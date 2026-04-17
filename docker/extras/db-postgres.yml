@@ -1,0 +1,38 @@
+volumes:
+  db-postgres-data:
+
+services:
+  db-postgres:
+    image: postgres:16-alpine
+    init: true
+    pids_limit: ${AGENT_PIDS_LIMIT:-400}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    runtime: ${RUNTIME:-runsc}
+    read_only: true
+    networks:
+      isolated_net:
+        ipv4_address: ${DB_POSTGRES_ISOLATED_IP:-172.28.0.54}
+    environment:
+      - POSTGRES_USER=${CONTAINER_PG_USER:-sandbox}
+      - POSTGRES_PASSWORD=${CONTAINER_PG_PASSWORD:-securepass}
+      - POSTGRES_DB=${CONTAINER_PG_DB:-claude_db}
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp:noexec,nosuid,nodev
+      - /var/tmp:noexec,nosuid,nodev
+    volumes:
+      - db-postgres-data:/var/lib/postgresql/data:rw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sandbox -d claude_db || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped

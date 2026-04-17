@@ -1,0 +1,51 @@
+services:
+  mcp-firecrawl:
+    build:
+      context: ..
+      dockerfile: extra/Dockerfile.mcp-firecrawl
+    image: sandbox-mcp-firecrawl:local
+    init: true
+    pids_limit: ${AGENT_PIDS_LIMIT:-400}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    runtime: ${RUNTIME:-runsc}
+    user: node
+    read_only: true
+    tmpfs:
+      - /home/node/.cache:nosuid,nodev
+      - /home/node/.ssh:noexec,nosuid,nodev
+      - /tmp:noexec,nosuid,nodev
+      - /var/tmp:noexec,nosuid,nodev
+    networks:
+      isolated_net:
+        ipv4_address: ${MCP_FIRECRAWL_ISOLATED_IP:-172.28.0.55}
+      proxy_net:
+        ipv4_address: ${MCP_FIRECRAWL_PROXY_IP:-172.29.0.55}
+    dns:
+      - ${DNS_SIDECAR_IP:-172.28.0.53}
+    extra_hosts:
+      - "proxy:${PROXY_IP:-172.29.0.254}"
+      - "dns-sidecar:${DNS_SIDECAR_IP:-172.28.0.53}"
+      - "db-postgres:${DB_POSTGRES_IP:-172.28.0.54}"
+    environment:
+      - FIRECRAWL_API_KEY=${CONTAINER_FIRECRAWL_API_KEY}
+      - HTTP_PROXY=${PROXY_URL_MCP_FIRECRAWL}
+      - HTTPS_PROXY=${PROXY_URL_MCP_FIRECRAWL}
+      - http_proxy=${PROXY_URL_MCP_FIRECRAWL}
+      - https_proxy=${PROXY_URL_MCP_FIRECRAWL}
+      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,${ISOLATED_SUBNET},${PROXY_SUBNET}
+    volumes:
+      - mcp-ipc_vol:/var/run/mcp
+    entrypoint: ["/usr/bin/socat", "UNIX-LISTEN:/var/run/mcp/firecrawl.sock,fork,mode=0660", "EXEC:npx -y firecrawl-mcp"]
+    depends_on:
+      dns-sidecar:
+        condition: service_healthy
+      proxy:
+        condition: service_healthy
