@@ -1,0 +1,67 @@
+######################################################################################################################################
+# Use modern completion
+######################################################################################################################################
+
+zstyle :compinstall filename '~/.zshrc'
+autoload -Uz compinit && compinit
+
+######################################################################################################################################
+# History
+######################################################################################################################################
+
+HISTFILE=/workspace/.log/.zsh_history
+HISTSIZE=1000000
+SAVEHIST=1000000
+setopt appendhistory
+setopt hist_ignore_all_dups
+setopt hist_ignore_space
+
+######################################################################################################################################
+# Styles
+######################################################################################################################################
+
+zstyle ':completion:*' menu select
+zstyle ':completion:*' list-colors
+zstyle ':completion:*' special-dirs true
+zstyle ':completion:*' list-colors
+
+######################################################################################################################################
+# Plugins
+######################################################################################################################################
+
+source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+fpath=(/usr/share/zsh-completions/src $fpath)
+[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
+
+######################################################################################################################################
+# Aliases
+######################################################################################################################################
+
+# List
+alias ls='eza --icons --color=always --group-directories-first'
+alias ll='eza -alF --icons --color=always --group-directories-first'
+alias la='eza -a --icons --color=always --group-directories-first'
+alias l='eza -F --icons --color=always --group-directories-first'
+alias l.='eza -a | egrep "^\."'
+alias grep='grep --color=auto'
+
+# Dirs
+alias ..="cd .."
+alias ...="cd ../.."
+alias ....="cd ../../.."
+alias .....="cd ../../../.."
+alias ......="cd ../../../../.."
+
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export OPENSPEC_TELEMETRY=0
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion" # This loads nvm bash_completion
+
+# gitmux
+export PATH="~/.install/gitmux:$PATH"
+
+eval "$(starship init zsh)"

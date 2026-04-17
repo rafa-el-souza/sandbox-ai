@@ -1,0 +1,161 @@
+ARG AGENT_BASE="cgr.dev/chainguard/wolfi-base:latest"
+FROM ${AGENT_BASE} AS base
+
+USER root
+RUN apk update && apk add --no-cache curl bash git wget unzip jq python3 py3-pip coreutils file tar gzip tzdata ca-certificates socat nano
+
+ARG USERNAME="agent"
+ARG HOME_DIR="/home/${USERNAME}"
+ARG HOST_UID="1000"
+
+RUN addgroup -g ${HOST_UID} ${USERNAME} && \
+    adduser -D -u ${HOST_UID} -G ${USERNAME} -s /bin/bash -h ${HOME_DIR} ${USERNAME} && \
+    mkdir -p ${HOME_DIR}/.local/bin && \
+    mkdir -p ${HOME_DIR}/.local/npm-python && \
+    mkdir -p ${HOME_DIR}/.local/npm-ts && \
+    chown -R ${USERNAME}:${USERNAME} ${HOME_DIR}
+
+USER ${USERNAME}
+WORKDIR ${HOME_DIR}
+
+ARG NVM_VERSION="0.39.7"
+ARG NODE_VERSION="20.12.2"
+ENV NVM_DIR="${HOME_DIR}/.nvm"
+
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v$NVM_VERSION/install.sh | bash && \
+    . "$NVM_DIR/nvm.sh" && \
+    nvm install $NODE_VERSION
+
+ENV PATH="$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH"
+
+# -----------------
+# PARALLEL WORKERS
+# -----------------
+
+FROM base AS branch-rust
+ARG ENABLE_RUST=true
+USER root
+RUN mkdir -p /staging${HOME_DIR}/.local/bin
+RUN if [ "$ENABLE_RUST" = "true" ]; then \
+      curl -L https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c - > /staging${HOME_DIR}/.local/bin/rust-analyzer && \
+      chmod u+x /staging${HOME_DIR}/.local/bin/rust-analyzer; \
+    fi
+
+FROM base AS branch-typescript
+ARG ENABLE_TYPESCRIPT=true
+USER ${USERNAME}
+RUN mkdir -p /staging${HOME_DIR}/.local/npm-ts
+RUN if [ "$ENABLE_TYPESCRIPT" = "true" ]; then \
+      npm install -g typescript-language-server typescript --prefix /staging${HOME_DIR}/.local/npm-ts; \
+    fi
+
+FROM base AS branch-go
+ARG ENABLE_GO=true
+USER root
+RUN mkdir -p /staging/usr/local/go && mkdir -p /staging${HOME_DIR}/go/bin
+RUN if [ "$ENABLE_GO" = "true" ]; then \
+      OS="$(uname -s | tr '[:upper:]' '[:lower:]')" && \
+      ARCH="$(uname -m)" && \
+      if [ "$ARCH" = "x86_64" ]; then ARCH="amd64"; fi && \
+      if [ "$ARCH" = "aarch64" ]; then ARCH="arm64"; fi && \
+      LATEST_VERSION=$(curl -s "https://go.dev/dl/?mode=json" | jq -r '.[0].version') && \
+      TARBALL="${LATEST_VERSION}.${OS}-${ARCH}.tar.gz" && \
+      DOWNLOAD_URL="https://go.dev/dl/${TARBALL}" && \
+      TMP_DIR="$(mktemp -d)" && \
+      TMP_FILE="${TMP_DIR}/${TARBALL}" && \
+      curl -sL "${DOWNLOAD_URL}" -o "${TMP_FILE}" && \
+      tar -C /staging/usr/local -xzf "${TMP_FILE}" && \
+      export GOPATH=/staging${HOME_DIR}/go && \
+      PATH=$PATH:/staging/usr/local/go/bin /staging/usr/local/go/bin/go install golang.org/x/tools/gopls@latest; \
+    fi
+
+FROM base AS branch-python
+ARG ENABLE_PYTHON=true
+USER root
+RUN mkdir -p /staging/usr/local/bin
+USER ${USERNAME}
+RUN mkdir -p /staging${HOME_DIR}/.local/npm-python
+RUN if [ "$ENABLE_PYTHON" = "true" ]; then \
+      curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/staging/usr/local/bin" sh && \
+      npm install -g pyright --prefix /staging${HOME_DIR}/.local/npm-python; \
+    fi
+
+# -----------
+# FINAL LAYER
+# -----------
+FROM base AS final
+
+USER root
+# Flatten isolated payloads resolving cache collisions
+COPY --from=branch-rust --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/.local/bin ${HOME_DIR}/.local/bin
+COPY --from=branch-go --chown=root:root /staging/usr/local/go /usr/local/go
+COPY --from=branch-go --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/go ${HOME_DIR}/go
+COPY --from=branch-python --chown=root:root /staging/usr/local/bin/uv /usr/local/bin/uv
+COPY --from=branch-typescript --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/.local/npm-ts ${HOME_DIR}/.local/npm-ts
+COPY --from=branch-python --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/.local/npm-python ${HOME_DIR}/.local/npm-python
+
+# Append bounded PATHs
+ENV GOPATH="${HOME_DIR}/go"
+ENV PATH="$PATH:/usr/local/go/bin:${HOME_DIR}/go/bin:${HOME_DIR}/.local/npm-ts/bin:${HOME_DIR}/.local/npm-python/bin:${HOME_DIR}/.local/bin"
+
+USER ${USERNAME}
+
+# UNIVERSAL BINARIES
+RUN npm install -g @fission-ai/openspec@latest && \
+    curl -fsSL https://claude.ai/install.sh | bash
+
+# CLAUDE PLUGINS
+RUN ~/.local/bin/claude plugin install context7@claude-plugins-official && \
+    ~/.local/bin/claude plugin install pyright-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin install typescript-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin install rust-analyzer-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin install gopls-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin install commit-commands@claude-plugins-official && \
+    ~/.local/bin/claude plugin install skill-creator@claude-plugins-official && \
+    ~/.local/bin/claude plugin install claude-md-management@claude-plugins-official && \
+    ~/.local/bin/claude plugin install claude-code-setup@claude-plugins-official && \
+    ~/.local/bin/claude plugin install feature-dev@claude-plugins-official && \
+    ~/.local/bin/claude plugin install security-guidance@claude-plugins-official && \
+    ~/.local/bin/claude plugin install code-simplifier@claude-plugins-official && \
+    ~/.local/bin/claude plugin install superpowers@claude-plugins-official && \
+    ~/.local/bin/claude plugin install explanatory-output-style@claude-plugins-official && \
+    ~/.local/bin/claude plugin install figma@claude-plugins-official && \
+    ~/.local/bin/claude plugin install serena@claude-plugins-official && \
+    ~/.local/bin/claude plugin install plugin-dev@claude-plugins-official && \
+    ~/.local/bin/claude plugin install playwright@claude-plugins-official && \
+    ~/.local/bin/claude plugin install Notion@claude-plugins-official && \
+    ~/.local/bin/claude plugin install chrome-devtools-mcp@claude-plugins-official && \
+    ~/.local/bin/claude plugin install frontend-design@claude-plugins-official && \
+    ~/.local/bin/claude plugin install pr-review-toolkit@claude-plugins-official && \
+    ~/.local/bin/claude plugin install code-review@claude-plugins-official
+
+# DISABLE UNNECESSARY PLUGINS
+RUN ~/.local/bin/claude plugin disable context7@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable pyright-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable typescript-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable rust-analyzer-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable gopls-lsp@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable commit-commands@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable skill-creator@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable claude-md-management@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable claude-code-setup@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable feature-dev@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable security-guidance@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable code-simplifier@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable superpowers@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable explanatory-output-style@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable figma@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable serena@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable plugin-dev@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable playwright@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable Notion@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable chrome-devtools-mcp@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable frontend-design@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable pr-review-toolkit@claude-plugins-official && \
+    ~/.local/bin/claude plugin disable code-review@claude-plugins-official
+
+ENV SHELL=/bin/bash
+ENV EDITOR=/usr/bin/nano
+ENV VISUAL=/usr/bin/nano
+
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/entrypoint.sh"]

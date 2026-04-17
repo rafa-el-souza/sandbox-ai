@@ -1,0 +1,47 @@
+
+# 1. Isolated Lateral Boundary
+# Blackholes internal execution names to prevent
+# lateral subnet probing requests from escaping to the public internet natively.
+cluster.local .local internal {
+    template ANY ANY . {
+        rcode NXDOMAIN
+    }
+}
+
+# 2. Whitelisted Domains Upstream (DNS-over-TLS Enforced)
+# Standard CoreDNS distributions lack dynamic `dstdomain "/file"` reading.
+# Therefore, `./sandbox-pilot/init.sh` MUST parse `.dotfiles/allowed_domains.txt`, strip leading 
+# wildcards, and dynamically concatenate them directly into this Server Block header.
+__DYNAMIC_WHITELIST_DOMAINS__ {
+    log # Algorithmically interleaves successful queries into `sandbox-cli logs`
+    
+    # IPv6 Complete Algorithmic Elimination
+    # Forces valid IPv4 domain packets to drop their AAAA requests instantly securely natively.
+    template ANY AAAA {
+        rcode NODATA
+    }
+    
+    # Native DoT Upstreaming perfectly resolving the OpenSpec SSL MITM avoidance mandate natively
+    # KEY DECISION: Maps to the most restrictive Mullvad "All" Anycast array. IPv6 limits structurally 
+    # eliminated. This natively blackholes ads, trackers, malware, gambling at the TCP:853 socket.
+    forward . tls://194.242.2.9 {
+        tls_servername all.dns.mullvad.net
+        health_check 5s
+    }
+    cache 30
+}
+
+# 3. Explicit NXDOMAIN Catch-All (DNS Tunneling Eradication)
+# All stochastic or malicious execution payloads natively collapse here geometrically.
+. {
+    log # Triggers explicit forensic log traces for evasion attempts automatically
+    
+    # KEY DECISION: Exposes the HTTP health check mathematically bound strictly 
+    # to the `127.0.0.1` container loopback interface natively. This completely stops 
+    # lateral network DoS attacks originating from the Agent proxy interface.
+    health 127.0.0.1:8080
+    
+    template ANY ANY . {
+        rcode NXDOMAIN
+    }
+}

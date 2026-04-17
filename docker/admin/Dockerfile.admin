@@ -1,0 +1,59 @@
+ARG ADMIN_BASE="debian:trixie-slim"
+FROM ${ADMIN_BASE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    zsh tmux curl wget git eza fzf tree \
+    zsh-syntax-highlighting zsh-autosuggestions \
+    ca-certificates tzdata tar gzip unzip socat nano \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG USERNAME="agent"
+ARG HOME_DIR="/home/${USERNAME}"
+ARG HOST_UID="1000"
+
+RUN useradd -ms /bin/zsh -u ${HOST_UID} ${USERNAME}
+
+USER ${USERNAME}
+WORKDIR ${HOME_DIR}
+
+ARG NVM_VERSION="0.39.7"
+ARG NODE_VERSION="20.12.2"
+ENV NVM_DIR="${HOME_DIR}/.nvm"
+
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v$NVM_VERSION/install.sh | bash && \
+    . "$NVM_DIR/nvm.sh" && \
+    nvm install $NODE_VERSION
+
+ENV PATH="$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH"
+
+USER root
+# Starship
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y
+
+# Gitmux
+RUN wget https://github.com/arl/gitmux/releases/latest/download/gitmux_Linux_x86_64.tar.gz && \
+    tar xzfv gitmux_Linux_x86_64.tar.gz -C /usr/local/bin && \
+    rm gitmux_Linux_x86_64.tar.gz
+
+USER ${USERNAME}
+
+# Zsh Completions
+RUN git clone https://github.com/zsh-users/zsh-completions.git /tmp/zc && \
+    mkdir -p ${HOME_DIR}/.local/share/zsh-completions && \
+    mv /tmp/zc/src/* ${HOME_DIR}/.local/share/zsh-completions/ && \
+    rm -rf /tmp/zc
+
+# Tmux TPM & Catppuccin
+RUN git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+RUN mkdir -p ~/.tmux/plugins/catppuccin && \
+    git clone -b v2.1.3 https://github.com/catppuccin/tmux.git ~/.tmux/plugins/catppuccin/tmux
+
+ENV SHELL=/bin/zsh
+ENV EDITOR=/usr/bin/nano
+ENV VISUAL=/usr/bin/nano
+
+RUN mkdir -p ${HOME_DIR}/.local/bin
+COPY --chown=${USERNAME}:${USERNAME} entrypoint.sh ${HOME_DIR}/.local/bin/entrypoint.sh
+RUN chmod u+x ${HOME_DIR}/.local/bin/entrypoint.sh
+
+ENTRYPOINT ["/bin/sh", "-c", "exec ${HOME_DIR}/.local/bin/entrypoint.sh"]

@@ -1,0 +1,6 @@
+# This physically isolates the inbound interface.
+# Defining the subnet locally as a file allows the orchestrator to dynamically update IPAM bounds
+# without rewriting the primary `squid.conf` logic globally.
+# Allocates the functional internal boundaries resolving the IPAM limits natively.
+172.28.0.0/16
+172.29.0.0/16
