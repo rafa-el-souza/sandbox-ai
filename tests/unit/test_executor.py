@@ -71,3 +71,11 @@ def test_executor_merges_custom_env(monkeypatch):
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "CUSTOM_VAR": "custom_value"},
             text=True
         )
+
+def test_executor_oserror():
+    executor = Executor()
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = OSError("No such file or directory")
+        with pytest.raises(SandboxExecutionError) as exc_info:
+            executor.run(["/no-such-binary"])
+        assert "OS Error during execution" in str(exc_info.value)

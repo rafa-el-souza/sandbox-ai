@@ -28,3 +28,35 @@ def test_ipam_dual_fcntl_locks():
         # acquire_locks should throw if it can't get both locks
         # we will mock the lock failure in the actual test later or simulate
         acquire_locks("global.lock", "local.lock", fail_mock=True)
+
+def test_ipam_fcntl_blocking_io_error(tmp_path):
+    global_lock_path = tmp_path / "ipam.json"
+    local_lock_path = tmp_path / "state.lock"
+    
+    from unittest.mock import patch
+    with patch("fcntl.flock") as mock_flock:
+        mock_flock.side_effect = BlockingIOError(11, "Resource temporarily unavailable")
+        from core.ipam import IPAMLockException
+        with pytest.raises(IPAMLockException, match="Could not acquire locks"):
+            acquire_locks(str(global_lock_path), str(local_lock_path))
+
+def test_ipam_json_decode_error(tmp_path):
+    global_lock_path = tmp_path / "ipam.json"
+    local_lock_path = tmp_path / "state.lock"
+    
+    with open(global_lock_path, "w") as f:
+        f.write("{ bad json }")
+        
+    subnet = get_next_subnet(str(global_lock_path), str(local_lock_path), "project-error")
+    assert subnet == "10.100.0.0/16"
+
+def test_ipam_high_subnet_increment(tmp_path):
+    global_lock_path = tmp_path / "ipam.json"
+    local_lock_path = tmp_path / "state.lock"
+    
+    import json
+    with open(global_lock_path, "w") as f:
+        json.dump({"project-alpha": "10.105.0.0/16"}, f)
+        
+    subnet = get_next_subnet(str(global_lock_path), str(local_lock_path), "project-beta")
+    assert subnet == "10.106.0.0/16"
