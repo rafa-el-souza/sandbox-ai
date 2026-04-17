@@ -23,6 +23,15 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 - **WHEN** a background process or secondary terminal concurrently executes `$ sandbox start` on an initializing repository
 - **THEN** the native `fcntl` filesystem lock rejects the OS request, forcing the Orchestrator to gracefully abort the execution loop before triggering a Docker socket race condition.
 
+#### Scenario: Standardized Module Execution
+- **WHEN** the Orchestrator triggers via a pure `python -m cli` boundary execution
+- **THEN** the system rigidly interprets a `cli/__main__.py` block seamlessly mapping execution arrays backwards explicitly into the `cli/main.py` entrypoint schema.
+
+#### Scenario: Opaque Error Bounds Trace
+- **WHEN** the orchestrator fails POSIX boundaries triggering native `CalledProcessError` exceptions
+- **THEN** the system violently strips Python stack trace limits natively raising a mathematical `SandboxExecutionError` strictly masking host variables and safely rendering clinical Typer warnings pointing explicitly at `./.sandbox/logs/orchestrator/orchestrator.log` securely.
+
+
 ### Requirement: Sub-Process Privilege Bounding
 The system SHALL strictly isolate command payloads across `dev` and `sandbox` bounds utilizing `machinectl`.
 

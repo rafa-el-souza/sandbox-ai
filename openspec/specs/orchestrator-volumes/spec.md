@@ -24,7 +24,7 @@ The system SHALL ruthlessly enforce geometric separations distinguishing mutable
 
 #### Scenario: The Mutable Project Plane (`./.sandbox/`)
 - **WHEN** establishing core diagnostic or internal proxy sidecar bindings natively
-- **THEN** the CLI structurally remaps telemetry footprints strictly to localized directories (`.sandbox/logs/proxy/`, `.sandbox/cache/core/`), thoroughly eliminating overlapping diagnostic streams tracking back to global file matrices negatively impacting host storage.
+- **THEN** the CLI structurally remaps telemetry footprints strictly to localized directories (`.sandbox/logs/proxy/`, `.sandbox/cache/core/`, AND explicitly routes `.sandbox/logs/orchestrator/orchestrator.log` for secure POSIX execution traces), thoroughly eliminating overlapping diagnostic streams tracking back to global file matrices negatively impacting host storage.
 
 #### Scenario: Human Shell History Isolation
 - **WHEN** mapping the human operator's `admin` and `core` environments
