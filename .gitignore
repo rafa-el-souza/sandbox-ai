@@ -14,3 +14,10 @@ log/core/.bash_history
 log/admin/.zsh_history
 .antigravityignore
 .agent/
+
+# Python
+__pycache__/
+*.pyc
+/.venv/
+.pytest_cache/
+.ruff_cache/
