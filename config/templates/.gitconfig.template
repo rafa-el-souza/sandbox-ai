@@ -1,9 +1,0 @@
-[user]
-    name = __DYNAMIC_GIT_USER__
-    email = __DYNAMIC_GIT_EMAIL__
-
-[http]
-    proxy = __DYNAMIC_SQUID_PROXY_URL__
-
-[url "https://github.com/"]
-    insteadOf = git@github.com:

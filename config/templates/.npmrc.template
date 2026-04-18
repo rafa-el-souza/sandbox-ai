@@ -1,2 +1,0 @@
-proxy=__DYNAMIC_SQUID_PROXY_URL__
-https-proxy=__DYNAMIC_SQUID_PROXY_URL__
