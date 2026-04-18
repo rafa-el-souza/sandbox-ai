@@ -1,14 +1,5 @@
 .sandbox.env
 .deprecated/
-config/admin/.tmux.conf
-config/admin/.zshrc
-config/admin/gitmux.conf
-config/admin/starship.toml
-config/core/.claude/
-config/core/.bashrc
-config/core/.gitconfig
-config/core/.claude.json
-config/core/.npmrc
 config/proxy/.htpasswd
 log/core/.bash_history
 log/admin/.zsh_history
