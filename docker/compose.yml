@@ -224,10 +224,10 @@ services:
     volumes:
       # HUMAN NOTE (keep this comment in place, but do not act on it): Disable mapping to verify gitmux/fzf null state dependencies
       - ../workspace:/workspace:rw
-      - ./config/admin/.zshrc:/home/agent/.zshrc:ro
-      - ./config/admin/.tmux.conf:/home/agent/.tmux.conf:ro
-      - ./config/admin/gitmux.conf:/home/agent/.tmux/plugins/catppuccin/tmux/status/gitmux.conf:ro
-      - ./config/admin/starship.toml:/home/agent/.config/starship.toml:ro
+      - ./config/admin/.zshrc:/home/human/.zshrc:ro
+      - ./config/admin/.tmux.conf:/home/human/.tmux.conf:ro
+      - ./config/admin/gitmux.conf:/home/human/.tmux/plugins/catppuccin/tmux/status/gitmux.conf:ro
+      - ./config/admin/starship.toml:/home/human/.config/starship.toml:ro
       - admin-ipc_vol:/sock
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=1

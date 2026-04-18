@@ -28,10 +28,16 @@ def test_graft_caddy_loopbacks():
 def test_format_host_volume_mappings():
     compiler = YAMLCompiler()
     project_dir = "/home/user/myproject"
-    service = {"volumes": []}
-    compiler.format_telemetry_volumes(service, project_dir)
-    assert f"{project_dir}/.sandbox/logs/admin/.bash_history:/home/dev/.bash_history" in service["volumes"]
-    assert f"{project_dir}/.sandbox/logs/admin/.zsh_history:/home/dev/.zsh_history" in service["volumes"]
+    
+    # Test Admin Service (Zsh)
+    admin_service = {"volumes": []}
+    compiler.format_telemetry_volumes("admin", admin_service, project_dir)
+    assert f"{project_dir}/.sandbox/logs/admin/.zsh_history:/home/human/.zsh_history" in admin_service["volumes"]
+    
+    # Test Core Service (Bash)
+    core_service = {"volumes": []}
+    compiler.format_telemetry_volumes("core", core_service, project_dir)
+    assert f"{project_dir}/.sandbox/logs/core/.bash_history:/home/agent/.bash_history" in core_service["volumes"]
 
 def test_extract_meta_missing_key():
     yaml_dict = {"services": {}}
@@ -49,7 +55,7 @@ def test_graft_caddy_loopbacks_missing_labels():
 def test_format_host_volume_mappings_missing_volumes():
     compiler = YAMLCompiler()
     project_dir = "/home/user/myproject"
-    service = {}
-    compiler.format_telemetry_volumes(service, project_dir)
-    assert f"{project_dir}/.sandbox/logs/admin/.bash_history:/home/dev/.bash_history" in service["volumes"]
-    assert f"{project_dir}/.sandbox/logs/admin/.zsh_history:/home/dev/.zsh_history" in service["volumes"]
+    
+    admin_service = {}
+    compiler.format_telemetry_volumes("admin", admin_service, project_dir)
+    assert f"{project_dir}/.sandbox/logs/admin/.zsh_history:/home/human/.zsh_history" in admin_service["volumes"]

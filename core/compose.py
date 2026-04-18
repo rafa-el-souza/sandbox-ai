@@ -23,13 +23,14 @@ class YAMLCompiler:
             service["labels"] = []
         service["labels"].append(f"caddy.listen={ip}:443")
         
-    def format_telemetry_volumes(self, service: Dict[str, Any], project_dir: str) -> None:
-        """Deeply formats local host volume mappings securely."""
+    def format_telemetry_volumes(self, service_name: str, service: Dict[str, Any], project_dir: str) -> None:
+        """Deeply formats local host volume mappings securely based on service role."""
         if "volumes" not in service:
             service["volumes"] = []
             
-        admin_zsh = os.path.join(project_dir, ".sandbox/logs/admin/.zsh_history")
-        admin_bash = os.path.join(project_dir, ".sandbox/logs/admin/.bash_history")
-        
-        service["volumes"].append(f"{admin_bash}:/home/dev/.bash_history")
-        service["volumes"].append(f"{admin_zsh}:/home/dev/.zsh_history")
+        if service_name == "admin":
+            admin_zsh = os.path.join(project_dir, ".sandbox/logs/admin/.zsh_history")
+            service["volumes"].append(f"{admin_zsh}:/home/human/.zsh_history")
+        elif service_name == "core":
+            core_bash = os.path.join(project_dir, ".sandbox/logs/core/.bash_history")
+            service["volumes"].append(f"{core_bash}:/home/agent/.bash_history")

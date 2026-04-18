@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata tar gzip unzip socat nano \
     && rm -rf /var/lib/apt/lists/*
 
-ARG USERNAME="agent"
+ARG USERNAME="human"
 ARG HOME_DIR="/home/${USERNAME}"
 ARG HOST_UID="1000"
 
