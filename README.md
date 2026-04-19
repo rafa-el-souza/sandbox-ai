@@ -1,0 +1,60 @@
+# sandbox-ai
+
+Deterministic, zero-trust orchestrator for isolated AI agent sandboxes.
+
+## CLI Commands
+
+```bash
+sandbox start     # Provision and launch a sandbox for the current project
+sandbox attach    # Reconnect to a running sandbox (no re-provisioning)
+sandbox stop      # Gracefully stop a running sandbox
+sandbox stop --clean  # Stop and destroy named volumes (data unrecoverable)
+sandbox destroy   # Permanently remove a sandbox instance (interactive confirmation)
+sandbox destroy --force  # Bypass confirmation
+```
+
+## Directory Layout
+
+```
+SANDBOX_AI_HOME/                  # Git clone root
+├── cli/                          # CLI entrypoint (typer)
+├── core/                         # Core modules
+│   ├── executor.py               # Sterile POSIX subprocess execution
+│   ├── registry.py               # Instance registry (fcntl-locked JSON)
+│   ├── ipam.py                   # Subnet allocator (lowest-slot scan)
+│   ├── hydration.py              # Pydantic → Jinja2 template pipeline
+│   ├── scaffold.py               # Instance directory bootstrapper
+│   └── crypto.py                 # Proxy credential generation (bcrypt)
+├── .docker/                      # Immutable tooling plane (Dockerfiles)
+├── .config/                      # Immutable config templates (Jinja2)
+├── .state/                       # Runtime state (instances.json, ipam.json)
+├── sandboxes/<id>/               # Per-instance mutable state
+│   ├── sandbox.toml              # Instance configuration
+│   ├── .sandbox.env              # Secrets (never committed)
+│   ├── docker/                   # Hydrated compose files
+│   ├── config/                   # Hydrated sidecar configs
+│   └── log/                      # Orchestrator and container logs
+└── tests/unit/                   # TDD test suite (124 tests)
+```
+
+## Configuration
+
+Each sandbox instance stores its configuration at `sandboxes/<id>/sandbox.toml`.
+The file is generated during `sandbox start` via the scaffolding pipeline and
+re-hydrated on every subsequent launch to ensure infrastructure drift is eliminated.
+
+## Development
+
+```bash
+make test        # Run unit tests
+make coverage    # Coverage report (target: 100% on core/ and cli/)
+make lint        # Ruff linting
+make typecheck   # Mypy strict mode
+```
+
+## Architecture
+
+- **Privilege boundary**: All Docker operations execute via `machinectl shell sandbox@.host` to inherit the unprivileged user's systemd environment.
+- **Transient locking**: `state.lock` is held only during provisioning, not for the runtime duration of the sandbox.
+- **Two-pattern ACL model**: Pattern A (sandbox user read access, granted on start, revoked on stop) and Pattern B (dev user persistent access via default ACLs, never revoked).
+- **IPAM**: Supports up to 13,312 concurrent instances via `/24` subnet triplet allocation with slot reuse.
