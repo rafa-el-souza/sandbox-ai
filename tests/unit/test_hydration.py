@@ -1,7 +1,6 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
-import os
-import shutil
+
 from pathlib import Path
 
 import pytest
@@ -48,11 +47,11 @@ version = "20.12.2"
 nvm_version = "0.39.7"
 
 [components]
-db_postgres = true
 mcp_firecrawl = false
 mcp_puppeteer = false
 
 [components.db_postgres]
+enabled = true
 expose_host_ports = [5432]
 
 [components.ingress]
@@ -78,7 +77,7 @@ class TestSandboxConfig:
         assert config.admin.base_distro_family == "debian"
         assert config.runtimes.python is True
         assert config.runtimes.go is False
-        assert config.components.db_postgres is True
+        assert config.components_db_postgres.enabled is True
         assert config.components.mcp_firecrawl is False
         assert ".github.com" in config.proxy_whitelist.domains
 

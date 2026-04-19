@@ -76,11 +76,11 @@ version = "20.12.2"
 nvm_version = "0.39.7"
 
 [components]
-db_postgres = true
 mcp_firecrawl = false
 mcp_puppeteer = false
 
 [components.db_postgres]
+enabled = true
 expose_host_ports = [5432]
 
 [components.ingress]
