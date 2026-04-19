@@ -1,26 +1,41 @@
+"""Proxy credential generation: password, bcrypt hash, htpasswd file.
+
+Generates a cryptographically secure proxy password, hashes it via bcrypt,
+and writes the htpasswd file for Squid proxy authentication.
+"""
+
+import os
 import secrets
-import string
+
 import bcrypt
-from typing import Dict
 
-def generate_random_password(length: int = 32) -> str:
-    """Generate a cryptographically secure random 32-character proxy sequence."""
-    chars = string.ascii_letters + string.digits + "!@#$%^&*()"
-    return "".join(secrets.choice(chars) for _ in range(length))
 
-def generate_proxy_hash(password: str) -> str:
+def generate_proxy_password() -> str:
+    """Generate a cryptographically secure URL-safe proxy password.
+
+    Uses secrets.token_urlsafe(32) producing a 43-character base64url string.
     """
-    Establish pure-Python bcrypt syntax hashes.
+    return secrets.token_urlsafe(32)
+
+
+def hash_proxy_password(password: str) -> str:
+    """Hash a proxy password using bcrypt.
+
+    Returns the raw bcrypt hash string (e.g., '$2b$12$...').
     """
     salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-    return hashed.decode('ascii')
+    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
+    return hashed.decode("ascii")
 
-def assemble_env_mapping(password: str, hashed: str) -> Dict[str, str]:
+
+def write_htpasswd(config_proxy_dir: str, htpasswd_line: str) -> None:
+    """Write the htpasswd file atomically to <config_proxy_dir>/.htpasswd.
+
+    Overwrites any existing file. The htpasswd_line should be
+    formatted as 'proxyuser:<bcrypt_hash>'.
     """
-    Assemble the variable execution arrays dynamically mapping to .sandbox/configs/ .
-    """
-    return {
-        "SANDBOX_PROXY_PASSWORD": password,
-        "SANDBOX_PROXY_HASH": hashed
-    }
+    htpasswd_path = os.path.join(config_proxy_dir, ".htpasswd")
+    tmp_path = htpasswd_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(htpasswd_line + "\n")
+    os.replace(tmp_path, htpasswd_path)

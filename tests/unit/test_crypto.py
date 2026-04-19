@@ -1,9 +1,8 @@
 """Tests for core/crypto.py — proxy credential generation and htpasswd writing."""
 
-import os
+
 from pathlib import Path
 
-import pytest
 
 from core.crypto import (
     generate_proxy_password,
