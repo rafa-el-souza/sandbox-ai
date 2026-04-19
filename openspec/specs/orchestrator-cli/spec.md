@@ -5,22 +5,22 @@ This specification defines the deterministic execution constraints bounding the 
 ## Requirements
 
 ### Requirement: Python CLI Orchestrator Execution
-The system SHALL execute utilizing a strict Python `typer` interface to deterministically govern the `sandbox` operational lifecycle.
+The system SHALL execute utilizing a strict Python `typer` interface to deterministically govern the `sandbox` operational lifecycle across four commands: `start`, `stop`, `attach`, and `destroy`.
 
 #### Scenario: Tooling Plane Bootstrapping
-- **WHEN** the Orchestrator initiates execution on a fresh host machine
-- **THEN** it mechanically intercepts the pipeline to duplicate its internal `docker/` and `config/` array templates into the global `~/.sandbox/` Tooling Plane before proceeding, preserving Git version-control natively.
+- **WHEN** the orchestrator initiates execution on a fresh host machine
+- **THEN** it resolves `SANDBOX_AI_HOME` from the location of the orchestrator source, derives `instance_dir` via the `instances.json` registry, and scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<project_name>-<project_id>/` before proceeding
 
 #### Scenario: Agent Startup Sequence
-- **WHEN** the human operator executes `$ sandbox start`
-- **THEN** the CLI acquires exclusive concurrency locks on both `./.sandbox/state.lock` AND the global IPAM ledger, determines network bindings, parses the `ruamel.yaml` stack, and physically prioritizes Docker Compose ingestion inside the daemon.
+- **WHEN** the human operator executes `sandbox start`
+- **THEN** the CLI performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet triple, runs the Pydantic + Jinja2 hydration pipeline, applies ACL grants, executes `docker compose up -d --build --wait` via `machinectl`, and hands the terminal over to the admin container via `docker exec -it`
 
-#### Scenario: Graceful Teardown Cleanses
-- **WHEN** the human operator executes `$ sandbox stop`
-- **THEN** the CLI natively terminates running container meshes, aggressively stripping active default ACL paths (`setfacl -R -x u:sandbox`) and purging ephemeral `.env` credentials without triggering a full volume overwrite.
+#### Scenario: Graceful Teardown
+- **WHEN** the human operator executes `sandbox stop`
+- **THEN** the CLI terminates running containers via `docker compose down` (or `down -v` with `--clean`), then revokes the `sandbox` user's ACL entries on `sandboxes/<id>/docker/` and `sandboxes/<id>/config/`
 
 #### Scenario: Concurrency Collision Mitigation
-- **WHEN** a background process or secondary terminal concurrently executes `$ sandbox start` on an initializing repository
+- **WHEN** a background process or secondary terminal concurrently executes `sandbox start` on an initializing repository
 - **THEN** the native `fcntl` filesystem lock rejects the OS request, forcing the Orchestrator to gracefully abort the execution loop before triggering a Docker socket race condition.
 
 #### Scenario: Standardized Module Execution
@@ -29,23 +29,27 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Opaque Error Bounds Trace
 - **WHEN** the orchestrator fails POSIX boundaries triggering native `CalledProcessError` exceptions
-- **THEN** the system violently strips Python stack trace limits natively raising a mathematical `SandboxExecutionError` strictly masking host variables and safely rendering clinical Typer warnings pointing explicitly at `./.sandbox/logs/orchestrator/orchestrator.log` securely.
+- **THEN** the system raises a `SandboxExecutionError` masking host topology variables and rendering clinical error messages identifying the failed command without leaking environment state.
 
 
 ### Requirement: Sub-Process Privilege Bounding
-The system SHALL strictly isolate command payloads across `dev` and `sandbox` bounds utilizing `machinectl`.
+The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `sudo machinectl shell <host_unprivileged_user>@.host`.
 
-#### Scenario: Daemon Interaction Crossing
-- **WHEN** the Python Orchestrator needs to execute `docker compose up`
-- **THEN** it strictly wraps the array inside an exclusive `subprocess.run(["sudo", "machinectl", "shell", "sandbox@...", "docker compose"])` IPC array.
+#### Scenario: Non-Interactive Daemon Interaction
+- **WHEN** the Python orchestrator needs to execute a non-interactive Docker command (e.g., `docker compose up`)
+- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "--", "/bin/bash", "-c", "<command>"])` with `capture_output=True`
+
+#### Scenario: Interactive PTY Execution
+- **WHEN** the orchestrator hands the terminal to the admin container
+- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited (no `-c` wrapper, PTY allocated through machinectl directly)
 
 ### Requirement: Automated AI Handover
-The system SHALL dictate Agent invocation asynchronously without trapping the human shell pipeline.
+The system SHALL deliver an interactive shell session in the admin container to the operator after containers are confirmed healthy, optionally auto-starting the agent if a warmup prompt is configured.
 
 #### Scenario: PTY Execution Bounding
-- **WHEN** the orchestrator initiates `docker compose wait` and the internal container healthchecks officially unblock the pipeline
-- **THEN** the CLI natively dispatches a `tmux send-keys` buffer payload targeting the `admin` container to automatically drop the operator inside an active bash session.
+- **WHEN** `docker compose up --wait` returns successfully (all healthchecks pass)
+- **THEN** `state.lock` is released and the CLI executes `docker exec -it <name>-admin-1 zsh` via machinectl, transferring terminal ownership to the admin container shell session
 
 #### Scenario: Warmup Prompt Injection
-- **WHEN** the `.sandbox.toml` declares a valid `warmup_prompt` parameter string
-- **THEN** the CLI inherently injects structured parameters `claude -p "..." --dangerously-skip-permissions` into the `tmux` mapping buffer, enforcing automation initialization bounds cleanly.
+- **WHEN** `sandbox.toml` declares a non-empty `project.warmup_prompt`
+- **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this env var on init to invoke `claude -p "<value>" --dangerously-skip-permissions` before dropping to an interactive prompt
