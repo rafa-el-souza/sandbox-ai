@@ -1,6 +1,10 @@
 HISTSIZE=50000
 SAVEHIST=50000
 
+# History file path injected by rendered compose.yml
+if [ -n "${BASH_HISTORY_PATH:-}" ]; then
+    export HISTFILE="$BASH_HISTORY_PATH"
+fi
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 export OPENSPEC_TELEMETRY=0

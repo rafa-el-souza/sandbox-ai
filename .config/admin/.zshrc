@@ -76,4 +76,10 @@ if [ -f "/workspace/.sandbox/custom/.zshrc" ]; then
     source "/workspace/.sandbox/custom/.zshrc"
 fi
 
+# Warmup prompt: if set, launch claude in non-interactive mode on first shell init
+if [ -n "${SANDBOX_WARMUP_PROMPT:-}" ]; then
+    claude -p "$SANDBOX_WARMUP_PROMPT" --dangerously-skip-permissions
+    unset SANDBOX_WARMUP_PROMPT
+fi
+
 eval "$(starship init zsh)"

@@ -7,7 +7,7 @@ networks:
       com.docker.network.bridge.enable_ip_masquerade: 'false'
     ipam:
       config:
-        - subnet: ${ISOLATED_SUBNET:-172.28.0.0/16}
+        - subnet: {{ isolated_subnet }}
   proxy_net:
     driver: bridge
     internal: true
@@ -16,24 +16,23 @@ networks:
       com.docker.network.bridge.enable_ip_masquerade: 'false'
     ipam:
       config:
-        - subnet: ${PROXY_SUBNET:-172.29.0.0/16}
+        - subnet: {{ proxy_subnet }}
   egress_net:
     driver: bridge
     enable_ipv6: false
     ipam:
       config:
-        - subnet: ${EGRESS_SUBNET:-172.30.0.0/16}
+        - subnet: {{ egress_subnet }}
 
 volumes:
   admin-ipc_vol:
   mcp-ipc_vol:
-  db-postgres-data:
 
 services:
   dns-sidecar:
-    image: ${DNS_IMAGE:-coredns/coredns:1.11.1}
+    image: {{ dns_image }}
     init: true
-    pids_limit: ${ADMIN_PIDS_LIMIT:-100}
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -43,7 +42,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    runtime: ${RUNTIME:-runsc}
+    runtime: {{ runtime }}
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,nodev
@@ -55,11 +54,11 @@ services:
       - net.ipv6.conf.lo.disable_ipv6=1
     networks:
       isolated_net:
-        ipv4_address: ${DNS_SIDECAR_IP:-172.28.0.53}
+        ipv4_address: {{ dns_sidecar_ip }}
       egress_net:
     volumes:
-      - ./config/dns/Corefile:/etc/coredns/Corefile:ro
-      - ./config/dns/allowed_domains.txt:/etc/coredns/allowed_domains.txt:ro
+      - {{ instance_dir }}/config/dns-sidecar/Corefile:/etc/coredns/Corefile:ro
+      - {{ instance_dir }}/config/dns-sidecar/allowed_domains.txt:/etc/coredns/allowed_domains.txt:ro
     command: -conf /etc/coredns/Corefile
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/health || exit 1"]
@@ -69,9 +68,9 @@ services:
     restart: unless-stopped
 
   proxy:
-    image: ${PROXY_IMAGE:-ubuntu/squid-114-ubuntu24.04}
+    image: {{ proxy_image }}
     init: true
-    pids_limit: ${ADMIN_PIDS_LIMIT:-100}
+    pids_limit: 100
     logging:
       driver: "json-file"
       options:
@@ -81,7 +80,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    runtime: ${RUNTIME:-runsc}
+    runtime: {{ runtime }}
     read_only: true
     tmpfs:
       - /var/spool/squid
@@ -91,14 +90,14 @@ services:
       - /var/tmp:noexec,nosuid,nodev
     networks:
       proxy_net:
-        ipv4_address: ${PROXY_IP:-172.29.0.254}
+        ipv4_address: {{ proxy_ip }}
       egress_net:
     volumes:
-      - ./config/proxy/squid.conf:/etc/squid/squid.conf:ro
-      - ./config/proxy/allowed_domains.txt:/etc/squid/allowed_domains.txt:ro
-      - ./config/proxy/trusted_clients.acl:/etc/squid/trusted_clients.acl:ro
-      - ./config/proxy/.htpasswd:/etc/squid/htpasswd:ro
-      - ./config/proxy/ERR_SANDBOX_403:/usr/share/squid/errors/en/ERR_SANDBOX_403:ro
+      - {{ instance_dir }}/config/proxy/squid.conf:/etc/squid/squid.conf:ro
+      - {{ instance_dir }}/config/proxy/allowed_domains.txt:/etc/squid/allowed_domains.txt:ro
+      - {{ instance_dir }}/config/proxy/trusted_clients.acl:/etc/squid/trusted_clients.acl:ro
+      - {{ instance_dir }}/config/proxy/.htpasswd:/etc/squid/htpasswd:ro
+      - {{ instance_dir }}/config/proxy/ERR_SANDBOX_403:/usr/share/squid/errors/en/ERR_SANDBOX_403:ro
     sysctls:
       - net.ipv4.ip_unprivileged_port_start=0
       - net.ipv4.ip_forward=0
@@ -114,19 +113,19 @@ services:
 
   core:
     build:
-      context: ./core
+      context: {{ instance_dir }}/docker/core
       dockerfile: Dockerfile.core
       args:
-        - AGENT_BASE=${AGENT_BASE:-cgr.dev/chainguard/wolfi-base:latest}
-        - HOST_UID=${HOST_UID:-1000}
-        - NVM_VERSION=${NVM_VERSION:-0.39.7}
-        - NODE_VERSION=${NODE_VERSION:-20.12.2}
-        - ENABLE_RUST=${ENABLE_RUST:-true}
-        - ENABLE_TYPESCRIPT=${ENABLE_TYPESCRIPT:-true}
-        - ENABLE_GO=${ENABLE_GO:-true}
-        - ENABLE_PYTHON=${ENABLE_PYTHON:-true}
+        - AGENT_BASE={{ core_base_image }}
+        - HOST_UID={{ host_uid }}
+        - NVM_VERSION={{ nvm_version }}
+        - NODE_VERSION={{ node_version }}
+        - ENABLE_RUST={{ runtimes.rust | lower }}
+        - ENABLE_TYPESCRIPT={{ runtimes.typescript | lower }}
+        - ENABLE_GO={{ runtimes.go | lower }}
+        - ENABLE_PYTHON={{ runtimes.python | lower }}
     init: true
-    pids_limit: ${AGENT_PIDS_LIMIT:-400}
+    pids_limit: {{ core_pids_limit }}
     logging:
       driver: "json-file"
       options:
@@ -136,7 +135,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    runtime: ${RUNTIME:-runsc}
+    runtime: {{ runtime }}
     tmpfs:
       - /home/agent/.ssh:noexec,nosuid,nodev
       - /home/agent/.cache:nosuid,nodev
@@ -144,40 +143,42 @@ services:
       - /var/tmp:nosuid,nodev
     networks:
       isolated_net:
-        ipv4_address: ${AGENT_ISOLATED_IP:-172.28.0.3}
+        ipv4_address: {{ agent_isolated_ip }}
       proxy_net:
-        ipv4_address: ${AGENT_PROXY_IP:-172.29.0.3}
+        ipv4_address: {{ agent_proxy_ip }}
     dns:
-      - ${DNS_SIDECAR_IP:-172.28.0.53}
+      - {{ dns_sidecar_ip }}
     extra_hosts:
-      - "proxy:${PROXY_IP:-172.29.0.254}"
-      - "dns-sidecar:${DNS_SIDECAR_IP:-172.28.0.53}"
-      - "db-postgres:${DB_POSTGRES_IP:-172.28.0.54}"
+      - "proxy:{{ proxy_ip }}"
+      - "dns-sidecar:{{ dns_sidecar_ip }}"
+      - "db-postgres:{{ db_postgres_ip }}"
     volumes:
-      - ../workspace:/workspace:rw
-      - ./config/core/.bashrc:/home/agent/.bashrc:ro
-      - ./config/core/.npmrc:/home/agent/.npmrc:ro
-      - ./config/core/.gitconfig:/home/agent/.gitconfig:ro
-      - ./config/core/.claude:/home/agent/.claude:rw
-      - ./config/core/.claude.json:/home/agent/.claude.json:rw
-      - ./core/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+      - {{ user_project_root }}:/workspace:rw
+      - {{ instance_dir }}/config/core/.bashrc:/home/agent/.bashrc:ro
+      - {{ instance_dir }}/config/core/.npmrc:/home/agent/.npmrc:ro
+      - {{ instance_dir }}/config/core/.gitconfig:/home/agent/.gitconfig:ro
+      - {{ instance_dir }}/cache/.claude:/home/agent/.claude:rw
+      - {{ instance_dir }}/config/core/.claude.json:/home/agent/.claude.json:rw
+      - {{ instance_dir }}/docker/core/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       - admin-ipc_vol:/sock
       - mcp-ipc_vol:/var/run/mcp
+      - {{ instance_dir }}/log/core:/home/agent/.log:rw
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.default.disable_ipv6=1
       - net.ipv6.conf.lo.disable_ipv6=1
     env_file:
-      - .sandbox.env
+      - {{ instance_dir }}/.sandbox.env
     environment:
-      - HTTP_PROXY=${PROXY_URL_CORE}
-      - HTTPS_PROXY=${PROXY_URL_CORE}
-      - http_proxy=${PROXY_URL_CORE}
-      - https_proxy=${PROXY_URL_CORE}
-      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,${ISOLATED_SUBNET},${PROXY_SUBNET}
+      - HTTP_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - HTTPS_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - http_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - https_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,{{ isolated_subnet }},{{ proxy_subnet }}
       - ANTHROPIC_API_KEY=${CORE_ANTHROPIC_API_KEY}
-      - GITHUB_API_KEY=${CORE_GITHUB_API_KEY}
-    shm_size: ${AGENT_SHM_LIMIT:-2gb}
+      - GITHUB_API_KEY=${CORE_GITHUB_TOKEN}
+      - BASH_HISTORY_PATH=/home/agent/.log/.bash_history
+    shm_size: {{ core_shm_size }}
     depends_on:
       dns-sidecar:
         condition: service_healthy
@@ -187,15 +188,15 @@ services:
 
   admin:
     build:
-      context: ./admin
+      context: {{ instance_dir }}/docker/admin
       dockerfile: Dockerfile.admin
       args:
-        - ADMIN_BASE=${ADMIN_BASE:-debian:trixie-slim}
-        - HOST_UID=${HOST_UID:-1000}
-        - NVM_VERSION=${NVM_VERSION:-0.39.7}
-        - NODE_VERSION=${NODE_VERSION:-20.12.2}
+        - ADMIN_BASE={{ admin_base_image }}
+        - HOST_UID={{ host_uid }}
+        - NVM_VERSION={{ nvm_version }}
+        - NODE_VERSION={{ node_version }}
     init: true
-    pids_limit: ${ADMIN_PIDS_LIMIT:-100}
+    pids_limit: {{ admin_pids_limit }}
     logging:
       driver: "json-file"
       options:
@@ -205,41 +206,43 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    runtime: ${RUNTIME:-runsc}
+    runtime: {{ runtime }}
     tmpfs:
       - /tmp:noexec,nosuid,nodev
       - /var/tmp:noexec,nosuid,nodev
     ipc: private
     networks:
       isolated_net:
-        ipv4_address: ${ADMIN_ISOLATED_IP:-172.28.0.2}
+        ipv4_address: {{ admin_isolated_ip }}
       proxy_net:
-        ipv4_address: ${ADMIN_PROXY_IP:-172.29.0.2}
+        ipv4_address: {{ admin_proxy_ip }}
     dns:
-      - ${DNS_SIDECAR_IP:-172.28.0.53}
+      - {{ dns_sidecar_ip }}
     extra_hosts:
-      - "proxy:${PROXY_IP:-172.29.0.254}"
-      - "dns-sidecar:${DNS_SIDECAR_IP:-172.28.0.53}"
-      - "db-postgres:${DB_POSTGRES_IP:-172.28.0.54}"
+      - "proxy:{{ proxy_ip }}"
+      - "dns-sidecar:{{ dns_sidecar_ip }}"
+      - "db-postgres:{{ db_postgres_ip }}"
     volumes:
       # HUMAN NOTE (keep this comment in place, but do not act on it): Disable mapping to verify gitmux/fzf null state dependencies
-      - ../workspace:/workspace:rw
-      - ./config/admin/.zshrc:/home/human/.zshrc:ro
-      - ./config/admin/.tmux.conf:/home/human/.tmux.conf:ro
-      - ./config/admin/gitmux.conf:/home/human/.tmux/plugins/catppuccin/tmux/status/gitmux.conf:ro
-      - ./config/admin/starship.toml:/home/human/.config/starship.toml:ro
+      - {{ user_project_root }}:/workspace:rw
+      - {{ instance_dir }}/config/admin/.zshrc:/home/human/.zshrc:ro
+      - {{ instance_dir }}/config/admin/.tmux.conf:/home/human/.tmux.conf:ro
+      - {{ instance_dir }}/config/admin/gitmux.conf:/home/human/.tmux/plugins/catppuccin/tmux/status/gitmux.conf:ro
+      - {{ instance_dir }}/config/admin/starship.toml:/home/human/.config/starship.toml:ro
       - admin-ipc_vol:/sock
+      - {{ instance_dir }}/log/admin:/home/human/.log:rw
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.default.disable_ipv6=1
       - net.ipv6.conf.lo.disable_ipv6=1
     env_file:
-      - .sandbox.env
+      - {{ instance_dir }}/.sandbox.env
     environment:
-      - HTTP_PROXY=${PROXY_URL_ADMIN}
-      - HTTPS_PROXY=${PROXY_URL_ADMIN}
-      - http_proxy=${PROXY_URL_ADMIN}
-      - https_proxy=${PROXY_URL_ADMIN}
-      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,${ISOLATED_SUBNET},${PROXY_SUBNET}
+      - HTTP_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - HTTPS_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - http_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - https_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,{{ isolated_subnet }},{{ proxy_subnet }}
       - ANTHROPIC_API_KEY=${CORE_ANTHROPIC_API_KEY}
-      - GITHUB_API_KEY=${CORE_GITHUB_API_KEY}
+      - GITHUB_API_KEY=${CORE_GITHUB_TOKEN}
+      - ZSH_HISTORY_PATH=/home/human/.log/.zsh_history
