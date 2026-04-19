@@ -1,7 +1,7 @@
 .PHONY: test coverage lint format typecheck
 
 coverage:
-	uv run --with pytest-cov pytest --cov=core --cov-report=term-missing tests/unit/
+	uv run --with pytest-cov pytest --cov=core --cov=cli --cov-report=term-missing tests/unit/
 
 test:
 	uv run pytest tests/unit/
