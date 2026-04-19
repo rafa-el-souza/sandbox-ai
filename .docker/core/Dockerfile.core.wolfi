@@ -1,4 +1,4 @@
-ARG AGENT_BASE="cgr.dev/chainguard/wolfi-base:latest"
+ARG AGENT_BASE="{{ core_base_image }}"
 FROM ${AGENT_BASE} AS base
 
 USER root

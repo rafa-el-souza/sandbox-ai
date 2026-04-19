@@ -1,4 +1,4 @@
-ARG ADMIN_BASE="debian:trixie-slim"
+ARG ADMIN_BASE="{{ admin_base_image }}"
 FROM ${ADMIN_BASE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
