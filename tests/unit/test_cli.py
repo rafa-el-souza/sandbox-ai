@@ -5,6 +5,7 @@ Tests validate the full phase sequencing per the orchestrator design spec.
 """
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -585,3 +586,464 @@ class TestDestroyRmtree:
             runner.invoke(app, ["destroy", "--force"])
             expected_dir = str(home / "sandboxes" / instance_id)
             mock_rmtree.assert_called_once_with(expected_dir)
+
+
+# ── Helper function unit tests (coverage) ────────────────────────────────────
+
+
+class TestResolveHelpers:
+    """Direct tests for _resolve_sandbox_ai_home and _resolve_project_dir."""
+
+    def test_resolve_sandbox_ai_home_returns_parent_of_cli(self) -> None:
+        from cli.main import _resolve_sandbox_ai_home
+
+        result = _resolve_sandbox_ai_home()
+        assert os.path.isabs(result)
+        # Should be the repo root (parent of cli/)
+        assert os.path.isdir(os.path.join(result, "cli"))
+
+    def test_resolve_project_dir_returns_cwd(self) -> None:
+        from cli.main import _resolve_project_dir
+
+        result = _resolve_project_dir()
+        assert result == os.path.abspath(os.getcwd())
+
+    def test_resolve_instance_found(self, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import _resolve_instance
+
+        home = mock_sandbox_ai_home
+        _register_instance(home, "/some/dir", "inst-abc")
+        idir, iid = _resolve_instance(str(home), "/some/dir")
+        assert iid == "inst-abc"
+        assert idir is not None
+        assert idir.endswith("sandboxes/inst-abc")
+
+    def test_resolve_instance_not_found(self, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import _resolve_instance
+
+        idir, iid = _resolve_instance(str(mock_sandbox_ai_home), "/nonexistent")
+        assert idir is None
+        assert iid is None
+
+    def test_load_config(self, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import _load_config
+
+        home = mock_sandbox_ai_home
+        inst = _register_instance(home, "/some/dir", "inst-abc")
+        config = _load_config(str(inst))
+        assert config.project.name == "myproject"
+
+
+class TestWarmCheckDirect:
+    """Direct tests for _warm_check."""
+
+    def test_warm_check_no_compose_file(self, tmp_path: Path) -> None:
+        from cli.main import _warm_check
+
+        assert _warm_check(str(tmp_path), "name", "sandbox") is False
+
+    def test_warm_check_warm_containers(self, tmp_path: Path) -> None:
+        from cli.main import _warm_check
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        import subprocess as sp
+
+        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr="")
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.return_value = mock_result
+            assert _warm_check(str(tmp_path), "name", "sandbox") is True
+
+    def test_warm_check_cold_containers(self, tmp_path: Path) -> None:
+        from cli.main import _warm_check
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        import subprocess as sp
+
+        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.return_value = mock_result
+            assert _warm_check(str(tmp_path), "name", "sandbox") is False
+
+    def test_warm_check_executor_error(self, tmp_path: Path) -> None:
+        from cli.main import _warm_check
+        from core.exceptions import SandboxExecutionError
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.side_effect = SandboxExecutionError("fail")
+            assert _warm_check(str(tmp_path), "name", "sandbox") is False
+
+
+class TestLockingDirect:
+    """Direct tests for _acquire_state_lock and _release_lock."""
+
+    def test_acquire_and_release(self, tmp_path: Path) -> None:
+        from cli.main import _acquire_state_lock, _release_lock
+
+        fd = _acquire_state_lock(str(tmp_path))
+        assert isinstance(fd, int)
+        _release_lock(fd)
+
+    def test_acquire_contention(self, tmp_path: Path) -> None:
+        import fcntl as _fcntl
+
+        from cli.main import _acquire_state_lock
+
+        lock_path = tmp_path / "state.lock"
+        held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        _fcntl.flock(held_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        try:
+            with pytest.raises(BlockingIOError):
+                _acquire_state_lock(str(tmp_path))
+        finally:
+            _fcntl.flock(held_fd, _fcntl.LOCK_UN)
+            os.close(held_fd)
+
+    def test_release_lock_handles_bad_fd(self) -> None:
+        from cli.main import _release_lock
+
+        # Should not raise even with invalid fd
+        _release_lock(999999)
+
+
+class TestPhaseIPAMDirect:
+    """Direct test for _phase_ipam."""
+
+    def test_phase_ipam_allocates(self, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import _phase_ipam
+
+        idx = _phase_ipam(str(mock_sandbox_ai_home), "test-instance")
+        assert idx == 0
+
+
+class TestPhaseCredentialsDirect:
+    """Direct test for _phase_credentials."""
+
+    def test_phase_credentials_writes_htpasswd(self, tmp_path: Path) -> None:
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        inst_dir = tmp_path
+
+        with patch("cli.main.write_htpasswd") as mock_write:
+            password = _phase_credentials(str(inst_dir))
+            assert len(password) > 0
+            mock_write.assert_called_once()
+            line = mock_write.call_args[0][1]
+            assert line.startswith("proxyuser:$2b$")
+
+
+class TestPhaseHydrateDirect:
+    """Direct test for _phase_hydrate."""
+
+    def test_phase_hydrate_calls_render(self) -> None:
+        from cli.main import _phase_hydrate
+        from core.hydration import SandboxConfig
+
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "test",
+                "user_project_root": "/home/dev/test",
+                "host_unprivileged_user": "sandbox",
+                "host_uid": "1000",
+            }
+        })
+
+        with (
+            patch("cli.main.build_jinja_context", return_value={}) as mock_ctx,
+            patch("cli.main.render_templates") as mock_render,
+        ):
+            _phase_hydrate(mock_config, 0, "pass", "/home", "/inst")
+            mock_ctx.assert_called_once()
+            mock_render.assert_called_once()
+
+
+class TestPhaseACLDirect:
+    """Direct test for _phase_acl_grant."""
+
+    def test_phase_acl_grant_calls_setfacl(self) -> None:
+        from cli.main import _phase_acl_grant
+
+        with patch("subprocess.run") as mock_run:
+            _phase_acl_grant("/inst", "sandbox")
+            assert mock_run.call_count == 2
+            calls = mock_run.call_args_list
+            assert "u:sandbox:rX" in calls[0][0][0]
+            assert "u:sandbox:rX" in calls[1][0][0]
+
+
+class TestBuildComposeFiles:
+    """Direct test for _build_compose_files."""
+
+    def test_base_only(self) -> None:
+        from cli.main import _build_compose_files
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+            "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
+            "components_db_postgres": {"enabled": False},
+        })
+        files = _build_compose_files("/inst", config)
+        assert len(files) == 2  # -f, path
+
+    def test_with_extras(self) -> None:
+        from cli.main import _build_compose_files
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+            "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
+            "components_db_postgres": {"enabled": True},
+        })
+        files = _build_compose_files("/inst", config)
+        assert len(files) == 6  # base + postgres + firecrawl
+
+
+class TestPhaseComposeUpDirect:
+    """Direct test for _phase_compose_up."""
+
+    def test_compose_up_calls_executor(self) -> None:
+        from cli.main import _phase_compose_up
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        with patch("cli.main.Executor") as MockExec:
+            _phase_compose_up("/inst", "myproj", "sandbox", config)
+            MockExec.return_value.run.assert_called_once()
+            cmd_args = MockExec.return_value.run.call_args[0][0]
+            assert "machinectl" in cmd_args
+            assert "up -d --build --wait" in cmd_args[-1]
+
+
+class TestPhaseHandoverDirect:
+    """Direct test for _phase_handover."""
+
+    def test_handover_without_warmup(self) -> None:
+        from cli.main import _phase_handover
+
+        with patch("cli.main.Executor") as MockExec:
+            _phase_handover("myproj", "sandbox")
+            cmd = MockExec.return_value.run.call_args[0][0]
+            assert "/usr/bin/docker" in cmd
+            assert "-it" in cmd
+            assert "SANDBOX_WARMUP_PROMPT" not in " ".join(cmd)
+
+    def test_handover_with_warmup(self) -> None:
+        from cli.main import _phase_handover
+
+        with patch("cli.main.Executor") as MockExec:
+            _phase_handover("myproj", "sandbox", warmup_prompt="do things")
+            cmd = MockExec.return_value.run.call_args[0][0]
+            assert any("SANDBOX_WARMUP_PROMPT" in arg for arg in cmd)
+
+
+class TestComposeDownDirect:
+    """Direct test for _compose_down."""
+
+    def test_compose_down_plain(self) -> None:
+        from cli.main import _compose_down
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        with patch("cli.main.Executor") as MockExec:
+            _compose_down("/inst", "myproj", "sandbox", config, volumes=False)
+            cmd_str = MockExec.return_value.run.call_args[0][0][-1]
+            assert "down" in cmd_str
+            assert " -v" not in cmd_str
+
+    def test_compose_down_volumes(self) -> None:
+        from cli.main import _compose_down
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        with patch("cli.main.Executor") as MockExec:
+            _compose_down("/inst", "myproj", "sandbox", config, volumes=True)
+            cmd_str = MockExec.return_value.run.call_args[0][0][-1]
+            assert "down -v" in cmd_str
+
+
+class TestRevokeACLsDirect:
+    """Direct test for _revoke_acls."""
+
+    def test_revoke_acls_calls_setfacl(self) -> None:
+        from cli.main import _revoke_acls
+
+        with patch("subprocess.run") as mock_run:
+            _revoke_acls("/inst", "sandbox")
+            assert mock_run.call_count == 2
+
+
+class TestScaffoldInstanceDirect:
+    """Direct test for _scaffold_instance."""
+
+    def test_scaffold_creates_full_instance(
+        self, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import _scaffold_instance
+
+        home = mock_sandbox_ai_home
+        project_dir = str(home / "fake-project")
+        os.makedirs(project_dir, exist_ok=True)
+
+        with (
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+        ):
+            inst_dir, inst_id = _scaffold_instance(str(home), project_dir)
+
+        assert os.path.isdir(inst_dir)
+        assert os.path.exists(os.path.join(inst_dir, "sandbox.toml"))
+        assert os.path.exists(os.path.join(inst_dir, ".sandbox.env"))
+        assert os.path.exists(os.path.join(inst_dir, ".initialized"))
+
+        # Verify registry entry
+        reg = json.loads((home / ".state" / "instances.json").read_text())
+        assert project_dir in reg
+
+
+# ── Edge case tests for remaining coverage ───────────────────────────────────
+
+
+class TestStopNoInstance:
+    """Cover stop with unregistered instance."""
+
+    def test_stop_no_instance_exits(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
+        ):
+            result = runner.invoke(app, ["stop"])
+            assert result.exit_code == 1
+            assert "no sandbox" in result.output.lower()
+
+
+class TestAttachNoInstance:
+    """Cover attach with unregistered instance."""
+
+    def test_attach_no_instance_exits(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
+        ):
+            result = runner.invoke(app, ["attach"])
+            assert result.exit_code == 1
+            assert "no sandbox" in result.output.lower()
+
+
+class TestDestroyNoInstance:
+    """Cover destroy with unregistered instance."""
+
+    def test_destroy_no_instance_exits(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 1
+            assert "no sandbox" in result.output.lower()
+
+
+class TestDestroyPrefixGuardInternal:
+    """Cover the internal prefix guard path (not mocked)."""
+
+    def test_prefix_guard_rejects_bad_path(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+
+        from cli.main import app
+
+        # Mock _resolve_instance to return a path outside sandboxes/
+        bad_path = str(home / "somewhere_else" / "evil")
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/some/dir"),
+            patch("cli.main._resolve_instance", return_value=(bad_path, "evil")),
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 1
+            assert "prefix guard" in result.output.lower()
+
+
+class TestScaffoldFirecrawl:
+    """Cover firecrawl branch in _scaffold_instance."""
+
+    def test_scaffold_with_firecrawl_enabled(
+        self, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import _scaffold_instance
+
+        home = mock_sandbox_ai_home
+        project_dir = str(home / "fc-project")
+        os.makedirs(project_dir, exist_ok=True)
+
+        # Write a toml that has firecrawl enabled
+        fc_toml = VALID_TOML_CONTENT.replace(
+            b"mcp_firecrawl = false", b"mcp_firecrawl = true"
+        )
+
+        with (
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets") as mock_prompt,
+            patch("cli.main.write_sandbox_toml") as mock_toml,
+        ):
+            # Override to write firecrawl-enabled config
+            def write_fc_toml(inst_dir: str, *_args: object) -> None:
+                toml_path = os.path.join(inst_dir, "sandbox.toml")
+                with open(toml_path, "wb") as f:
+                    f.write(fc_toml)
+
+            mock_toml.side_effect = write_fc_toml
+            inst_dir, inst_id = _scaffold_instance(str(home), project_dir)
+
+            # Verify firecrawl secret was included in prompt_secrets call
+            call_args = mock_prompt.call_args[0]
+            secret_names = [s[0] for s in call_args[1]]
+            assert "FIRECRAWL_API_KEY" in secret_names

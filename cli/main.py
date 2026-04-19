@@ -5,7 +5,6 @@ All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
 import fcntl
-import json
 import os
 import shutil
 import subprocess
