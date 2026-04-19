@@ -94,3 +94,11 @@ class TestInstanceRegistry:
 
         reg2 = InstanceRegistry(registry_path)
         assert reg2.lookup("/home/dev/myproject") == "myproject-abc123"
+
+    def test_corrupt_json_recovers(self, tmp_path: object) -> None:
+        """Corrupt JSON file is treated as empty registry."""
+        registry_path = str(tmp_path) + "/instances.json"  # type: ignore[operator]
+        with open(registry_path, "w") as f:
+            f.write("{ corrupt json !!!")
+        reg = InstanceRegistry(registry_path)
+        assert reg.lookup("/home/dev/anything") is None
