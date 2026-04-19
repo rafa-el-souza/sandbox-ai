@@ -1,62 +1,146 @@
+"""Tests for the IPAM /24-triple allocator with slot reuse and overflow detection."""
+
+import json
+
 import pytest
-from core.ipam import get_next_subnet, acquire_locks
 
-def test_ipam_sequential_allocation(tmp_path):
-    """
-    Test sequential /16 bounding arrays.
-    """
-    global_lock_path = tmp_path / "ipam.json"
-    local_lock_path = tmp_path / "state.lock"
-    
-    # First allocation: should be 10.100.0.0/16
-    subnet_1 = get_next_subnet(global_lock_path, local_lock_path, "project-1")
-    assert subnet_1 == "10.100.0.0/16"
-    
-    # Second allocation: should be 10.101.0.0/16
-    subnet_2 = get_next_subnet(global_lock_path, local_lock_path, "project-2")
-    assert subnet_2 == "10.101.0.0/16"
-    
-    # Retrieving an existing project should return the same subnet
-    subnet_1_again = get_next_subnet(global_lock_path, local_lock_path, "project-1")
-    assert subnet_1_again == "10.100.0.0/16"
+from core.ipam import (
+    IPAMExhaustedError,
+    IPAMLedger,
+    derive_static_ips,
+    derive_subnets,
+)
 
-def test_ipam_dual_fcntl_locks():
-    """
-    Test dual fcntl locks logic. It should raise an exception if locked.
-    """
-    with pytest.raises(BlockingIOError):
-        # acquire_locks should throw if it can't get both locks
-        # we will mock the lock failure in the actual test later or simulate
-        acquire_locks("global.lock", "local.lock", fail_mock=True)
 
-def test_ipam_fcntl_blocking_io_error(tmp_path):
-    global_lock_path = tmp_path / "ipam.json"
-    local_lock_path = tmp_path / "state.lock"
-    
-    from unittest.mock import patch
-    with patch("fcntl.flock") as mock_flock:
-        mock_flock.side_effect = BlockingIOError(11, "Resource temporarily unavailable")
+@pytest.fixture
+def ledger(tmp_path: object) -> IPAMLedger:
+    """Create an IPAM ledger backed by a temporary file."""
+    ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+    return IPAMLedger(ledger_path)
+
+
+class TestIPAMLedger:
+    def test_allocate_lowest_slot(self, ledger: IPAMLedger) -> None:
+        """First allocation gets base_index 0."""
+        idx = ledger.allocate("project-aaa")
+        assert idx == 0
+
+    def test_sequential_allocation(self, ledger: IPAMLedger) -> None:
+        """Sequential allocations get incrementing indices."""
+        idx0 = ledger.allocate("p1")
+        idx1 = ledger.allocate("p2")
+        idx2 = ledger.allocate("p3")
+        assert idx0 == 0
+        assert idx1 == 1
+        assert idx2 == 2
+
+    def test_idempotent_reallocation(self, ledger: IPAMLedger) -> None:
+        """Re-allocating the same project_id returns the same base_index."""
+        idx1 = ledger.allocate("project-aaa")
+        idx2 = ledger.allocate("project-aaa")
+        assert idx1 == idx2
+
+    def test_slot_freed_after_release(self, ledger: IPAMLedger) -> None:
+        """Released slot is reused by next allocation (lowest-available)."""
+        ledger.allocate("p1")  # slot 0
+        ledger.allocate("p2")  # slot 1
+        ledger.allocate("p3")  # slot 2
+
+        ledger.release("p2")  # frees slot 1
+
+        idx = ledger.allocate("p4")
+        assert idx == 1  # lowest available
+
+    def test_release_nonexistent_noop(self, ledger: IPAMLedger) -> None:
+        """Releasing a non-existent project_id does not raise."""
+        ledger.release("nonexistent")
+
+    def test_overflow_detection(self, tmp_path: object) -> None:
+        """IPAMExhaustedError raised when all 13312 slots consumed."""
+        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        # Pre-fill ledger with all slots
+        data = {f"p{i}": i for i in range(13312)}
+        with open(ledger_path, "w") as f:
+            json.dump(data, f)
+
+        ledger = IPAMLedger(ledger_path)
+        with pytest.raises(IPAMExhaustedError, match="sandbox destroy"):
+            ledger.allocate("one-more-project")
+
+    def test_corrupt_json_recovers(self, tmp_path: object) -> None:
+        """Corrupt JSON ledger is treated as empty."""
+        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        with open(ledger_path, "w") as f:
+            f.write("{ bad json }")
+        ledger = IPAMLedger(ledger_path)
+        idx = ledger.allocate("project-aaa")
+        assert idx == 0
+
+    def test_lock_contention_raises(self, tmp_path: object) -> None:
+        """IPAMLockException raised when lock is already held."""
+        from unittest.mock import patch
+
         from core.ipam import IPAMLockException
-        with pytest.raises(IPAMLockException, match="Could not acquire locks"):
-            acquire_locks(str(global_lock_path), str(local_lock_path))
 
-def test_ipam_json_decode_error(tmp_path):
-    global_lock_path = tmp_path / "ipam.json"
-    local_lock_path = tmp_path / "state.lock"
-    
-    with open(global_lock_path, "w") as f:
-        f.write("{ bad json }")
-        
-    subnet = get_next_subnet(str(global_lock_path), str(local_lock_path), "project-error")
-    assert subnet == "10.100.0.0/16"
+        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        ledger = IPAMLedger(ledger_path)
 
-def test_ipam_high_subnet_increment(tmp_path):
-    global_lock_path = tmp_path / "ipam.json"
-    local_lock_path = tmp_path / "state.lock"
-    
-    import json
-    with open(global_lock_path, "w") as f:
-        json.dump({"project-alpha": "10.105.0.0/16"}, f)
-        
-    subnet = get_next_subnet(str(global_lock_path), str(local_lock_path), "project-beta")
-    assert subnet == "10.106.0.0/16"
+        with patch("fcntl.flock", side_effect=BlockingIOError(11, "Resource temporarily unavailable")):
+            with pytest.raises(IPAMLockException, match="Could not acquire IPAM lock"):
+                ledger.allocate("project-aaa")
+
+class TestDeriveSubnets:
+    def test_base_index_zero(self) -> None:
+        """base_index=0 → g=0: 10.100.0.0/24, 10.100.1.0/24, 10.100.2.0/24."""
+        isolated, proxy, egress = derive_subnets(0)
+        assert isolated == "10.100.0.0/24"
+        assert proxy == "10.100.1.0/24"
+        assert egress == "10.100.2.0/24"
+
+    def test_base_index_max(self) -> None:
+        """base_index=13311 → g=39933: verify correct subnet derivation."""
+        g = 13311 * 3
+        expected_isolated = f"10.{100 + g // 256}.{g % 256}.0/24"
+        g1 = g + 1
+        expected_proxy = f"10.{100 + g1 // 256}.{g1 % 256}.0/24"
+        g2 = g + 2
+        expected_egress = f"10.{100 + g2 // 256}.{g2 % 256}.0/24"
+
+        isolated, proxy, egress = derive_subnets(13311)
+        assert isolated == expected_isolated
+        assert proxy == expected_proxy
+        assert egress == expected_egress
+
+    def test_base_index_one(self) -> None:
+        """base_index=1 → g=3: 10.100.3.0/24, 10.100.4.0/24, 10.100.5.0/24."""
+        isolated, proxy, egress = derive_subnets(1)
+        assert isolated == "10.100.3.0/24"
+        assert proxy == "10.100.4.0/24"
+        assert egress == "10.100.5.0/24"
+
+
+class TestDeriveStaticIPs:
+    def test_output_keys(self) -> None:
+        """derive_static_ips returns all required IP keys."""
+        ips = derive_static_ips(0)
+        expected_keys = {
+            "dns_sidecar_ip",
+            "db_postgres_ip",
+            "agent_isolated_ip",
+            "admin_isolated_ip",
+            "proxy_ip",
+            "agent_proxy_ip",
+            "admin_proxy_ip",
+        }
+        assert set(ips.keys()) == expected_keys
+
+    def test_values_at_index_zero(self) -> None:
+        """Verify specific IP values at base_index=0."""
+        ips = derive_static_ips(0)
+        assert ips["dns_sidecar_ip"] == "10.100.0.53"
+        assert ips["db_postgres_ip"] == "10.100.0.54"
+        assert ips["agent_isolated_ip"] == "10.100.0.3"
+        assert ips["admin_isolated_ip"] == "10.100.0.2"
+        assert ips["proxy_ip"] == "10.100.1.254"
+        assert ips["agent_proxy_ip"] == "10.100.1.3"
+        assert ips["admin_proxy_ip"] == "10.100.1.2"

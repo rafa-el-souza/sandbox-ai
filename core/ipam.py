@@ -1,76 +1,141 @@
+"""IPAM allocator: /24-triple subnet allocation with lowest-slot scan and overflow detection.
+
+Each sandbox instance is assigned three consecutive /24 subnets (isolated, proxy, egress)
+from the 10.100.0.0–10.255.255.0 range. The ledger maps project_id → base_index (integer).
+Subnets are derived at runtime using: 10.(100 + g//256).(g%256).0/24 where g = base_index * 3.
+
+Maximum concurrent instances: 13,312 (base_index 0–13311).
+"""
+
 import fcntl
 import json
 import os
-from typing import Dict, Tuple
 
-class IPAMLockException(BlockingIOError):
+MAX_SLOTS = 13312
+
+
+class IPAMExhaustedError(Exception):
+    """Raised when all IPAM slots are consumed."""
+
     pass
 
-def acquire_locks(global_lock_path: str, local_lock_path: str, fail_mock: bool = False) -> Tuple[int, int]:
-    """
-    Acquire dual fcntl locks.
-    """
-    if fail_mock:
-        raise IPAMLockException("Mock failure")
-        
-    try:
-        os.makedirs(os.path.dirname(global_lock_path), exist_ok=True)
-        # For local lock it could just be in a temp dir or same dir
-        os.makedirs(os.path.dirname(local_lock_path) or ".", exist_ok=True)
-        
-        global_fd = os.open(global_lock_path, os.O_CREAT | os.O_RDWR)
-        local_fd = os.open(local_lock_path, os.O_CREAT | os.O_RDWR)
-        
-        fcntl.flock(global_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(local_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return global_fd, local_fd
-    except BlockingIOError:
-        raise IPAMLockException("Could not acquire locks")
 
-def _read_ledger(ledger_path: str) -> Dict[str, str]:
-    if not os.path.exists(ledger_path):
-        return {}
-    with open(ledger_path, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
+class IPAMLockException(BlockingIOError):
+    """Raised when IPAM lock cannot be acquired."""
+
+    pass
+
+
+class IPAMLedger:
+    """File-backed IPAM ledger with fcntl locking for concurrent access."""
+
+    def __init__(self, ledger_path: str) -> None:
+        self._path = ledger_path
+
+    def _load(self) -> dict[str, int]:
+        """Load the ledger from disk. Returns empty dict if file missing or corrupt."""
+        if not os.path.exists(self._path):
             return {}
+        with open(self._path) as f:
+            try:
+                data: dict[str, int] = json.load(f)
+                return data
+            except json.JSONDecodeError:
+                return {}
 
-def _write_ledger(ledger_path: str, data: Dict[str, str]) -> None:
-    os.makedirs(os.path.dirname(ledger_path), exist_ok=True)
-    with open(ledger_path, 'w') as f:
-        json.dump(data, f, indent=2)
+    def _save(self, data: dict[str, int]) -> None:
+        """Write the ledger to disk."""
+        os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
+        with open(self._path, "w") as f:
+            json.dump(data, f, indent=2)
 
-def get_next_subnet(global_ledger_path: str, local_lock_path: str, project_id: str) -> str:
+    def _acquire_lock(self) -> int:
+        """Acquire the IPAM lock file. Returns the lock fd."""
+        lock_path = self._path + ".lock"
+        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock_fd
+        except BlockingIOError:
+            os.close(lock_fd)
+            raise IPAMLockException("Could not acquire IPAM lock")
+
+    def allocate(self, project_id: str) -> int:
+        """Allocate the lowest available base_index for a project.
+
+        Returns the existing base_index if project_id is already allocated.
+        Raises IPAMExhaustedError if all slots are consumed.
+        """
+        lock_fd = self._acquire_lock()
+        try:
+            data = self._load()
+
+            # Idempotent: return existing allocation
+            if project_id in data:
+                return data[project_id]
+
+            # Find lowest available slot
+            used_indices = set(data.values())
+            for candidate in range(MAX_SLOTS):
+                if candidate not in used_indices:
+                    data[project_id] = candidate
+                    self._save(data)
+                    return candidate
+
+            raise IPAMExhaustedError(
+                f"All {MAX_SLOTS} IPAM slots are consumed. "
+                "Free slots by running 'sandbox destroy' on unused instances."
+            )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    def release(self, project_id: str) -> None:
+        """Release an IPAM slot, freeing it for reuse."""
+        lock_fd = self._acquire_lock()
+        try:
+            data = self._load()
+            data.pop(project_id, None)
+            self._save(data)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
+def derive_subnets(base_index: int) -> tuple[str, str, str]:
+    """Derive three /24 subnets from a base_index.
+
+    Formula: g = base_index * 3
+        isolated = 10.(100 + g//256).(g%256).0/24
+        proxy    = 10.(100 + (g+1)//256).((g+1)%256).0/24
+        egress   = 10.(100 + (g+2)//256).((g+2)%256).0/24
     """
-    Allocate the next /16 subnet dynamically.
+    g = base_index * 3
+    isolated = f"10.{100 + g // 256}.{g % 256}.0/24"
+    g1 = g + 1
+    proxy = f"10.{100 + g1 // 256}.{g1 % 256}.0/24"
+    g2 = g + 2
+    egress = f"10.{100 + g2 // 256}.{g2 % 256}.0/24"
+    return isolated, proxy, egress
+
+
+def derive_static_ips(base_index: int) -> dict[str, str]:
+    """Derive all static IP addresses from a base_index.
+
+    Uses the isolated subnet base for services on isolated_net
+    and the proxy subnet base for services on proxy_net.
     """
-    global_lock = str(global_ledger_path) + ".lock"
-    
-    global_fd, local_fd = acquire_locks(global_lock, str(local_lock_path))
-    
-    try:
-        ledger = _read_ledger(str(global_ledger_path))
-        
-        if project_id in ledger:
-            return ledger[project_id]
-        
-        existing_subnets = list(ledger.values())
-        if not existing_subnets:
-            next_subnet = "10.100.0.0/16"
-        else:
-            highest = 100
-            for sub in existing_subnets:
-                parts = sub.split('.')
-                if len(parts) > 1 and parts[1].isdigit():
-                    val = int(parts[1])
-                    if val > highest:
-                        highest = val
-            next_subnet = f"10.{highest + 1}.0.0/16"
-            
-        ledger[project_id] = next_subnet
-        _write_ledger(str(global_ledger_path), ledger)
-        return next_subnet
-    finally:
-        os.close(global_fd)
-        os.close(local_fd)
+    isolated_subnet, proxy_subnet, _ = derive_subnets(base_index)
+    isolated_base = isolated_subnet.rsplit(".0/24", 1)[0]
+    proxy_base = proxy_subnet.rsplit(".0/24", 1)[0]
+
+    return {
+        "dns_sidecar_ip": f"{isolated_base}.53",
+        "db_postgres_ip": f"{isolated_base}.54",
+        "agent_isolated_ip": f"{isolated_base}.3",
+        "admin_isolated_ip": f"{isolated_base}.2",
+        "proxy_ip": f"{proxy_base}.254",
+        "agent_proxy_ip": f"{proxy_base}.3",
+        "admin_proxy_ip": f"{proxy_base}.2",
+    }
