@@ -72,6 +72,10 @@ web_ports = [3000, 8080]
 domains = [".github.com"]
 """
 
+RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(
+    b'name = "myproject"', b'name = "renamed-project"'
+)
+
 WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(
     b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"'
 )
@@ -293,6 +297,70 @@ class TestStartComposeUnhealthy:
             result = runner.invoke(app, ["start"])
             assert result.exit_code == 1
             mock_release.assert_called_once()
+
+
+class TestStartProjectNameImmutabilityWarning:
+    """Spec: sandbox-toml-schema — project.name immutability warning."""
+
+    def test_divergent_name_emits_warning(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """WHEN project.name differs from instance_id name component, THEN warning is emitted."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        inst = _register_instance(home, project_dir, instance_id)
+        # Overwrite sandbox.toml with renamed project.name
+        (inst / "sandbox.toml").write_bytes(RENAMED_TOML_CONTENT)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            assert "project.name has changed" in result.output
+            assert "COMPOSE_PROJECT_NAME" in result.output
+
+    def test_matching_name_no_warning(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """WHEN project.name matches instance_id name component, THEN no warning."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            assert "project.name has changed" not in result.output
 
 
 # ── sandbox stop ─────────────────────────────────────────────────────────────

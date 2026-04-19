@@ -314,6 +314,16 @@ def start() -> None:
     name = config.project.name
     host_user = config.project.host_unprivileged_user
 
+    # Project name immutability check (sandbox-toml-schema spec)
+    # instance_id format: <project_name>-<md5[:6]> — strip last 7 chars to recover original name
+    original_name = instance_id[:-7]
+    if name != original_name:
+        console.print(
+            "WARNING: project.name has changed since init. "
+            "COMPOSE_PROJECT_NAME mismatch may orphan running containers.",
+            style="yellow",
+        )
+
     # Pre-lock warm check (D-52)
     if _warm_check(instance_dir, name, host_user):
         console.print(
