@@ -1,6 +1,6 @@
 """Tests for core/scaffold.py — instance directory scaffolding."""
 
-import getpass
+
 import os
 import stat
 from pathlib import Path
