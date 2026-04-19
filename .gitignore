@@ -1,8 +1,15 @@
+# Per-instance sandbox state (generated at runtime)
+sandboxes/*/
+.state/*.lock
+
+# Secrets — never commit
 .sandbox.env
+*.htpasswd
+
+# Legacy / deprecated
 .deprecated/
-config/proxy/.htpasswd
-log/core/.bash_history
-log/admin/.zsh_history
+
+# Tooling
 .antigravityignore
 .agent/
 .venv/
