@@ -76,6 +76,18 @@ class TestIPAMLedger:
         idx = ledger.allocate("project-aaa")
         assert idx == 0
 
+    def test_lock_contention_raises(self, tmp_path: object) -> None:
+        """IPAMLockException raised when lock is already held."""
+        from unittest.mock import patch
+
+        from core.ipam import IPAMLockException
+
+        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        ledger = IPAMLedger(ledger_path)
+
+        with patch("fcntl.flock", side_effect=BlockingIOError(11, "Resource temporarily unavailable")):
+            with pytest.raises(IPAMLockException, match="Could not acquire IPAM lock"):
+                ledger.allocate("project-aaa")
 
 class TestDeriveSubnets:
     def test_base_index_zero(self) -> None:
