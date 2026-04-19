@@ -175,8 +175,8 @@ services:
       - http_proxy=${PROXY_URL_CORE}
       - https_proxy=${PROXY_URL_CORE}
       - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,${ISOLATED_SUBNET},${PROXY_SUBNET}
-      - ANTHROPIC_API_KEY=${CONTAINER_ANTHROPIC_API_KEY}
-      - GITHUB_API_KEY=${CONTAINER_GITHUB_API_KEY}
+      - ANTHROPIC_API_KEY=${CORE_ANTHROPIC_API_KEY}
+      - GITHUB_API_KEY=${CORE_GITHUB_API_KEY}
     shm_size: ${AGENT_SHM_LIMIT:-2gb}
     depends_on:
       dns-sidecar:
@@ -241,5 +241,5 @@ services:
       - http_proxy=${PROXY_URL_ADMIN}
       - https_proxy=${PROXY_URL_ADMIN}
       - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,${ISOLATED_SUBNET},${PROXY_SUBNET}
-      - ANTHROPIC_API_KEY=${CONTAINER_ANTHROPIC_API_KEY}
-      - GITHUB_API_KEY=${CONTAINER_GITHUB_API_KEY}
+      - ANTHROPIC_API_KEY=${CORE_ANTHROPIC_API_KEY}
+      - GITHUB_API_KEY=${CORE_GITHUB_API_KEY}
