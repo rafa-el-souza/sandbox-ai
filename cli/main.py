@@ -413,7 +413,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     # Handover
     handover_cmd = (
         f"sudo machinectl shell {host_user}@.host -- "
-        f"/usr/bin/docker exec -it {name}-core-1 /bin/bash"
+        f"/usr/bin/docker exec -it {name}-admin-1 zsh"
     )
     console.print(f"    $ {handover_cmd}", style="dim")
 
