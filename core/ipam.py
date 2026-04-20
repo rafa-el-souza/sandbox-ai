@@ -102,6 +102,30 @@ class IPAMLedger:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
+    def peek_next_slot(self, project_id: str) -> tuple[int, bool]:
+        """Read-only scan: return (slot, is_existing) without lock or write.
+
+        Returns the existing base_index if project_id is already allocated (True),
+        otherwise the lowest available slot (False).
+        Raises IPAMExhaustedError if all slots are consumed.
+        """
+        data = self._load()
+
+        # Existing allocation
+        if project_id in data:
+            return data[project_id], True
+
+        # Find lowest available slot
+        used_indices = set(data.values())
+        for candidate in range(MAX_SLOTS):
+            if candidate not in used_indices:
+                return candidate, False
+
+        raise IPAMExhaustedError(
+            f"All {MAX_SLOTS} IPAM slots are consumed. "
+            "Free slots by running 'sandbox destroy' on unused instances."
+        )
+
 
 def derive_subnets(base_index: int) -> tuple[str, str, str]:
     """Derive three /24 subnets from a base_index.
