@@ -7,11 +7,11 @@ test:
 	uv run pytest tests/unit/
 
 lint:
-	uv run ruff check core/ tests/
+	uv run ruff check core/ cli/ tests/
 
 format:
-	uv run ruff format core/ tests/
-	uv run ruff check --fix core/ tests/
+	uv run ruff format core/ cli/ tests/
+	uv run ruff check --fix core/ cli/ tests/
 
 typecheck:
-	uv run mypy core/ tests/
+	uv run mypy core/ cli/ tests/

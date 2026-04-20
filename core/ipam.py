@@ -1,10 +1,10 @@
 """IPAM allocator: /24-triple subnet allocation with lowest-slot scan and overflow detection.
 
 Each sandbox instance is assigned three consecutive /24 subnets (isolated, proxy, egress)
-from the 10.100.0.0–10.255.255.0 range. The ledger maps project_id → base_index (integer).
+from the 10.100.0.0-10.255.255.0 range. The ledger maps project_id -> base_index (integer).
 Subnets are derived at runtime using: 10.(100 + g//256).(g%256).0/24 where g = base_index * 3.
 
-Maximum concurrent instances: 13,312 (base_index 0–13311).
+Maximum concurrent instances: 13,312 (base_index 0-13311).
 """
 
 import fcntl
@@ -57,9 +57,9 @@ class IPAMLedger:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return lock_fd
-        except BlockingIOError:
+        except BlockingIOError as exc:
             os.close(lock_fd)
-            raise IPAMLockException("Could not acquire IPAM lock")
+            raise IPAMLockException("Could not acquire IPAM lock") from exc
 
     def allocate(self, project_id: str) -> int:
         """Allocate the lowest available base_index for a project.

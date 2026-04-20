@@ -8,6 +8,7 @@ sandboxes/*/
 
 # Legacy / deprecated
 .deprecated/
+temp/
 
 # Tooling
 .antigravityignore

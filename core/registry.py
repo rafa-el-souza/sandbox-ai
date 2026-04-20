@@ -8,7 +8,6 @@ import fcntl
 import hashlib
 import json
 import os
-from typing import Optional
 
 
 def generate_instance_id(project_dir: str) -> str:
@@ -59,7 +58,7 @@ class InstanceRegistry:
         """Register a project directory to an instance ID."""
         self._save({project_dir: instance_id})
 
-    def lookup(self, project_dir: str) -> Optional[str]:
+    def lookup(self, project_dir: str) -> str | None:
         """Look up the instance ID for a project directory. Returns None if not found."""
         data = self._load()
         return data.get(project_dir)

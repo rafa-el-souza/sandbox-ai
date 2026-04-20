@@ -138,7 +138,7 @@ class TestStartHappyPath:
     def test_start_existing_instance_full_sequence(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """Existing instance: registry hit → warm check (cold) → lock → IPAM → creds → hydrate → ACL → compose → handover."""
+        """Existing instance: full start sequence (registry hit -> compose -> handover)."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"

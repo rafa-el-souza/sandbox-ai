@@ -34,7 +34,7 @@ SANDBOX_AI_HOME/                  # Git clone root
 │   ├── docker/                   # Hydrated compose files
 │   ├── config/                   # Hydrated sidecar configs
 │   └── log/                      # Orchestrator and container logs
-└── tests/unit/                   # TDD test suite (124 tests)
+└── tests/unit/                   # TDD test suite (119 tests)
 ```
 
 ## Configuration
@@ -44,6 +44,9 @@ The file is generated during `sandbox start` via the scaffolding pipeline and
 re-hydrated on every subsequent launch to ensure infrastructure drift is eliminated.
 
 ## Development
+
+All commands require [`uv`](https://docs.astral.sh/uv/). The project pins Python 3.14 via `.python-version`;
+the host system Python may differ. Always use `uv run` or `make` targets — never invoke `python` directly.
 
 ```bash
 make test        # Run unit tests

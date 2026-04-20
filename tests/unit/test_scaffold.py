@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
 from core.scaffold import (
     apply_default_acls,
     create_env_file,

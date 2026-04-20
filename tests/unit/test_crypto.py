@@ -3,7 +3,6 @@
 
 from pathlib import Path
 
-
 from core.crypto import (
     generate_proxy_password,
     hash_proxy_password,
