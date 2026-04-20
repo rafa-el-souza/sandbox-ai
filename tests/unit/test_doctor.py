@@ -625,3 +625,44 @@ class TestRichRenderer:
         output = buf.getvalue()
         assert "Group 1" in output
         assert "Group 2" in output
+
+
+# ── Coverage gap tests ──────────────────────────────────────────────────────
+
+
+class TestDistroIdLikeFallback:
+    """Cover ID_LIKE parsing branch when ID is not in _DISTRO_MAP."""
+
+    def test_id_like_resolves_when_id_unknown(self) -> None:
+        from core.doctor import detect_distro
+
+        content = 'ID=linuxmint\nID_LIKE="ubuntu debian"\n'
+        with patch("builtins.open", mock_open(read_data=content)):
+            # linuxmint NOT in _DISTRO_MAP, but "ubuntu" in ID_LIKE IS
+            assert detect_distro() == "debian"
+
+
+class TestRunscJsonDecodeError:
+    """Cover JSONDecodeError branch in check_runsc_registered."""
+
+    def test_runsc_bad_json_output(self) -> None:
+        from core.doctor import check_runsc_registered
+
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="NOT-VALID-JSON{{{", stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_registered("sandbox", None)
+            assert result.status == "fail"
+
+
+class TestRenderResultsDefaultConsole:
+    """Cover the console=None default branch in render_results."""
+
+    def test_render_results_no_console(self) -> None:
+        from core.doctor import CheckResult, render_results
+
+        results = [CheckResult(status="pass", name="X", detail="ok")]
+        # Should not raise — uses default RichConsole internally
+        render_results(results)
+

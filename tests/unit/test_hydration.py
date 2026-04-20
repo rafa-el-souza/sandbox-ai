@@ -342,3 +342,120 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
         "proxy_whitelist_domains": [".github.com", ".npmjs.com"],
     }
+
+
+class TestValidateTemplates:
+    """Coverage tests for validate_templates dry-run function."""
+
+    def test_validate_all_valid(self, tmp_path: Path) -> None:
+        """All templates valid returns (count, [])."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert count > 0
+        assert errors == []
+
+    def test_validate_with_firecrawl(self, tmp_path: Path) -> None:
+        """mcp_firecrawl=True checks firecrawl template and Dockerfile."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=True,
+        )
+        assert count > 0
+        assert errors == []
+
+    def test_validate_missing_template(self, tmp_path: Path) -> None:
+        """Missing template file produces TemplateNotFound error."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        (tooling / ".docker" / "compose.yml").unlink()
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert any("Template not found" in e for e in errors)
+
+    def test_validate_undefined_variable(self, tmp_path: Path) -> None:
+        """Undefined variable in template produces UndefinedError."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        (tooling / ".docker" / "compose.yml").write_text("{{ nonexistent_var }}")
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert any("Undefined variable" in e for e in errors)
+
+    def test_validate_syntax_error(self, tmp_path: Path) -> None:
+        """Syntax error in template produces TemplateSyntaxError."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        (tooling / ".docker" / "compose.yml").write_text("{% if %}broken{% endif %}")
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert any("Syntax error" in e for e in errors)
+
+    def test_validate_missing_static_file(self, tmp_path: Path) -> None:
+        """Missing static file produces error."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        (tooling / ".config" / "core" / "CLAUDE.md").unlink()
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert any("Static file missing" in e for e in errors)
+        assert any("CLAUDE.md" in e for e in errors)
+
+
+def _build_minimal_tooling(tmp_path: Path) -> Path:
+    """Build minimal tooling plane for validate_templates tests."""
+    tooling = tmp_path / "tooling"
+    docker_dir = tooling / ".docker"
+    docker_dir.mkdir(parents=True)
+    (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+    core_dir = docker_dir / "core"
+    core_dir.mkdir()
+    (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
+    (core_dir / "entrypoint.sh").write_text("#!/bin/bash\n")
+    admin_dir = docker_dir / "admin"
+    admin_dir.mkdir()
+    (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
+    (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+    extras_dir = docker_dir / "extras"
+    extras_dir.mkdir()
+    (extras_dir / "mcp-firecrawl.yml").write_text("# firecrawl\n")
+    (extras_dir / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
+
+    config_dir = tooling / ".config"
+    dns_dir = config_dir / "dns-sidecar"
+    dns_dir.mkdir(parents=True)
+    (dns_dir / "Corefile").write_text("# {{ project_name }}\n")
+    proxy_dir = config_dir / "proxy"
+    proxy_dir.mkdir(parents=True)
+    (proxy_dir / "squid.conf").write_text("# {{ proxy_ip }}\n")
+    (proxy_dir / "ERR_SANDBOX_403").write_text("DENIED\n")
+    admin_cfg = config_dir / "admin"
+    admin_cfg.mkdir(parents=True)
+    for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml"]:
+        (admin_cfg / f).write_text(f"# {f}\n")
+    core_cfg = config_dir / "core"
+    core_cfg.mkdir(parents=True)
+    for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        (core_cfg / f).write_text(f"# {f}\n")
+
+    return tooling
+

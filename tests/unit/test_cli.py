@@ -1421,3 +1421,65 @@ def _create_tooling_plane(home: Path) -> None:
     (config_dir / "core" / "CLAUDE.md").write_text("# Claude\n")
 
 
+class TestDryRunIpamExhausted:
+    """Cover IPAM exhaustion path in dry-run pipeline."""
+
+    def test_dry_run_ipam_exhausted_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """IPAM exhaustion during dry-run exits with code 1."""
+        from core.ipam import IPAMExhaustedError
+
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+            patch.object(
+                __import__("core.ipam", fromlist=["IPAMLedger"]).IPAMLedger,
+                "peek_next_slot",
+                side_effect=IPAMExhaustedError("All slots consumed"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 1
+
+
+class TestCheckSecretsFirecrawl:
+    """Cover firecrawl secret branch in _check_secrets."""
+
+    def test_check_secrets_firecrawl_missing(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Firecrawl secret reported when mcp_firecrawl=true."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        inst = _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        # Write a sandbox.toml with mcp_firecrawl=true
+        firecrawl_toml = (inst / "sandbox.toml").read_bytes().decode()
+        firecrawl_toml = firecrawl_toml.replace(
+            "mcp_firecrawl = false", "mcp_firecrawl = true"
+        )
+        (inst / "sandbox.toml").write_text(firecrawl_toml)
+
+        # Also need mcp-firecrawl.yml in tooling plane
+        extras = home / ".docker" / "extras"
+        (extras / "mcp-firecrawl.yml").write_text("# firecrawl\n")
+        (extras / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            out = result.output.lower()
+            assert "firecrawl" in out or "missing" in out or "secret" in out
