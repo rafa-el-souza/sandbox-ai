@@ -329,3 +329,74 @@ def _copy_file(
     dst = os.path.join(instance_dir, dst_rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copy2(src, dst)
+
+
+# ─── Dry-Run Validation ─────────────────────────────────────────────────────
+
+
+def validate_templates(
+    context: dict[str, Any],
+    tooling_plane: str,
+    *,
+    db_postgres: bool,
+    mcp_firecrawl: bool,
+) -> tuple[int, list[str]]:
+    """Render all Jinja2 templates to memory without writing.
+
+    Returns (count_of_validated_templates, list_of_errors).
+    Empty errors list means all templates are valid.
+    """
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(tooling_plane),
+        undefined=jinja2.StrictUndefined,
+        keep_trailing_newline=True,
+    )
+
+    errors: list[str] = []
+    validated = 0
+
+    # Build the full list of templates to validate
+    templates: list[str] = [
+        ".docker/compose.yml",
+        f".docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
+        f".docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
+        ".config/dns-sidecar/Corefile",
+        ".config/proxy/squid.conf",
+    ]
+
+    if db_postgres:
+        templates.append(".docker/extras/db-postgres.yml")
+    if mcp_firecrawl:
+        templates.append(".docker/extras/mcp-firecrawl.yml")
+
+    for template_rel in templates:
+        try:
+            template = env.get_template(template_rel)
+            template.render(context)
+            validated += 1
+        except jinja2.TemplateNotFound:
+            errors.append(f"Template not found: {template_rel}")
+        except jinja2.TemplateSyntaxError as e:
+            errors.append(f"Syntax error in {template_rel}: {e}")
+        except jinja2.UndefinedError as e:
+            errors.append(f"Undefined variable in {template_rel}: {e}")
+
+    # Verify static files exist
+    static_files = (
+        [f".config/proxy/{f}" for f in _STATIC_CONFIG_PROXY]
+        + [f".config/admin/{f}" for f in _STATIC_CONFIG_ADMIN]
+        + [f".config/core/{f}" for f in _STATIC_CONFIG_CORE]
+        + [".docker/core/entrypoint.sh", ".docker/admin/entrypoint.sh"]
+    )
+    if mcp_firecrawl:
+        static_files.append(".docker/extras/Dockerfile.mcp-firecrawl")
+
+    for rel_path in static_files:
+        abs_path = os.path.join(tooling_plane, rel_path)
+        if os.path.exists(abs_path):
+            validated += 1
+        else:
+            errors.append(f"Static file missing: {rel_path}")
+
+    return validated, errors
+

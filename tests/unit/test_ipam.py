@@ -145,3 +145,48 @@ class TestDeriveStaticIPs:
         assert ips["proxy_ip"] == "10.100.1.254"
         assert ips["agent_proxy_ip"] == "10.100.1.3"
         assert ips["admin_proxy_ip"] == "10.100.1.2"
+
+
+class TestPeekNextSlot:
+    """Task 11.1: peek_next_slot read-only slot preview."""
+
+    def test_peek_new_project_returns_lowest_slot(self, ledger: IPAMLedger) -> None:
+        """New project: returns (0, False) — lowest available, not existing."""
+        slot, is_existing = ledger.peek_next_slot("new-project")
+        assert slot == 0
+        assert is_existing is False
+
+    def test_peek_existing_project_returns_existing(self, ledger: IPAMLedger) -> None:
+        """Existing project: returns (allocated_slot, True)."""
+        ledger.allocate("existing-project")  # slot 0
+        slot, is_existing = ledger.peek_next_slot("existing-project")
+        assert slot == 0
+        assert is_existing is True
+
+    def test_peek_does_not_write(self, ledger: IPAMLedger) -> None:
+        """Peek is read-only — no mutations to ledger file."""
+        ledger.peek_next_slot("ghost-project")
+        # A subsequent allocate should still get slot 0
+        idx = ledger.allocate("ghost-project")
+        assert idx == 0
+
+    def test_peek_with_gaps(self, ledger: IPAMLedger) -> None:
+        """Peek finds lowest available slot with gaps."""
+        ledger.allocate("p1")  # 0
+        ledger.allocate("p2")  # 1
+        ledger.allocate("p3")  # 2
+        ledger.release("p2")  # free slot 1
+        slot, is_existing = ledger.peek_next_slot("new-project")
+        assert slot == 1
+        assert is_existing is False
+
+    def test_peek_exhausted_raises(self, tmp_path: object) -> None:
+        """IPAMExhaustedError raised when all slots consumed."""
+        ledger_path = str(tmp_path) + "/ipam.json"
+        data = {f"p{i}": i for i in range(13312)}
+        with open(ledger_path, "w") as f:
+            json.dump(data, f)
+        ledger = IPAMLedger(ledger_path)
+        with pytest.raises(IPAMExhaustedError):
+            ledger.peek_next_slot("one-more")
+

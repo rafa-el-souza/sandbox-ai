@@ -1115,3 +1115,371 @@ class TestScaffoldFirecrawl:
             call_args = mock_prompt.call_args[0]
             secret_names = [s[0] for s in call_args[1]]
             assert "FIRECRAWL_API_KEY" in secret_names
+
+
+# ── sandbox doctor ───────────────────────────────────────────────────────────
+
+
+class TestDoctorAllPass:
+    """Task 10.1: sandbox doctor --user — all checks pass."""
+
+    def test_doctor_all_pass_exit_code_0(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        all_pass = [
+            CheckResult(status="pass", name=f"check-{i}", detail="ok")
+            for i in range(12)
+        ]
+        with (
+            patch("cli.main.detect_distro", return_value="debian"),
+            patch("cli.main.build_check_registry", return_value=[]),
+            patch("cli.main.run_checks", return_value=all_pass),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert result.exit_code == 0
+
+
+class TestDoctorAnyFail:
+    """Task 10.1: sandbox doctor --user — some checks fail."""
+
+    def test_doctor_any_fail_exit_code_1(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        mixed = [
+            CheckResult(status="pass", name="a", detail="ok"),
+            CheckResult(status="fail", name="b", detail="bad", remediation="fix"),
+        ]
+        with (
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.build_check_registry", return_value=[]),
+            patch("cli.main.run_checks", return_value=mixed),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert result.exit_code == 1
+
+
+class TestDoctorMissingUser:
+    """Task 10.1: sandbox doctor without --user errors."""
+
+    def test_doctor_missing_user_exits_error(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code != 0
+
+
+class TestDoctorRunnerInvoked:
+    """Task 10.1: verify runner is invoked with correct arguments."""
+
+    def test_runner_receives_user_and_distro(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        results = [CheckResult(status="pass", name="a", detail="ok")]
+        with (
+            patch("cli.main.detect_distro", return_value="fedora") as mock_distro,
+            patch("cli.main.build_check_registry", return_value=["check_obj"]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results") as mock_render,
+        ):
+            runner.invoke(app, ["doctor", "--user", "testuser"])
+            mock_distro.assert_called_once()
+            mock_reg.assert_called_once()
+            mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
+            mock_render.assert_called_once()
+
+
+# ── sandbox start --dry-run ──────────────────────────────────────────────────
+
+
+class TestDryRunExistingInstance:
+    """Task 12.1: --dry-run with existing instance."""
+
+    def test_dry_run_skips_warm_check(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Warm state check is skipped when --dry-run is set."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        # Create tooling plane files for template validation
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check") as mock_warm,
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            mock_warm.assert_not_called()
+            assert result.exit_code == 0
+
+    def test_dry_run_existing_instance_exit_0(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Existing instance dry-run passes with exit code 0."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 0
+
+    def test_dry_run_shows_ipam_preview(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """IPAM slot is previewed with 'subject to concurrent changes' note."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 5)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 0
+            # Should mention the IPAM slot
+            assert "5" in result.output or "slot" in result.output.lower()
+
+    def test_dry_run_shows_compose_command(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Compose command is displayed in dry-run output."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
+
+    def test_dry_run_template_error_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Template error causes exit code 1."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+        # Break the compose template
+        (home / ".docker" / "compose.yml").write_text("{{ undefined_var }}")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 1
+
+    def test_dry_run_missing_env_keys_reported(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Missing .sandbox.env keys are reported in dry-run."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        inst = _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+        # Write empty env file — secrets missing
+        (inst / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""')
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            # Should mention missing secrets
+            out = result.output.lower()
+            assert "missing" in out or "secret" in out or "empty" in out
+
+
+class TestDryRunNewInstance:
+    """Task 13.1: --dry-run with no existing instance."""
+
+    def test_dry_run_new_instance_exit_0(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """New instance dry-run renders from scaffold defaults."""
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 0
+
+    def test_dry_run_new_instance_shows_sandbox_user(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """New instance dry-run uses 'sandbox' as the default user."""
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "sandbox" in result.output.lower()
+
+    def test_dry_run_new_instance_shows_directory_tree(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """New instance dry-run displays the directory tree."""
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "docker" in result.output.lower() or "directory" in result.output.lower()
+
+
+def _create_tooling_plane(home: Path) -> None:
+    """Create minimal tooling plane files needed for dry-run template validation."""
+    # Jinja2 templates
+    docker_dir = home / ".docker"
+    (docker_dir / "compose.yml").write_text(
+        "# compose for {{ project_name }}\nversion: '3'\n"
+    )
+    (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
+    (docker_dir / "core" / "Dockerfile.core.wolfi").write_text(
+        "FROM {{ core_base_image }}\n"
+    )
+    (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/bash\n")
+    (docker_dir / "admin" / "Dockerfile.admin.debian").write_text(
+        "FROM {{ admin_base_image }}\n"
+    )
+    (docker_dir / "extras").mkdir(parents=True, exist_ok=True)
+    (docker_dir / "extras" / "db-postgres.yml").write_text("# postgres\n")
+
+    config_dir = home / ".config"
+    (config_dir / "dns-sidecar").mkdir(parents=True, exist_ok=True)
+    (config_dir / "dns-sidecar" / "Corefile").write_text(
+        "# Corefile for {{ project_name }}\n"
+    )
+    (config_dir / "proxy" / "squid.conf").write_text(
+        "# squid for {{ proxy_ip }}\n"
+    )
+    (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("403 Forbidden\n")
+    (config_dir / "admin").mkdir(parents=True, exist_ok=True)
+    (config_dir / "admin" / ".zshrc").write_text("# zshrc\n")
+    (config_dir / "admin" / ".tmux.conf").write_text("# tmux\n")
+    (config_dir / "admin" / "gitmux.conf").write_text("# gitmux\n")
+    (config_dir / "admin" / "starship.toml").write_text("# starship\n")
+    (config_dir / "core").mkdir(parents=True, exist_ok=True)
+    (config_dir / "core" / ".bashrc").write_text("# bashrc\n")
+    (config_dir / "core" / ".npmrc").write_text("# npmrc\n")
+    (config_dir / "core" / ".gitconfig").write_text("# gitconfig\n")
+    (config_dir / "core" / ".claude.json").write_text("{}\n")
+    (config_dir / "core" / "CLAUDE.md").write_text("# Claude\n")
+
+
+class TestDryRunIpamExhausted:
+    """Cover IPAM exhaustion path in dry-run pipeline."""
+
+    def test_dry_run_ipam_exhausted_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """IPAM exhaustion during dry-run exits with code 1."""
+        from core.ipam import IPAMExhaustedError
+
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+            patch.object(
+                __import__("core.ipam", fromlist=["IPAMLedger"]).IPAMLedger,
+                "peek_next_slot",
+                side_effect=IPAMExhaustedError("All slots consumed"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 1
+
+
+class TestCheckSecretsFirecrawl:
+    """Cover firecrawl secret branch in _check_secrets."""
+
+    def test_check_secrets_firecrawl_missing(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Firecrawl secret reported when mcp_firecrawl=true."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        inst = _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        # Write a sandbox.toml with mcp_firecrawl=true
+        firecrawl_toml = (inst / "sandbox.toml").read_bytes().decode()
+        firecrawl_toml = firecrawl_toml.replace(
+            "mcp_firecrawl = false", "mcp_firecrawl = true"
+        )
+        (inst / "sandbox.toml").write_text(firecrawl_toml)
+
+        # Also need mcp-firecrawl.yml in tooling plane
+        extras = home / ".docker" / "extras"
+        (extras / "mcp-firecrawl.yml").write_text("# firecrawl\n")
+        (extras / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            out = result.output.lower()
+            assert "firecrawl" in out or "missing" in out or "secret" in out
