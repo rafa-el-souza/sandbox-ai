@@ -620,7 +620,7 @@ class TestRichRenderer:
             CheckResult(status="pass", name="B", detail="ok", category="Group 2"),
         ]
         buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
+        console = Console(file=buf, force_terminal=True, width=120, highlight=False)
         render_results(results, console=console)
         output = buf.getvalue()
         assert "Group 1" in output
