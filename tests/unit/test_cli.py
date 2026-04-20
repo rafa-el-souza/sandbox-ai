@@ -1115,3 +1115,80 @@ class TestScaffoldFirecrawl:
             call_args = mock_prompt.call_args[0]
             secret_names = [s[0] for s in call_args[1]]
             assert "FIRECRAWL_API_KEY" in secret_names
+
+
+# ── sandbox doctor ───────────────────────────────────────────────────────────
+
+
+class TestDoctorAllPass:
+    """Task 10.1: sandbox doctor --user — all checks pass."""
+
+    def test_doctor_all_pass_exit_code_0(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        all_pass = [
+            CheckResult(status="pass", name=f"check-{i}", detail="ok")
+            for i in range(12)
+        ]
+        with (
+            patch("cli.main.detect_distro", return_value="debian"),
+            patch("cli.main.build_check_registry", return_value=[]),
+            patch("cli.main.run_checks", return_value=all_pass),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert result.exit_code == 0
+
+
+class TestDoctorAnyFail:
+    """Task 10.1: sandbox doctor --user — some checks fail."""
+
+    def test_doctor_any_fail_exit_code_1(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        mixed = [
+            CheckResult(status="pass", name="a", detail="ok"),
+            CheckResult(status="fail", name="b", detail="bad", remediation="fix"),
+        ]
+        with (
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.build_check_registry", return_value=[]),
+            patch("cli.main.run_checks", return_value=mixed),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert result.exit_code == 1
+
+
+class TestDoctorMissingUser:
+    """Task 10.1: sandbox doctor without --user errors."""
+
+    def test_doctor_missing_user_exits_error(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code != 0
+
+
+class TestDoctorRunnerInvoked:
+    """Task 10.1: verify runner is invoked with correct arguments."""
+
+    def test_runner_receives_user_and_distro(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        results = [CheckResult(status="pass", name="a", detail="ok")]
+        with (
+            patch("cli.main.detect_distro", return_value="fedora") as mock_distro,
+            patch("cli.main.build_check_registry", return_value=["check_obj"]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results") as mock_render,
+        ):
+            runner.invoke(app, ["doctor", "--user", "testuser"])
+            mock_distro.assert_called_once()
+            mock_reg.assert_called_once()
+            mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
+            mock_render.assert_called_once()
+

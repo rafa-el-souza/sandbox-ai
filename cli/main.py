@@ -1,6 +1,6 @@
 """Sandbox CLI orchestrator — full lifecycle implementation.
 
-Commands: start, stop, attach, destroy.
+Commands: start, stop, attach, destroy, doctor.
 All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
@@ -11,6 +11,12 @@ import subprocess
 
 import typer
 from core.crypto import generate_proxy_password, hash_proxy_password, write_htpasswd
+from core.doctor import (
+    build_check_registry,
+    detect_distro,
+    render_results,
+    run_checks,
+)
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.hydration import SandboxConfig, build_jinja_context, render_templates
@@ -499,6 +505,21 @@ def destroy(force: bool = False) -> None:
     console.print(
         f"Sandbox '{name}' permanently destroyed. IPAM slot freed for reuse."
     )
+
+
+@app.command()
+def doctor(
+    user: str = typer.Option(..., "--user", help="Unprivileged user to validate"),
+) -> None:
+    """Run host readiness diagnostics."""
+    distro = detect_distro()
+    checks = build_check_registry()
+    results = run_checks(checks, user, distro)
+    render_results(results, console=console)
+
+    has_failures = any(r.status == "fail" for r in results)
+    if has_failures:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
