@@ -3,7 +3,6 @@
 import json
 
 import pytest
-
 from core.ipam import (
     IPAMExhaustedError,
     IPAMLedger,
@@ -15,7 +14,7 @@ from core.ipam import (
 @pytest.fixture
 def ledger(tmp_path: object) -> IPAMLedger:
     """Create an IPAM ledger backed by a temporary file."""
-    ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+    ledger_path = str(tmp_path) + "/ipam.json"
     return IPAMLedger(ledger_path)
 
 
@@ -57,7 +56,7 @@ class TestIPAMLedger:
 
     def test_overflow_detection(self, tmp_path: object) -> None:
         """IPAMExhaustedError raised when all 13312 slots consumed."""
-        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        ledger_path = str(tmp_path) + "/ipam.json"
         # Pre-fill ledger with all slots
         data = {f"p{i}": i for i in range(13312)}
         with open(ledger_path, "w") as f:
@@ -69,7 +68,7 @@ class TestIPAMLedger:
 
     def test_corrupt_json_recovers(self, tmp_path: object) -> None:
         """Corrupt JSON ledger is treated as empty."""
-        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        ledger_path = str(tmp_path) + "/ipam.json"
         with open(ledger_path, "w") as f:
             f.write("{ bad json }")
         ledger = IPAMLedger(ledger_path)
@@ -82,11 +81,13 @@ class TestIPAMLedger:
 
         from core.ipam import IPAMLockException
 
-        ledger_path = str(tmp_path) + "/ipam.json"  # type: ignore[operator]
+        ledger_path = str(tmp_path) + "/ipam.json"
         ledger = IPAMLedger(ledger_path)
 
-        with patch("fcntl.flock", side_effect=BlockingIOError(11, "Resource temporarily unavailable")):
-            with pytest.raises(IPAMLockException, match="Could not acquire IPAM lock"):
+        with (
+            patch("fcntl.flock", side_effect=BlockingIOError(11, "Resource temporarily unavailable")),
+            pytest.raises(IPAMLockException, match="Could not acquire IPAM lock"),
+        ):
                 ledger.allocate("project-aaa")
 
 class TestDeriveSubnets:

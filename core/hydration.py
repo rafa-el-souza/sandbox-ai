@@ -8,15 +8,13 @@ Implements the PHASE 4 (HYDRATION) from the orchestrator design:
 
 import os
 import shutil
+import tomllib
 from typing import Any
 
 import jinja2
 from pydantic import BaseModel
 
 from core.ipam import derive_static_ips, derive_subnets
-
-import tomllib
-
 
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
 
@@ -107,7 +105,7 @@ class SandboxConfig(BaseModel):
     proxy_whitelist: ProxyWhitelistConfig = ProxyWhitelistConfig()
 
     @classmethod
-    def from_toml(cls, toml_path: str) -> "SandboxConfig":
+    def from_toml(cls, toml_path: str) -> SandboxConfig:
         """Parse sandbox.toml into a validated SandboxConfig."""
         with open(toml_path, "rb") as f:
             raw = tomllib.load(f)
@@ -263,7 +261,12 @@ def render_templates(
         _render_file(env, ".docker/extras/db-postgres.yml", instance_dir, "docker/extras/db-postgres.yml", context)
     if mcp_firecrawl:
         _render_file(env, ".docker/extras/mcp-firecrawl.yml", instance_dir, "docker/extras/mcp-firecrawl.yml", context)
-        _copy_file(tooling_plane, ".docker/extras/Dockerfile.mcp-firecrawl", instance_dir, "docker/extras/Dockerfile.mcp-firecrawl")
+        _copy_file(
+            tooling_plane,
+            ".docker/extras/Dockerfile.mcp-firecrawl",
+            instance_dir,
+            "docker/extras/Dockerfile.mcp-firecrawl",
+        )
 
     # ── Config templates ──────────────────────────────────────────────────
 

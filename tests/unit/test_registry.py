@@ -1,14 +1,13 @@
 import threading
 
 import pytest
-
 from core.registry import InstanceRegistry, generate_instance_id
 
 
 @pytest.fixture
 def registry(tmp_path: object) -> InstanceRegistry:
     """Create a registry backed by a temporary file."""
-    registry_path = str(tmp_path) + "/instances.json"  # type: ignore[operator]
+    registry_path = str(tmp_path) + "/instances.json"
     return InstanceRegistry(registry_path)
 
 
@@ -64,7 +63,7 @@ class TestInstanceRegistry:
 
     def test_concurrent_write_safety(self, tmp_path: object) -> None:
         """Two threads writing concurrently do not corrupt the registry."""
-        registry_path = str(tmp_path) + "/instances.json"  # type: ignore[operator]
+        registry_path = str(tmp_path) + "/instances.json"
         errors: list[Exception] = []
 
         def writer(project_dir: str, instance_id: str) -> None:
@@ -88,7 +87,7 @@ class TestInstanceRegistry:
 
     def test_persistence_across_instances(self, tmp_path: object) -> None:
         """Data persists across InstanceRegistry instances (file-backed)."""
-        registry_path = str(tmp_path) + "/instances.json"  # type: ignore[operator]
+        registry_path = str(tmp_path) + "/instances.json"
         reg1 = InstanceRegistry(registry_path)
         reg1.register("/home/dev/myproject", "myproject-abc123")
 
@@ -97,7 +96,7 @@ class TestInstanceRegistry:
 
     def test_corrupt_json_recovers(self, tmp_path: object) -> None:
         """Corrupt JSON file is treated as empty registry."""
-        registry_path = str(tmp_path) + "/instances.json"  # type: ignore[operator]
+        registry_path = str(tmp_path) + "/instances.json"
         with open(registry_path, "w") as f:
             f.write("{ corrupt json !!!")
         reg = InstanceRegistry(registry_path)

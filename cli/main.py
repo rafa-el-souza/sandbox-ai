@@ -10,8 +10,6 @@ import shutil
 import subprocess
 
 import typer
-from rich.console import Console
-
 from core.crypto import generate_proxy_password, hash_proxy_password, write_htpasswd
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
@@ -26,6 +24,7 @@ from core.scaffold import (
     write_initialized_sentinel,
     write_sandbox_toml,
 )
+from rich.console import Console
 
 app = typer.Typer()
 console = Console()
@@ -201,8 +200,10 @@ def _phase_handover(
     exec_args.extend(["-it", f"{name}-admin-1", "zsh"])
 
     executor.run(
-        ["sudo", "machinectl", "shell", f"{host_user}@.host",
-         "/usr/bin/docker"] + exec_args,
+        [
+            "sudo", "machinectl", "shell", f"{host_user}@.host",
+            "/usr/bin/docker", *exec_args,
+        ],
         interactive=True,
     )
 
@@ -340,7 +341,7 @@ def start() -> None:
             "Another sandbox start is already in progress for this instance.",
             style="red bold",
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     try:
         # Phase 2: IPAM
@@ -362,7 +363,7 @@ def start() -> None:
         console.print(f"[FATAL] {e}", style="red bold")
         if lock_fd is not None:
             _release_lock(lock_fd)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     # Phase 7: Handover — release lock first
     if lock_fd is not None:

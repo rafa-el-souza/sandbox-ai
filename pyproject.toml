@@ -3,7 +3,7 @@ name = "sandbox-ai"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "bcrypt>=5.0.0",
     "jinja2>=3.1.0",
@@ -21,3 +21,19 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.11",
 ]
+
+[tool.ruff]
+target-version = "py314"
+src = ["core", "cli", "tests"]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH", "RUF"]
+ignore = ["SIM105"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["TCH003", "RUF059", "B017"]
+
+[tool.mypy]
+strict = true
+packages = ["core", "cli"]

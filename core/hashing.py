@@ -1,6 +1,7 @@
 import hashlib
 import os
 
+
 def generate_project_hash(project_dir: str) -> str:
     """Generate deterministic project hash from absolute path."""
     abs_path = os.path.abspath(project_dir)

@@ -1,6 +1,6 @@
 """Instance scaffolding: directory tree, sandbox.toml, env file, ACLs, secret prompting.
 
-Implements the SCAFFOLD SUB-SEQUENCE (S1–S7) from the orchestrator design.
+Implements the SCAFFOLD SUB-SEQUENCE (S1-S7) from the orchestrator design.
 Called on first `sandbox start` for a project directory.
 """
 
@@ -8,8 +8,10 @@ import getpass
 import os
 import subprocess
 import sys
-from typing import Sequence
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # ─── S1: Directory Tree ──────────────────────────────────────────────────────
 
