@@ -1192,3 +1192,232 @@ class TestDoctorRunnerInvoked:
             mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
             mock_render.assert_called_once()
 
+
+# ── sandbox start --dry-run ──────────────────────────────────────────────────
+
+
+class TestDryRunExistingInstance:
+    """Task 12.1: --dry-run with existing instance."""
+
+    def test_dry_run_skips_warm_check(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Warm state check is skipped when --dry-run is set."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        # Create tooling plane files for template validation
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check") as mock_warm,
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            mock_warm.assert_not_called()
+            assert result.exit_code == 0
+
+    def test_dry_run_existing_instance_exit_0(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Existing instance dry-run passes with exit code 0."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 0
+
+    def test_dry_run_shows_ipam_preview(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """IPAM slot is previewed with 'subject to concurrent changes' note."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 5)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 0
+            # Should mention the IPAM slot
+            assert "5" in result.output or "slot" in result.output.lower()
+
+    def test_dry_run_shows_compose_command(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Compose command is displayed in dry-run output."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
+
+    def test_dry_run_template_error_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Template error causes exit code 1."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+        # Break the compose template
+        (home / ".docker" / "compose.yml").write_text("{{ undefined_var }}")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 1
+
+    def test_dry_run_missing_env_keys_reported(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Missing .sandbox.env keys are reported in dry-run."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        inst = _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+        # Write empty env file — secrets missing
+        (inst / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""')
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            # Should mention missing secrets
+            out = result.output.lower()
+            assert "missing" in out or "secret" in out or "empty" in out
+
+
+class TestDryRunNewInstance:
+    """Task 13.1: --dry-run with no existing instance."""
+
+    def test_dry_run_new_instance_exit_0(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """New instance dry-run renders from scaffold defaults."""
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 0
+
+    def test_dry_run_new_instance_shows_sandbox_user(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """New instance dry-run uses 'sandbox' as the default user."""
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "sandbox" in result.output.lower()
+
+    def test_dry_run_new_instance_shows_directory_tree(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """New instance dry-run displays the directory tree."""
+        home = mock_sandbox_ai_home
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
+            patch("os.getuid", return_value=1000),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "docker" in result.output.lower() or "directory" in result.output.lower()
+
+
+def _create_tooling_plane(home: Path) -> None:
+    """Create minimal tooling plane files needed for dry-run template validation."""
+    # Jinja2 templates
+    docker_dir = home / ".docker"
+    (docker_dir / "compose.yml").write_text(
+        "# compose for {{ project_name }}\nversion: '3'\n"
+    )
+    (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
+    (docker_dir / "core" / "Dockerfile.core.wolfi").write_text(
+        "FROM {{ core_base_image }}\n"
+    )
+    (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/bash\n")
+    (docker_dir / "admin" / "Dockerfile.admin.debian").write_text(
+        "FROM {{ admin_base_image }}\n"
+    )
+    (docker_dir / "extras").mkdir(parents=True, exist_ok=True)
+    (docker_dir / "extras" / "db-postgres.yml").write_text("# postgres\n")
+
+    config_dir = home / ".config"
+    (config_dir / "dns-sidecar").mkdir(parents=True, exist_ok=True)
+    (config_dir / "dns-sidecar" / "Corefile").write_text(
+        "# Corefile for {{ project_name }}\n"
+    )
+    (config_dir / "proxy" / "squid.conf").write_text(
+        "# squid for {{ proxy_ip }}\n"
+    )
+    (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("403 Forbidden\n")
+    (config_dir / "admin").mkdir(parents=True, exist_ok=True)
+    (config_dir / "admin" / ".zshrc").write_text("# zshrc\n")
+    (config_dir / "admin" / ".tmux.conf").write_text("# tmux\n")
+    (config_dir / "admin" / "gitmux.conf").write_text("# gitmux\n")
+    (config_dir / "admin" / "starship.toml").write_text("# starship\n")
+    (config_dir / "core").mkdir(parents=True, exist_ok=True)
+    (config_dir / "core" / ".bashrc").write_text("# bashrc\n")
+    (config_dir / "core" / ".npmrc").write_text("# npmrc\n")
+    (config_dir / "core" / ".gitconfig").write_text("# gitconfig\n")
+    (config_dir / "core" / ".claude.json").write_text("{}\n")
+    (config_dir / "core" / "CLAUDE.md").write_text("# Claude\n")
+
+

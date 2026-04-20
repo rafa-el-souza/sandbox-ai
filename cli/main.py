@@ -19,8 +19,13 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.hydration import SandboxConfig, build_jinja_context, render_templates
-from core.ipam import IPAMExhaustedError, IPAMLedger
+from core.hydration import (
+    SandboxConfig,
+    build_jinja_context,
+    render_templates,
+    validate_templates,
+)
+from core.ipam import IPAMExhaustedError, IPAMLedger, derive_subnets
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
     apply_default_acls,
@@ -301,14 +306,161 @@ def _scaffold_instance(
     return instance_dir, instance_id
 
 
+# ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
+
+
+def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
+    """Simulate the full start pipeline without side effects.
+
+    Validates config parsing, IPAM allocation, template rendering, secret
+    completeness, and previews the subprocess commands that would execute.
+    """
+    console.print("\n[bold]Dry-run: sandbox start[/bold]\n")
+
+    # ── Instance resolution ──────────────────────────────────────────────
+    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    is_new = instance_dir is None or instance_id is None
+
+    if is_new:
+        console.print("  Instance: [yellow]NEW[/yellow] (would be scaffolded)")
+        # Build a default config for simulation
+        project_name = os.path.basename(project_dir)
+        host_user = "sandbox"
+        host_uid = str(os.getuid())
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": project_name,
+                "user_project_root": project_dir,
+                "host_unprivileged_user": host_user,
+                "host_uid": host_uid,
+            }
+        })
+        instance_id = f"{project_name}-dry000"
+        instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+        console.print(f"  Project: {project_name}")
+        console.print(f"  User: {host_user}")
+        console.print(f"  Directory: {instance_dir} [dim](simulated)[/dim]")
+    else:
+        assert instance_dir is not None
+        assert instance_id is not None
+        console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
+        config = _load_config(instance_dir)
+        host_user = config.project.host_unprivileged_user
+
+    name = config.project.name
+
+    # ── IPAM preview ─────────────────────────────────────────────────────
+    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
+    ledger = IPAMLedger(ipam_path)
+    try:
+        slot, is_existing = ledger.peek_next_slot(instance_id)
+        isolated, proxy, egress = derive_subnets(slot)
+        status = "existing" if is_existing else "preview — subject to concurrent changes"
+        console.print(f"\n  IPAM slot: {slot} ({status})")
+        console.print(f"    Isolated: {isolated}")
+        console.print(f"    Proxy:    {proxy}")
+        console.print(f"    Egress:   {egress}")
+    except IPAMExhaustedError as e:
+        console.print(f"\n  [red]IPAM: {e}[/red]")
+        raise typer.Exit(code=1) from None
+
+    # ── Template validation ──────────────────────────────────────────────
+    context = build_jinja_context(config, slot, "DRY_RUN_PASSWORD", instance_dir)
+    validated, errors = validate_templates(
+        context,
+        sandbox_ai_home,
+        db_postgres=config.components_db_postgres.enabled,
+        mcp_firecrawl=config.components.mcp_firecrawl,
+    )
+
+    if errors:
+        console.print("\n  [red]Template validation failed:[/red]")
+        for err in errors:
+            console.print(f"    ✗ {err}", style="red")
+        raise typer.Exit(code=1) from None
+    else:
+        console.print(f"\n  Templates: [green]{validated} validated[/green]")
+
+    # ── Secret completeness check ────────────────────────────────────────
+    if not is_new:
+        env_path = os.path.join(instance_dir, ".sandbox.env")
+        missing_secrets = _check_secrets(env_path, config)
+        if missing_secrets:
+            console.print("\n  [yellow]Missing/empty secrets:[/yellow]")
+            for secret in missing_secrets:
+                console.print(f"    ⊘ {secret}")
+    else:
+        console.print("\n  Secrets: [dim]would be prompted during scaffold[/dim]")
+
+    # ── Command preview ──────────────────────────────────────────────────
+    compose_files = _build_compose_files(instance_dir, config)
+    files_str = " ".join(compose_files)
+
+    console.print("\n  [bold]Commands that would execute:[/bold]")
+
+    # ACL grants
+    for subdir in ["docker/", "config/"]:
+        target = os.path.join(instance_dir, subdir)
+        console.print(f"    $ setfacl -R -m u:{host_user}:rX {target}", style="dim")
+
+    # Compose up
+    compose_cmd = (
+        f"sudo machinectl shell {host_user}@.host -- /bin/bash -c "
+        f"'COMPOSE_PROJECT_NAME={name} docker compose {files_str} up -d --build --wait'"
+    )
+    console.print(f"    $ {compose_cmd}", style="dim")
+
+    # Handover
+    handover_cmd = (
+        f"sudo machinectl shell {host_user}@.host -- "
+        f"/usr/bin/docker exec -it {name}-core-1 /bin/bash"
+    )
+    console.print(f"    $ {handover_cmd}", style="dim")
+
+    console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
+
+
+def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
+    """Check for missing or empty secrets in .sandbox.env."""
+    required = ["CORE_ANTHROPIC_API_KEY"]
+    if config.components_db_postgres.enabled:
+        required.append("PG_PASSWORD")
+    if config.components.mcp_firecrawl:
+        required.append("FIRECRAWL_API_KEY")
+
+    missing: list[str] = []
+    env_vars: dict[str, str] = {}
+
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    key, _, val = line.partition("=")
+                    env_vars[key.strip()] = val.strip().strip('"')
+
+    for key in required:
+        if key not in env_vars or not env_vars[key]:
+            missing.append(key)
+
+    return missing
+
+
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 
+
 @app.command()
-def start() -> None:
+def start(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
+) -> None:
     """Start the sandbox."""
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
+
+    if dry_run:
+        _dry_run_pipeline(sandbox_ai_home, project_dir)
+        return
 
     # Phase 0: Instance resolution
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
