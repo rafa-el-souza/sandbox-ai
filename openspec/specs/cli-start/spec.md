@@ -5,11 +5,15 @@ This specification defines the `sandbox start` command lifecycle, governing pre-
 ## Requirements
 
 ### Requirement: Pre-Lock Warm State Detection
-The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks.
+The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation.
 
 #### Scenario: Already-running instance exits without lock contention
 - **WHEN** `sandbox start` is invoked and `docker compose ps -q` returns non-empty output
 - **THEN** the CLI exits with "Sandbox '<name>' is already running. Use 'sandbox attach' to reconnect." before acquiring `state.lock` or the IPAM lock
+
+#### Scenario: Dry-run bypasses warm state check
+- **WHEN** `sandbox start --dry-run` is invoked
+- **THEN** the warm state check is skipped and the system proceeds to dry-run validation regardless of container state
 
 ### Requirement: Concurrency Lock Acquisition
 The system SHALL acquire a per-instance `state.lock` (fcntl `LOCK_EX | LOCK_NB`) before modifying any instance state.
