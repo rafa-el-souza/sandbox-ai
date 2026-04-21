@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 
 import typer
-from core.crypto import generate_proxy_password, hash_proxy_password, write_htpasswd
+from core.crypto import generate_credential, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
     detect_distro,
@@ -199,7 +199,7 @@ def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
 
 def _phase_credentials(instance_dir: str) -> str:
     """Phase 3: Generate proxy credentials. Returns proxy password."""
-    password = generate_proxy_password()
+    password = generate_credential()
     hashed = hash_proxy_password(password)
     htpasswd_line = f"proxyuser:{hashed}"
     config_proxy_dir = os.path.join(instance_dir, "config", "proxy")
@@ -529,8 +529,7 @@ def init(
         ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
         ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
     ]
-    if config.components_db_postgres.enabled:
-        required_secrets.append(("PG_PASSWORD", "PostgreSQL password"))
+    # PG_PASSWORD is auto-generated at scaffold time — not prompted
     if config.components.mcp_firecrawl:
         required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
     prompt_secrets(env_path, required_secrets)

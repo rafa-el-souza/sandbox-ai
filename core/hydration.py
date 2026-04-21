@@ -70,6 +70,8 @@ class DbPostgresConfig(BaseModel):
 
     enabled: bool = True
     expose_host_ports: list[int] = [5432]
+    pg_user: str = "sandbox"
+    pg_db: str = "sandbox_db"
 
 
 class IngressConfig(BaseModel):
@@ -187,6 +189,9 @@ def build_jinja_context(
         "proxy_image": "ubuntu/squid:latest",
         # Proxy whitelist
         "proxy_whitelist_domains": config.proxy_whitelist.domains,
+        # Extras: db-postgres
+        "pg_user": config.components_db_postgres.pg_user,
+        "pg_db": config.components_db_postgres.pg_db,
     }
 
 

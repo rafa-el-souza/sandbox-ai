@@ -5,7 +5,7 @@ services:
       dockerfile: extra/Dockerfile.mcp-firecrawl
     image: sandbox-mcp-firecrawl:local
     init: true
-    pids_limit: ${AGENT_PIDS_LIMIT:-400}
+    pids_limit: {{ core_pids_limit }}
     logging:
       driver: "json-file"
       options:
@@ -15,7 +15,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    runtime: ${RUNTIME:-runsc}
+    runtime: {{ runtime }}
     user: node
     read_only: true
     tmpfs:
@@ -25,22 +25,24 @@ services:
       - /var/tmp:noexec,nosuid,nodev
     networks:
       isolated_net:
-        ipv4_address: ${MCP_FIRECRAWL_ISOLATED_IP:-172.28.0.55}
+        ipv4_address: {{ mcp_firecrawl_isolated_ip }}
       proxy_net:
-        ipv4_address: ${MCP_FIRECRAWL_PROXY_IP:-172.29.0.55}
+        ipv4_address: {{ mcp_firecrawl_proxy_ip }}
     dns:
-      - ${DNS_SIDECAR_IP:-172.28.0.53}
+      - {{ dns_sidecar_ip }}
     extra_hosts:
-      - "proxy:${PROXY_IP:-172.29.0.254}"
-      - "dns-sidecar:${DNS_SIDECAR_IP:-172.28.0.53}"
-      - "db-postgres:${DB_POSTGRES_IP:-172.28.0.54}"
+      - "proxy:{{ proxy_ip }}"
+      - "dns-sidecar:{{ dns_sidecar_ip }}"
+      - "db-postgres:{{ db_postgres_ip }}"
+    env_file:
+      - "{{ instance_dir }}/.sandbox.env"
     environment:
-      - FIRECRAWL_API_KEY=${CONTAINER_FIRECRAWL_API_KEY}
-      - HTTP_PROXY=${PROXY_URL_MCP_FIRECRAWL}
-      - HTTPS_PROXY=${PROXY_URL_MCP_FIRECRAWL}
-      - http_proxy=${PROXY_URL_MCP_FIRECRAWL}
-      - https_proxy=${PROXY_URL_MCP_FIRECRAWL}
-      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,${ISOLATED_SUBNET},${PROXY_SUBNET}
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}
+      - HTTP_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - HTTPS_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - http_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - https_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128
+      - NO_PROXY=localhost,127.0.0.1,::1,proxy,dns-sidecar,db-postgres,{{ isolated_subnet }},{{ proxy_subnet }}
     volumes:
       - mcp-ipc_vol:/var/run/mcp
     entrypoint: ["/usr/bin/socat", "UNIX-LISTEN:/var/run/mcp/firecrawl.sock,fork,mode=0660", "EXEC:npx -y firecrawl-mcp"]

@@ -127,6 +127,8 @@ class TestDeriveStaticIPs:
         expected_keys = {
             "dns_sidecar_ip",
             "db_postgres_ip",
+            "mcp_firecrawl_isolated_ip",
+            "mcp_firecrawl_proxy_ip",
             "agent_isolated_ip",
             "admin_isolated_ip",
             "proxy_ip",
@@ -140,6 +142,8 @@ class TestDeriveStaticIPs:
         ips = derive_static_ips(0)
         assert ips["dns_sidecar_ip"] == "10.100.0.53"
         assert ips["db_postgres_ip"] == "10.100.0.54"
+        assert ips["mcp_firecrawl_isolated_ip"] == "10.100.0.55"
+        assert ips["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
         assert ips["agent_isolated_ip"] == "10.100.0.3"
         assert ips["admin_isolated_ip"] == "10.100.0.2"
         assert ips["proxy_ip"] == "10.100.1.254"

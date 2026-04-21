@@ -10,10 +10,11 @@ import secrets
 import bcrypt
 
 
-def generate_proxy_password() -> str:
-    """Generate a cryptographically secure URL-safe proxy password.
+def generate_credential() -> str:
+    """Generate a cryptographically secure URL-safe credential string.
 
     Uses secrets.token_urlsafe(32) producing a 43-character base64url string.
+    Credential-type-agnostic: used for proxy passwords, PG_PASSWORD, etc.
     """
     return secrets.token_urlsafe(32)
 

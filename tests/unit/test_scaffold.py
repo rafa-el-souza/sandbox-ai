@@ -121,6 +121,37 @@ class TestCreateEnvFile:
         create_env_file(str(env_off), db_postgres=False, mcp_firecrawl=False)
         assert "PG_USER" not in env_off.read_text()
 
+    def test_postgres_pg_user_default(self, tmp_path: Path) -> None:
+        """Task 3.2: PG_USER defaults to 'sandbox' (aligned with DbPostgresConfig)."""
+        env_path = tmp_path / "env_pg_user"
+        create_env_file(str(env_path), db_postgres=True, mcp_firecrawl=False)
+        content = env_path.read_text()
+        assert 'PG_USER="sandbox"' in content
+
+    def test_postgres_pg_password_auto_generated(self, tmp_path: Path) -> None:
+        """Task 5.1: PG_PASSWORD is auto-generated with a non-empty value."""
+        env_path = tmp_path / "env_pg_auto"
+        create_env_file(str(env_path), db_postgres=True, mcp_firecrawl=False)
+        content = env_path.read_text()
+        # Should contain PG_PASSWORD with a non-empty value
+        assert 'PG_PASSWORD=""' not in content
+        # Extract the value
+        for line in content.splitlines():
+            if line.startswith("PG_PASSWORD="):
+                val = line.split("=", 1)[1].strip('"')
+                assert len(val) >= 32, f"PG_PASSWORD too short: {val}"
+                break
+        else:
+            pytest.fail("PG_PASSWORD not found in env file")
+
+    def test_postgres_pg_password_non_empty(self, tmp_path: Path) -> None:
+        """Task 5.6: Existing test updated — value is non-empty."""
+        env_path = tmp_path / "env_pg_ne"
+        create_env_file(str(env_path), db_postgres=True, mcp_firecrawl=False)
+        content = env_path.read_text()
+        assert "PG_PASSWORD" in content
+        assert 'PG_PASSWORD=""' not in content
+
     def test_firecrawl_conditional(self, tmp_path: Path) -> None:
         """FIRECRAWL_API_KEY present only when mcp_firecrawl=True."""
         env_on = tmp_path / "env_on"

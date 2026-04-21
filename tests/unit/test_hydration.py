@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from core.hydration import (
+    DbPostgresConfig,
     SandboxConfig,
     build_jinja_context,
     render_templates,
@@ -88,6 +89,37 @@ class TestSandboxConfig:
             SandboxConfig.from_toml(str(toml_path))
 
 
+class TestDbPostgresConfigFields:
+    """Task 3.1: DbPostgresConfig gains pg_user and pg_db fields."""
+
+    def test_default_field_values(self) -> None:
+        """pg_user defaults to 'sandbox', pg_db defaults to 'sandbox_db'."""
+        db = DbPostgresConfig()
+        assert db.pg_user == "sandbox"
+        assert db.pg_db == "sandbox_db"
+
+    def test_round_trip_through_from_toml(self, tmp_path: Path) -> None:
+        """pg_user and pg_db survive from_toml() parsing with defaults."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.components_db_postgres.pg_user == "sandbox"
+        assert config.components_db_postgres.pg_db == "sandbox_db"
+
+    def test_custom_values_from_toml(self, tmp_path: Path) -> None:
+        """Custom pg_user/pg_db values are parsed from TOML."""
+        custom = VALID_TOML.replace(
+            "[components.db_postgres]\nenabled = true\nexpose_host_ports = [5432]",
+            "[components.db_postgres]\nenabled = true\nexpose_host_ports = [5432]\n"
+            'pg_user = "custom_user"\npg_db = "custom_db"',
+        )
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(custom)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.components_db_postgres.pg_user == "custom_user"
+        assert config.components_db_postgres.pg_db == "custom_db"
+
+
 class TestBuildJinjaContext:
     def test_produces_correct_ips_at_index_zero(self, tmp_path: Path) -> None:
         """Context dict has correct IP values at base_index=0."""
@@ -144,6 +176,28 @@ class TestBuildJinjaContext:
         )
 
         assert ".github.com" in ctx["proxy_whitelist_domains"]
+
+    def test_extras_context_keys(self, tmp_path: Path) -> None:
+        """Task 4.1: build_jinja_context includes pg_user, pg_db, and firecrawl IPs."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        ctx = build_jinja_context(
+            config=config,
+            base_index=0,
+            proxy_password="testpass",
+            instance_dir="/sandboxes/test",
+        )
+
+        # pg_user and pg_db from DbPostgresConfig
+        assert ctx["pg_user"] == "sandbox"
+        assert ctx["pg_db"] == "sandbox_db"
+        # Firecrawl IPs from derive_static_ips (already flow through **ips)
+        assert "mcp_firecrawl_isolated_ip" in ctx
+        assert "mcp_firecrawl_proxy_ip" in ctx
+        assert ctx["mcp_firecrawl_isolated_ip"] == "10.100.0.55"
+        assert ctx["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
 
 
 class TestRenderTemplates:
@@ -341,6 +395,9 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "node_version": "20.12.2",
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
         "proxy_whitelist_domains": [".github.com", ".npmjs.com"],
+        "pg_user": "sandbox",
+        "pg_db": "sandbox_db",
+        "warmup_prompt": "",
     }
 
 
@@ -459,3 +516,105 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
 
     return tooling
 
+
+class TestDbPostgresTemplateRendering:
+    """Task 6.1: db-postgres.yml renders through Jinja2 with no ${...:-...} patterns."""
+
+    def test_no_dollar_default_patterns(self, tmp_path: Path) -> None:
+        """Rendered db-postgres.yml contains zero ${VAR:-default} patterns."""
+        import re
+
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "db-postgres.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        # No ${VAR:-default} patterns should remain
+        dollar_defaults = re.findall(r"\$\{[^}]+:-[^}]+\}", rendered)
+        assert dollar_defaults == [], (
+            f"Found ${'{'}...:-...{'}'} patterns in rendered db-postgres.yml: "
+            f"{dollar_defaults}"
+        )
+
+    def test_env_file_directive_present(self, tmp_path: Path) -> None:
+        """Rendered db-postgres.yml contains env_file directive."""
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "db-postgres.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        assert "env_file:" in rendered
+        assert ".sandbox.env" in rendered
+
+
+class TestMcpFirecrawlTemplateRendering:
+    """Task 7.1: mcp-firecrawl.yml renders through Jinja2 with no ${...:-...}."""
+
+    def test_no_dollar_default_patterns(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml has zero ${VAR:-default} patterns.
+
+        Only bare ${VAR} for env_file secrets (FIRECRAWL_API_KEY,
+        PG_USER, PG_PASSWORD, PG_DB) are allowed.
+        """
+        import re
+
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "mcp-firecrawl.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        dollar_defaults = re.findall(r"\$\{[^}]+:-[^}]+\}", rendered)
+        assert dollar_defaults == [], (
+            f"Found ${'{'}...:-...{'}'} patterns in rendered "
+            f"mcp-firecrawl.yml: {dollar_defaults}"
+        )
+
+    def test_env_file_directive_present(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml contains env_file directive."""
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "mcp-firecrawl.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        assert "env_file:" in rendered
+        assert ".sandbox.env" in rendered

@@ -157,9 +157,11 @@ def derive_static_ips(base_index: int) -> dict[str, str]:
     return {
         "dns_sidecar_ip": f"{isolated_base}.53",
         "db_postgres_ip": f"{isolated_base}.54",
+        "mcp_firecrawl_isolated_ip": f"{isolated_base}.55",
         "agent_isolated_ip": f"{isolated_base}.3",
         "admin_isolated_ip": f"{isolated_base}.2",
         "proxy_ip": f"{proxy_base}.254",
+        "mcp_firecrawl_proxy_ip": f"{proxy_base}.55",
         "agent_proxy_ip": f"{proxy_base}.3",
         "admin_proxy_ip": f"{proxy_base}.2",
     }

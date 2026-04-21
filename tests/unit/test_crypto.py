@@ -1,31 +1,31 @@
-"""Tests for core/crypto.py — proxy credential generation and htpasswd writing."""
+"""Tests for core/crypto.py — credential generation and htpasswd writing."""
 
 
 from pathlib import Path
 
 from core.crypto import (
-    generate_proxy_password,
+    generate_credential,
     hash_proxy_password,
     write_htpasswd,
 )
 
 
-class TestGenerateProxyPassword:
+class TestGenerateCredential:
     def test_length(self) -> None:
-        """Generated password has sufficient length (token_urlsafe(32) → 43 chars)."""
-        pwd = generate_proxy_password()
+        """Generated credential has sufficient length (token_urlsafe(32) → 43 chars)."""
+        pwd = generate_credential()
         assert len(pwd) >= 32
 
     def test_url_safe_characters(self) -> None:
-        """Password contains only URL-safe characters (base64url: A-Z, a-z, 0-9, -, _)."""
-        pwd = generate_proxy_password()
+        """Credential contains only URL-safe characters (base64url: A-Z, a-z, 0-9, -, _)."""
+        pwd = generate_credential()
         allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-        assert all(c in allowed for c in pwd), f"Invalid characters in password: {pwd}"
+        assert all(c in allowed for c in pwd), f"Invalid characters in credential: {pwd}"
 
     def test_unique_per_call(self) -> None:
-        """Each call produces a unique password (probabilistic)."""
-        passwords = {generate_proxy_password() for _ in range(10)}
-        assert len(passwords) == 10
+        """Each call produces a unique credential (probabilistic)."""
+        credentials = {generate_credential() for _ in range(10)}
+        assert len(credentials) == 10
 
 
 class TestHashProxyPassword:

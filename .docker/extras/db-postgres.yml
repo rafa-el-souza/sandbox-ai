@@ -5,7 +5,7 @@ services:
   db-postgres:
     image: postgres:16-alpine
     init: true
-    pids_limit: ${AGENT_PIDS_LIMIT:-400}
+    pids_limit: {{ core_pids_limit }}
     logging:
       driver: "json-file"
       options:
@@ -15,15 +15,17 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    runtime: ${RUNTIME:-runsc}
+    runtime: {{ runtime }}
     read_only: true
     networks:
       isolated_net:
-        ipv4_address: ${DB_POSTGRES_ISOLATED_IP:-172.28.0.54}
+        ipv4_address: {{ db_postgres_ip }}
+    env_file:
+      - "{{ instance_dir }}/.sandbox.env"
     environment:
-      - POSTGRES_USER=${CONTAINER_PG_USER:-sandbox}
-      - POSTGRES_PASSWORD=${CONTAINER_PG_PASSWORD:-securepass}
-      - POSTGRES_DB=${CONTAINER_PG_DB:-claude_db}
+      - POSTGRES_USER=${PG_USER}
+      - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - POSTGRES_DB=${PG_DB}
     tmpfs:
       - /var/run/postgresql
       - /tmp:noexec,nosuid,nodev
@@ -31,7 +33,7 @@ services:
     volumes:
       - db-postgres-data:/var/lib/postgresql/data:rw
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sandbox -d claude_db || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB} || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 3
