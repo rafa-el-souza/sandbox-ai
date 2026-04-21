@@ -617,6 +617,42 @@ def run_checks(
     return output
 
 
+def run_check_subset(
+    categories: list[str],
+    user: str,
+    distro: str | None,
+) -> list[CheckResult]:
+    """Execute a filtered subset of doctor checks by category.
+
+    Filters ``build_check_registry()`` by ``Check.category``, validates the
+    cross-chain invariant (all ``depends_on`` references must resolve within
+    the subset), then delegates to ``run_checks``.
+
+    Raises:
+        ValueError: If any ``depends_on`` reference in the filtered subset
+            points to a check outside the subset.
+    """
+    if not categories:
+        return []
+
+    registry = build_check_registry()
+    category_set = set(categories)
+    subset = [c for c in registry if c.category in category_set]
+
+    # Assert cross-chain invariant: every depends_on must resolve internally
+    subset_ids = {c.id for c in subset}
+    for check in subset:
+        for dep in check.depends_on:
+            if dep not in subset_ids:
+                raise ValueError(
+                    f"Check '{check.id}' depends on '{dep}' which is outside "
+                    f"the subset (categories: {categories}). Cross-chain "
+                    f"dependencies are not supported in subset execution."
+                )
+
+    return run_checks(subset, user, distro)
+
+
 # ─── Section 9: Rich Output Renderer ────────────────────────────────────────
 
 

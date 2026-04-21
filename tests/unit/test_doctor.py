@@ -9,6 +9,8 @@ import subprocess
 from typing import Any
 from unittest.mock import MagicMock, mock_open, patch
 
+import pytest
+
 # ── Section 1: Data Types ────────────────────────────────────────────────────
 
 
@@ -665,4 +667,109 @@ class TestRenderResultsDefaultConsole:
         results = [CheckResult(status="pass", name="X", detail="ok")]
         # Should not raise — uses default RichConsole internally
         render_results(results)
+
+
+# ── Section 10: Check Subset API ─────────────────────────────────────────────
+
+
+class TestRunCheckSubset:
+    """Task 1.1: run_check_subset — category filtering and invariant assertions."""
+
+    def test_category_filtering_returns_only_matching_checks(self) -> None:
+        """Filtering by a single category returns only checks in that category."""
+        from core.doctor import run_check_subset
+
+        results = run_check_subset(["Filesystem"], "sandbox", None)
+        # Chain 2 has 2 checks: setfacl, ACL support
+        assert len(results) == 2
+        names = {r.name for r in results}
+        assert "setfacl" in names or "setfacl binary" in names
+
+    def test_multiple_categories_returns_union(self) -> None:
+        """Filtering by multiple categories returns checks from all specified categories."""
+        from core.doctor import run_check_subset
+
+        results = run_check_subset(["Filesystem", "Repo Integrity"], "sandbox", None)
+        # Chain 2 (2 checks) + Chain 3 (2 checks) = 4
+        assert len(results) == 4
+        names = {r.name for r in results}
+        # Must contain checks from both categories
+        assert "tooling plane" in names or "state dir writable" in names
+
+    def test_cascading_skip_within_subset(self) -> None:
+        """When a root check fails within a subset, dependents are skipped."""
+        from unittest.mock import patch
+
+        from core.doctor import CheckResult, run_check_subset
+
+        # setfacl fails → ACL support should be skipped
+        def fake_setfacl(user: str, distro: str | None) -> CheckResult:
+            return CheckResult(
+                status="fail", name="setfacl", detail="not found", category="Filesystem"
+            )
+
+        with patch("core.doctor.check_setfacl", fake_setfacl):
+            results = run_check_subset(["Filesystem"], "sandbox", None)
+            assert len(results) == 2
+            statuses = {r.name: r.status for r in results}
+            assert statuses["setfacl"] == "fail" or statuses["setfacl binary"] == "fail"
+            # ACL support depends on setfacl → must be skip
+            acl_result = next(r for r in results if "ACL" in r.name)
+            assert acl_result.status == "skip"
+
+    def test_empty_category_list_returns_empty(self) -> None:
+        """Empty category list returns no results."""
+        from core.doctor import run_check_subset
+
+        results = run_check_subset([], "sandbox", None)
+        assert results == []
+
+    def test_cross_chain_dependency_raises_valueerror(self) -> None:
+        """ValueError raised if a filtered subset has a depends_on pointing outside the subset."""
+        from core.doctor import Check, CheckResult
+
+        # Construct a registry where Chain 2 depends on a Chain 1 check
+        def noop(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="n", detail="")
+
+        fake_checks = [
+            Check(
+                id="setfacl", name="setfacl", category="Filesystem",
+                depends_on=["sudo"],  # cross-chain dependency!
+                run=noop, remediation="",
+            ),
+            Check(
+                id="sudo", name="sudo", category="Privilege Boundary",
+                depends_on=[], run=noop, remediation="",
+            ),
+        ]
+
+        with patch("core.doctor.build_check_registry", return_value=fake_checks):
+            from core.doctor import run_check_subset
+
+            with pytest.raises(ValueError, match="outside the subset"):
+                run_check_subset(["Filesystem"], "sandbox", None)
+
+
+class TestRenderResultsWithSubset:
+    """Task 1.3: Verify render_results works unchanged with subset results."""
+
+    def test_render_results_accepts_subset(self) -> None:
+        """render_results works with subset results (no code change expected)."""
+        from io import StringIO
+
+        from core.doctor import CheckResult, render_results
+        from rich.console import Console
+
+        # Simulate subset output — only Filesystem category
+        results = [
+            CheckResult(status="pass", name="setfacl binary", detail="ok", category="Filesystem"),
+            CheckResult(status="pass", name="ACL support", detail="ok", category="Filesystem"),
+        ]
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=120)
+        render_results(results, console=console)
+        output = buf.getvalue()
+        assert "Filesystem" in output
+        assert "2/2 passed" in output
 
