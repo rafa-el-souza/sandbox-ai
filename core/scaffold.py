@@ -10,6 +10,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+from core.crypto import generate_credential
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -184,10 +186,17 @@ FIRECRAWL_API_KEY=""
 def create_env_file(
     env_path: str, *, db_postgres: bool, mcp_firecrawl: bool
 ) -> None:
-    """Create .sandbox.env with mode 0600 via O_CREAT|O_EXCL. Raises FileExistsError on conflict."""
+    """Create .sandbox.env with mode 0600 via O_CREAT|O_EXCL. Raises FileExistsError on conflict.
+
+    PG_PASSWORD is auto-generated via generate_credential() (secrets.token_urlsafe(32)).
+    """
     content = _ENV_HEADER
     if db_postgres:
-        content += _ENV_POSTGRES_BLOCK
+        pg_password = generate_credential()
+        block = _ENV_POSTGRES_BLOCK.replace(
+            'PG_PASSWORD=""', f'PG_PASSWORD="{pg_password}"'
+        )
+        content += block
     if mcp_firecrawl:
         content += _ENV_FIRECRAWL_BLOCK
 

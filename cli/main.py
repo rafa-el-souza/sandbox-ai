@@ -529,8 +529,7 @@ def init(
         ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
         ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
     ]
-    if config.components_db_postgres.enabled:
-        required_secrets.append(("PG_PASSWORD", "PostgreSQL password"))
+    # PG_PASSWORD is auto-generated at scaffold time — not prompted
     if config.components.mcp_firecrawl:
         required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
     prompt_secrets(env_path, required_secrets)

@@ -1333,6 +1333,8 @@ class TestInitFirecrawl:
             call_args = mock_prompt.call_args[0]
             secret_names = [s[0] for s in call_args[1]]
             assert "FIRECRAWL_API_KEY" in secret_names
+            # Task 5.2/5.7: PG_PASSWORD must NOT be in prompt list
+            assert "PG_PASSWORD" not in secret_names
 
 
 # ── sandbox doctor ───────────────────────────────────────────────────────────
