@@ -193,15 +193,15 @@ class TestPromptSecrets:
         assert 'CORE_GITHUB_TOKEN="ghp_yyy"' in content
 
     @patch("sys.stdin")
-    def test_no_tty_raises(self, mock_stdin: MagicMock, tmp_path: Path) -> None:
-        """Non-TTY context raises RuntimeError with env file path."""
+    def test_no_tty_prints_guidance(self, mock_stdin: MagicMock, tmp_path: Path) -> None:
+        """Non-TTY context prints guidance instead of raising."""
         mock_stdin.isatty.return_value = False
 
         env_path = tmp_path / ".sandbox.env"
         env_path.write_text('CORE_ANTHROPIC_API_KEY=""\n')
 
-        with pytest.raises(RuntimeError, match=str(env_path)):
-            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])
+        # Should not raise — prints guidance instead
+        prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])
 
 
 class TestWriteInitializedSentinel:
@@ -223,3 +223,129 @@ class TestWriteInitializedSentinel:
 
         write_initialized_sentinel(str(instance_dir))
         write_initialized_sentinel(str(instance_dir))  # Should not raise
+
+
+# ─── Task 2.1: write_sandbox_toml with git_user/git_email ────────────────────
+
+
+class TestWriteSandboxTomlGitFields:
+    """Task 2.1: git_user/git_email params interpolated into sandbox.toml."""
+
+    def test_git_user_interpolated(self, tmp_path: Path) -> None:
+        """git_user value is written into sandbox.toml."""
+        instance_dir = tmp_path / "sandboxes" / "test"
+        instance_dir.mkdir(parents=True)
+
+        write_sandbox_toml(
+            instance_dir=str(instance_dir),
+            project_name="test",
+            project_dir="/dev/test",
+            host_unprivileged_user="sandbox",
+            git_user="Jane Doe",
+            git_email="jane@example.com",
+        )
+
+        content = (instance_dir / "sandbox.toml").read_text()
+        assert 'git_user = "Jane Doe"' in content
+        assert 'git_email = "jane@example.com"' in content
+
+    def test_git_fields_default_empty(self, tmp_path: Path) -> None:
+        """git_user/git_email default to empty strings when not provided."""
+        instance_dir = tmp_path / "sandboxes" / "test"
+        instance_dir.mkdir(parents=True)
+
+        write_sandbox_toml(
+            instance_dir=str(instance_dir),
+            project_name="test",
+            project_dir="/dev/test",
+            host_unprivileged_user="sandbox",
+        )
+
+        content = (instance_dir / "sandbox.toml").read_text()
+        assert 'git_user = ""' in content
+        assert 'git_email = ""' in content
+
+
+# ─── Task 2.2: _detect_git_config ────────────────────────────────────────────
+
+
+class TestDetectGitConfig:
+    """Task 2.2: auto-detect git user.name and user.email from global config."""
+
+    def test_git_config_detected(self) -> None:
+        """Returns (name, email) when git config is available."""
+        from unittest.mock import patch
+
+        from core.scaffold import _detect_git_config
+
+        def mock_run(cmd: list[str], **kwargs: object) -> object:
+            import subprocess
+            if "user.name" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Jane Doe\n", stderr="")
+            if "user.email" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="jane@example.com\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=mock_run):
+            name, email = _detect_git_config()
+            assert name == "Jane Doe"
+            assert email == "jane@example.com"
+
+    def test_git_not_installed(self) -> None:
+        """Returns ('', '') when git is not on PATH."""
+        from unittest.mock import patch
+
+        from core.scaffold import _detect_git_config
+
+        with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+            name, email = _detect_git_config()
+            assert name == ""
+            assert email == ""
+
+    def test_git_config_unset(self) -> None:
+        """Returns ('', '') when git config values are unset."""
+        import subprocess
+        from unittest.mock import patch
+
+        from core.scaffold import _detect_git_config
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            name, email = _detect_git_config()
+            assert name == ""
+            assert email == ""
+
+
+# ─── Task 2.5: Non-TTY prompt_secrets ─────────────────────────────────────────
+
+
+class TestPromptSecretsNonTTY:
+    """Task 2.5: Non-TTY prompt_secrets skips prompting, prints guidance."""
+
+    def test_non_tty_no_exception(self, tmp_path: Path) -> None:
+        """Non-TTY mode does not raise RuntimeError."""
+        from unittest.mock import MagicMock, patch
+
+        env_path = tmp_path / ".sandbox.env"
+        env_path.write_text('CORE_ANTHROPIC_API_KEY=""\n')
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        with patch("sys.stdin", mock_stdin):
+            # Should not raise — the current code raises RuntimeError,
+            # the new implementation should skip and print guidance
+            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])
+
+    def test_non_tty_prints_guidance(self, tmp_path: Path, capsys: object) -> None:
+        """Non-TTY mode prints guidance message with env path."""
+        from unittest.mock import MagicMock, patch
+
+        env_path = tmp_path / ".sandbox.env"
+        env_path.write_text('CORE_ANTHROPIC_API_KEY=""\n')
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        with patch("sys.stdin", mock_stdin):
+            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])

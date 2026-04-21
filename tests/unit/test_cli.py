@@ -167,10 +167,10 @@ class TestStartHappyPath:
             mock_compose.assert_called_once()
             mock_handover.assert_called_once()
 
-    def test_start_new_instance_triggers_scaffold(
+    def test_start_no_init_errors(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """New project: registry miss → scaffold → continue to launch."""
+        """New project: registry miss → error with init guidance."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
@@ -179,7 +179,79 @@ class TestStartHappyPath:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main._scaffold_instance") as mock_scaffold,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "sandbox init" in result.output.lower()
+
+    def test_start_partial_init_errors(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Instance registered but .initialized sentinel missing → error."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        inst = _register_instance(home, project_dir, instance_id)
+        # Remove the sentinel
+        (inst / ".initialized").unlink()
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "partially initialized" in result.output.lower() or "destroy" in result.output.lower()
+
+    def test_start_progress_output(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Start shows phase progress indicators."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="proxypass123"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            # Should show progress indicators
+            assert "ipam" in out or "network" in out
+            assert "compose" in out or "containers" in out
+
+    def test_start_handover_indication(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Start shows handover indication before PTY exec."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -190,10 +262,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            # scaffold must be called since registry has no entry
-            mock_scaffold.return_value = (str(home / "sandboxes" / "newproject-aaa111"), "newproject-aaa111")
-            runner.invoke(app, ["start"])
-            mock_scaffold.assert_called_once()
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "handing over" in out or "handover" in out or "admin shell" in out
+
 
 
 class TestStartWarmExit:
@@ -1192,6 +1265,166 @@ class TestDoctorRunnerInvoked:
             mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
             mock_render.assert_called_once()
 
+# ── sandbox init ─────────────────────────────────────────────────────────────
+
+
+class TestInitHappyPath:
+    """Task 3.1: sandbox init --user — happy path scaffold."""
+
+    def test_init_creates_instance(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init scaffolds a new instance successfully."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+        from core.hydration import SandboxConfig
+
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "newproject", "user_project_root": project_dir,
+                "host_unprivileged_user": "sandbox", "host_uid": "1000",
+            },
+        })
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 0
+
+
+class TestInitReInitRejection:
+    """Task 3.1: sandbox init — re-init rejected."""
+
+    def test_reinit_rejected(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init errors when instance already exists."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 1
+            assert "already initialized" in result.output.lower() or "destroy" in result.output.lower()
+
+
+class TestInitDryRun:
+    """Task 3.1: sandbox init --dry-run previews without writing."""
+
+    def test_init_dry_run_no_state(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init --dry-run does not create any files or registry entries."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox", "--dry-run"])
+            assert result.exit_code == 0
+
+        # Registry should be unmodified
+        reg_data = json.loads((home / ".state" / "instances.json").read_text())
+        assert project_dir not in reg_data
+
+
+class TestInitDoctorPreFlightFailure:
+    """Task 3.1: sandbox init — doctor pre-flight failure aborts."""
+
+    def test_init_aborts_on_doctor_failure(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init aborts when doctor pre-flight checks fail."""
+        from core.doctor import CheckResult
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+
+        failed_results = [
+            CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")
+        ]
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main.run_check_subset", return_value=failed_results),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 1
+
+
+class TestInitNonTTY:
+    """Task 3.1: sandbox init in non-TTY environment."""
+
+    def test_init_non_tty_completes(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init completes in non-TTY mode (prompt_secrets skips)."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+        from core.hydration import SandboxConfig
+
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "newproject", "user_project_root": project_dir,
+                "host_unprivileged_user": "sandbox", "host_uid": "1000",
+            },
+        })
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 0
+
+
+class TestInitMissingUser:
+    """Task 3.1: sandbox init without --user errors."""
+
+    def test_init_missing_user_exits_error(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code != 0
+
 
 # ── sandbox start --dry-run ──────────────────────────────────────────────────
 
@@ -1327,58 +1560,24 @@ class TestDryRunExistingInstance:
 
 
 class TestDryRunNewInstance:
-    """Task 13.1: --dry-run with no existing instance."""
+    """Task 5.1: --dry-run with no existing instance → error with guidance."""
 
-    def test_dry_run_new_instance_exit_0(
+    def test_dry_run_no_instance_errors_with_guidance(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """New instance dry-run renders from scaffold defaults."""
+        """No-instance dry-run errors with init guidance message."""
         home = mock_sandbox_ai_home
-        _create_tooling_plane(home)
 
         from cli.main import app
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
         ):
             result = runner.invoke(app, ["start", "--dry-run"])
-            assert result.exit_code == 0
+            assert result.exit_code == 1
+            assert "sandbox init" in result.output.lower()
 
-    def test_dry_run_new_instance_shows_sandbox_user(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
-        """New instance dry-run uses 'sandbox' as the default user."""
-        home = mock_sandbox_ai_home
-        _create_tooling_plane(home)
-
-        from cli.main import app
-
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert "sandbox" in result.output.lower()
-
-    def test_dry_run_new_instance_shows_directory_tree(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
-        """New instance dry-run displays the directory tree."""
-        home = mock_sandbox_ai_home
-        _create_tooling_plane(home)
-
-        from cli.main import app
-
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert "docker" in result.output.lower() or "directory" in result.output.lower()
 
 
 def _create_tooling_plane(home: Path) -> None:
@@ -1431,14 +1630,15 @@ class TestDryRunIpamExhausted:
         from core.ipam import IPAMExhaustedError
 
         home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
         _create_tooling_plane(home)
 
         from cli.main import app
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch.object(
                 __import__("core.ipam", fromlist=["IPAMLedger"]).IPAMLedger,
                 "peek_next_slot",
@@ -1483,3 +1683,223 @@ class TestCheckSecretsFirecrawl:
             result = runner.invoke(app, ["start", "--dry-run"])
             out = result.output.lower()
             assert "firecrawl" in out or "missing" in out or "secret" in out
+
+
+# ── Container Status Function ────────────────────────────────────────────────
+
+
+class TestContainerStatus:
+    """Task 6.1: _container_status NDJSON parsing."""
+
+    def test_parses_ndjson_output(self, tmp_path: Path) -> None:
+        """Multiple NDJSON lines are parsed into ContainerInfo list."""
+        import subprocess as sp
+
+        from cli.main import ContainerInfo, _container_status
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        ndjson = (
+            '{"Name":"t-core-1","Service":"core","State":"running","Health":"healthy","Status":"Up 5s"}\n'
+            '{"Name":"t-admin-1","Service":"admin","State":"running","Health":"","Status":"Up 5s"}\n'
+        )
+
+        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout=ndjson, stderr="")
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.return_value = mock_result
+            containers = _container_status(str(tmp_path), "t", "s", config)
+
+        assert len(containers) == 2
+        assert containers[0].name == "t-core-1"
+        assert containers[0].service == "core"
+        assert containers[0].state == "running"
+        assert containers[0].health == "healthy"
+        assert isinstance(containers[1], ContainerInfo)
+
+    def test_empty_for_stopped_instance(self, tmp_path: Path) -> None:
+        """Stopped instance returns empty container list."""
+        import subprocess as sp
+
+        from cli.main import _container_status
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.return_value = mock_result
+            containers = _container_status(str(tmp_path), "t", "s", config)
+
+        assert containers == []
+
+    def test_executor_error_returns_empty(self, tmp_path: Path) -> None:
+        """Executor error returns empty list instead of raising."""
+        from cli.main import _container_status
+        from core.exceptions import SandboxExecutionError
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.side_effect = SandboxExecutionError("fail")
+            containers = _container_status(str(tmp_path), "t", "s", config)
+
+        assert containers == []
+
+
+# ── Status Command ───────────────────────────────────────────────────────────
+
+
+class TestStatusNoInstance:
+    """Task 7.1: sandbox status — no instance error."""
+
+    def test_status_no_instance_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 1
+            assert "no sandbox" in result.output.lower()
+
+
+class TestStatusRunning:
+    """Task 7.1: sandbox status — running instance."""
+
+    def test_status_running_shows_state(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        from cli.main import ContainerInfo, app
+
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="healthy", status="Up 5s"),
+            ContainerInfo(name="t-admin-1", service="admin", state="running", health="healthy", status="Up 5s"),
+        ]
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=containers),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "running" in out
+            assert "core" in out
+
+
+class TestStatusStopped:
+    """Task 7.1: sandbox status — stopped instance."""
+
+    def test_status_stopped_shows_state(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=[]),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "stopped" in out
+
+
+class TestStatusDegraded:
+    """Task 7.1: sandbox status — degraded state."""
+
+    def test_status_degraded_shows_warning(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        from cli.main import ContainerInfo, app
+
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="healthy", status="Up"),
+            ContainerInfo(name="t-admin-1", service="admin", state="running", health="unhealthy", status="Up"),
+        ]
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=containers),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "degraded" in out
+
+
+class TestStatusIPAM:
+    """Task 7.1: sandbox status — IPAM display."""
+
+    def test_status_shows_ipam_subnets(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 3)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=[]),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output
+            # Should display IPAM slot and subnets
+            assert "3" in out or "slot" in out.lower()
+            assert "10." in out
+

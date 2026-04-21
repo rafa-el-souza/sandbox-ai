@@ -1,13 +1,15 @@
 """Sandbox CLI orchestrator — full lifecycle implementation.
 
-Commands: start, stop, attach, destroy, doctor.
+Commands: init, start, stop, attach, destroy, doctor, status.
 All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
 import fcntl
+import json as _json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 
 import typer
 from core.crypto import generate_proxy_password, hash_proxy_password, write_htpasswd
@@ -15,6 +17,7 @@ from core.doctor import (
     build_check_registry,
     detect_distro,
     render_results,
+    run_check_subset,
     run_checks,
 )
 from core.exceptions import SandboxExecutionError
@@ -28,6 +31,7 @@ from core.hydration import (
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_subnets
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
+    _detect_git_config,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
@@ -36,9 +40,25 @@ from core.scaffold import (
     write_sandbox_toml,
 )
 from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 app = typer.Typer()
 console = Console()
+
+
+# ─── Data Types ──────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ContainerInfo:
+    """Parsed container status from `docker compose ps --format json`."""
+
+    name: str
+    service: str
+    state: str
+    health: str | None
+    status: str
 
 
 # ─── Resolution helpers ─────────────────────────────────────────────────────
@@ -74,6 +94,55 @@ def _load_config(instance_dir: str) -> SandboxConfig:
 
 
 # ─── Warm state check ───────────────────────────────────────────────────────
+
+def _container_status(
+    instance_dir: str,
+    name: str,
+    host_user: str,
+    config: SandboxConfig,
+) -> list[ContainerInfo]:
+    """Query container statuses via `docker compose ps --format json`.
+
+    Returns a list of ContainerInfo parsed from NDJSON output.
+    Returns an empty list if the instance is stopped or the executor errors.
+    """
+    compose_file = os.path.join(instance_dir, "docker", "compose.yml")
+    if not os.path.exists(compose_file):
+        return []
+
+    compose_files = _build_compose_files(instance_dir, config)
+    files_str = " ".join(f"-f {f}" for f in compose_files)
+
+    executor = Executor()
+    try:
+        result = executor.run(
+            [
+                "sudo", "machinectl", "shell", f"{host_user}@.host",
+                "/bin/bash", "-c",
+                f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} ps --format json",
+            ]
+        )
+    except SandboxExecutionError:
+        return []
+
+    containers: list[ContainerInfo] = []
+    if result.stdout:
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = _json.loads(line)
+                containers.append(ContainerInfo(
+                    name=data.get("Name", ""),
+                    service=data.get("Service", ""),
+                    state=data.get("State", ""),
+                    health=data.get("Health", None) or None,
+                    status=data.get("Status", ""),
+                ))
+            except _json.JSONDecodeError:
+                continue
+    return containers
 
 
 def _warm_check(
@@ -319,33 +388,17 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # ── Instance resolution ──────────────────────────────────────────────
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    is_new = instance_dir is None or instance_id is None
 
-    if is_new:
-        console.print("  Instance: [yellow]NEW[/yellow] (would be scaffolded)")
-        # Build a default config for simulation
-        project_name = os.path.basename(project_dir)
-        host_user = "sandbox"
-        host_uid = str(os.getuid())
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": project_name,
-                "user_project_root": project_dir,
-                "host_unprivileged_user": host_user,
-                "host_uid": host_uid,
-            }
-        })
-        instance_id = f"{project_name}-dry000"
-        instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-        console.print(f"  Project: {project_name}")
-        console.print(f"  User: {host_user}")
-        console.print(f"  Directory: {instance_dir} [dim](simulated)[/dim]")
-    else:
-        assert instance_dir is not None
-        assert instance_id is not None
-        console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
-        config = _load_config(instance_dir)
-        host_user = config.project.host_unprivileged_user
+    if instance_dir is None or instance_id is None:
+        console.print(
+            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
+    config = _load_config(instance_dir)
+    host_user = config.project.host_unprivileged_user
 
     name = config.project.name
 
@@ -382,15 +435,12 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
         console.print(f"\n  Templates: [green]{validated} validated[/green]")
 
     # ── Secret completeness check ────────────────────────────────────────
-    if not is_new:
-        env_path = os.path.join(instance_dir, ".sandbox.env")
-        missing_secrets = _check_secrets(env_path, config)
-        if missing_secrets:
-            console.print("\n  [yellow]Missing/empty secrets:[/yellow]")
-            for secret in missing_secrets:
-                console.print(f"    ⊘ {secret}")
-    else:
-        console.print("\n  Secrets: [dim]would be prompted during scaffold[/dim]")
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    missing_secrets = _check_secrets(env_path, config)
+    if missing_secrets:
+        console.print("\n  [yellow]Missing/empty secrets:[/yellow]")
+        for secret in missing_secrets:
+            console.print(f"    ⊘ {secret}")
 
     # ── Command preview ──────────────────────────────────────────────────
     compose_files = _build_compose_files(instance_dir, config)
@@ -449,6 +499,105 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 
+@app.command()
+def init(
+    user: str = typer.Option(..., "--user", help="Unprivileged user for the sandbox"),
+    git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
+    git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
+) -> None:
+    """Initialize a new sandbox instance for the current project."""
+    sandbox_ai_home = _resolve_sandbox_ai_home()
+    project_dir = _resolve_project_dir()
+
+    # Re-init guard (D-6)
+    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    if instance_dir is not None:
+        console.print(
+            "Instance already initialized for this directory. "
+            "Run `sandbox destroy` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
+    if not dry_run:
+        distro = detect_distro()
+        preflight_results = run_check_subset(
+            ["Filesystem", "Repo Integrity"], user, distro
+        )
+        has_failures = any(r.status == "fail" for r in preflight_results)
+        if has_failures:
+            render_results(preflight_results, console=console)
+            raise typer.Exit(code=1)
+
+    # Git config auto-detection (D-8)
+    if not git_user or not git_email:
+        detected_name, detected_email = _detect_git_config()
+        if not git_user:
+            git_user = detected_name
+        if not git_email:
+            git_email = detected_email
+
+    # Derive instance identity
+    instance_id = generate_instance_id(project_dir)
+    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+    project_name = os.path.basename(project_dir)
+
+    if dry_run:
+        console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
+        console.print(f"  Instance ID: {instance_id}")
+        console.print(f"  Directory: {instance_dir}")
+        console.print(f"  User: {user}")
+        console.print(f"  Git: {git_user} <{git_email}>")
+        console.print(f"  Project: {project_name}")
+        console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
+        return
+
+    # S1: Directory tree
+    create_instance_dirs(instance_dir)
+
+    # S2: sandbox.toml
+    write_sandbox_toml(
+        instance_dir, project_name, project_dir, user,
+        git_user=git_user, git_email=git_email,
+    )
+
+    # S3: .sandbox.env
+    config = _load_config(instance_dir)
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    create_env_file(
+        env_path,
+        db_postgres=config.components_db_postgres.enabled,
+        mcp_firecrawl=config.components.mcp_firecrawl,
+    )
+
+    # S4: Default ACLs (Pattern B)
+    dev_user = os.environ.get("USER", "dev")
+    apply_default_acls(instance_dir, config.project.user_project_root, dev_user)
+
+    # S5: Register
+    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
+    registry = InstanceRegistry(registry_path)
+    registry.register(project_dir, instance_id)
+
+    # S6: Secret prompting (non-TTY safe)
+    required_secrets: list[tuple[str, str]] = [
+        ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+        ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
+    ]
+    if config.components_db_postgres.enabled:
+        required_secrets.append(("PG_PASSWORD", "PostgreSQL password"))
+    if config.components.mcp_firecrawl:
+        required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
+    prompt_secrets(env_path, required_secrets)
+
+    # S7: Sentinel
+    write_initialized_sentinel(instance_dir)
+
+    console.print(f"Sandbox '{project_name}' initialized. Run `sandbox start` to launch.")
+
+
 
 @app.command()
 def start(
@@ -466,8 +615,20 @@ def start(
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
 
     if instance_dir is None or instance_id is None:
-        # New instance — scaffold
-        instance_dir, instance_id = _scaffold_instance(sandbox_ai_home, project_dir)
+        console.print(
+            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Sentinel check: verify init completed
+    sentinel_path = os.path.join(instance_dir, ".initialized")
+    if not os.path.exists(sentinel_path):
+        console.print(
+            "Instance partially initialized. Run `sandbox destroy` then `sandbox init`.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
     name = config.project.name
@@ -504,18 +665,24 @@ def start(
     try:
         # Phase 2: IPAM
         base_index = _phase_ipam(sandbox_ai_home, instance_id)
+        console.print("✓ IPAM — network allocation complete")
 
         # Phase 3: Credentials
         proxy_password = _phase_credentials(instance_dir)
+        console.print("✓ Credentials — proxy auth configured")
 
         # Phase 4: Hydration
         _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir)
+        console.print("✓ Hydration — templates rendered")
 
         # Phase 5: ACL grants (Pattern A)
         _phase_acl_grant(instance_dir, host_user)
+        console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 6: Compose up
+        console.print("⟳ Compose — starting containers…")
         _phase_compose_up(instance_dir, name, host_user, config)
+        console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
         console.print(f"[FATAL] {e}", style="red bold")
@@ -527,6 +694,7 @@ def start(
     if lock_fd is not None:
         _release_lock(lock_fd)
 
+    console.print("→ Handing over to admin shell")
     _phase_handover(name, host_user, config.project.warmup_prompt)
 
 
@@ -672,6 +840,98 @@ def doctor(
     has_failures = any(r.status == "fail" for r in results)
     if has_failures:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def status() -> None:
+    """Show sandbox instance status and diagnostics."""
+    sandbox_ai_home = _resolve_sandbox_ai_home()
+    project_dir = _resolve_project_dir()
+
+    # Instance resolution
+    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    if instance_dir is None or instance_id is None:
+        console.print("No sandbox instance found for this directory.", style="red")
+        raise typer.Exit(code=1)
+
+    config = _load_config(instance_dir)
+    name = config.project.name
+    host_user = config.project.host_unprivileged_user
+
+    # Container status
+    containers = _container_status(instance_dir, name, host_user, config)
+    is_running = len(containers) > 0
+    has_unhealthy = any(
+        c.health is not None and c.health.lower() in ("unhealthy", "starting")
+        for c in containers
+    )
+
+    # Determine state
+    if is_running and has_unhealthy:
+        state_label = "⚠ degraded"
+        border_color = "yellow"
+    elif is_running:
+        state_label = "● running"
+        border_color = "green"
+    else:
+        state_label = "○ stopped"
+        border_color = "red"
+
+    # Instance header panel
+    header_lines = [
+        f"[bold]Name:[/bold]    {name}",
+        f"[bold]ID:[/bold]      {instance_id}",
+        f"[bold]Path:[/bold]    {config.project.user_project_root}",
+        f"[bold]User:[/bold]    {host_user}",
+        f"[bold]State:[/bold]   {state_label}",
+    ]
+    panel = Panel(
+        "\n".join(header_lines),
+        title=f"Sandbox: {name}",
+        border_style=border_color,
+    )
+    console.print(panel)
+
+    # Container grid (running only)
+    if is_running:
+        table = Table(title="Containers")
+        table.add_column("Service", style="cyan")
+        table.add_column("State")
+        table.add_column("Health")
+        table.add_column("Status")
+
+        for c in containers:
+            health_display = c.health or "—"
+            if c.health and c.health.lower() == "unhealthy":
+                health_display = f"[red]{c.health}[/red]"
+            elif c.health and c.health.lower() == "healthy":
+                health_display = f"[green]{c.health}[/green]"
+            table.add_row(c.service, c.state, health_display, c.status)
+
+        console.print(table)
+
+    # IPAM display
+    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
+    ledger = IPAMLedger(ipam_path)
+    try:
+        slot, _is_existing = ledger.peek_next_slot(instance_id)
+        if _is_existing:
+            isolated, proxy, egress = derive_subnets(slot)
+            console.print(f"\n[bold]IPAM[/bold] slot {slot}")
+            console.print(f"  Isolated: {isolated}")
+            console.print(f"  Proxy:    {proxy}")
+            console.print(f"  Egress:   {egress}")
+    except IPAMExhaustedError:
+        pass
+
+    # Config completeness warnings
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    if os.path.exists(env_path):
+        missing = _check_secrets(env_path, config)
+        if missing:
+            console.print("\n[yellow bold]Warnings[/yellow bold]")
+            for secret in missing:
+                console.print(f"  ⊘ Missing secret: {secret}", style="yellow")
 
 
 if __name__ == "__main__":
