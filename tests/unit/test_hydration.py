@@ -395,6 +395,9 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "node_version": "20.12.2",
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
         "proxy_whitelist_domains": [".github.com", ".npmjs.com"],
+        "pg_user": "sandbox",
+        "pg_db": "sandbox_db",
+        "warmup_prompt": "",
     }
 
 
@@ -513,3 +516,105 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
 
     return tooling
 
+
+class TestDbPostgresTemplateRendering:
+    """Task 6.1: db-postgres.yml renders through Jinja2 with no ${...:-...} patterns."""
+
+    def test_no_dollar_default_patterns(self, tmp_path: Path) -> None:
+        """Rendered db-postgres.yml contains zero ${VAR:-default} patterns."""
+        import re
+
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "db-postgres.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        # No ${VAR:-default} patterns should remain
+        dollar_defaults = re.findall(r"\$\{[^}]+:-[^}]+\}", rendered)
+        assert dollar_defaults == [], (
+            f"Found ${'{'}...:-...{'}'} patterns in rendered db-postgres.yml: "
+            f"{dollar_defaults}"
+        )
+
+    def test_env_file_directive_present(self, tmp_path: Path) -> None:
+        """Rendered db-postgres.yml contains env_file directive."""
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "db-postgres.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        assert "env_file:" in rendered
+        assert ".sandbox.env" in rendered
+
+
+class TestMcpFirecrawlTemplateRendering:
+    """Task 7.1: mcp-firecrawl.yml renders through Jinja2 with no ${...:-...}."""
+
+    def test_no_dollar_default_patterns(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml has zero ${VAR:-default} patterns.
+
+        Only bare ${VAR} for env_file secrets (FIRECRAWL_API_KEY,
+        PG_USER, PG_PASSWORD, PG_DB) are allowed.
+        """
+        import re
+
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "mcp-firecrawl.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        dollar_defaults = re.findall(r"\$\{[^}]+:-[^}]+\}", rendered)
+        assert dollar_defaults == [], (
+            f"Found ${'{'}...:-...{'}'} patterns in rendered "
+            f"mcp-firecrawl.yml: {dollar_defaults}"
+        )
+
+    def test_env_file_directive_present(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml contains env_file directive."""
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        template_content = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "extras" / "mcp-firecrawl.yml"
+        ).read_text()
+
+        env = jinja2.Environment(
+            loader=jinja2.BaseLoader(),
+            undefined=jinja2.StrictUndefined,
+        )
+        template = env.from_string(template_content)
+        rendered = template.render(ctx)
+
+        assert "env_file:" in rendered
+        assert ".sandbox.env" in rendered
