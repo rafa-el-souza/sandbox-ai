@@ -756,6 +756,7 @@ class TestRenderResultsWithSubset:
 
     def test_render_results_accepts_subset(self) -> None:
         """render_results works with subset results (no code change expected)."""
+        import re
         from io import StringIO
 
         from core.doctor import CheckResult, render_results
@@ -770,6 +771,8 @@ class TestRenderResultsWithSubset:
         console = Console(file=buf, force_terminal=True, no_color=True, width=120)
         render_results(results, console=console)
         output = buf.getvalue()
-        assert "Filesystem" in output
-        assert "2/2 passed" in output
+        # Strip ANSI escape sequences — force_terminal emits bold escapes even with no_color
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        assert "Filesystem" in plain
+        assert "2/2 passed" in plain
 

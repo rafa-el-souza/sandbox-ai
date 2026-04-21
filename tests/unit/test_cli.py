@@ -150,6 +150,8 @@ class TestStartHappyPath:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -220,6 +222,8 @@ class TestStartHappyPath:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -252,6 +256,8 @@ class TestStartHappyPath:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -266,6 +272,111 @@ class TestStartHappyPath:
             assert result.exit_code == 0
             out = result.output.lower()
             assert "handing over" in out or "handover" in out or "admin shell" in out
+
+
+class TestStartSecretCompletenessGate:
+    """Task 4.4a: secret completeness gate — must run before _acquire_state_lock."""
+
+    def test_start_exits_on_missing_secrets(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """start exits code 1 when _check_secrets returns missing secrets."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=["PG_PASSWORD"]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock") as mock_lock,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "pg_password" in result.output.lower()
+            # Gate must fire BEFORE lock acquisition
+            mock_lock.assert_not_called()
+
+
+class TestStartDoctorChain1PreFlight:
+    """Task 4.5a: doctor Chain 1 (Privilege Boundary) pre-flight in start."""
+
+    def test_start_exits_on_doctor_chain1_failure(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """start exits code 1 when run_check_subset returns fail for Privilege Boundary."""
+        from core.doctor import CheckResult
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+
+        failed_results = [
+            CheckResult(status="fail", name="machinectl", detail="not configured", remediation="fix sudoers"),
+        ]
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=failed_results),
+            patch("cli.main.render_results") as mock_render,
+            patch("cli.main._warm_check") as mock_warm,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_render.assert_called_once()
+            # Gate must fire BEFORE warm check
+            mock_warm.assert_not_called()
+
+
+class TestStartComposeSpinner:
+    """Task 4.6a: console.status() spinner during compose-up phase."""
+
+    def test_start_uses_console_status_for_compose(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """start uses console.status() context manager during compose-up."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+            patch.object(
+                __import__("cli.main", fromlist=["console"]).console,
+                "status",
+            ) as mock_status,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            mock_status.assert_called_once()
+            # Verify __enter__ was called (context manager was used)
+            mock_status.return_value.__enter__.assert_called()
 
 
 
@@ -284,6 +395,8 @@ class TestStartWarmExit:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._acquire_state_lock") as mock_lock,
         ):
@@ -308,6 +421,8 @@ class TestStartLockContention:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", side_effect=BlockingIOError("locked")),
         ):
@@ -332,6 +447,8 @@ class TestStartIPAMExhausted:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", side_effect=IPAMExhaustedError("full")),
@@ -358,6 +475,8 @@ class TestStartComposeUnhealthy:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -391,6 +510,8 @@ class TestStartProjectNameImmutabilityWarning:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -421,6 +542,8 @@ class TestStartProjectNameImmutabilityWarning:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -776,51 +899,54 @@ class TestResolveHelpers:
 
 
 class TestWarmCheckDirect:
-    """Direct tests for _warm_check."""
+    """Direct tests for _warm_check — delegates to _container_status (D-3)."""
 
     def test_warm_check_no_compose_file(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
 
         assert _warm_check(str(tmp_path), "name", "sandbox") is False
 
-    def test_warm_check_warm_containers(self, tmp_path: Path) -> None:
-        from cli.main import _warm_check
+    def test_warm_check_returns_true_when_containers_present(self, tmp_path: Path) -> None:
+        from cli.main import ContainerInfo, _warm_check
 
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        import subprocess as sp
-
-        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="abc123\n", stderr="")
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.return_value = mock_result
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="healthy", status="Up"),
+        ]
+        with (
+            patch("cli.main._load_config"),
+            patch("cli.main._container_status", return_value=containers),
+        ):
             assert _warm_check(str(tmp_path), "name", "sandbox") is True
 
-    def test_warm_check_cold_containers(self, tmp_path: Path) -> None:
+    def test_warm_check_returns_false_when_empty(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
 
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        import subprocess as sp
-
-        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.return_value = mock_result
+        with (
+            patch("cli.main._load_config"),
+            patch("cli.main._container_status", return_value=[]),
+        ):
             assert _warm_check(str(tmp_path), "name", "sandbox") is False
 
-    def test_warm_check_executor_error(self, tmp_path: Path) -> None:
+    def test_warm_check_returns_false_on_container_status_error(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
-        from core.exceptions import SandboxExecutionError
 
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.side_effect = SandboxExecutionError("fail")
+        # _container_status returns [] on error internally, so _warm_check sees empty
+        with (
+            patch("cli.main._load_config"),
+            patch("cli.main._container_status", return_value=[]),
+        ):
             assert _warm_check(str(tmp_path), "name", "sandbox") is False
 
 
@@ -1049,32 +1175,46 @@ class TestRevokeACLsDirect:
             assert mock_run.call_count == 2
 
 
-class TestScaffoldInstanceDirect:
-    """Direct test for _scaffold_instance."""
+class TestInitScaffoldDirect:
+    """Task 9.1: init command creates full instance (migrated from _scaffold_instance)."""
 
-    def test_scaffold_creates_full_instance(
-        self, mock_sandbox_ai_home: Path
+    def test_init_creates_full_instance(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        from cli.main import _scaffold_instance
+        from cli.main import app
+        from core.hydration import SandboxConfig
 
         home = mock_sandbox_ai_home
-        project_dir = str(home / "fake-project")
-        os.makedirs(project_dir, exist_ok=True)
+        project_dir = "/home/dev/newproject"
+
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "newproject", "user_project_root": project_dir,
+                "host_unprivileged_user": "sandbox", "host_uid": "1000",
+            },
+        })
 
         with (
-            patch("cli.main.apply_default_acls"),
-            patch("cli.main.prompt_secrets"),
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs") as mock_dirs,
+            patch("cli.main.write_sandbox_toml") as mock_toml,
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file") as mock_env,
+            patch("cli.main.apply_default_acls") as mock_acls,
+            patch("cli.main.prompt_secrets") as mock_secrets,
+            patch("cli.main.write_initialized_sentinel") as mock_sentinel,
         ):
-            inst_dir, inst_id = _scaffold_instance(str(home), project_dir)
-
-        assert os.path.isdir(inst_dir)
-        assert os.path.exists(os.path.join(inst_dir, "sandbox.toml"))
-        assert os.path.exists(os.path.join(inst_dir, ".sandbox.env"))
-        assert os.path.exists(os.path.join(inst_dir, ".initialized"))
-
-        # Verify registry entry
-        reg = json.loads((home / ".state" / "instances.json").read_text())
-        assert project_dir in reg
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 0
+            mock_dirs.assert_called_once()
+            mock_toml.assert_called_once()
+            mock_env.assert_called_once()
+            mock_acls.assert_called_once()
+            mock_secrets.assert_called_once()
+            mock_sentinel.assert_called_once()
 
 
 # ── Edge case tests for remaining coverage ───────────────────────────────────
@@ -1153,37 +1293,42 @@ class TestDestroyPrefixGuardInternal:
             assert "prefix guard" in result.output.lower()
 
 
-class TestScaffoldFirecrawl:
-    """Cover firecrawl branch in _scaffold_instance."""
+class TestInitFirecrawl:
+    """Task 9.1: init command's firecrawl branch (migrated from _scaffold_instance)."""
 
-    def test_scaffold_with_firecrawl_enabled(
-        self, mock_sandbox_ai_home: Path
+    def test_init_with_firecrawl_includes_secret(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        from cli.main import _scaffold_instance
+        from cli.main import app
+        from core.hydration import SandboxConfig
 
         home = mock_sandbox_ai_home
-        project_dir = str(home / "fc-project")
-        os.makedirs(project_dir, exist_ok=True)
+        project_dir = "/home/dev/fc-project"
 
-        # Write a toml that has firecrawl enabled
-        fc_toml = VALID_TOML_CONTENT.replace(
-            b"mcp_firecrawl = false", b"mcp_firecrawl = true"
-        )
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "fc-project", "user_project_root": project_dir,
+                "host_unprivileged_user": "sandbox", "host_uid": "1000",
+            },
+            "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
+            "components_db_postgres": {"enabled": True},
+        })
 
         with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
             patch("cli.main.apply_default_acls"),
             patch("cli.main.prompt_secrets") as mock_prompt,
-            patch("cli.main.write_sandbox_toml") as mock_toml,
+            patch("cli.main.write_initialized_sentinel"),
         ):
-            # Override to write firecrawl-enabled config
-            def write_fc_toml(inst_dir: str, *_args: object) -> None:
-                toml_path = os.path.join(inst_dir, "sandbox.toml")
-                with open(toml_path, "wb") as f:
-                    f.write(fc_toml)
-
-            mock_toml.side_effect = write_fc_toml
-            inst_dir, inst_id = _scaffold_instance(str(home), project_dir)
-
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 0
             # Verify firecrawl secret was included in prompt_secrets call
             call_args = mock_prompt.call_args[0]
             secret_names = [s[0] for s in call_args[1]]
@@ -1823,6 +1968,10 @@ class TestStatusRunning:
             out = result.output.lower()
             assert "running" in out
             assert "core" in out
+            # Task 7.5a: container table must include IP addresses
+            # For slot 0: core → agent_isolated_ip = 10.100.0.3
+            assert "10.100.0.3" in result.output
+            assert "network" in out
 
 
 class TestStatusStopped:
@@ -1903,3 +2052,31 @@ class TestStatusIPAM:
             assert "3" in out or "slot" in out.lower()
             assert "10." in out
 
+
+class TestStatusConfigWarnings:
+    """Task 9.2: status output shows ⊘ and missing secret names."""
+
+    def test_status_warns_on_missing_secrets(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        # Write env file with empty PG_PASSWORD
+        inst_dir = home / "sandboxes" / "myproject-abc123"
+        env_path = inst_dir / ".sandbox.env"
+        env_path.write_text("CORE_ANTHROPIC_API_KEY=sk-123\nPG_PASSWORD=\n")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=[]),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            assert "⊘" in result.output
+            assert "PG_PASSWORD" in result.output

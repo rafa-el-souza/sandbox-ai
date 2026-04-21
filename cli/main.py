@@ -28,7 +28,7 @@ from core.hydration import (
     render_templates,
     validate_templates,
 )
-from core.ipam import IPAMExhaustedError, IPAMLedger, derive_subnets
+from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
     _detect_git_config,
@@ -148,22 +148,16 @@ def _container_status(
 def _warm_check(
     instance_dir: str, name: str, host_user: str
 ) -> bool:
-    """Check if containers are already running. Returns True if warm."""
+    """Check if containers are already running. Returns True if warm.
+
+    Delegates to _container_status (D-3) — returns True if any containers exist.
+    """
     compose_file = os.path.join(instance_dir, "docker", "compose.yml")
     if not os.path.exists(compose_file):
         return False
-    executor = Executor()
-    try:
-        result = executor.run(
-            [
-                "sudo", "machinectl", "shell", f"{host_user}@.host",
-                "/bin/bash", "-c",
-                f'COMPOSE_PROJECT_NAME={name} docker compose -f {compose_file} ps -q',
-            ]
-        )
-        return bool(result.stdout and result.stdout.strip())
-    except SandboxExecutionError:
-        return False
+
+    config = _load_config(instance_dir)
+    return bool(_container_status(instance_dir, name, host_user, config))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -322,57 +316,6 @@ def _revoke_acls(instance_dir: str, host_user: str) -> None:
             check=True,
         )
 
-
-# ─── Scaffolding ─────────────────────────────────────────────────────────────
-
-
-def _scaffold_instance(
-    sandbox_ai_home: str, project_dir: str
-) -> tuple[str, str]:
-    """Full scaffold sub-sequence for a new instance. Returns (instance_dir, instance_id)."""
-    instance_id = generate_instance_id(project_dir)
-    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-    project_name = os.path.basename(project_dir)
-
-    # S1: Directory tree
-    create_instance_dirs(instance_dir)
-
-    # S2: sandbox.toml
-    write_sandbox_toml(instance_dir, project_name, project_dir, "sandbox")
-
-    # S3: .sandbox.env
-    config = _load_config(instance_dir)
-    env_path = os.path.join(instance_dir, ".sandbox.env")
-    create_env_file(
-        env_path,
-        db_postgres=config.components_db_postgres.enabled,
-        mcp_firecrawl=config.components.mcp_firecrawl,
-    )
-
-    # S4: Default ACLs (Pattern B — never revoked)
-    dev_user = os.environ.get("USER", "dev")
-    apply_default_acls(instance_dir, config.project.user_project_root, dev_user)
-
-    # S5: Register
-    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-    registry = InstanceRegistry(registry_path)
-    registry.register(project_dir, instance_id)
-
-    # S6: Secret prompting
-    required_secrets: list[tuple[str, str]] = [
-        ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
-        ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
-    ]
-    if config.components_db_postgres.enabled:
-        required_secrets.append(("PG_PASSWORD", "PostgreSQL password"))
-    if config.components.mcp_firecrawl:
-        required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
-    prompt_secrets(env_path, required_secrets)
-
-    # S7: Sentinel
-    write_initialized_sentinel(instance_dir)
-
-    return instance_dir, instance_id
 
 
 # ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
@@ -644,6 +587,29 @@ def start(
             style="yellow",
         )
 
+    # Pre-flight: Secret completeness gate (D-7 — before lock acquisition)
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    missing_secrets = _check_secrets(env_path, config)
+    if missing_secrets:
+        console.print("Missing required secrets:", style="red")
+        for secret in missing_secrets:
+            console.print(f"  ⊘ {secret}", style="red")
+        console.print(
+            "\nPopulate secrets in .sandbox.env and retry.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
+    distro = detect_distro()
+    preflight_results = run_check_subset(
+        ["Privilege Boundary"], host_user, distro
+    )
+    has_preflight_failures = any(r.status == "fail" for r in preflight_results)
+    if has_preflight_failures:
+        render_results(preflight_results, console=console)
+        raise typer.Exit(code=1)
+
     # Pre-lock warm check (D-52)
     if _warm_check(instance_dir, name, host_user):
         console.print(
@@ -679,9 +645,9 @@ def start(
         _phase_acl_grant(instance_dir, host_user)
         console.print("✓ ACL — filesystem permissions granted")
 
-        # Phase 6: Compose up
-        console.print("⟳ Compose — starting containers…")
-        _phase_compose_up(instance_dir, name, host_user, config)
+        # Phase 6: Compose up (D-5 — spinner for long-running phase)
+        with console.status("⟳ Compose — starting containers…"):
+            _phase_compose_up(instance_dir, name, host_user, config)
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
@@ -894,10 +860,30 @@ def status() -> None:
 
     # Container grid (running only)
     if is_running:
+        # Derive static IPs for network column
+        ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
+        ledger = IPAMLedger(ipam_path)
+        ip_map: dict[str, str] = {}
+        try:
+            slot, _is_existing = ledger.peek_next_slot(instance_id)
+            if _is_existing:
+                ips = derive_static_ips(slot)
+                # Map service names to IPs from IPAM
+                ip_map = {
+                    "core": ips.get("agent_isolated_ip", ""),
+                    "admin": ips.get("admin_isolated_ip", ""),
+                    "dns-sidecar": ips.get("dns_sidecar_ip", ""),
+                    "db-postgres": ips.get("db_postgres_ip", ""),
+                    "proxy": ips.get("proxy_ip", ""),
+                }
+        except IPAMExhaustedError:
+            pass
+
         table = Table(title="Containers")
         table.add_column("Service", style="cyan")
         table.add_column("State")
         table.add_column("Health")
+        table.add_column("Network")
         table.add_column("Status")
 
         for c in containers:
@@ -906,7 +892,8 @@ def status() -> None:
                 health_display = f"[red]{c.health}[/red]"
             elif c.health and c.health.lower() == "healthy":
                 health_display = f"[green]{c.health}[/green]"
-            table.add_row(c.service, c.state, health_display, c.status)
+            network = ip_map.get(c.service, "")
+            table.add_row(c.service, c.state, health_display, network, c.status)
 
         console.print(table)
 
