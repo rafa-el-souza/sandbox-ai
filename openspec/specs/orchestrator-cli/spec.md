@@ -5,15 +5,19 @@ This specification defines the deterministic execution constraints bounding the 
 ## Requirements
 
 ### Requirement: Python CLI Orchestrator Execution
-The system SHALL execute utilizing a strict Python `typer` interface to deterministically govern the `sandbox` operational lifecycle across four commands: `start`, `stop`, `attach`, and `destroy`.
+The system SHALL execute utilizing a strict Python `typer` interface to deterministically govern the `sandbox` operational lifecycle across seven commands: `init`, `start`, `stop`, `attach`, `destroy`, `doctor`, and `status`.
 
 #### Scenario: Tooling Plane Bootstrapping
 - **WHEN** the orchestrator initiates execution on a fresh host machine
-- **THEN** it resolves `SANDBOX_AI_HOME` from the location of the orchestrator source, derives `instance_dir` via the `instances.json` registry, and scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<project_name>-<project_id>/` before proceeding
+- **THEN** the operator runs `sandbox init --user <user>` which resolves `SANDBOX_AI_HOME` from the location of the orchestrator source, scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<project_name>-<project_id>/`, and writes the `.initialized` sentinel
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start`
-- **THEN** the CLI performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet triple, runs the Pydantic + Jinja2 hydration pipeline, applies ACL grants, executes `docker compose up -d --build --wait` via `machinectl`, and hands the terminal over to the admin container via `docker exec -it`
+- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight, validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet triple, runs the Pydantic + Jinja2 hydration pipeline, applies ACL grants, executes `docker compose up -d --build --wait` via `machinectl`, and hands the terminal over to the admin container via `docker exec -it`, displaying progress for each phase
+
+#### Scenario: Instance State Query
+- **WHEN** the human operator executes `sandbox status`
+- **THEN** the CLI displays a Rich-formatted dashboard with instance identity, container health, IPAM allocation, and config completeness warnings
 
 #### Scenario: Graceful Teardown
 - **WHEN** the human operator executes `sandbox stop`
