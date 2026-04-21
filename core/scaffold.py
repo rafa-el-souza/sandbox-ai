@@ -84,6 +84,8 @@ mcp_puppeteer = false
 [components.db_postgres]
 enabled = true
 expose_host_ports = [5432]
+pg_user = "sandbox"
+pg_db = "sandbox_db"
 
 [components.ingress]
 web_ports = [3000, 8080]
@@ -168,7 +170,7 @@ CORE_GITHUB_TOKEN=""
 
 _ENV_POSTGRES_BLOCK = """
 # ── Database ──────────────────────────────────────────────────────────────────
-PG_USER="agent"
+PG_USER="sandbox"
 PG_PASSWORD=""
 PG_DB="sandbox_db"
 """

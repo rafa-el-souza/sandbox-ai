@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from core.hydration import (
+    DbPostgresConfig,
     SandboxConfig,
     build_jinja_context,
     render_templates,
@@ -86,6 +87,37 @@ class TestSandboxConfig:
         toml_path.write_text(broken)
         with pytest.raises(Exception):  # Pydantic ValidationError
             SandboxConfig.from_toml(str(toml_path))
+
+
+class TestDbPostgresConfigFields:
+    """Task 3.1: DbPostgresConfig gains pg_user and pg_db fields."""
+
+    def test_default_field_values(self) -> None:
+        """pg_user defaults to 'sandbox', pg_db defaults to 'sandbox_db'."""
+        db = DbPostgresConfig()
+        assert db.pg_user == "sandbox"
+        assert db.pg_db == "sandbox_db"
+
+    def test_round_trip_through_from_toml(self, tmp_path: Path) -> None:
+        """pg_user and pg_db survive from_toml() parsing with defaults."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.components_db_postgres.pg_user == "sandbox"
+        assert config.components_db_postgres.pg_db == "sandbox_db"
+
+    def test_custom_values_from_toml(self, tmp_path: Path) -> None:
+        """Custom pg_user/pg_db values are parsed from TOML."""
+        custom = VALID_TOML.replace(
+            "[components.db_postgres]\nenabled = true\nexpose_host_ports = [5432]",
+            "[components.db_postgres]\nenabled = true\nexpose_host_ports = [5432]\n"
+            'pg_user = "custom_user"\npg_db = "custom_db"',
+        )
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(custom)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.components_db_postgres.pg_user == "custom_user"
+        assert config.components_db_postgres.pg_db == "custom_db"
 
 
 class TestBuildJinjaContext:

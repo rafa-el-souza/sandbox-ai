@@ -70,6 +70,8 @@ class DbPostgresConfig(BaseModel):
 
     enabled: bool = True
     expose_host_ports: list[int] = [5432]
+    pg_user: str = "sandbox"
+    pg_db: str = "sandbox_db"
 
 
 class IngressConfig(BaseModel):

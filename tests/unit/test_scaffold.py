@@ -121,6 +121,13 @@ class TestCreateEnvFile:
         create_env_file(str(env_off), db_postgres=False, mcp_firecrawl=False)
         assert "PG_USER" not in env_off.read_text()
 
+    def test_postgres_pg_user_default(self, tmp_path: Path) -> None:
+        """Task 3.2: PG_USER defaults to 'sandbox' (aligned with DbPostgresConfig)."""
+        env_path = tmp_path / "env_pg_user"
+        create_env_file(str(env_path), db_postgres=True, mcp_firecrawl=False)
+        content = env_path.read_text()
+        assert 'PG_USER="sandbox"' in content
+
     def test_firecrawl_conditional(self, tmp_path: Path) -> None:
         """FIRECRAWL_API_KEY present only when mcp_firecrawl=True."""
         env_on = tmp_path / "env_on"
