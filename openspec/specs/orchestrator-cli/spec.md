@@ -37,7 +37,7 @@ The system SHALL isolate all Docker command execution across the `dev`/`sandbox`
 
 #### Scenario: Non-Interactive Daemon Interaction
 - **WHEN** the Python orchestrator needs to execute a non-interactive Docker command (e.g., `docker compose up`)
-- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "--", "/bin/bash", "-c", "<command>"])` with `capture_output=True`
+- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "/bin/bash", "-c", "<command>"])` with `capture_output=True`
 
 #### Scenario: Interactive PTY Execution
 - **WHEN** the orchestrator hands the terminal to the admin container
