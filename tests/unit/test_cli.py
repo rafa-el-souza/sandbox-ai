@@ -167,10 +167,10 @@ class TestStartHappyPath:
             mock_compose.assert_called_once()
             mock_handover.assert_called_once()
 
-    def test_start_new_instance_triggers_scaffold(
+    def test_start_no_init_errors(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """New project: registry miss → scaffold → continue to launch."""
+        """New project: registry miss → error with init guidance."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
@@ -179,7 +179,79 @@ class TestStartHappyPath:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main._scaffold_instance") as mock_scaffold,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "sandbox init" in result.output.lower()
+
+    def test_start_partial_init_errors(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Instance registered but .initialized sentinel missing → error."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        inst = _register_instance(home, project_dir, instance_id)
+        # Remove the sentinel
+        (inst / ".initialized").unlink()
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "partially initialized" in result.output.lower() or "destroy" in result.output.lower()
+
+    def test_start_progress_output(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Start shows phase progress indicators."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="proxypass123"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            # Should show progress indicators
+            assert "ipam" in out or "network" in out
+            assert "compose" in out or "containers" in out
+
+    def test_start_handover_indication(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Start shows handover indication before PTY exec."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
@@ -190,10 +262,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            # scaffold must be called since registry has no entry
-            mock_scaffold.return_value = (str(home / "sandboxes" / "newproject-aaa111"), "newproject-aaa111")
-            runner.invoke(app, ["start"])
-            mock_scaffold.assert_called_once()
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "handing over" in out or "handover" in out or "admin shell" in out
+
 
 
 class TestStartWarmExit:

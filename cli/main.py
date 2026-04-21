@@ -567,8 +567,20 @@ def start(
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
 
     if instance_dir is None or instance_id is None:
-        # New instance — scaffold
-        instance_dir, instance_id = _scaffold_instance(sandbox_ai_home, project_dir)
+        console.print(
+            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Sentinel check: verify init completed
+    sentinel_path = os.path.join(instance_dir, ".initialized")
+    if not os.path.exists(sentinel_path):
+        console.print(
+            "Instance partially initialized. Run `sandbox destroy` then `sandbox init`.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
     name = config.project.name
@@ -605,18 +617,24 @@ def start(
     try:
         # Phase 2: IPAM
         base_index = _phase_ipam(sandbox_ai_home, instance_id)
+        console.print("✓ IPAM — network allocation complete")
 
         # Phase 3: Credentials
         proxy_password = _phase_credentials(instance_dir)
+        console.print("✓ Credentials — proxy auth configured")
 
         # Phase 4: Hydration
         _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir)
+        console.print("✓ Hydration — templates rendered")
 
         # Phase 5: ACL grants (Pattern A)
         _phase_acl_grant(instance_dir, host_user)
+        console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 6: Compose up
+        console.print("⟳ Compose — starting containers…")
         _phase_compose_up(instance_dir, name, host_user, config)
+        console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
         console.print(f"[FATAL] {e}", style="red bold")
@@ -628,6 +646,7 @@ def start(
     if lock_fd is not None:
         _release_lock(lock_fd)
 
+    console.print("→ Handing over to admin shell")
     _phase_handover(name, host_user, config.project.warmup_prompt)
 
 
