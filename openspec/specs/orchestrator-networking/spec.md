@@ -43,3 +43,14 @@ The system SHALL structurally enforce internet isolation patterns natively throu
 #### Scenario: Ephemeral Cryptographic Authentication
 - **WHEN** the proxy squid container initializes bounds
 - **THEN** the CLI generates a 32-character string employing Python `secrets`, hashes it via bcrypt, and writes the `proxyuser:<hash>` line to `.htpasswd` for Squid proxy authentication.
+
+### Requirement: Component Static IP Derivation
+The system SHALL derive static IP addresses for component containers from the same `base_index` used for infrastructure IPs, using fixed host octets per component.
+
+#### Scenario: Firecrawl IPs derived from base_index
+- **WHEN** `derive_static_ips(base_index)` is called
+- **THEN** the returned dict includes `mcp_firecrawl_isolated_ip` as `<isolated_base>.55` and `mcp_firecrawl_proxy_ip` as `<proxy_base>.55`
+
+#### Scenario: Component IPs are deterministic across restarts
+- **WHEN** `derive_static_ips()` is called with the same `base_index` on successive `sandbox start` invocations
+- **THEN** the returned firecrawl IPs are identical
