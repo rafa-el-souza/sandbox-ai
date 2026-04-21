@@ -767,7 +767,7 @@ class TestRenderResultsWithSubset:
             CheckResult(status="pass", name="ACL support", detail="ok", category="Filesystem"),
         ]
         buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
+        console = Console(file=buf, force_terminal=True, no_color=True, width=120)
         render_results(results, console=console)
         output = buf.getvalue()
         assert "Filesystem" in output
