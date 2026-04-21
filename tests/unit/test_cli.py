@@ -1683,3 +1683,223 @@ class TestCheckSecretsFirecrawl:
             result = runner.invoke(app, ["start", "--dry-run"])
             out = result.output.lower()
             assert "firecrawl" in out or "missing" in out or "secret" in out
+
+
+# ── Container Status Function ────────────────────────────────────────────────
+
+
+class TestContainerStatus:
+    """Task 6.1: _container_status NDJSON parsing."""
+
+    def test_parses_ndjson_output(self, tmp_path: Path) -> None:
+        """Multiple NDJSON lines are parsed into ContainerInfo list."""
+        import subprocess as sp
+
+        from cli.main import ContainerInfo, _container_status
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        ndjson = (
+            '{"Name":"t-core-1","Service":"core","State":"running","Health":"healthy","Status":"Up 5s"}\n'
+            '{"Name":"t-admin-1","Service":"admin","State":"running","Health":"","Status":"Up 5s"}\n'
+        )
+
+        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout=ndjson, stderr="")
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.return_value = mock_result
+            containers = _container_status(str(tmp_path), "t", "s", config)
+
+        assert len(containers) == 2
+        assert containers[0].name == "t-core-1"
+        assert containers[0].service == "core"
+        assert containers[0].state == "running"
+        assert containers[0].health == "healthy"
+        assert isinstance(containers[1], ContainerInfo)
+
+    def test_empty_for_stopped_instance(self, tmp_path: Path) -> None:
+        """Stopped instance returns empty container list."""
+        import subprocess as sp
+
+        from cli.main import _container_status
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.return_value = mock_result
+            containers = _container_status(str(tmp_path), "t", "s", config)
+
+        assert containers == []
+
+    def test_executor_error_returns_empty(self, tmp_path: Path) -> None:
+        """Executor error returns empty list instead of raising."""
+        from cli.main import _container_status
+        from core.exceptions import SandboxExecutionError
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate({
+            "project": {
+                "name": "t", "user_project_root": "/x",
+                "host_unprivileged_user": "s", "host_uid": "1000",
+            },
+        })
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch("cli.main.Executor") as MockExec:
+            MockExec.return_value.run.side_effect = SandboxExecutionError("fail")
+            containers = _container_status(str(tmp_path), "t", "s", config)
+
+        assert containers == []
+
+
+# ── Status Command ───────────────────────────────────────────────────────────
+
+
+class TestStatusNoInstance:
+    """Task 7.1: sandbox status — no instance error."""
+
+    def test_status_no_instance_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 1
+            assert "no sandbox" in result.output.lower()
+
+
+class TestStatusRunning:
+    """Task 7.1: sandbox status — running instance."""
+
+    def test_status_running_shows_state(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        from cli.main import ContainerInfo, app
+
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="healthy", status="Up 5s"),
+            ContainerInfo(name="t-admin-1", service="admin", state="running", health="healthy", status="Up 5s"),
+        ]
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=containers),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "running" in out
+            assert "core" in out
+
+
+class TestStatusStopped:
+    """Task 7.1: sandbox status — stopped instance."""
+
+    def test_status_stopped_shows_state(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=[]),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "stopped" in out
+
+
+class TestStatusDegraded:
+    """Task 7.1: sandbox status — degraded state."""
+
+    def test_status_degraded_shows_warning(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        from cli.main import ContainerInfo, app
+
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="healthy", status="Up"),
+            ContainerInfo(name="t-admin-1", service="admin", state="running", health="unhealthy", status="Up"),
+        ]
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=containers),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output.lower()
+            assert "degraded" in out
+
+
+class TestStatusIPAM:
+    """Task 7.1: sandbox status — IPAM display."""
+
+    def test_status_shows_ipam_subnets(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 3)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=[]),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            out = result.output
+            # Should display IPAM slot and subnets
+            assert "3" in out or "slot" in out.lower()
+            assert "10." in out
+

@@ -5,9 +5,11 @@ All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
 import fcntl
+import json as _json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 
 import typer
 from core.crypto import generate_proxy_password, hash_proxy_password, write_htpasswd
@@ -38,9 +40,25 @@ from core.scaffold import (
     write_sandbox_toml,
 )
 from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 app = typer.Typer()
 console = Console()
+
+
+# ─── Data Types ──────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ContainerInfo:
+    """Parsed container status from `docker compose ps --format json`."""
+
+    name: str
+    service: str
+    state: str
+    health: str | None
+    status: str
 
 
 # ─── Resolution helpers ─────────────────────────────────────────────────────
@@ -76,6 +94,55 @@ def _load_config(instance_dir: str) -> SandboxConfig:
 
 
 # ─── Warm state check ───────────────────────────────────────────────────────
+
+def _container_status(
+    instance_dir: str,
+    name: str,
+    host_user: str,
+    config: SandboxConfig,
+) -> list[ContainerInfo]:
+    """Query container statuses via `docker compose ps --format json`.
+
+    Returns a list of ContainerInfo parsed from NDJSON output.
+    Returns an empty list if the instance is stopped or the executor errors.
+    """
+    compose_file = os.path.join(instance_dir, "docker", "compose.yml")
+    if not os.path.exists(compose_file):
+        return []
+
+    compose_files = _build_compose_files(instance_dir, config)
+    files_str = " ".join(f"-f {f}" for f in compose_files)
+
+    executor = Executor()
+    try:
+        result = executor.run(
+            [
+                "sudo", "machinectl", "shell", f"{host_user}@.host",
+                "/bin/bash", "-c",
+                f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} ps --format json",
+            ]
+        )
+    except SandboxExecutionError:
+        return []
+
+    containers: list[ContainerInfo] = []
+    if result.stdout:
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = _json.loads(line)
+                containers.append(ContainerInfo(
+                    name=data.get("Name", ""),
+                    service=data.get("Service", ""),
+                    state=data.get("State", ""),
+                    health=data.get("Health", None) or None,
+                    status=data.get("Status", ""),
+                ))
+            except _json.JSONDecodeError:
+                continue
+    return containers
 
 
 def _warm_check(
@@ -773,6 +840,98 @@ def doctor(
     has_failures = any(r.status == "fail" for r in results)
     if has_failures:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def status() -> None:
+    """Show sandbox instance status and diagnostics."""
+    sandbox_ai_home = _resolve_sandbox_ai_home()
+    project_dir = _resolve_project_dir()
+
+    # Instance resolution
+    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    if instance_dir is None or instance_id is None:
+        console.print("No sandbox instance found for this directory.", style="red")
+        raise typer.Exit(code=1)
+
+    config = _load_config(instance_dir)
+    name = config.project.name
+    host_user = config.project.host_unprivileged_user
+
+    # Container status
+    containers = _container_status(instance_dir, name, host_user, config)
+    is_running = len(containers) > 0
+    has_unhealthy = any(
+        c.health is not None and c.health.lower() in ("unhealthy", "starting")
+        for c in containers
+    )
+
+    # Determine state
+    if is_running and has_unhealthy:
+        state_label = "⚠ degraded"
+        border_color = "yellow"
+    elif is_running:
+        state_label = "● running"
+        border_color = "green"
+    else:
+        state_label = "○ stopped"
+        border_color = "red"
+
+    # Instance header panel
+    header_lines = [
+        f"[bold]Name:[/bold]    {name}",
+        f"[bold]ID:[/bold]      {instance_id}",
+        f"[bold]Path:[/bold]    {config.project.user_project_root}",
+        f"[bold]User:[/bold]    {host_user}",
+        f"[bold]State:[/bold]   {state_label}",
+    ]
+    panel = Panel(
+        "\n".join(header_lines),
+        title=f"Sandbox: {name}",
+        border_style=border_color,
+    )
+    console.print(panel)
+
+    # Container grid (running only)
+    if is_running:
+        table = Table(title="Containers")
+        table.add_column("Service", style="cyan")
+        table.add_column("State")
+        table.add_column("Health")
+        table.add_column("Status")
+
+        for c in containers:
+            health_display = c.health or "—"
+            if c.health and c.health.lower() == "unhealthy":
+                health_display = f"[red]{c.health}[/red]"
+            elif c.health and c.health.lower() == "healthy":
+                health_display = f"[green]{c.health}[/green]"
+            table.add_row(c.service, c.state, health_display, c.status)
+
+        console.print(table)
+
+    # IPAM display
+    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
+    ledger = IPAMLedger(ipam_path)
+    try:
+        slot, _is_existing = ledger.peek_next_slot(instance_id)
+        if _is_existing:
+            isolated, proxy, egress = derive_subnets(slot)
+            console.print(f"\n[bold]IPAM[/bold] slot {slot}")
+            console.print(f"  Isolated: {isolated}")
+            console.print(f"  Proxy:    {proxy}")
+            console.print(f"  Egress:   {egress}")
+    except IPAMExhaustedError:
+        pass
+
+    # Config completeness warnings
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    if os.path.exists(env_path):
+        missing = _check_secrets(env_path, config)
+        if missing:
+            console.print("\n[yellow bold]Warnings[/yellow bold]")
+            for secret in missing:
+                console.print(f"  ⊘ Missing secret: {secret}", style="yellow")
 
 
 if __name__ == "__main__":
