@@ -1560,58 +1560,24 @@ class TestDryRunExistingInstance:
 
 
 class TestDryRunNewInstance:
-    """Task 13.1: --dry-run with no existing instance."""
+    """Task 5.1: --dry-run with no existing instance → error with guidance."""
 
-    def test_dry_run_new_instance_exit_0(
+    def test_dry_run_no_instance_errors_with_guidance(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """New instance dry-run renders from scaffold defaults."""
+        """No-instance dry-run errors with init guidance message."""
         home = mock_sandbox_ai_home
-        _create_tooling_plane(home)
 
         from cli.main import app
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
         ):
             result = runner.invoke(app, ["start", "--dry-run"])
-            assert result.exit_code == 0
+            assert result.exit_code == 1
+            assert "sandbox init" in result.output.lower()
 
-    def test_dry_run_new_instance_shows_sandbox_user(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
-        """New instance dry-run uses 'sandbox' as the default user."""
-        home = mock_sandbox_ai_home
-        _create_tooling_plane(home)
-
-        from cli.main import app
-
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert "sandbox" in result.output.lower()
-
-    def test_dry_run_new_instance_shows_directory_tree(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
-        """New instance dry-run displays the directory tree."""
-        home = mock_sandbox_ai_home
-        _create_tooling_plane(home)
-
-        from cli.main import app
-
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert "docker" in result.output.lower() or "directory" in result.output.lower()
 
 
 def _create_tooling_plane(home: Path) -> None:
@@ -1664,14 +1630,15 @@ class TestDryRunIpamExhausted:
         from core.ipam import IPAMExhaustedError
 
         home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
         _create_tooling_plane(home)
 
         from cli.main import app
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-            patch("os.getuid", return_value=1000),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch.object(
                 __import__("core.ipam", fromlist=["IPAMLedger"]).IPAMLedger,
                 "peek_next_slot",

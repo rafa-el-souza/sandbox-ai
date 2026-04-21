@@ -321,33 +321,17 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # ── Instance resolution ──────────────────────────────────────────────
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    is_new = instance_dir is None or instance_id is None
 
-    if is_new:
-        console.print("  Instance: [yellow]NEW[/yellow] (would be scaffolded)")
-        # Build a default config for simulation
-        project_name = os.path.basename(project_dir)
-        host_user = "sandbox"
-        host_uid = str(os.getuid())
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": project_name,
-                "user_project_root": project_dir,
-                "host_unprivileged_user": host_user,
-                "host_uid": host_uid,
-            }
-        })
-        instance_id = f"{project_name}-dry000"
-        instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-        console.print(f"  Project: {project_name}")
-        console.print(f"  User: {host_user}")
-        console.print(f"  Directory: {instance_dir} [dim](simulated)[/dim]")
-    else:
-        assert instance_dir is not None
-        assert instance_id is not None
-        console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
-        config = _load_config(instance_dir)
-        host_user = config.project.host_unprivileged_user
+    if instance_dir is None or instance_id is None:
+        console.print(
+            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
+    config = _load_config(instance_dir)
+    host_user = config.project.host_unprivileged_user
 
     name = config.project.name
 
@@ -384,15 +368,12 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
         console.print(f"\n  Templates: [green]{validated} validated[/green]")
 
     # ── Secret completeness check ────────────────────────────────────────
-    if not is_new:
-        env_path = os.path.join(instance_dir, ".sandbox.env")
-        missing_secrets = _check_secrets(env_path, config)
-        if missing_secrets:
-            console.print("\n  [yellow]Missing/empty secrets:[/yellow]")
-            for secret in missing_secrets:
-                console.print(f"    ⊘ {secret}")
-    else:
-        console.print("\n  Secrets: [dim]would be prompted during scaffold[/dim]")
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    missing_secrets = _check_secrets(env_path, config)
+    if missing_secrets:
+        console.print("\n  [yellow]Missing/empty secrets:[/yellow]")
+        for secret in missing_secrets:
+            console.print(f"    ⊘ {secret}")
 
     # ── Command preview ──────────────────────────────────────────────────
     compose_files = _build_compose_files(instance_dir, config)
