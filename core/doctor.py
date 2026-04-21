@@ -221,7 +221,7 @@ def check_machinectl_reachable(user: str, distro: str | None) -> CheckResult:
         result = subprocess.run(
             [
                 "sudo", "machinectl", "shell", f"{user}@.host",
-                "--", "/bin/bash", "-c", "echo ok",
+                "/bin/bash", "-c", "echo ok",
             ],
             capture_output=True,
             text=True,
@@ -264,7 +264,7 @@ def check_docker_available(user: str, distro: str | None) -> CheckResult:
     result = subprocess.run(
         [
             "sudo", "machinectl", "shell", f"{user}@.host",
-            "--", "/bin/bash", "-c",
+            "/bin/bash", "-c",
             "docker version --format '{{.Server.Version}}'",
         ],
         capture_output=True,
@@ -292,7 +292,7 @@ def check_docker_rootless(user: str, distro: str | None) -> CheckResult:
     result = subprocess.run(
         [
             "sudo", "machinectl", "shell", f"{user}@.host",
-            "--", "/bin/bash", "-c",
+            "/bin/bash", "-c",
             "docker info --format '{{.SecurityOptions}}'",
         ],
         capture_output=True,
@@ -323,7 +323,7 @@ def check_runsc_registered(user: str, distro: str | None) -> CheckResult:
     result = subprocess.run(
         [
             "sudo", "machinectl", "shell", f"{user}@.host",
-            "--", "/bin/bash", "-c",
+            "/bin/bash", "-c",
             "docker info --format '{{json .Runtimes}}'",
         ],
         capture_output=True,
