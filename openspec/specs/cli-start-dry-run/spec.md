@@ -20,7 +20,7 @@ The system SHALL accept a `--dry-run` flag on `sandbox start` that simulates the
 - **THEN** the process exits with code 1 with the failure reason displayed
 
 ### Requirement: Instance Resolution in Dry-Run
-The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start.
+The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init`.
 
 #### Scenario: Existing instance resolved
 - **WHEN** dry-run is invoked and the project directory has a registered instance
@@ -28,11 +28,11 @@ The system SHALL resolve the instance from the registry in dry-run mode using th
 
 #### Scenario: Existing instance with incomplete secrets
 - **WHEN** dry-run resolves an existing instance and `.sandbox.env` is missing keys required by the current config (e.g., `PG_PASSWORD` when `db_postgres.enabled = true`)
-- **THEN** dry-run reports the missing secrets that would be prompted on the next real start
+- **THEN** dry-run reports the missing secrets as warnings
 
-#### Scenario: New instance simulated
+#### Scenario: No instance found — error with guidance
 - **WHEN** dry-run is invoked and no instance exists for the project directory
-- **THEN** the system renders the scaffold from defaults (hardcoded `sandbox` unprivileged user) and displays the directory tree, default config, and secrets that would be prompted
+- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init --user <user>` first." and exit code 1
 
 ### Requirement: IPAM Slot Preview
 The system SHALL compute the IPAM slot that would be allocated without writing to the ledger.

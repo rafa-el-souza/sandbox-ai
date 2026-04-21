@@ -5,7 +5,7 @@ This specification defines the `sandbox doctor` diagnostic command, which valida
 ## Requirements
 
 ### Requirement: Doctor Command Interface
-The system SHALL provide a `sandbox doctor --user <name>` command that validates host readiness for sandbox operation. The `--user` parameter SHALL be mandatory with no default value.
+The system SHALL provide a `sandbox doctor --user <name>` command that validates host readiness for sandbox operation. The `--user` parameter SHALL be mandatory with no default value. The doctor module SHALL also expose a programmatic subset API for use by other commands.
 
 #### Scenario: Doctor invoked with user parameter
 - **WHEN** the operator runs `sandbox doctor --user sandbox`
@@ -200,3 +200,18 @@ The system SHALL render results using Rich, grouped by category, with compact su
 #### Scenario: Summary line
 - **WHEN** all checks have been evaluated
 - **THEN** a summary line is displayed: `N/M passed · X failed · Y skipped`
+
+### Requirement: Check Subset API
+The system SHALL provide a function to execute a filtered subset of doctor checks by category, enabling `init` and `start` to run only their relevant dependency chains without duplicating check logic.
+
+#### Scenario: Init runs filesystem and repo checks
+- **WHEN** `sandbox init` invokes the doctor subset with categories `["Filesystem", "Repo Integrity"]`
+- **THEN** only the 4 checks in those categories are executed (setfacl, ACL support, tooling plane, state dir writable), with dependency graph and cascading skip logic preserved
+
+#### Scenario: Start runs privilege boundary checks
+- **WHEN** `sandbox start` invokes the doctor subset with category `["Privilege Boundary"]`
+- **THEN** only the 8 checks in that category are executed (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc), with dependency graph and cascading skip logic preserved
+
+#### Scenario: Subset results match full doctor format
+- **WHEN** the subset API returns results
+- **THEN** the return type is `list[CheckResult]`, identical to `run_checks`, and compatible with `render_results`

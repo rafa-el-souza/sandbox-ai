@@ -5,7 +5,15 @@ This specification defines the `sandbox start` command lifecycle, governing pre-
 ## Requirements
 
 ### Requirement: Pre-Lock Warm State Detection
-The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation.
+The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation. The system SHALL require a prior `sandbox init` and reject start if no instance is registered.
+
+#### Scenario: No instance found — error with guidance
+- **WHEN** `sandbox start` is invoked and no instance is registered for the current project directory
+- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init --user <user>` first." and exit code 1
+
+#### Scenario: Partial init detected
+- **WHEN** `sandbox start` is invoked and the registry contains an entry but `.initialized` sentinel is missing
+- **THEN** the CLI exits with "Instance partially initialized. Run `sandbox destroy` then `sandbox init`." and exit code 1
 
 #### Scenario: Already-running instance exits without lock contention
 - **WHEN** `sandbox start` is invoked and `docker compose ps -q` returns non-empty output
@@ -50,6 +58,36 @@ The system SHALL hand over the terminal to the admin container via `machinectl s
 #### Scenario: Terminal handed to admin container
 - **WHEN** containers are healthy and `state.lock` is released
 - **THEN** `sudo machinectl shell <host_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed and the user's terminal is now owned by that session
+
+### Requirement: Instance Pre-Flight Checks
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks.
+
+#### Scenario: Secret completeness gate
+- **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
+- **THEN** the CLI lists the missing secrets, prints the path to `.sandbox.env`, and exits with code 1 before acquiring any locks
+
+#### Scenario: Doctor Chain 1 pre-flight
+- **WHEN** `sandbox start` is invoked
+- **THEN** the system executes doctor Chain 1 checks (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc) and aborts with diagnostic output if any check fails
+
+#### Scenario: Pre-flight passes
+- **WHEN** sentinel exists, all required secrets are populated, and all Chain 1 checks pass
+- **THEN** provisioning proceeds normally
+
+### Requirement: Phase Progress Output
+The system SHALL display progress for each provisioning phase using Rich formatted output.
+
+#### Scenario: Fast phase completion
+- **WHEN** a provisioning phase (IPAM, credentials, hydration, ACL grant) completes
+- **THEN** a static line `✓ <phase name> (<summary>)` is printed
+
+#### Scenario: Compose up spinner
+- **WHEN** the compose up phase begins
+- **THEN** a Rich `console.status()` spinner is displayed until compose up completes, then replaced by a `✓ Containers ready (<duration>)` line
+
+#### Scenario: Handover indication
+- **WHEN** all phases complete and handover begins
+- **THEN** a `→ Handing over to admin shell` line is printed before the PTY exec
 
 #### Scenario: Warmup prompt injected at exec time
 - **WHEN** `sandbox.toml` declares a non-empty `project.warmup_prompt`
