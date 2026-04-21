@@ -5,11 +5,16 @@ machinectl reachability, Docker checks, filesystem checks, check runner,
 and Rich output renderer.
 """
 
+from __future__ import annotations
+
 import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import CapturedConsole
 
 # ── Section 1: Data Types ────────────────────────────────────────────────────
 
@@ -542,25 +547,17 @@ class TestCheckRunner:
 class TestRichRenderer:
     """Task 9.1: Rich console output renderer."""
 
-    def test_pass_marker(self) -> None:
-        from io import StringIO
-
+    def test_pass_marker(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results
-        from rich.console import Console
 
         results = [CheckResult(status="pass", name="Test Check", detail="ok")]
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
-        render_results(results, console=console)
-        output = buf.getvalue()
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
         assert "✓" in output
         assert "Test Check" in output
 
-    def test_fail_marker_with_expansion(self) -> None:
-        from io import StringIO
-
+    def test_fail_marker_with_expansion(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results
-        from rich.console import Console
 
         results = [
             CheckResult(
@@ -571,60 +568,43 @@ class TestRichRenderer:
                 doc_ref="https://docs.example.com",
             )
         ]
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
-        render_results(results, console=console)
-        output = buf.getvalue()
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
         assert "✗" in output
         assert "Broken Check" in output
         assert "sudo fix-it" in output
 
-    def test_skip_marker(self) -> None:
-        from io import StringIO
-
+    def test_skip_marker(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results
-        from rich.console import Console
 
         results = [CheckResult(status="skip", name="Skipped Check", detail="requires: root")]
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
-        render_results(results, console=console)
-        output = buf.getvalue()
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
         assert "⊘" in output
         assert "Skipped Check" in output
 
-    def test_summary_line_format(self) -> None:
-        from io import StringIO
-
+    def test_summary_line_format(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results
-        from rich.console import Console
 
         results = [
             CheckResult(status="pass", name="A", detail="ok"),
             CheckResult(status="fail", name="B", detail="bad", remediation="fix"),
             CheckResult(status="skip", name="C", detail="skip"),
         ]
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
-        render_results(results, console=console)
-        output = buf.getvalue()
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
         assert "1" in output  # 1 passed
         assert "failed" in output.lower() or "fail" in output.lower()
 
-    def test_category_grouping(self) -> None:
-        from io import StringIO
-
+    def test_category_grouping(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results
-        from rich.console import Console
 
         results = [
             CheckResult(status="pass", name="A", detail="ok", category="Group 1"),
             CheckResult(status="pass", name="B", detail="ok", category="Group 2"),
         ]
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120, highlight=False)
-        render_results(results, console=console)
-        output = buf.getvalue()
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
         assert "Group 1" in output
         assert "Group 2" in output
 
@@ -754,25 +734,17 @@ class TestRunCheckSubset:
 class TestRenderResultsWithSubset:
     """Task 1.3: Verify render_results works unchanged with subset results."""
 
-    def test_render_results_accepts_subset(self) -> None:
+    def test_render_results_accepts_subset(self, captured_console: CapturedConsole) -> None:
         """render_results works with subset results (no code change expected)."""
-        import re
-        from io import StringIO
-
         from core.doctor import CheckResult, render_results
-        from rich.console import Console
 
         # Simulate subset output — only Filesystem category
         results = [
             CheckResult(status="pass", name="setfacl binary", detail="ok", category="Filesystem"),
             CheckResult(status="pass", name="ACL support", detail="ok", category="Filesystem"),
         ]
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, no_color=True, width=120)
-        render_results(results, console=console)
-        output = buf.getvalue()
-        # Strip ANSI escape sequences — force_terminal emits bold escapes even with no_color
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
-        assert "Filesystem" in plain
-        assert "2/2 passed" in plain
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "Filesystem" in output
+        assert "2/2 passed" in output
 
