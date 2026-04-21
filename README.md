@@ -5,12 +5,15 @@ Deterministic, zero-trust orchestrator for isolated AI agent sandboxes.
 ## CLI Commands
 
 ```bash
-sandbox start     # Provision and launch a sandbox for the current project
+sandbox init      # Initialize a new sandbox instance for the current project
+sandbox start     # Launch a previously initialized sandbox
+sandbox status    # Show instance status, container health, and diagnostics
 sandbox attach    # Reconnect to a running sandbox (no re-provisioning)
 sandbox stop      # Gracefully stop a running sandbox
 sandbox stop --clean  # Stop and destroy named volumes (data unrecoverable)
 sandbox destroy   # Permanently remove a sandbox instance (interactive confirmation)
 sandbox destroy --force  # Bypass confirmation
+sandbox doctor    # Run host readiness diagnostics
 ```
 
 ## Directory Layout
@@ -34,14 +37,14 @@ SANDBOX_AI_HOME/                  # Git clone root
 │   ├── docker/                   # Hydrated compose files
 │   ├── config/                   # Hydrated sidecar configs
 │   └── log/                      # Orchestrator and container logs
-└── tests/unit/                   # TDD test suite (119 tests)
+└── tests/unit/                   # TDD test suite (226 tests)
 ```
 
 ## Configuration
 
 Each sandbox instance stores its configuration at `sandboxes/<id>/sandbox.toml`.
-The file is generated during `sandbox start` via the scaffolding pipeline and
-re-hydrated on every subsequent launch to ensure infrastructure drift is eliminated.
+The file is generated during `sandbox init` via the scaffolding pipeline and
+re-hydrated on every subsequent `sandbox start` to ensure infrastructure drift is eliminated.
 
 ## Development
 
