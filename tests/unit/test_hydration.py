@@ -177,6 +177,28 @@ class TestBuildJinjaContext:
 
         assert ".github.com" in ctx["proxy_whitelist_domains"]
 
+    def test_extras_context_keys(self, tmp_path: Path) -> None:
+        """Task 4.1: build_jinja_context includes pg_user, pg_db, and firecrawl IPs."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        ctx = build_jinja_context(
+            config=config,
+            base_index=0,
+            proxy_password="testpass",
+            instance_dir="/sandboxes/test",
+        )
+
+        # pg_user and pg_db from DbPostgresConfig
+        assert ctx["pg_user"] == "sandbox"
+        assert ctx["pg_db"] == "sandbox_db"
+        # Firecrawl IPs from derive_static_ips (already flow through **ips)
+        assert "mcp_firecrawl_isolated_ip" in ctx
+        assert "mcp_firecrawl_proxy_ip" in ctx
+        assert ctx["mcp_firecrawl_isolated_ip"] == "10.100.0.55"
+        assert ctx["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
+
 
 class TestRenderTemplates:
     @pytest.fixture
