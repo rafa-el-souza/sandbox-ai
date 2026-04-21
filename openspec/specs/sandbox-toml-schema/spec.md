@@ -5,7 +5,7 @@ This specification defines the `sandbox.toml` configuration file schema, governi
 ## Requirements
 
 ### Requirement: Schema Generation on Scaffold
-The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded.
+The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[components.db_postgres]` sub-table SHALL include `pg_user` and `pg_db` fields with defaults.
 
 #### Scenario: Auto-derived project name
 - **WHEN** no `project_name` override is present in an existing `sandbox.toml`
@@ -15,8 +15,12 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 - **WHEN** scaffold writes a new `sandbox.toml`
 - **THEN** the `project.host_uid` field is set to the UID of the invoking user (obtained via `os.getuid()`)
 
+#### Scenario: Database config defaults include pg_user and pg_db
+- **WHEN** scaffold writes a new `sandbox.toml` with `components.db_postgres.enabled = true`
+- **THEN** the `[components.db_postgres]` sub-table includes `pg_user = "sandbox"` and `pg_db = "sandbox_db"` as defaults
+
 ### Requirement: Pydantic Schema Validation
-The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid.
+The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings.
 
 #### Scenario: Missing required field
 - **WHEN** `sandbox.toml` is missing a required field (e.g., `project.user_project_root`)
@@ -25,6 +29,10 @@ The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecy
 #### Scenario: Unknown field rejection
 - **WHEN** `sandbox.toml` contains a field not present in the Pydantic model
 - **THEN** the CLI emits a warning (strict mode: error) identifying the unknown key
+
+#### Scenario: DbPostgresConfig validates pg_user and pg_db
+- **WHEN** `sandbox.toml` includes `[components.db_postgres]` with `pg_user` or `pg_db` fields
+- **THEN** the Pydantic model validates them as strings and applies defaults if absent
 
 ### Requirement: Component-Conditional Validation
 The system SHALL apply sub-table validation only for components that are enabled in `[components]`.

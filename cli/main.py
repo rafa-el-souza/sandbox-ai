@@ -417,7 +417,7 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
     """Check for missing or empty secrets in .sandbox.env."""
     required = ["CORE_ANTHROPIC_API_KEY"]
     if config.components_db_postgres.enabled:
-        required.append("PG_PASSWORD")
+        required.append("PG_PASSWORD")  # Auto-generated at init — validated here, not prompted
     if config.components.mcp_firecrawl:
         required.append("FIRECRAWL_API_KEY")
 
