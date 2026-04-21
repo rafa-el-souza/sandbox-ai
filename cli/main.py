@@ -88,7 +88,7 @@ def _warm_check(
         result = executor.run(
             [
                 "sudo", "machinectl", "shell", f"{host_user}@.host",
-                "--", "/bin/bash", "-c",
+                "/bin/bash", "-c",
                 f'COMPOSE_PROJECT_NAME={name} docker compose -f {compose_file} ps -q',
             ]
         )
@@ -195,7 +195,7 @@ def _phase_compose_up(
     executor.run(
         [
             "sudo", "machinectl", "shell", f"{host_user}@.host",
-            "--", "/bin/bash", "-c", cmd,
+            "/bin/bash", "-c", cmd,
         ]
     )
 
@@ -239,7 +239,7 @@ def _compose_down(
     executor.run(
         [
             "sudo", "machinectl", "shell", f"{host_user}@.host",
-            "--", "/bin/bash", "-c", cmd,
+            "/bin/bash", "-c", cmd,
         ]
     )
 
