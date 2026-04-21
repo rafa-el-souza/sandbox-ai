@@ -1192,6 +1192,166 @@ class TestDoctorRunnerInvoked:
             mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
             mock_render.assert_called_once()
 
+# ── sandbox init ─────────────────────────────────────────────────────────────
+
+
+class TestInitHappyPath:
+    """Task 3.1: sandbox init --user — happy path scaffold."""
+
+    def test_init_creates_instance(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init scaffolds a new instance successfully."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+        from core.hydration import SandboxConfig
+
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "newproject", "user_project_root": project_dir,
+                "host_unprivileged_user": "sandbox", "host_uid": "1000",
+            },
+        })
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 0
+
+
+class TestInitReInitRejection:
+    """Task 3.1: sandbox init — re-init rejected."""
+
+    def test_reinit_rejected(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init errors when instance already exists."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 1
+            assert "already initialized" in result.output.lower() or "destroy" in result.output.lower()
+
+
+class TestInitDryRun:
+    """Task 3.1: sandbox init --dry-run previews without writing."""
+
+    def test_init_dry_run_no_state(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init --dry-run does not create any files or registry entries."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox", "--dry-run"])
+            assert result.exit_code == 0
+
+        # Registry should be unmodified
+        reg_data = json.loads((home / ".state" / "instances.json").read_text())
+        assert project_dir not in reg_data
+
+
+class TestInitDoctorPreFlightFailure:
+    """Task 3.1: sandbox init — doctor pre-flight failure aborts."""
+
+    def test_init_aborts_on_doctor_failure(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init aborts when doctor pre-flight checks fail."""
+        from core.doctor import CheckResult
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+
+        failed_results = [
+            CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")
+        ]
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main.run_check_subset", return_value=failed_results),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 1
+
+
+class TestInitNonTTY:
+    """Task 3.1: sandbox init in non-TTY environment."""
+
+    def test_init_non_tty_completes(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """init completes in non-TTY mode (prompt_secrets skips)."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/newproject"
+
+        from cli.main import app
+        from core.hydration import SandboxConfig
+
+        mock_config = SandboxConfig.model_validate({
+            "project": {
+                "name": "newproject", "user_project_root": project_dir,
+                "host_unprivileged_user": "sandbox", "host_uid": "1000",
+            },
+        })
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            assert result.exit_code == 0
+
+
+class TestInitMissingUser:
+    """Task 3.1: sandbox init without --user errors."""
+
+    def test_init_missing_user_exits_error(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code != 0
+
 
 # ── sandbox start --dry-run ──────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 """Sandbox CLI orchestrator — full lifecycle implementation.
 
-Commands: start, stop, attach, destroy, doctor.
+Commands: init, start, stop, attach, destroy, doctor, status.
 All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
@@ -15,6 +15,7 @@ from core.doctor import (
     build_check_registry,
     detect_distro,
     render_results,
+    run_check_subset,
     run_checks,
 )
 from core.exceptions import SandboxExecutionError
@@ -28,6 +29,7 @@ from core.hydration import (
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_subnets
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
+    _detect_git_config,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
@@ -447,6 +449,105 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
 
 
 # ─── CLI Commands ────────────────────────────────────────────────────────────
+
+
+@app.command()
+def init(
+    user: str = typer.Option(..., "--user", help="Unprivileged user for the sandbox"),
+    git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
+    git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
+) -> None:
+    """Initialize a new sandbox instance for the current project."""
+    sandbox_ai_home = _resolve_sandbox_ai_home()
+    project_dir = _resolve_project_dir()
+
+    # Re-init guard (D-6)
+    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    if instance_dir is not None:
+        console.print(
+            "Instance already initialized for this directory. "
+            "Run `sandbox destroy` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
+    if not dry_run:
+        distro = detect_distro()
+        preflight_results = run_check_subset(
+            ["Filesystem", "Repo Integrity"], user, distro
+        )
+        has_failures = any(r.status == "fail" for r in preflight_results)
+        if has_failures:
+            render_results(preflight_results, console=console)
+            raise typer.Exit(code=1)
+
+    # Git config auto-detection (D-8)
+    if not git_user or not git_email:
+        detected_name, detected_email = _detect_git_config()
+        if not git_user:
+            git_user = detected_name
+        if not git_email:
+            git_email = detected_email
+
+    # Derive instance identity
+    instance_id = generate_instance_id(project_dir)
+    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+    project_name = os.path.basename(project_dir)
+
+    if dry_run:
+        console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
+        console.print(f"  Instance ID: {instance_id}")
+        console.print(f"  Directory: {instance_dir}")
+        console.print(f"  User: {user}")
+        console.print(f"  Git: {git_user} <{git_email}>")
+        console.print(f"  Project: {project_name}")
+        console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
+        return
+
+    # S1: Directory tree
+    create_instance_dirs(instance_dir)
+
+    # S2: sandbox.toml
+    write_sandbox_toml(
+        instance_dir, project_name, project_dir, user,
+        git_user=git_user, git_email=git_email,
+    )
+
+    # S3: .sandbox.env
+    config = _load_config(instance_dir)
+    env_path = os.path.join(instance_dir, ".sandbox.env")
+    create_env_file(
+        env_path,
+        db_postgres=config.components_db_postgres.enabled,
+        mcp_firecrawl=config.components.mcp_firecrawl,
+    )
+
+    # S4: Default ACLs (Pattern B)
+    dev_user = os.environ.get("USER", "dev")
+    apply_default_acls(instance_dir, config.project.user_project_root, dev_user)
+
+    # S5: Register
+    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
+    registry = InstanceRegistry(registry_path)
+    registry.register(project_dir, instance_id)
+
+    # S6: Secret prompting (non-TTY safe)
+    required_secrets: list[tuple[str, str]] = [
+        ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+        ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
+    ]
+    if config.components_db_postgres.enabled:
+        required_secrets.append(("PG_PASSWORD", "PostgreSQL password"))
+    if config.components.mcp_firecrawl:
+        required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
+    prompt_secrets(env_path, required_secrets)
+
+    # S7: Sentinel
+    write_initialized_sentinel(instance_dir)
+
+    console.print(f"Sandbox '{project_name}' initialized. Run `sandbox start` to launch.")
 
 
 
