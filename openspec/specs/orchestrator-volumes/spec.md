@@ -50,3 +50,43 @@ The system SHALL support volume removal on explicit operator request, scoped str
 #### Scenario: The `destroy` Full Annihilation
 - **WHEN** the human operator confirms `sandbox destroy`
 - **THEN** `docker compose down -v` removes all named Docker volumes, after which `shutil.rmtree(sandboxes/<id>/)` removes the entire instance directory including logs and cache
+
+### Requirement: Custom Config Override Bind Mounts
+The rendered `compose.yml` SHALL include read-only bind mounts provisioning the custom config override directories inside each container. Without these mounts, the override hooks in `.bashrc`, `.gitconfig`, `.zshrc`, and `.tmux.conf` would silently no-op.
+
+#### Scenario: Core custom config mount
+- **WHEN** the rendered `compose.yml` is inspected for the core service
+- **THEN** it contains a volume entry `{{ instance_dir }}/custom/config/core:{{ custom_config_core }}:ro`
+
+#### Scenario: Admin custom config mount
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** it contains a volume entry `{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro`
+
+### Requirement: Tmux Resurrect State Bind Mount
+The rendered `compose.yml` SHALL include a read-write bind mount for the tmux resurrect session state directory in the admin container, sourced from the `cache/admin/tmux_resurrect` instance subdirectory. This relocates the plugin state from the agent-writable workspace.
+
+#### Scenario: Tmux resurrect mount in admin service
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** it contains a volume entry `{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw`
+
+### Requirement: Container-Namespaced Cache Directory
+The `cache/` subtree SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`).
+
+#### Scenario: Scaffold creates namespaced cache directory
+- **WHEN** scaffold creates a new instance via `INSTANCE_SUBDIRS`
+- **THEN** `sandboxes/<id>/cache/core/.claude` is created (not `sandboxes/<id>/cache/.claude`)
+
+#### Scenario: Scaffold creates tmux resurrect cache directory
+- **WHEN** scaffold creates a new instance via `INSTANCE_SUBDIRS`
+- **THEN** `sandboxes/<id>/cache/admin/tmux_resurrect` is created
+
+#### Scenario: Compose mount references namespaced cache path
+- **WHEN** the rendered `compose.yml` is inspected for the core service
+- **THEN** the `.claude` directory mount references `{{ instance_dir }}/cache/core/.claude` (not `{{ instance_dir }}/cache/.claude`)
+
+### Requirement: Stale Proxy Seed File Removal
+The following files in `.config/proxy/` SHALL be deleted from the tooling plane: `allowed_domains.txt`, `trusted_clients.acl`, `.htpasswd`. These files are overridden by programmatic generation in `render_templates()` or by `core/crypto.py` during scaffold. Their presence in the tooling plane is misleading — edits to them have no effect.
+
+#### Scenario: No stale proxy seed files in tooling plane
+- **WHEN** the `.config/proxy/` directory in the tooling plane is inspected
+- **THEN** it contains only `squid.conf` and `ERR_SANDBOX_403` (the Jinja2 template and the static error page)

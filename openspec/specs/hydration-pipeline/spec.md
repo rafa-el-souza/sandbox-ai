@@ -20,7 +20,7 @@ The system SHALL render all Jinja2 templates from the tooling plane into the ins
 
 #### Scenario: Config templates rendered
 - **WHEN** `sandbox start` proceeds to the hydration phase
-- **THEN** `.config/dns-sidecar/Corefile` is rendered into `sandboxes/<id>/config/dns-sidecar/Corefile` with the `proxy.whitelist.domains` list resolved
+- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `sandboxes/<id>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `dns-sidecar/Corefile`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `admin/.zshrc`, and `admin/.tmux.conf`.
 
 #### Scenario: Extras templates resolve Jinja2 variables
 - **WHEN** an enabled extras template (e.g., `db-postgres.yml`) is rendered
@@ -42,7 +42,7 @@ The system SHALL render extension override files only for components that are en
 - **THEN** `.docker/extras/db-postgres.yml` is rendered into `sandboxes/<id>/docker/extras/db-postgres.yml`
 
 ### Requirement: Extras Jinja2 Context Completeness
-The system SHALL include all values required by extras templates in the Jinja2 context returned by `build_jinja_context()`.
+The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`.
 
 #### Scenario: Database context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -53,8 +53,32 @@ The system SHALL include all values required by extras templates in the Jinja2 c
 - **THEN** the returned context includes `mcp_firecrawl_isolated_ip`, `mcp_firecrawl_proxy_ip`, `proxy_password`, `dns_sidecar_ip`, `proxy_ip`, `db_postgres_ip`, `isolated_subnet`, `proxy_subnet`, `core_pids_limit`, `runtime`, and `instance_dir`
 
 #### Scenario: Dry-run validation catches missing context keys
-- **WHEN** `validate_templates()` renders an extras template and a required Jinja2 variable is missing from the context
+- **WHEN** `validate_templates()` renders a template (including extras and config templates) and a required Jinja2 variable is missing from the context
 - **THEN** `jinja2.StrictUndefined` raises `UndefinedError` and the validation reports the missing variable name and template file
+
+#### Scenario: Proxy URL context key present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `proxy_url_core` with value `http://proxyuser:<proxy_password>@proxy:3128`
+
+#### Scenario: Git identity context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `git_user` (from `config.core.git_user`, falling back to `"Agent"` when empty) and `git_email` (from `config.core.git_email`, falling back to `"agent@sandbox.local"` when empty)
+
+#### Scenario: Custom config path context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `custom_config_core` (value: `/home/agent/.sandbox/custom`), `custom_config_admin` (value: `/home/human/.sandbox/custom`), and `tmux_resurrect_dir` (value: `/home/human/.sandbox/tmux_resurrect`)
+
+#### Scenario: Component enablement context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `db_postgres_enabled` (from `config.components_db_postgres.enabled`) and `mcp_firecrawl_enabled` (from `config.components.mcp_firecrawl`)
+
+#### Scenario: Custom CLAUDE.md rules context key present
+- **WHEN** `build_jinja_context()` is called and `custom/config/core/CLAUDE.md` exists in the instance directory
+- **THEN** the returned context includes `custom_claude_rules` containing the file's contents
+
+#### Scenario: Custom CLAUDE.md rules absent
+- **WHEN** `build_jinja_context()` is called and `custom/config/core/CLAUDE.md` does not exist in the instance directory
+- **THEN** the returned context includes `custom_claude_rules` with value `""`
 
 ### Requirement: Precious State Preservation
 The system SHALL never overwrite the user's persistent state files during hydration.
@@ -114,3 +138,44 @@ The rendered `compose.yml` SHALL include static hardening properties that are no
 #### Scenario: DNS sidecar IP forwarding disabled
 - **WHEN** `compose.yml` is rendered
 - **THEN** the dns-sidecar service's `sysctls` block contains `net.ipv4.ip_forward=0`
+
+### Requirement: Config Template Path Templatization
+The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations and tmux resurrect state directories within rendered config files. No rendered config file SHALL contain the literal path `/workspace/.sandbox/custom/` or `/workspace/.tmux_resurrect`.
+
+#### Scenario: Core config files use templatized custom path
+- **WHEN** `.config/core/.gitconfig` and `.config/core/.bashrc` are rendered
+- **THEN** custom config references resolve to the value of `{{ custom_config_core }}` (not `/workspace/.sandbox/custom/`)
+
+#### Scenario: Admin config files use templatized custom path
+- **WHEN** `.config/admin/.zshrc` and `.config/admin/.tmux.conf` are rendered
+- **THEN** custom config references resolve to the value of `{{ custom_config_admin }}` (not `/workspace/.sandbox/custom/`)
+
+#### Scenario: Tmux resurrect dir uses templatized path
+- **WHEN** `.config/admin/.tmux.conf` is rendered
+- **THEN** the resurrect-dir setting resolves to the value of `{{ tmux_resurrect_dir }}` (not `/workspace/.tmux_resurrect`)
+
+#### Scenario: No hardcoded workspace sandbox paths in rendered output
+- **WHEN** all config templates are rendered
+- **THEN** zero files in the rendered instance contain `/workspace/.sandbox/` or `/workspace/.tmux_resurrect`
+
+### Requirement: Gitconfig Default Filter Removal
+The `.config/core/.gitconfig` template SHALL use bare `{{ git_user }}` and `{{ git_email }}` without Jinja2 `| default()` filters. Default resolution is the responsibility of `build_jinja_context()`.
+
+#### Scenario: Gitconfig uses bare context variables
+- **WHEN** `.config/core/.gitconfig` template source is inspected
+- **THEN** it contains `{{ git_user }}` and `{{ git_email }}` without `| default(...)` filters
+
+### Requirement: Zshrc Load Order Contract
+The `.config/admin/.zshrc` template SHALL enforce a tail load order of: (1) `starship init`, (2) user override hook, (3) warmup prompt. A comment block SHALL document this contract.
+
+#### Scenario: Starship init before user override
+- **WHEN** the rendered `.zshrc` is inspected
+- **THEN** the `eval "$(starship init zsh)"` line appears before the user override `source` block
+
+#### Scenario: User override before warmup prompt
+- **WHEN** the rendered `.zshrc` is inspected
+- **THEN** the user override `source` block appears before the `SANDBOX_WARMUP_PROMPT` check
+
+#### Scenario: Load order contract comment present
+- **WHEN** the `.config/admin/.zshrc` template source is inspected
+- **THEN** it contains a comment block documenting the load order: shell setup → starship init → user override → warmup prompt
