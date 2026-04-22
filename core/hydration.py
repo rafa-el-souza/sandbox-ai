@@ -143,13 +143,29 @@ class SandboxConfig(BaseModel):
 # ─── Jinja2 Context Builder ──────────────────────────────────────────────────
 
 
+def _read_optional_file(path: str) -> str:
+    """Return file contents (trailing whitespace stripped) if exists, '' otherwise."""
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read().rstrip()
+    return ""
+
+
 def build_jinja_context(
     config: SandboxConfig,
     base_index: int,
     proxy_password: str,
     instance_dir: str,
 ) -> dict[str, Any]:
-    """Build the complete Jinja2 template context from parsed config + IPAM."""
+    """Build the complete Jinja2 template context from parsed config + IPAM.
+
+    Context contract:
+        All template variable defaults are resolved here. Templates use bare
+        ``{{ var }}`` without Jinja2 ``| default()`` filters. The Jinja2
+        ``StrictUndefined`` configuration enforces completeness — any variable
+        referenced in a template but absent from this context raises
+        ``UndefinedError`` at render time and during ``--dry-run`` validation.
+    """
     isolated, proxy, egress = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
 
@@ -161,13 +177,20 @@ def build_jinja_context(
         **ips,
         # Credentials
         "proxy_password": proxy_password,
+        "proxy_url_core": f"http://proxyuser:{proxy_password}@proxy:3128",
         # Paths
         "instance_dir": instance_dir,
         "user_project_root": config.project.user_project_root,
+        "custom_config_core": "/home/agent/.sandbox/custom",
+        "custom_config_admin": "/home/human/.sandbox/custom",
+        "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",
         # Project
         "project_name": config.project.name,
         "host_uid": config.project.host_uid,
         "warmup_prompt": config.project.warmup_prompt,
+        # Git identity
+        "git_user": config.core.git_user or "Agent",
+        "git_email": config.core.git_email or "agent@sandbox.local",
         # Core
         "core_base_image": config.core.base_image,
         "core_distro_family": config.core.base_distro_family,
@@ -202,6 +225,13 @@ def build_jinja_context(
         # Extras: db-postgres
         "pg_user": config.components_db_postgres.pg_user,
         "pg_db": config.components_db_postgres.pg_db,
+        # Component enablement flags
+        "db_postgres_enabled": config.components_db_postgres.enabled,
+        "mcp_firecrawl_enabled": config.components.mcp_firecrawl,
+        # Custom CLAUDE.md rules (user-authored, concatenated into rendered output)
+        "custom_claude_rules": _read_optional_file(
+            os.path.join(instance_dir, "custom/config/core/CLAUDE.md")
+        ),
     }
 
 
@@ -215,11 +245,17 @@ _JINJA_RENDERED_DOCKER = [
 _JINJA_RENDERED_CONFIG = [
     ("dns-sidecar/Corefile", "config/dns-sidecar/Corefile"),
     ("proxy/squid.conf", "config/proxy/squid.conf"),
+    ("core/.gitconfig", "config/core/.gitconfig"),
+    ("core/.npmrc", "config/core/.npmrc"),
+    ("core/.bashrc", "config/core/.bashrc"),
+    ("core/CLAUDE.md", "config/core/CLAUDE.md"),
+    ("admin/.zshrc", "config/admin/.zshrc"),
+    ("admin/.tmux.conf", "config/admin/.tmux.conf"),
 ]
 
 # Static files copied as-is (no Jinja2 processing)
-_STATIC_CONFIG_ADMIN = [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml"]
-_STATIC_CONFIG_CORE = [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]
+_STATIC_CONFIG_ADMIN = ["gitmux.conf", "starship.toml"]
+_STATIC_CONFIG_CORE = [".claude.json"]
 _STATIC_CONFIG_PROXY = ["ERR_SANDBOX_403"]
 
 
@@ -242,12 +278,18 @@ def render_templates(
         keep_trailing_newline=True,
     )
 
-    # ── Docker templates ──────────────────────────────────────────────────
+    # ── Standard registry-driven templates ─────────────────────────────────
+    # _JINJA_RENDERED_DOCKER and _JINJA_RENDERED_CONFIG are the authoritative
+    # file registries. All standard templates are iterated here.
 
-    # compose.yml
-    _render_file(env, ".docker/compose.yml", instance_dir, "docker/compose.yml", context)
+    for src_rel, dst_rel in _JINJA_RENDERED_DOCKER:
+        _render_file(env, f".docker/{src_rel}", instance_dir, dst_rel, context)
 
-    # Core Dockerfile (selected by distro family)
+    for src_rel, dst_rel in _JINJA_RENDERED_CONFIG:
+        _render_file(env, f".config/{src_rel}", instance_dir, dst_rel, context)
+
+    # ── Distro-selected Dockerfiles (dynamic template path) ───────────────
+
     core_family = context["core_distro_family"]
     _render_file(
         env,
@@ -256,10 +298,7 @@ def render_templates(
         "docker/core/Dockerfile.core",
         context,
     )
-    # Core entrypoint (static copy)
-    _copy_file(tooling_plane, ".docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
 
-    # Admin Dockerfile (selected by distro family)
     admin_family = context["admin_distro_family"]
     _render_file(
         env,
@@ -268,10 +307,14 @@ def render_templates(
         "docker/admin/Dockerfile.admin",
         context,
     )
-    # Admin entrypoint (static copy)
+
+    # ── Static copies (no Jinja2 rendering) ───────────────────────────────
+
+    _copy_file(tooling_plane, ".docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
     _copy_file(tooling_plane, ".docker/admin/entrypoint.sh", instance_dir, "docker/admin/entrypoint.sh")
 
-    # Component-conditional extras
+    # ── Feature-gated extras ──────────────────────────────────────────────
+
     if db_postgres:
         _render_file(env, ".docker/extras/db-postgres.yml", instance_dir, "docker/extras/db-postgres.yml", context)
     if mcp_firecrawl:
@@ -283,13 +326,7 @@ def render_templates(
             "docker/extras/Dockerfile.mcp-firecrawl",
         )
 
-    # ── Config templates ──────────────────────────────────────────────────
-
-    # DNS sidecar Corefile (Jinja2)
-    _render_file(env, ".config/dns-sidecar/Corefile", instance_dir, "config/dns-sidecar/Corefile", context)
-
-    # Proxy squid.conf (Jinja2)
-    _render_file(env, ".config/proxy/squid.conf", instance_dir, "config/proxy/squid.conf", context)
+    # ── Programmatic generation ───────────────────────────────────────────
 
     # Generate allowed_domains.txt from whitelist
     domains = context.get("proxy_whitelist_domains", [])
@@ -304,15 +341,14 @@ def render_templates(
         f.write(f"{context['isolated_subnet']}\n")
         f.write(f"{context['proxy_subnet']}\n")
 
-    # Static proxy files
+    # ── Static config copies ──────────────────────────────────────────────
+
     for filename in _STATIC_CONFIG_PROXY:
         _copy_file(tooling_plane, f".config/proxy/{filename}", instance_dir, f"config/proxy/{filename}")
 
-    # Static admin configs
     for filename in _STATIC_CONFIG_ADMIN:
         _copy_file(tooling_plane, f".config/admin/{filename}", instance_dir, f"config/admin/{filename}")
 
-    # Static core configs
     for filename in _STATIC_CONFIG_CORE:
         _copy_file(tooling_plane, f".config/core/{filename}", instance_dir, f"config/core/{filename}")
 
@@ -370,13 +406,14 @@ def validate_templates(
     errors: list[str] = []
     validated = 0
 
-    # Build the full list of templates to validate
+    # Build the full list of templates from the authoritative registries
     templates: list[str] = [
-        ".docker/compose.yml",
+        f".docker/{src_rel}" for src_rel, _ in _JINJA_RENDERED_DOCKER
+    ] + [
+        f".config/{src_rel}" for src_rel, _ in _JINJA_RENDERED_CONFIG
+    ] + [
         f".docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
         f".docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
-        ".config/dns-sidecar/Corefile",
-        ".config/proxy/squid.conf",
     ]
 
     if db_postgres:

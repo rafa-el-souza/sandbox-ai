@@ -59,7 +59,6 @@ services:
       egress_net:
     volumes:
       - "{{ instance_dir }}/config/dns-sidecar/Corefile:/etc/coredns/Corefile:ro"
-      - "{{ instance_dir }}/config/dns-sidecar/allowed_domains.txt:/etc/coredns/allowed_domains.txt:ro"
     command: -conf /etc/coredns/Corefile
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/health || exit 1"]
@@ -158,8 +157,10 @@ services:
       - "{{ instance_dir }}/config/core/.bashrc:/home/agent/.bashrc:ro"
       - "{{ instance_dir }}/config/core/.npmrc:/home/agent/.npmrc:ro"
       - "{{ instance_dir }}/config/core/.gitconfig:/home/agent/.gitconfig:ro"
-      - "{{ instance_dir }}/cache/.claude:/home/agent/.claude:rw"
+      - "{{ instance_dir }}/cache/core/.claude:/home/agent/.claude:rw"
+      - "{{ instance_dir }}/config/core/CLAUDE.md:/home/agent/.claude/CLAUDE.md:ro"
       - "{{ instance_dir }}/config/core/.claude.json:/home/agent/.claude.json:rw"
+      - "{{ instance_dir }}/custom/config/core:{{ custom_config_core }}:ro"
       - "{{ instance_dir }}/docker/core/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro"
       - admin-ipc_vol:/sock
       - mcp-ipc_vol:/var/run/mcp
@@ -251,6 +252,8 @@ services:
       - "{{ instance_dir }}/config/admin/.tmux.conf:/home/human/.tmux.conf:ro"
       - "{{ instance_dir }}/config/admin/gitmux.conf:/home/human/.tmux/plugins/catppuccin/tmux/status/gitmux.conf:ro"
       - "{{ instance_dir }}/config/admin/starship.toml:/home/human/.config/starship.toml:ro"
+      - "{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro"
+      - "{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw"
       - admin-ipc_vol:/sock
       - "{{ instance_dir }}/log/admin:/home/human/.log:rw"
     sysctls:
