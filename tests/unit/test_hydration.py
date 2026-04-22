@@ -202,6 +202,39 @@ class TestBuildJinjaContext:
         assert ctx["mcp_firecrawl_isolated_ip"] == "10.100.0.55"
         assert ctx["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
 
+    def test_custom_claude_rules_loaded_when_present(self, tmp_path: Path) -> None:
+        """custom_claude_rules contains file content when custom/config/core/CLAUDE.md exists."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        instance_dir = tmp_path / "instance"
+        custom_rules = instance_dir / "custom" / "config" / "core" / "CLAUDE.md"
+        custom_rules.parent.mkdir(parents=True)
+        custom_rules.write_text("Always use pytest.\n")
+
+        ctx = build_jinja_context(
+            config=config,
+            base_index=0,
+            proxy_password="x",
+            instance_dir=str(instance_dir),
+        )
+        assert ctx["custom_claude_rules"] == "Always use pytest."
+
+    def test_custom_claude_rules_empty_when_absent(self, tmp_path: Path) -> None:
+        """custom_claude_rules is '' when custom/config/core/CLAUDE.md does not exist."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        ctx = build_jinja_context(
+            config=config,
+            base_index=0,
+            proxy_password="x",
+            instance_dir=str(tmp_path / "nonexistent"),
+        )
+        assert ctx["custom_claude_rules"] == ""
+
 
 class TestCoreConfigResourceLimits:
     """Task 8.1, 8.3: CoreConfig mem_limit and cpus fields with defaults."""
