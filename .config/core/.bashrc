@@ -14,6 +14,6 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
 # User Override Hook
-if [ -f "/workspace/.sandbox/custom/.bashrc" ]; then
-    source "/workspace/.sandbox/custom/.bashrc"
+if [ -f "{{ custom_config_core }}/.bashrc" ]; then
+    source "{{ custom_config_core }}/.bashrc"
 fi

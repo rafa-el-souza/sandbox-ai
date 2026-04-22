@@ -1,6 +1,6 @@
 [user]
-    name = {{ git_user | default('Agent') }}
-    email = {{ git_email | default('agent@sandbox.local') }}
+    name = {{ git_user }}
+    email = {{ git_email }}
 
 [http]
     proxy = {{ proxy_url_core }}
@@ -9,4 +9,4 @@
     insteadOf = git@github.com:
 
 [include]
-    path = /workspace/.sandbox/custom/.gitconfig
+    path = {{ custom_config_core }}/.gitconfig

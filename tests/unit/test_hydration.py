@@ -1,6 +1,7 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
 
+import os
 from pathlib import Path
 
 import pytest
@@ -386,7 +387,8 @@ class TestRenderTemplates:
         for d in [
             "docker/core", "docker/admin", "docker/extras",
             "config/admin", "config/core", "config/dns-sidecar", "config/proxy",
-            "log/admin", "log/core", "cache/.claude", "custom/config/admin",
+            "log/admin", "log/core", "cache/core/.claude", "cache/admin/tmux_resurrect",
+            "custom/config/admin", "custom/config/core",
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
@@ -445,7 +447,7 @@ class TestRenderTemplates:
         (instance / "sandbox.toml").write_text("PRECIOUS")
         (instance / ".sandbox.env").write_text("PRECIOUS")
         (instance / "custom" / "config" / "admin" / "custom.zshrc").write_text("PRECIOUS")
-        (instance / "cache" / ".claude" / "settings.json").write_text("PRECIOUS")
+        (instance / "cache" / "core" / ".claude" / "settings.json").write_text("PRECIOUS")
         (instance / "log" / "admin" / "test.log").write_text("PRECIOUS")
 
         render_templates(ctx, str(tooling), str(instance), db_postgres=True, mcp_firecrawl=True)
@@ -453,7 +455,7 @@ class TestRenderTemplates:
         assert (instance / "sandbox.toml").read_text() == "PRECIOUS"
         assert (instance / ".sandbox.env").read_text() == "PRECIOUS"
         assert (instance / "custom" / "config" / "admin" / "custom.zshrc").read_text() == "PRECIOUS"
-        assert (instance / "cache" / ".claude" / "settings.json").read_text() == "PRECIOUS"
+        assert (instance / "cache" / "core" / ".claude" / "settings.json").read_text() == "PRECIOUS"
         assert (instance / "log" / "admin" / "test.log").read_text() == "PRECIOUS"
 
     def test_renders_corefile(self, tooling_and_instance: tuple[Path, Path]) -> None:
@@ -476,8 +478,14 @@ class TestRenderTemplates:
         domains = (instance / "config" / "proxy" / "allowed_domains.txt").read_text()
         assert ".github.com" in domains
 
-    def test_copies_static_configs(self, tooling_and_instance: tuple[Path, Path]) -> None:
-        """Static config files (admin/, core/) are copied to instance."""
+    def test_renders_and_copies_configs(self, tooling_and_instance: tuple[Path, Path]) -> None:
+        """Config files are rendered (Jinja2) or statically copied to instance.
+
+        .zshrc, .tmux.conf, .bashrc, .npmrc, .gitconfig, and CLAUDE.md are now
+        rendered through the Jinja2 pipeline (not statically copied). Static files
+        (.claude.json, gitmux.conf, starship.toml) are still copied as-is.
+        Assertions verify file existence at the expected output paths.
+        """
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
@@ -487,6 +495,41 @@ class TestRenderTemplates:
         assert (instance / "config" / "core" / ".bashrc").exists()
         assert (instance / "config" / "core" / "CLAUDE.md").exists()
 
+    def test_no_unresolved_jinja_markers(self, tooling_and_instance: tuple[Path, Path]) -> None:
+        """T1: No rendered file under instance dir contains literal {{ markers.
+
+        This test scans all rendered output for surviving Jinja2 template syntax
+        after a full render_templates() call. It catches future regressions where
+        a file is misclassified as static (and therefore not rendered), leaving
+        {{ }} markers in the deployed config.
+
+        Synthetic stub limitation: The fixture tooling plane uses minimal stubs,
+        not the real .config/ files. This means the test would NOT have detected
+        the original Defect 1 (stubs contained no {{ }} markers). Full
+        content-level coverage requires T2/T3 integration tests against the real
+        tooling plane (separate change).
+        """
+        tooling, instance = tooling_and_instance
+        ctx = _build_test_context(str(instance))
+
+        render_templates(ctx, str(tooling), str(instance), db_postgres=True, mcp_firecrawl=True)
+
+        violations: list[str] = []
+        for root, _dirs, files in os.walk(str(instance)):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath) as f:
+                        content = f.read()
+                except (UnicodeDecodeError, PermissionError):
+                    continue
+                if "{{" in content:
+                    rel = os.path.relpath(fpath, str(instance))
+                    violations.append(rel)
+
+        assert violations == [], (
+            f"Unresolved Jinja2 markers found in rendered files: {violations}"
+        )
 
 def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
@@ -504,6 +547,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "egress_subnet": egress,
         **ips,
         "proxy_password": "testpass",
+        "proxy_url_core": "http://proxyuser:testpass@proxy:3128",
         "core_base_image": "cgr.dev/chainguard/wolfi-base:latest",
         "admin_base_image": "debian:trixie-slim",
         "core_distro_family": "wolfi",
@@ -529,6 +573,14 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "pg_user": "sandbox",
         "pg_db": "sandbox_db",
         "warmup_prompt": "",
+        "git_user": "Agent",
+        "git_email": "agent@sandbox.local",
+        "custom_config_core": "/home/agent/.sandbox/custom",
+        "custom_config_admin": "/home/human/.sandbox/custom",
+        "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",
+        "db_postgres_enabled": True,
+        "mcp_firecrawl_enabled": False,
+        "custom_claude_rules": "",
     }
 
 
@@ -600,17 +652,22 @@ class TestValidateTemplates:
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".config" / "core" / "CLAUDE.md").unlink()
+        (tooling / ".config" / "core" / ".claude.json").unlink()
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
         )
         assert any("Static file missing" in e for e in errors)
-        assert any("CLAUDE.md" in e for e in errors)
+        assert any(".claude.json" in e for e in errors)
 
 
 def _build_minimal_tooling(tmp_path: Path) -> Path:
-    """Build minimal tooling plane for validate_templates tests."""
+    """Build minimal tooling plane for validate_templates tests.
+
+    Config file set matches the updated _JINJA_RENDERED_CONFIG and
+    _STATIC_CONFIG_* lists so TestValidateTemplates exercises the correct
+    template and static file sets.
+    """
     tooling = tmp_path / "tooling"
     docker_dir = tooling / ".docker"
     docker_dir.mkdir(parents=True)
@@ -636,14 +693,25 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     proxy_dir.mkdir(parents=True)
     (proxy_dir / "squid.conf").write_text("# {{ proxy_ip }}\n")
     (proxy_dir / "ERR_SANDBOX_403").write_text("DENIED\n")
+    # Admin: rendered templates + static files
     admin_cfg = config_dir / "admin"
     admin_cfg.mkdir(parents=True)
-    for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml"]:
+    # Rendered (.zshrc, .tmux.conf)
+    (admin_cfg / ".zshrc").write_text("# zshrc {{ custom_config_admin }}\n")
+    (admin_cfg / ".tmux.conf").write_text("# tmux {{ tmux_resurrect_dir }}\n")
+    # Static (gitmux.conf, starship.toml)
+    for f in ["gitmux.conf", "starship.toml"]:
         (admin_cfg / f).write_text(f"# {f}\n")
+    # Core: rendered templates + static files
     core_cfg = config_dir / "core"
     core_cfg.mkdir(parents=True)
-    for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
-        (core_cfg / f).write_text(f"# {f}\n")
+    # Rendered (.bashrc, .npmrc, .gitconfig, CLAUDE.md)
+    (core_cfg / ".bashrc").write_text("# bashrc {{ custom_config_core }}\n")
+    (core_cfg / ".npmrc").write_text("proxy={{ proxy_url_core }}\n")
+    (core_cfg / ".gitconfig").write_text("# git {{ git_user }} {{ git_email }}\n")
+    (core_cfg / "CLAUDE.md").write_text("# CLAUDE {{ db_postgres_enabled }}\n")
+    # Static (.claude.json)
+    (core_cfg / ".claude.json").write_text('{"version": 1}\n')
 
     return tooling
 
