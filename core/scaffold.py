@@ -58,6 +58,8 @@ warmup_prompt = ""
 [core]
 shm_size = "2gb"
 pids_limit = 400
+mem_limit = "8gb"
+cpus = 4.0
 base_image = "cgr.dev/chainguard/wolfi-base:latest"
 base_distro_family = "wolfi"
 git_user = "{git_user}"
@@ -66,6 +68,8 @@ git_email = "{git_email}"
 [admin]
 shm_size = "2gb"
 pids_limit = 400
+mem_limit = "8gb"
+cpus = 4.0
 base_image = "debian:trixie-slim"
 base_distro_family = "debian"
 

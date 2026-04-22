@@ -9,7 +9,7 @@ The system SHALL provide a `sandbox doctor --user <name>` command that validates
 
 #### Scenario: Doctor invoked with user parameter
 - **WHEN** the operator runs `sandbox doctor --user sandbox`
-- **THEN** the system executes all 12 diagnostic checks and reports results grouped by category
+- **THEN** the system executes all 13 diagnostic checks and reports results grouped by category
 
 #### Scenario: Doctor invoked without user parameter
 - **WHEN** the operator runs `sandbox doctor` without `--user`
@@ -110,6 +110,65 @@ The system SHALL verify that the `runsc` runtime is registered in Docker.
 - **WHEN** `runsc` is absent from the Docker runtime list
 - **THEN** the check reports FAIL with a link to gVisor installation documentation
 
+### Requirement: runsc RuntimeArgs Validation
+The system SHALL verify that the sandbox user's rootless Docker daemon has `--oci-seccomp` and `--debug-log` configured in the `runsc` runtime's `runtimeArgs`. This check SHALL use `warn` severity — it is a defense-in-depth advisory, not a hard prerequisite.
+
+**Dependencies:** gVisor Runtime Registration (`runsc` check)
+
+#### Scenario: Both runtimeArgs present
+- **WHEN** `docker info --format '{{json .Runtimes}}'` (via machinectl) returns a `runsc` entry with `runtimeArgs` containing both `--oci-seccomp` and an arg prefixed with `--debug-log`
+- **THEN** the check reports PASS
+
+#### Scenario: Missing --oci-seccomp
+- **WHEN** the `runsc` runtime's `runtimeArgs` does not contain `--oci-seccomp`
+- **THEN** the check reports WARN with remediation referencing `~<user>/.config/docker/daemon.json`
+
+#### Scenario: Missing --debug-log
+- **WHEN** the `runsc` runtime's `runtimeArgs` does not contain an arg prefixed with `--debug-log`
+- **THEN** the check reports WARN with remediation referencing `~<user>/.config/docker/daemon.json`
+
+#### Scenario: Both runtimeArgs missing
+- **WHEN** the `runsc` runtime's `runtimeArgs` is empty or missing both args
+- **THEN** the check reports WARN listing both missing args
+
+#### Scenario: runsc dependency failed — check skipped
+- **WHEN** the `runsc` check has failed or been skipped
+- **THEN** the runtimeArgs check is skipped with annotation `requires: runsc`
+
+### Requirement: Warn Severity Status
+The system SHALL support a `warn` status in `CheckResult` for defense-in-depth advisories that inform without blocking. `warn` results SHALL NOT cascade skip to dependent checks. `warn` results SHALL NOT block `sandbox start` pre-flight gates. `warn` results SHALL NOT cause a non-zero exit code from `sandbox doctor`.
+
+#### Scenario: Warn does not cascade skip
+- **WHEN** a check returns `warn` and has dependent checks
+- **THEN** the dependent checks still execute (they are NOT skipped)
+
+#### Scenario: Warn does not block sandbox start
+- **WHEN** `sandbox start` runs the Privilege Boundary pre-flight subset and a check returns `warn`
+- **THEN** the start pipeline proceeds — the warn result does not trigger exit code 1
+
+#### Scenario: Warn does not affect doctor exit code
+- **WHEN** `sandbox doctor` completes with one or more `warn` results and zero `fail` results
+- **THEN** the process exits with code 0
+
+### Requirement: Warn Display in Rich Output
+The system SHALL render `warn` results with yellow styling, showing the check name, detail, and remediation.
+
+#### Scenario: Warn check display
+- **WHEN** a check returns `warn`
+- **THEN** it is displayed as `⚠ <check name>` in yellow with detail and remediation on subsequent indented lines
+
+#### Scenario: Summary line includes warn count
+- **WHEN** all checks have been evaluated and one or more returned `warn`
+- **THEN** the summary line includes the warn count: `N/M passed · W warnings · X failed · Y skipped`
+
+#### Scenario: Summary style reflects warn state
+- **WHEN** all checks have been evaluated with zero failures and one or more warnings
+- **THEN** the summary line is styled yellow (not green, not red)
+
+#### Scenario: Summary style with failures takes precedence
+- **WHEN** all checks have been evaluated with one or more failures (regardless of warnings)
+- **THEN** the summary line is styled red (failures take precedence over warnings)
+
 ### Requirement: Filesystem ACL Support
 The system SHALL verify that the filesystem under SANDBOX_AI_HOME supports POSIX ACLs.
 
@@ -172,18 +231,18 @@ The system SHALL detect the host Linux distribution by parsing `/etc/os-release`
 - **THEN** remediation commands use generic package names without a package manager prefix
 
 ### Requirement: Exit Code Contract
-The system SHALL exit with code 0 when all checks pass and code 1 when any check fails.
+The system SHALL exit with code 0 when all checks pass (or warn) and code 1 when any check fails. Warn results SHALL NOT cause a non-zero exit code.
 
 #### Scenario: All checks pass
-- **WHEN** every executed check returns PASS
+- **WHEN** every executed check returns PASS or WARN
 - **THEN** the process exits with code 0
 
 #### Scenario: Any check fails
-- **WHEN** one or more checks return FAIL (skipped checks do not count as failures)
+- **WHEN** one or more checks return FAIL (skipped and warned checks do not count as failures)
 - **THEN** the process exits with code 1
 
 ### Requirement: Rich Formatted Output
-The system SHALL render results using Rich, grouped by category, with compact success lines and expanded failure blocks.
+The system SHALL render results using Rich, grouped by category, with compact success lines, expanded failure blocks, and yellow warning blocks.
 
 #### Scenario: Passing check display
 - **WHEN** a check passes
@@ -197,9 +256,13 @@ The system SHALL render results using Rich, grouped by category, with compact su
 - **WHEN** a check is skipped due to a failed dependency
 - **THEN** it is displayed as `⊘ <check name> — skipped (requires: <dependency name>)`
 
+#### Scenario: Warning check display
+- **WHEN** a check returns warn
+- **THEN** it is displayed as `⚠ <check name>` in yellow followed by an indented block containing: the warning detail and remediation
+
 #### Scenario: Summary line
 - **WHEN** all checks have been evaluated
-- **THEN** a summary line is displayed: `N/M passed · X failed · Y skipped`
+- **THEN** a summary line is displayed: `N/M passed · W warnings · X failed · Y skipped` (segments with zero count are omitted)
 
 ### Requirement: Check Subset API
 The system SHALL provide a function to execute a filtered subset of doctor checks by category, enabling `init` and `start` to run only their relevant dependency chains without duplicating check logic.
@@ -210,7 +273,7 @@ The system SHALL provide a function to execute a filtered subset of doctor check
 
 #### Scenario: Start runs privilege boundary checks
 - **WHEN** `sandbox start` invokes the doctor subset with category `["Privilege Boundary"]`
-- **THEN** only the 8 checks in that category are executed (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc), with dependency graph and cascading skip logic preserved
+- **THEN** only the 9 checks in that category are executed (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc, runsc runtimeArgs), with dependency graph and cascading skip logic preserved
 
 #### Scenario: Subset results match full doctor format
 - **WHEN** the subset API returns results

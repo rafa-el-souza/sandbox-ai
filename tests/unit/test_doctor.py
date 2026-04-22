@@ -7,6 +7,7 @@ and Rich output renderer.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, mock_open, patch
@@ -57,7 +58,7 @@ class TestCheckResult:
         from core.doctor import CheckResult
 
         # Valid statuses should not raise
-        for s in ("pass", "fail", "skip"):
+        for s in ("pass", "fail", "skip", "warn"):
             r = CheckResult(status=s, name="t", detail="d")
             assert r.status == s
 
@@ -477,11 +478,12 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 12
+        assert len(checks) == 13
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert "machinectl_reachable" in ids
         assert "docker_rootless" in ids
+        assert "runsc_runtimeargs" in ids
 
     def test_topological_sort_respects_dependencies(self) -> None:
         from core.doctor import Check, CheckResult, topological_sort
@@ -747,4 +749,211 @@ class TestRenderResultsWithSubset:
         output = captured_console.plain_output
         assert "Filesystem" in output
         assert "2/2 passed" in output
+
+
+# ── Section 11: Warn Severity Tests ────────────────────────────────────────────
+
+
+class TestWarnStatus:
+    """Tasks 9.1-9.5: Warn severity tests."""
+
+    def test_check_result_accepts_warn(self) -> None:
+        """Task 9.1: CheckResult accepts status='warn'."""
+        from core.doctor import CheckResult
+
+        r = CheckResult(status="warn", name="advisory", detail="suboptimal", remediation="improve it")
+        assert r.status == "warn"
+        assert r.remediation == "improve it"
+
+    def test_warn_does_not_cascade_skip(self) -> None:
+        """Task 9.2: run_checks does NOT cascade skip on warn — dependents still execute."""
+        from core.doctor import Check, CheckResult, run_checks
+
+        def warn_run(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="warn", name="root", detail="advisory")
+
+        def pass_run(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="dep", detail="ok")
+
+        checks = [
+            Check(id="root", name="Root", category="t", depends_on=[], run=warn_run, remediation=""),
+            Check(id="dep1", name="Dep1", category="t", depends_on=["root"], run=pass_run, remediation=""),
+        ]
+        results = run_checks(checks, "sandbox", None)
+        assert results[0].status == "warn"
+        assert results[1].status == "pass"  # NOT skipped
+
+    def test_render_warn_only_yellow_summary(self, captured_console: CapturedConsole) -> None:
+        """Task 9.3: Warn-only results produce yellow summary, zero fail count."""
+        from core.doctor import CheckResult, render_results
+
+        results = [
+            CheckResult(status="pass", name="A", detail="ok", category="Test"),
+            CheckResult(status="warn", name="B", detail="advisory", remediation="fix", category="Test"),
+        ]
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "1/2 passed" in output
+        assert "1 warnings" in output
+        assert "failed" not in output.lower()
+
+    def test_render_mixed_pass_warn_fail_red_summary(self, captured_console: CapturedConsole) -> None:
+        """Task 9.4: Mixed pass+warn+fail results produce red summary with warn count."""
+        from core.doctor import CheckResult, render_results
+
+        results = [
+            CheckResult(status="pass", name="A", detail="ok", category="Test"),
+            CheckResult(status="warn", name="B", detail="advisory", remediation="fix", category="Test"),
+            CheckResult(status="fail", name="C", detail="broken", remediation="fix", category="Test"),
+        ]
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "1/3 passed" in output
+        assert "1 warnings" in output
+        assert "1 failed" in output
+
+    def test_render_warn_display(self, captured_console: CapturedConsole) -> None:
+        """Task 9.5: Warn display shows ⚠ symbol, detail, and remediation."""
+        from core.doctor import CheckResult, render_results
+
+        results = [
+            CheckResult(
+                status="warn", name="Advisory Check", detail="something suboptimal",
+                remediation="do better", category="Test",
+            ),
+        ]
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "⚠" in output
+        assert "Advisory Check" in output
+        assert "something suboptimal" in output
+        assert "do better" in output
+
+
+# ── Section 12: runsc RuntimeArgs Check Tests ───────────────────────────────
+
+
+class TestCheckRunscRuntimeArgs:
+    """Tasks 9.6-9.13: check_runsc_runtimeargs function tests."""
+
+    def test_both_args_present_pass(self) -> None:
+        """Task 9.6: Returns pass when both --oci-seccomp and --debug-log present."""
+        from core.doctor import check_runsc_runtimeargs
+
+        docker_info = json.dumps({
+            "runsc": {
+                "path": "/usr/local/bin/runsc",
+                "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
+            }
+        })
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=docker_info, stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.status == "pass"
+            assert "--oci-seccomp" in result.detail
+            assert "--debug-log" in result.detail
+
+    def test_missing_oci_seccomp_warn(self) -> None:
+        """Task 9.7: Returns warn when --oci-seccomp missing."""
+        from core.doctor import check_runsc_runtimeargs
+
+        docker_info = json.dumps({
+            "runsc": {
+                "path": "/usr/local/bin/runsc",
+                "runtimeArgs": ["--debug-log=/var/log/runsc/%ID%/"],
+            }
+        })
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=docker_info, stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.status == "warn"
+            assert "--oci-seccomp" in result.detail
+
+    def test_missing_debug_log_warn(self) -> None:
+        """Task 9.8: Returns warn when --debug-log missing."""
+        from core.doctor import check_runsc_runtimeargs
+
+        docker_info = json.dumps({
+            "runsc": {
+                "path": "/usr/local/bin/runsc",
+                "runtimeArgs": ["--oci-seccomp"],
+            }
+        })
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=docker_info, stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.status == "warn"
+            assert "--debug-log" in result.detail
+
+    def test_empty_runtime_args_warn(self) -> None:
+        """Task 9.9: Returns warn when runtimeArgs is empty/absent."""
+        from core.doctor import check_runsc_runtimeargs
+
+        docker_info = json.dumps({
+            "runsc": {
+                "path": "/usr/local/bin/runsc",
+            }
+        })
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=docker_info, stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.status == "warn"
+            assert "--oci-seccomp" in result.detail
+            assert "--debug-log" in result.detail
+
+    def test_remediation_references_daemon_json(self) -> None:
+        """Task 9.10: Remediation references ~<user>/.config/docker/daemon.json."""
+        from core.doctor import check_runsc_runtimeargs
+
+        docker_info = json.dumps({"runsc": {"path": "/usr/local/bin/runsc"}})
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=docker_info, stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.remediation is not None
+            assert "~sandbox/.config/docker/daemon.json" in result.remediation
+
+    def test_registry_returns_13_checks(self) -> None:
+        """Task 9.11: build_check_registry returns 13 checks."""
+        from core.doctor import build_check_registry
+
+        checks = build_check_registry()
+        assert len(checks) == 13
+
+    def test_privilege_boundary_subset_contains_9_checks(self) -> None:
+        """Task 9.12: Privilege boundary subset contains 9 checks (was 8)."""
+        from core.doctor import build_check_registry
+
+        checks = build_check_registry()
+        pb_checks = [c for c in checks if c.category == "Privilege Boundary"]
+        assert len(pb_checks) == 9
+
+    def test_runsc_runtimeargs_skipped_when_runsc_fails(self) -> None:
+        """Task 9.13: check_runsc_runtimeargs is skipped when runsc check fails."""
+        from core.doctor import Check, CheckResult, run_checks
+
+        def fail_runsc(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="fail", name="gVisor runsc", detail="not found")
+
+        def pass_runtimeargs(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="runsc runtimeArgs", detail="ok")
+
+        checks = [
+            Check(id="runsc", name="gVisor runsc", category="Privilege Boundary",
+                  depends_on=[], run=fail_runsc, remediation=""),
+            Check(id="runsc_runtimeargs", name="runsc runtimeArgs", category="Privilege Boundary",
+                  depends_on=["runsc"], run=pass_runtimeargs, remediation=""),
+        ]
+        results = run_checks(checks, "sandbox", None)
+        assert results[0].status == "fail"
+        assert results[1].status == "skip"
 

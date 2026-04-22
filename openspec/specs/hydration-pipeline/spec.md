@@ -70,3 +70,47 @@ The system SHALL never overwrite the user's persistent state files during hydrat
 #### Scenario: Cache and logs are preserved
 - **WHEN** the hydration pipeline runs
 - **THEN** `sandboxes/<id>/cache/` and `sandboxes/<id>/log/` contents are NOT modified
+
+### Requirement: Core Resource Limit Context Keys
+The system SHALL include `core_mem_limit`, `core_memswap_limit`, and `core_cpus` in the Jinja2 context returned by `build_jinja_context()`. `core_memswap_limit` SHALL always equal `core_mem_limit` (zero swap — not independently configurable).
+
+#### Scenario: Core resource context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `core_mem_limit` (from `config.core.mem_limit`), `core_memswap_limit` (equal to `core_mem_limit`), and `core_cpus` (from `str(config.core.cpus)`)
+
+#### Scenario: Core memswap_limit derives from mem_limit
+- **WHEN** `build_jinja_context()` is called with `config.core.mem_limit = "16gb"`
+- **THEN** the returned context has `core_mem_limit = "16gb"` and `core_memswap_limit = "16gb"`
+
+### Requirement: Admin Resource Limit Context Keys
+The system SHALL include `admin_mem_limit`, `admin_memswap_limit`, and `admin_cpus` in the Jinja2 context returned by `build_jinja_context()`. `admin_memswap_limit` SHALL always equal `admin_mem_limit`.
+
+#### Scenario: Admin resource context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `admin_mem_limit` (from `config.admin.mem_limit`), `admin_memswap_limit` (equal to `admin_mem_limit`), and `admin_cpus` (from `str(config.admin.cpus)`)
+
+### Requirement: Compose Template Resource Limits
+The rendered `compose.yml` SHALL include `mem_limit`, `memswap_limit`, and `cpus` on the core and admin services, resolved from the Jinja2 context.
+
+#### Scenario: Core service rendered with resource limits
+- **WHEN** `compose.yml` is rendered with default config
+- **THEN** the core service block contains `mem_limit: "8gb"`, `memswap_limit: "8gb"`, and `cpus: "4.0"`
+
+#### Scenario: Admin service rendered with resource limits
+- **WHEN** `compose.yml` is rendered with default config
+- **THEN** the admin service block contains `mem_limit: "8gb"`, `memswap_limit: "8gb"`, and `cpus: "4.0"`
+
+### Requirement: Compose Template Static Hardening Properties
+The rendered `compose.yml` SHALL include static hardening properties that are not configurable via `sandbox.toml`.
+
+#### Scenario: Core IPC isolation
+- **WHEN** `compose.yml` is rendered
+- **THEN** the core service block contains `ipc: private`
+
+#### Scenario: Core and admin ulimits
+- **WHEN** `compose.yml` is rendered
+- **THEN** both core and admin service blocks contain `ulimits` with `core: { soft: 0, hard: 0 }` (disabling core dumps) and `nofile: { soft: 65536, hard: 65536 }` (bounding file descriptors)
+
+#### Scenario: DNS sidecar IP forwarding disabled
+- **WHEN** `compose.yml` is rendered
+- **THEN** the dns-sidecar service's `sysctls` block contains `net.ipv4.ip_forward=0`
