@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 from core.hydration import (
+    AdminConfig,
+    CoreConfig,
     DbPostgresConfig,
     SandboxConfig,
     build_jinja_context,
@@ -200,6 +202,129 @@ class TestBuildJinjaContext:
         assert ctx["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
 
 
+class TestCoreConfigResourceLimits:
+    """Task 8.1, 8.3: CoreConfig mem_limit and cpus fields with defaults."""
+
+    def test_core_config_defaults(self) -> None:
+        """CoreConfig accepts mem_limit and cpus with correct defaults."""
+        core = CoreConfig()
+        assert core.mem_limit == "8gb"
+        assert core.cpus == 4.0
+
+    def test_core_config_custom_values(self) -> None:
+        """CoreConfig accepts custom mem_limit and cpus."""
+        core = CoreConfig(mem_limit="16gb", cpus=8.0)
+        assert core.mem_limit == "16gb"
+        assert core.cpus == 8.0
+
+    def test_core_config_backward_compatibility(self, tmp_path: Path) -> None:
+        """Omitted mem_limit and cpus fields use defaults."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.core.mem_limit == "8gb"
+        assert config.core.cpus == 4.0
+
+
+class TestAdminConfigResourceLimits:
+    """Task 8.2, 8.4: AdminConfig mem_limit and cpus fields with defaults."""
+
+    def test_admin_config_defaults(self) -> None:
+        """AdminConfig accepts mem_limit and cpus with correct defaults."""
+        admin = AdminConfig()
+        assert admin.mem_limit == "8gb"
+        assert admin.cpus == 4.0
+
+    def test_admin_config_custom_values(self) -> None:
+        """AdminConfig accepts custom mem_limit and cpus."""
+        admin = AdminConfig(mem_limit="4gb", cpus=2.0)
+        assert admin.mem_limit == "4gb"
+        assert admin.cpus == 2.0
+
+    def test_admin_config_backward_compatibility(self, tmp_path: Path) -> None:
+        """Omitted mem_limit and cpus fields use defaults."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.admin.mem_limit == "8gb"
+        assert config.admin.cpus == 4.0
+
+
+class TestBuildJinjaContextResourceLimits:
+    """Tasks 8.5-8.8: build_jinja_context resource limit keys."""
+
+    def test_core_resource_keys_present(self, tmp_path: Path) -> None:
+        """Context includes core_mem_limit, core_memswap_limit, core_cpus."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["core_mem_limit"] == "8gb"
+        assert ctx["core_memswap_limit"] == "8gb"
+        assert ctx["core_cpus"] == "4.0"
+
+    def test_admin_resource_keys_present(self, tmp_path: Path) -> None:
+        """Context includes admin_mem_limit, admin_memswap_limit, admin_cpus."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["admin_mem_limit"] == "8gb"
+        assert ctx["admin_memswap_limit"] == "8gb"
+        assert ctx["admin_cpus"] == "4.0"
+
+    def test_core_memswap_equals_mem_limit(self, tmp_path: Path) -> None:
+        """core_memswap_limit always equals core_mem_limit (zero swap)."""
+        custom_toml = VALID_TOML.replace(
+            '[core]\nshm_size = "2gb"',
+            '[core]\nmem_limit = "16gb"\nshm_size = "2gb"',
+        )
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(custom_toml)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["core_mem_limit"] == "16gb"
+        assert ctx["core_memswap_limit"] == "16gb"
+
+    def test_admin_memswap_equals_mem_limit(self, tmp_path: Path) -> None:
+        """admin_memswap_limit always equals admin_mem_limit (zero swap)."""
+        custom_toml = VALID_TOML.replace(
+            '[admin]\nshm_size = "2gb"',
+            '[admin]\nmem_limit = "4gb"\nshm_size = "2gb"',
+        )
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(custom_toml)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["admin_mem_limit"] == "4gb"
+        assert ctx["admin_memswap_limit"] == "4gb"
+
+
+class TestScaffoldTemplateResourceLimits:
+    """Task 8.9: Scaffold _SANDBOX_TOML_TEMPLATE includes resource limit defaults."""
+
+    def test_scaffold_template_contains_resource_limits(self, tmp_path: Path) -> None:
+        """Scaffold output contains mem_limit and cpus in both [core] and [admin]."""
+        from core.scaffold import write_sandbox_toml
+
+        instance = tmp_path / "instance"
+        instance.mkdir()
+        write_sandbox_toml(
+            str(instance), "testproject", "/home/dev/test", "sandbox",
+        )
+        content = (instance / "sandbox.toml").read_text()
+
+        # Verify [core] section has mem_limit and cpus
+        core_section = content.split("[core]")[1].split("[")[0]
+        assert 'mem_limit = "8gb"' in core_section
+        assert "cpus = 4.0" in core_section
+
+        # Verify [admin] section has mem_limit and cpus
+        admin_section = content.split("[admin]")[1].split("[")[0]
+        assert 'mem_limit = "8gb"' in admin_section
+        assert "cpus = 4.0" in admin_section
+
+
 class TestRenderTemplates:
     @pytest.fixture
     def tooling_and_instance(self, tmp_path: Path) -> tuple[Path, Path]:
@@ -388,6 +513,12 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "admin_pids_limit": 400,
         "core_shm_size": "2gb",
         "admin_shm_size": "2gb",
+        "core_mem_limit": "8gb",
+        "core_memswap_limit": "8gb",
+        "core_cpus": "4.0",
+        "admin_mem_limit": "8gb",
+        "admin_memswap_limit": "8gb",
+        "admin_cpus": "4.0",
         "runtime": "runsc",
         "dns_image": "coredns/coredns:1.11.1",
         "proxy_image": "ubuntu/squid:latest",

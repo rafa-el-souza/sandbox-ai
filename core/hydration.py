@@ -34,6 +34,8 @@ class CoreConfig(BaseModel):
 
     shm_size: str = "2gb"
     pids_limit: int = 400
+    mem_limit: str = "8gb"
+    cpus: float = 4.0
     base_image: str = "cgr.dev/chainguard/wolfi-base:latest"
     base_distro_family: str = "wolfi"
     git_user: str = ""
@@ -45,6 +47,8 @@ class AdminConfig(BaseModel):
 
     shm_size: str = "2gb"
     pids_limit: int = 400
+    mem_limit: str = "8gb"
+    cpus: float = 4.0
     base_image: str = "debian:trixie-slim"
     base_distro_family: str = "debian"
 
@@ -169,11 +173,17 @@ def build_jinja_context(
         "core_distro_family": config.core.base_distro_family,
         "core_pids_limit": config.core.pids_limit,
         "core_shm_size": config.core.shm_size,
+        "core_mem_limit": config.core.mem_limit,
+        "core_memswap_limit": config.core.mem_limit,
+        "core_cpus": str(config.core.cpus),
         # Admin
         "admin_base_image": config.admin.base_image,
         "admin_distro_family": config.admin.base_distro_family,
         "admin_pids_limit": config.admin.pids_limit,
         "admin_shm_size": config.admin.shm_size,
+        "admin_mem_limit": config.admin.mem_limit,
+        "admin_memswap_limit": config.admin.mem_limit,
+        "admin_cpus": str(config.admin.cpus),
         # Runtimes
         "runtimes": {
             "python": config.runtimes.python,

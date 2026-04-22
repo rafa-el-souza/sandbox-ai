@@ -1,7 +1,8 @@
 """Doctor module: host readiness diagnostics for sandbox operation.
 
-Provides 12 diagnostic checks across 3 independent chains:
-- Chain 1 (privilege boundary, 8 checks): sudo → machinectl → user → machined → reachable → docker → rootless → runsc
+Provides 13 diagnostic checks across 3 independent chains:
+- Chain 1 (privilege boundary, 9 checks): sudo -> machinectl -> user -> machined
+  -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs
 - Chain 2 (filesystem, 2 checks): setfacl → ACL support
 - Chain 3 (repo integrity, 2 checks): tooling plane, state dir (independent)
 """
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
 class CheckResult:
     """Result of a single diagnostic check."""
 
-    status: Literal["pass", "fail", "skip"]
+    status: Literal["pass", "fail", "skip", "warn"]
     name: str
     detail: str
     remediation: str | None = None
@@ -352,6 +353,74 @@ def check_runsc_registered(user: str, distro: str | None) -> CheckResult:
     )
 
 
+def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
+    """Check that runsc runtimeArgs include --oci-seccomp and --debug-log.
+
+    Validates defense-in-depth configuration for the gVisor runtime.
+    Returns warn (not fail) when args are missing — this is an advisory check.
+    """
+    result = subprocess.run(
+        [
+            "sudo", "machinectl", "shell", f"{user}@.host",
+            "/bin/bash", "-c",
+            "docker info --format '{{json .Runtimes}}'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if result.returncode != 0:
+        return CheckResult(
+            status="warn",
+            name="runsc runtimeArgs",
+            detail="Could not query Docker runtimes",
+            remediation=(
+                f"Verify Docker is accessible for user '{user}' and check "
+                f"~{user}/.config/docker/daemon.json"
+            ),
+        )
+
+    try:
+        runtimes = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return CheckResult(
+            status="warn",
+            name="runsc runtimeArgs",
+            detail="Could not parse Runtimes JSON",
+            remediation=f"Check ~{user}/.config/docker/daemon.json",
+        )
+
+    runsc_entry = runtimes.get("runsc", {})
+    runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
+
+    has_seccomp = any(arg == "--oci-seccomp" for arg in runtime_args)
+    has_debug_log = any(arg.startswith("--debug-log") for arg in runtime_args)
+
+    if has_seccomp and has_debug_log:
+        return CheckResult(
+            status="pass",
+            name="runsc runtimeArgs",
+            detail="--oci-seccomp and --debug-log configured",
+        )
+
+    missing: list[str] = []
+    if not has_seccomp:
+        missing.append("--oci-seccomp")
+    if not has_debug_log:
+        missing.append("--debug-log")
+
+    return CheckResult(
+        status="warn",
+        name="runsc runtimeArgs",
+        detail=f"Missing runtimeArgs: {', '.join(missing)}",
+        remediation=(
+            f"Add {', '.join(missing)} to runsc runtimeArgs in "
+            f"~{user}/.config/docker/daemon.json"
+        ),
+    )
+
+
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
 # 15 unconditional source files in the tooling plane
@@ -452,7 +521,7 @@ def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
 
 
 def build_check_registry() -> list[Check]:
-    """Build the full 12-check registry with dependency declarations."""
+    """Build the full 13-check registry with dependency declarations."""
     return [
         # Chain 1: privilege boundary
         Check(
@@ -517,6 +586,14 @@ def build_check_registry() -> list[Check]:
             category="Privilege Boundary",
             depends_on=["docker_available"],
             run=check_runsc_registered,
+            remediation="",
+        ),
+        Check(
+            id="runsc_runtimeargs",
+            name="runsc runtimeArgs",
+            category="Privilege Boundary",
+            depends_on=["runsc"],
+            run=check_runsc_runtimeargs,
             remediation="",
         ),
         # Chain 2: filesystem
@@ -677,6 +754,7 @@ def render_results(
     pass_count = sum(1 for r in results if r.status == "pass")
     fail_count = sum(1 for r in results if r.status == "fail")
     skip_count = sum(1 for r in results if r.status == "skip")
+    warn_count = sum(1 for r in results if r.status == "warn")
 
     for category, checks in grouped.items():
         console.print(f"\n[bold]{category}[/bold]")
@@ -693,16 +771,28 @@ def render_results(
                     console.print(f"    Fix: {r.remediation}", style="yellow")
                 if r.doc_ref:
                     console.print(f"    Docs: {r.doc_ref}", style="dim")
+            elif r.status == "warn":
+                console.print(Text(f"  ⚠ {r.name}", style="yellow"))
+                console.print(f"    {r.detail}")
+                if r.remediation:
+                    console.print(f"    Fix: {r.remediation}", style="yellow")
             elif r.status == "skip":
                 console.print(Text(f"  ⊘ {r.name} — {r.detail}", style="dim"))
 
     # Summary line
     console.print()
     summary = f"{pass_count}/{len(results)} passed"
+    if warn_count:
+        summary += f" · {warn_count} warnings"
     if fail_count:
         summary += f" · {fail_count} failed"
     if skip_count:
         summary += f" · {skip_count} skipped"
 
-    style = "green bold" if fail_count == 0 else "red bold"
+    if fail_count > 0:
+        style = "red bold"
+    elif warn_count > 0:
+        style = "yellow bold"
+    else:
+        style = "green bold"
     console.print(summary, style=style)

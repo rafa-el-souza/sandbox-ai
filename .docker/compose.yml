@@ -52,6 +52,7 @@ services:
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.default.disable_ipv6=1
       - net.ipv6.conf.lo.disable_ipv6=1
+      - net.ipv4.ip_forward=0
     networks:
       isolated_net:
         ipv4_address: "{{ dns_sidecar_ip }}"
@@ -179,6 +180,17 @@ services:
       - GITHUB_API_KEY=${CORE_GITHUB_TOKEN}
       - BASH_HISTORY_PATH=/home/agent/.log/.bash_history
     shm_size: "{{ core_shm_size }}"
+    mem_limit: "{{ core_mem_limit }}"
+    memswap_limit: "{{ core_memswap_limit }}"
+    cpus: "{{ core_cpus }}"
+    ipc: private
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       dns-sidecar:
         condition: service_healthy
@@ -211,6 +223,16 @@ services:
       - /tmp:noexec,nosuid,nodev
       - /var/tmp:noexec,nosuid,nodev
     ipc: private
+    mem_limit: "{{ admin_mem_limit }}"
+    memswap_limit: "{{ admin_memswap_limit }}"
+    cpus: "{{ admin_cpus }}"
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+      nofile:
+        soft: 65536
+        hard: 65536
     networks:
       isolated_net:
         ipv4_address: "{{ admin_isolated_ip }}"
