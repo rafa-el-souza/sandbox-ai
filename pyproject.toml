@@ -47,3 +47,11 @@ ignore = ["SIM105"]
 [tool.mypy]
 strict = true
 packages = ["core", "cli"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.",
+]
+
+[tool.coverage.run]
+omit = ["cli/__main__.py"]

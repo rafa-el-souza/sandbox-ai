@@ -42,7 +42,7 @@ The system SHALL render extension override files only for components that are en
 - **THEN** `.docker/extras/db-postgres.yml` is rendered into `sandboxes/<id>/docker/extras/db-postgres.yml`
 
 ### Requirement: Extras Jinja2 Context Completeness
-The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`.
+The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys.
 
 #### Scenario: Database context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -79,6 +79,14 @@ The system SHALL include all values required by extras templates and config temp
 #### Scenario: Custom CLAUDE.md rules absent
 - **WHEN** `build_jinja_context()` is called and `custom/config/core/CLAUDE.md` does not exist in the instance directory
 - **THEN** the returned context includes `custom_claude_rules` with value `""`
+
+#### Scenario: CoreDNS domain context key present
+- **WHEN** `build_jinja_context()` is called and `config.proxy_whitelist.domains` contains `[".github.com", ".npmjs.com"]`
+- **THEN** the returned context includes `proxy_whitelist_domains_coredns` with value `["github.com", "npmjs.com"]` (leading dots stripped)
+
+#### Scenario: CoreDNS domain key coexists with Squid domain key
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes both `proxy_whitelist_domains` (with leading dots, for Squid `dstdomain` and `allowed_domains.txt`) and `proxy_whitelist_domains_coredns` (without leading dots, for CoreDNS zone declarations)
 
 ### Requirement: Precious State Preservation
 The system SHALL never overwrite the user's persistent state files during hydration.
@@ -125,7 +133,7 @@ The rendered `compose.yml` SHALL include `mem_limit`, `memswap_limit`, and `cpus
 - **THEN** the admin service block contains `mem_limit: "8gb"`, `memswap_limit: "8gb"`, and `cpus: "4.0"`
 
 ### Requirement: Compose Template Static Hardening Properties
-The rendered `compose.yml` SHALL include static hardening properties that are not configurable via `sandbox.toml`.
+The rendered compose templates (main `compose.yml` and feature-gated extras) SHALL include static hardening properties that are not configurable via `sandbox.toml`. All services with `cap_drop: ALL` SHALL re-grant only the minimum Linux capabilities required for their entrypoint to function. All tmpfs mounts SHALL include `noexec,nosuid,nodev` flags.
 
 #### Scenario: Core IPC isolation
 - **WHEN** `compose.yml` is rendered
@@ -138,6 +146,22 @@ The rendered `compose.yml` SHALL include static hardening properties that are no
 #### Scenario: DNS sidecar IP forwarding disabled
 - **WHEN** `compose.yml` is rendered
 - **THEN** the dns-sidecar service's `sysctls` block contains `net.ipv4.ip_forward=0`
+
+#### Scenario: DNS sidecar capability grant
+- **WHEN** `compose.yml` is rendered
+- **THEN** the dns-sidecar service block contains `cap_drop: [ALL]` and `cap_add: [NET_BIND_SERVICE]`
+
+#### Scenario: Proxy capability grants
+- **WHEN** `compose.yml` is rendered
+- **THEN** the proxy service block contains `cap_drop: [ALL]` and `cap_add: [SETUID, SETGID]`
+
+#### Scenario: Proxy tmpfs mounts hardened
+- **WHEN** `compose.yml` is rendered
+- **THEN** the proxy service's `tmpfs` block contains `/var/spool/squid:noexec,nosuid,nodev`, `/var/run/squid:noexec,nosuid,nodev`, `/var/log/squid:noexec,nosuid,nodev`, and `/run:size=1m,noexec,nosuid,nodev`
+
+#### Scenario: Postgres extras capability grants
+- **WHEN** `db-postgres.yml` extras template is rendered
+- **THEN** the db-postgres service block contains `cap_drop: [ALL]` and `cap_add: [CHOWN, FOWNER, SETGID, SETUID]`
 
 ### Requirement: Config Template Path Templatization
 The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations and tmux resurrect state directories within rendered config files. No rendered config file SHALL contain the literal path `/workspace/.sandbox/custom/` or `/workspace/.tmux_resurrect`.

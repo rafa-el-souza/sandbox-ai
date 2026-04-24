@@ -1151,8 +1151,8 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
             warnings = _revoke_acls("/inst", "sandbox")
-            # instance root + docker/ + config/ + .sandbox.env = 4
-            assert mock_run.call_count == 4
+            # instance root + docker/ + config/ + .sandbox.env + 4x(effective+default) rw mounts = 12
+            assert mock_run.call_count == 12
             assert warnings == []
 
     def test_partial_failure_continues_and_collects_warnings(self) -> None:
@@ -1171,7 +1171,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run", side_effect=side_effect):
             warnings = _revoke_acls("/inst", "sandbox")
 
-        assert call_count == 4  # All 4 entries attempted
+        assert call_count == 12  # All 12 entries attempted
         assert len(warnings) == 1
         assert "No such file" in warnings[0]
 
@@ -1182,7 +1182,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
             warnings = _revoke_acls("/inst", "sandbox")
 
-        assert len(warnings) == 4  # All fail with OSError
+        assert len(warnings) == 12  # All fail with OSError
         assert all("setfacl not found" in w for w in warnings)
 
 
@@ -2178,6 +2178,103 @@ class TestACLPlanAsymmetry:
         # Verify r-x permission on instance root
         root_entries = [(args, d) for args, d in plan if "instance root" in d]
         assert any("r-x" in " ".join(args) for args, _ in root_entries)
+
+    def test_grant_plan_includes_rw_mount_sources(self, tmp_path: Path) -> None:
+        """Grant plan includes rw mount source entries for all four subdirectories."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        descriptions = [d for _, d in plan]
+
+        expected_subdirs = [
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "log/core",
+            "log/admin",
+        ]
+        for subdir in expected_subdirs:
+            target = str(instance_dir / subdir)
+            assert any(
+                d == f"rw mount source: {target}" for d in descriptions
+            ), f"Missing rw mount source entry for {subdir}"
+            # Verify setfacl args contain -R -m and rwX
+            source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
+            assert len(source_entries) == 1
+            args = source_entries[0][0]
+            assert "-R" in args
+            assert "-m" in args
+            assert any("rwX" in a for a in args)
+
+    def test_grant_plan_includes_default_acls(self, tmp_path: Path) -> None:
+        """Grant plan includes default ACL entries (-d flag) for rw mount subdirectories."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        descriptions = [d for _, d in plan]
+
+        expected_subdirs = [
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "log/core",
+            "log/admin",
+        ]
+        for subdir in expected_subdirs:
+            target = str(instance_dir / subdir)
+            assert any(
+                d == f"rw mount default: {target}" for d in descriptions
+            ), f"Missing rw mount default entry for {subdir}"
+            # Verify setfacl args contain -d and -m
+            default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
+            assert len(default_entries) == 1
+            args = default_entries[0][0]
+            assert "-d" in args
+            assert "-m" in args
+
+    def test_revoke_plan_includes_rw_mount_sources(self, tmp_path: Path) -> None:
+        """Revoke plan includes entries for all four rw mount subdirectories (effective + default)."""
+        from cli.main import _acl_revoke_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox")
+        descriptions = [d for _, d in plan]
+
+        expected_subdirs = [
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "log/core",
+            "log/admin",
+        ]
+        for subdir in expected_subdirs:
+            target = str(instance_dir / subdir)
+            # Effective removal
+            assert any(
+                d == f"rw mount source: {target}" for d in descriptions
+            ), f"Missing rw mount source revoke for {subdir}"
+            source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
+            assert "-x" in source_entries[0][0]
+            assert "-R" in source_entries[0][0]
+
+            # Default removal
+            assert any(
+                d == f"rw mount default: {target}" for d in descriptions
+            ), f"Missing rw mount default revoke for {subdir}"
+            default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
+            assert "-d" in default_entries[0][0]
+            assert "-x" in default_entries[0][0]
 
 
 class TestPhaseACLGrantErrorWrapping:

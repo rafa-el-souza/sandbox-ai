@@ -214,6 +214,10 @@ def build_jinja_context(
         "proxy_image": "ubuntu/squid:latest",
         # Proxy whitelist
         "proxy_whitelist_domains": config.proxy_whitelist.domains,
+        # CoreDNS zones: strip leading dot (zones are inherently suffix-matching)
+        "proxy_whitelist_domains_coredns": [
+            d.lstrip(".") for d in config.proxy_whitelist.domains
+        ],
         # Extras: db-postgres
         "pg_user": config.components_db_postgres.pg_user,
         "pg_db": config.components_db_postgres.pg_db,

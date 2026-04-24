@@ -178,6 +178,7 @@ class TestBuildJinjaContext:
         )
 
         assert ".github.com" in ctx["proxy_whitelist_domains"]
+        assert "github.com" in ctx["proxy_whitelist_domains_coredns"]
 
     def test_extras_context_keys(self, tmp_path: Path) -> None:
         """Task 4.1: build_jinja_context includes pg_user, pg_db, and firecrawl IPs."""
@@ -396,7 +397,7 @@ class TestRenderTemplates:
         # dns-sidecar
         dns_dir = config_dir / "dns-sidecar"
         dns_dir.mkdir(parents=True)
-        (dns_dir / "Corefile").write_text("{{ proxy_whitelist_domains | join(' ') }}\n")
+        (dns_dir / "Corefile").write_text("{{ proxy_whitelist_domains_coredns | join(' ') }}\n")
 
         # proxy
         proxy_dir = config_dir / "proxy"
@@ -508,7 +509,7 @@ class TestRenderTemplates:
         render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
 
         corefile = (instance / "config" / "dns-sidecar" / "Corefile").read_text()
-        assert ".github.com" in corefile
+        assert "github.com" in corefile
 
     def test_generates_allowed_domains(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """allowed_domains.txt is generated from whitelist domains."""
@@ -611,6 +612,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "node_version": "20.12.2",
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
         "proxy_whitelist_domains": [".github.com", ".npmjs.com"],
+        "proxy_whitelist_domains_coredns": ["github.com", "npmjs.com"],
         "pg_user": "sandbox",
         "pg_db": "sandbox_db",
         "warmup_prompt": "",

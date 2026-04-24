@@ -56,4 +56,8 @@ RUN mkdir -p ${HOME_DIR}/.local/bin
 COPY --chown=${USERNAME}:${USERNAME} entrypoint.sh ${HOME_DIR}/.local/bin/entrypoint.sh
 RUN chmod u+x ${HOME_DIR}/.local/bin/entrypoint.sh
 
-ENTRYPOINT ["/bin/sh", "-c", "exec ${HOME_DIR}/.local/bin/entrypoint.sh"]
+USER root
+RUN mkdir -p /sock && chown human:human /sock
+USER ${USERNAME}
+
+ENTRYPOINT ["/home/human/.local/bin/entrypoint.sh"]
