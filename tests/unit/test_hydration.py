@@ -1,6 +1,5 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
-
 import os
 from pathlib import Path
 
@@ -344,7 +343,10 @@ class TestScaffoldTemplateResourceLimits:
         instance = tmp_path / "instance"
         instance.mkdir()
         write_sandbox_toml(
-            str(instance), "testproject", "/home/dev/test", "sandbox",
+            str(instance),
+            "testproject",
+            "/home/dev/test",
+            "sandbox",
         )
         content = (instance / "sandbox.toml").read_text()
 
@@ -369,9 +371,7 @@ class TestRenderTemplates:
         # Create a minimal compose.yml template
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text(
-            "# rendered: {{ project_name }}\nsubnet: {{ isolated_subnet }}\n"
-        )
+        (docker_dir / "compose.yml").write_text("# rendered: {{ project_name }}\nsubnet: {{ isolated_subnet }}\n")
         # Core Dockerfile template
         core_dir = docker_dir / "core"
         core_dir.mkdir()
@@ -418,10 +418,19 @@ class TestRenderTemplates:
 
         # Create instance dirs
         for d in [
-            "docker/core", "docker/admin", "docker/extras",
-            "config/admin", "config/core", "config/dns-sidecar", "config/proxy",
-            "log/admin", "log/core", "cache/core/.claude", "cache/admin/tmux_resurrect",
-            "custom/config/admin", "custom/config/core",
+            "docker/core",
+            "docker/admin",
+            "docker/extras",
+            "config/admin",
+            "config/core",
+            "config/dns-sidecar",
+            "config/proxy",
+            "log/admin",
+            "log/core",
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "custom/config/admin",
+            "custom/config/core",
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
@@ -554,15 +563,14 @@ class TestRenderTemplates:
                 try:
                     with open(fpath) as f:
                         content = f.read()
-                except (UnicodeDecodeError, PermissionError):
+                except UnicodeDecodeError, PermissionError:
                     continue
                 if "{{" in content:
                     rel = os.path.relpath(fpath, str(instance))
                     violations.append(rel)
 
-        assert violations == [], (
-            f"Unresolved Jinja2 markers found in rendered files: {violations}"
-        )
+        assert violations == [], f"Unresolved Jinja2 markers found in rendered files: {violations}"
+
 
 def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
@@ -627,7 +635,10 @@ class TestValidateTemplates:
         tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
-            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+            ctx,
+            str(tooling),
+            db_postgres=False,
+            mcp_firecrawl=False,
         )
         assert count > 0
         assert errors == []
@@ -639,7 +650,10 @@ class TestValidateTemplates:
         tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
-            ctx, str(tooling), db_postgres=False, mcp_firecrawl=True,
+            ctx,
+            str(tooling),
+            db_postgres=False,
+            mcp_firecrawl=True,
         )
         assert count > 0
         assert errors == []
@@ -652,7 +666,10 @@ class TestValidateTemplates:
         (tooling / ".docker" / "compose.yml").unlink()
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
-            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+            ctx,
+            str(tooling),
+            db_postgres=False,
+            mcp_firecrawl=False,
         )
         assert any("Template not found" in e for e in errors)
 
@@ -664,7 +681,10 @@ class TestValidateTemplates:
         (tooling / ".docker" / "compose.yml").write_text("{{ nonexistent_var }}")
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
-            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+            ctx,
+            str(tooling),
+            db_postgres=False,
+            mcp_firecrawl=False,
         )
         assert any("Undefined variable" in e for e in errors)
 
@@ -676,7 +696,10 @@ class TestValidateTemplates:
         (tooling / ".docker" / "compose.yml").write_text("{% if %}broken{% endif %}")
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
-            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+            ctx,
+            str(tooling),
+            db_postgres=False,
+            mcp_firecrawl=False,
         )
         assert any("Syntax error" in e for e in errors)
 
@@ -688,7 +711,10 @@ class TestValidateTemplates:
         (tooling / ".config" / "core" / ".claude.json").unlink()
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
-            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+            ctx,
+            str(tooling),
+            db_postgres=False,
+            mcp_firecrawl=False,
         )
         assert any("Static file missing" in e for e in errors)
         assert any(".claude.json" in e for e in errors)
@@ -759,10 +785,7 @@ class TestDbPostgresTemplateRendering:
         import jinja2
 
         ctx = _build_test_context(str(tmp_path / "inst"))
-        template_content = (
-            Path(__file__).parent.parent.parent
-            / ".docker" / "extras" / "db-postgres.yml"
-        ).read_text()
+        template_content = (Path(__file__).parent.parent.parent / ".docker" / "extras" / "db-postgres.yml").read_text()
 
         env = jinja2.Environment(
             loader=jinja2.BaseLoader(),
@@ -774,8 +797,7 @@ class TestDbPostgresTemplateRendering:
         # No ${VAR:-default} patterns should remain
         dollar_defaults = re.findall(r"\$\{[^}]+:-[^}]+\}", rendered)
         assert dollar_defaults == [], (
-            f"Found ${'{'}...:-...{'}'} patterns in rendered db-postgres.yml: "
-            f"{dollar_defaults}"
+            f"Found ${'{'}...:-...{'}'} patterns in rendered db-postgres.yml: {dollar_defaults}"
         )
 
     def test_env_file_directive_present(self, tmp_path: Path) -> None:
@@ -783,10 +805,7 @@ class TestDbPostgresTemplateRendering:
         import jinja2
 
         ctx = _build_test_context(str(tmp_path / "inst"))
-        template_content = (
-            Path(__file__).parent.parent.parent
-            / ".docker" / "extras" / "db-postgres.yml"
-        ).read_text()
+        template_content = (Path(__file__).parent.parent.parent / ".docker" / "extras" / "db-postgres.yml").read_text()
 
         env = jinja2.Environment(
             loader=jinja2.BaseLoader(),
@@ -814,8 +833,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent
-            / ".docker" / "extras" / "mcp-firecrawl.yml"
+            Path(__file__).parent.parent.parent / ".docker" / "extras" / "mcp-firecrawl.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -827,8 +845,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         dollar_defaults = re.findall(r"\$\{[^}]+:-[^}]+\}", rendered)
         assert dollar_defaults == [], (
-            f"Found ${'{'}...:-...{'}'} patterns in rendered "
-            f"mcp-firecrawl.yml: {dollar_defaults}"
+            f"Found ${'{'}...:-...{'}'} patterns in rendered mcp-firecrawl.yml: {dollar_defaults}"
         )
 
     def test_env_file_directive_present(self, tmp_path: Path) -> None:
@@ -837,8 +854,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent
-            / ".docker" / "extras" / "mcp-firecrawl.yml"
+            Path(__file__).parent.parent.parent / ".docker" / "extras" / "mcp-firecrawl.yml"
         ).read_text()
 
         env = jinja2.Environment(

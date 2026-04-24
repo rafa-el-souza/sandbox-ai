@@ -182,6 +182,29 @@ The system SHALL verify that the filesystem under SANDBOX_AI_HOME supports POSIX
 - **WHEN** the `setfacl` probe fails
 - **THEN** the check reports FAIL with guidance on filesystem mount options
 
+### Requirement: Ancestor Traverse Verification
+The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) that verifies the sandbox user can traverse ancestor directories from `SANDBOX_AI_HOME` to `/`. The check SHALL depend on the `acl_support` check.
+
+#### Scenario: All ancestors traversable
+- **WHEN** the sandbox user has `--x` permission (via mode bits or ACLs) on every user-owned ancestor directory from `SANDBOX_AI_HOME` up to the ownership boundary
+- **THEN** the check reports PASS
+
+#### Scenario: Ancestor lacks traverse permission
+- **WHEN** a user-owned ancestor directory (e.g., `/home/dev/`) has mode 0700 and no ACL entry granting `--x` to the sandbox user
+- **THEN** the check reports FAIL with the specific directory, its current mode, and a fix command: `setfacl -m u:<user>:--x <dir>`
+
+#### Scenario: Symlink detected in ancestor path
+- **WHEN** a symlink is detected in the ancestor path (a component resolves to a different physical path)
+- **THEN** the check reports WARN noting that the sandbox user may need manual `--x` grants on target-path intermediaries outside the ownership boundary
+
+#### Scenario: acl_support dependency failed — check skipped
+- **WHEN** the `acl_support` check has failed or been skipped
+- **THEN** the `ancestor_traverse` check is skipped with annotation `requires: acl_support`
+
+#### Scenario: Check executes without user_exists dependency
+- **WHEN** the `ancestor_traverse` check is invoked and the `user_exists` check has not been explicitly evaluated in this chain
+- **THEN** the check still executes successfully using the provided user parameter (no cross-chain `depends_on` required)
+
 ### Requirement: Tooling Plane Integrity
 The system SHALL verify that the 15 unconditional template and static files exist in `.docker/` and `.config/`.
 

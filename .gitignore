@@ -1,6 +1,6 @@
 # Per-instance sandbox state (generated at runtime)
 sandboxes/*/
-.state/*.lock
+.state/
 
 # Secrets — never commit
 .sandbox.env

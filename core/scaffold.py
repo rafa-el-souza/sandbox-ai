@@ -149,14 +149,18 @@ def _detect_git_config() -> tuple[str, str]:
     try:
         result = subprocess.run(
             ["git", "config", "--global", "user.name"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode == 0:
             name = result.stdout.strip()
 
         result = subprocess.run(
             ["git", "config", "--global", "user.email"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode == 0:
             email = result.stdout.strip()
@@ -188,9 +192,7 @@ FIRECRAWL_API_KEY=""
 """
 
 
-def create_env_file(
-    env_path: str, *, db_postgres: bool, mcp_firecrawl: bool
-) -> None:
+def create_env_file(env_path: str, *, db_postgres: bool, mcp_firecrawl: bool) -> None:
     """Create .sandbox.env with mode 0600 via O_CREAT|O_EXCL. Raises FileExistsError on conflict.
 
     PG_PASSWORD is auto-generated via generate_credential() (secrets.token_urlsafe(32)).
@@ -198,9 +200,7 @@ def create_env_file(
     content = _ENV_HEADER
     if db_postgres:
         pg_password = generate_credential()
-        block = _ENV_POSTGRES_BLOCK.replace(
-            'PG_PASSWORD=""', f'PG_PASSWORD="{pg_password}"'
-        )
+        block = _ENV_POSTGRES_BLOCK.replace('PG_PASSWORD=""', f'PG_PASSWORD="{pg_password}"')
         content += block
     if mcp_firecrawl:
         content += _ENV_FIRECRAWL_BLOCK
@@ -216,9 +216,7 @@ def create_env_file(
 # ─── S4: Default ACLs ────────────────────────────────────────────────────────
 
 
-def apply_default_acls(
-    instance_dir: str, user_project_root: str, dev_user: str
-) -> None:
+def apply_default_acls(instance_dir: str, user_project_root: str, dev_user: str) -> None:
     """Apply default ACLs so dev can read container-created files (D-39)."""
     for target in [
         os.path.join(instance_dir, "log/"),
@@ -244,10 +242,7 @@ def prompt_secrets(
     directing the operator to populate the env file manually.
     """
     if not sys.stdin.isatty():
-        print(
-            f"Non-interactive mode: populate secrets in {env_path} "
-            f"before running 'sandbox start'."
-        )
+        print(f"Non-interactive mode: populate secrets in {env_path} before running 'sandbox start'.")
         return
 
     # Read current content

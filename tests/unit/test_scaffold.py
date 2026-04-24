@@ -1,6 +1,5 @@
 """Tests for core/scaffold.py — instance directory scaffolding."""
 
-
 import os
 import stat
 from pathlib import Path
@@ -204,9 +203,7 @@ class TestApplyDefaultAcls:
 class TestPromptSecrets:
     @patch("sys.stdin")
     @patch("getpass.getpass")
-    def test_interactive_tty_prompts(
-        self, mock_getpass: MagicMock, mock_stdin: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_interactive_tty_prompts(self, mock_getpass: MagicMock, mock_stdin: MagicMock, tmp_path: Path) -> None:
         """In TTY mode, prompts for each required secret and writes to env file."""
         mock_stdin.isatty.return_value = True
         mock_getpass.side_effect = ["sk-ant-xxx", "ghp_yyy"]
@@ -312,6 +309,7 @@ class TestDetectGitConfig:
 
         def mock_run(cmd: list[str], **kwargs: object) -> object:
             import subprocess
+
             if "user.name" in cmd:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Jane Doe\n", stderr="")
             if "user.email" in cmd:

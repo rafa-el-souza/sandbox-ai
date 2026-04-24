@@ -15,6 +15,24 @@ The system SHALL shut down the sandbox's containers by running `docker compose d
 - **WHEN** `sandbox stop` is invoked and `docker compose ps -q` returns no output
 - **THEN** the CLI emits a warning that no containers are running and exits with code 0
 
+### Requirement: Concurrency Lock Acquisition on Stop
+The system SHALL acquire the per-instance `state.lock` with `LOCK_NB` before executing stop operations. If the lock is held by a concurrent `start`, `stop` SHALL fail fast with a clear message.
+
+#### Scenario: Stop acquires lock successfully
+- **WHEN** `sandbox stop` is invoked and no other command holds the instance lock
+- **THEN** the lock is acquired and stop proceeds normally
+
+#### Scenario: Stop rejected during concurrent start
+- **WHEN** `sandbox stop` is invoked while `sandbox start` holds the instance lock
+- **THEN** the CLI exits immediately with: "Another sandbox operation is already in progress for this instance."
+
+### Requirement: Compose Environment File on Stop
+The system SHALL pass `--env-file <instance_dir>/.sandbox.env` to the `docker compose down` invocation during stop.
+
+#### Scenario: --env-file on compose down
+- **WHEN** `_compose_down` constructs the compose command during stop
+- **THEN** the command includes `--env-file <instance_dir>/.sandbox.env`
+
 ### Requirement: Named Volume Preservation on Plain Stop
 The system SHALL preserve all named Docker volumes when `sandbox stop` is invoked without `--clean`.
 
@@ -30,8 +48,12 @@ The system SHALL remove all named Docker volumes when `sandbox stop --clean` is 
 - **THEN** `docker compose down -v` has been executed and all named volumes for the instance are absent from the Docker volume list
 
 ### Requirement: ACL Revocation After Shutdown
-The system SHALL revoke the `sandbox` user's ACL grants on `docker/` and `config/` after containers are confirmed down.
+The system SHALL revoke the `sandbox` user's ACL grants on instance root, `docker/`, `config/`, and `.sandbox.env` after containers are confirmed down. Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
 
 #### Scenario: sandbox ACL removed after stop
 - **WHEN** `docker compose down` confirms all containers have exited
-- **THEN** `setfacl -R -x u:<host_unprivileged_user>` is applied to `sandboxes/<id>/docker/` and `sandboxes/<id>/config/`
+- **THEN** `setfacl -x u:<host_unprivileged_user>` is applied independently to `sandboxes/<id>/`, `sandboxes/<id>/docker/` (recursive), `sandboxes/<id>/config/` (recursive), and `sandboxes/<id>/.sandbox.env`
+
+#### Scenario: Partial revocation failure reported as warning
+- **WHEN** one or more ACL revocation targets fail during stop
+- **THEN** the failure is reported as a warning and remaining targets are still attempted

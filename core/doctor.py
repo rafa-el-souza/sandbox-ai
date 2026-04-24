@@ -1,9 +1,9 @@
 """Doctor module: host readiness diagnostics for sandbox operation.
 
-Provides 13 diagnostic checks across 3 independent chains:
+Provides 14 diagnostic checks across 3 independent chains:
 - Chain 1 (privilege boundary, 9 checks): sudo -> machinectl -> user -> machined
   -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs
-- Chain 2 (filesystem, 2 checks): setfacl → ACL support
+- Chain 2 (filesystem, 3 checks): setfacl → ACL support → ancestor traverse
 - Chain 3 (repo integrity, 2 checks): tooling plane, state dir (independent)
 """
 
@@ -221,8 +221,13 @@ def check_machinectl_reachable(user: str, distro: str | None) -> CheckResult:
     try:
         result = subprocess.run(
             [
-                "sudo", "machinectl", "shell", f"{user}@.host",
-                "/bin/bash", "-c", "echo ok",
+                "sudo",
+                "machinectl",
+                "shell",
+                f"{user}@.host",
+                "/bin/bash",
+                "-c",
+                "echo ok",
             ],
             capture_output=True,
             text=True,
@@ -250,10 +255,7 @@ def check_machinectl_reachable(user: str, distro: str | None) -> CheckResult:
         status="fail",
         name="machinectl reachable",
         detail=f"Shell probe failed (exit {result.returncode}): {result.stderr.strip()}",
-        remediation=(
-            "Ensure systemd-machined is running and the user exists. "
-            "Check stderr for details."
-        ),
+        remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
     )
 
 
@@ -264,8 +266,12 @@ def check_docker_available(user: str, distro: str | None) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
     result = subprocess.run(
         [
-            "sudo", "machinectl", "shell", f"{user}@.host",
-            "/bin/bash", "-c",
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{user}@.host",
+            "/bin/bash",
+            "-c",
             "docker version --format '{{.Server.Version}}'",
         ],
         capture_output=True,
@@ -292,8 +298,12 @@ def check_docker_rootless(user: str, distro: str | None) -> CheckResult:
     """Check that Docker is running in rootless mode."""
     result = subprocess.run(
         [
-            "sudo", "machinectl", "shell", f"{user}@.host",
-            "/bin/bash", "-c",
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{user}@.host",
+            "/bin/bash",
+            "-c",
             "docker info --format '{{.SecurityOptions}}'",
         ],
         capture_output=True,
@@ -312,8 +322,7 @@ def check_docker_rootless(user: str, distro: str | None) -> CheckResult:
         name="Docker rootless",
         detail="Docker is NOT running in rootless mode",
         remediation=(
-            "Rootless Docker is a non-negotiable security boundary. "
-            f"Configure rootless mode for user '{user}'."
+            f"Rootless Docker is a non-negotiable security boundary. Configure rootless mode for user '{user}'."
         ),
         doc_ref="https://docs.docker.com/engine/security/rootless/",
     )
@@ -323,8 +332,12 @@ def check_runsc_registered(user: str, distro: str | None) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
     result = subprocess.run(
         [
-            "sudo", "machinectl", "shell", f"{user}@.host",
-            "/bin/bash", "-c",
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{user}@.host",
+            "/bin/bash",
+            "-c",
             "docker info --format '{{json .Runtimes}}'",
         ],
         capture_output=True,
@@ -361,8 +374,12 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
     """
     result = subprocess.run(
         [
-            "sudo", "machinectl", "shell", f"{user}@.host",
-            "/bin/bash", "-c",
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{user}@.host",
+            "/bin/bash",
+            "-c",
             "docker info --format '{{json .Runtimes}}'",
         ],
         capture_output=True,
@@ -375,10 +392,7 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
             status="warn",
             name="runsc runtimeArgs",
             detail="Could not query Docker runtimes",
-            remediation=(
-                f"Verify Docker is accessible for user '{user}' and check "
-                f"~{user}/.config/docker/daemon.json"
-            ),
+            remediation=(f"Verify Docker is accessible for user '{user}' and check ~{user}/.config/docker/daemon.json"),
         )
 
     try:
@@ -414,10 +428,7 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
         status="warn",
         name="runsc runtimeArgs",
         detail=f"Missing runtimeArgs: {', '.join(missing)}",
-        remediation=(
-            f"Add {', '.join(missing)} to runsc runtimeArgs in "
-            f"~{user}/.config/docker/daemon.json"
-        ),
+        remediation=(f"Add {', '.join(missing)} to runsc runtimeArgs in ~{user}/.config/docker/daemon.json"),
     )
 
 
@@ -464,13 +475,139 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
             name="ACL support",
             detail="Filesystem supports POSIX ACLs",
         )
-    except (subprocess.CalledProcessError, OSError):
+    except subprocess.CalledProcessError, OSError:
         return CheckResult(
             status="fail",
             name="ACL support",
             detail="Filesystem does not support POSIX ACLs",
             remediation="Ensure the filesystem is mounted with ACL support (mount -o acl)",
         )
+
+
+def _has_acl_exec(directory: str, user: str) -> bool:
+    """Probe getfacl for a named-user ACL entry granting execute on *directory*.
+
+    Returns True if ``getfacl`` reports an entry matching ``user:<user>:..x``
+    (execute bit set in the named-user ACL).  Returns False on any error
+    (missing getfacl binary, permission denied, parse failure).
+    """
+    try:
+        result = subprocess.run(
+            ["getfacl", "--absolute-names", "--no-effective", directory],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        # Look for "user:<name>:" lines where the permission string contains 'x'
+        prefix = f"user:{user}:"
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith(prefix):
+                perms = line[len(prefix) :]
+                if "x" in perms:
+                    return True
+    except subprocess.TimeoutExpired, OSError:
+        pass
+    return False
+
+
+def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
+    """Check that all ancestor directories of sandboxes/ are traversable by the sandbox user.
+
+    Walks from SANDBOX_AI_HOME/sandboxes upward to root, checking --x permission
+    via a two-tier probe: (1) os.stat() mode bits (fast, no subprocess), then
+    (2) getfacl for named-user ACL entries if mode bits deny access.
+    Also detects symlink divergence (WARN).
+    Reports FAIL with fix command on first blocked ancestor (D10).
+    """
+    import pwd
+    import stat
+
+    sandbox_home = _get_sandbox_ai_home()
+    sandboxes_dir = os.path.join(sandbox_home, "sandboxes")
+    abs_path = os.path.abspath(sandboxes_dir)
+
+    # Resolve the user
+    try:
+        pw = pwd.getpwnam(user)
+        target_uid = pw.pw_uid
+        target_gid = pw.pw_gid
+    except KeyError:
+        return CheckResult(
+            status="fail",
+            name="ancestor traverse",
+            detail=f"User '{user}' does not exist on this host",
+            remediation=f"Create user: sudo useradd --system --shell /usr/sbin/nologin {user}",
+        )
+
+    # Build ancestor chain
+    components: list[str] = []
+    current = abs_path
+    while current != "/":
+        components.append(current)
+        current = os.path.dirname(current)
+    components.append("/")
+    components.reverse()
+
+    # Symlink divergence check
+    real_path = os.path.realpath(sandboxes_dir)
+    symlink_warning = ""
+    if abs_path != real_path:
+        symlink_warning = (
+            f"Symlink divergence detected: {abs_path} resolves to {real_path}. "
+            f"ACLs may need to be applied to the real path."
+        )
+
+    # Traverse permission check
+    for directory in components:
+        try:
+            st = os.stat(directory)
+        except OSError:
+            return CheckResult(
+                status="fail",
+                name="ancestor traverse",
+                detail=f"Cannot stat directory: {directory}",
+                remediation=f"Verify directory exists and is accessible: ls -la {directory}",
+            )
+
+        mode = st.st_mode
+        has_exec = False
+        if st.st_uid == target_uid:
+            has_exec = bool(mode & stat.S_IXUSR)
+        elif st.st_gid == target_gid:
+            has_exec = bool(mode & stat.S_IXGRP)
+        else:
+            has_exec = bool(mode & stat.S_IXOTH)
+
+        # Mode bits are blind to POSIX ACL named-user entries.
+        # If mode bits deny, probe getfacl for an explicit ACL grant.
+        if not has_exec:
+            has_exec = _has_acl_exec(directory, user)
+
+        if not has_exec:
+            return CheckResult(
+                status="fail",
+                name="ancestor traverse",
+                detail=f"User '{user}' lacks execute permission on {directory}",
+                remediation=f"setfacl -m u:{user}:--x {directory}",
+            )
+
+    # All ancestors traversable
+    if symlink_warning:
+        return CheckResult(
+            status="warn",
+            name="ancestor traverse",
+            detail=f"All ancestor directories traversable. {symlink_warning}",
+        )
+
+    return CheckResult(
+        status="pass",
+        name="ancestor traverse",
+        detail=f"All ancestor directories traversable by '{user}'",
+    )
 
 
 def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
@@ -613,6 +750,14 @@ def build_check_registry() -> list[Check]:
             run=check_acl_support,
             remediation="",
         ),
+        Check(
+            id="ancestor_traverse",
+            name="ancestor traverse",
+            category="Filesystem",
+            depends_on=["acl_support"],
+            run=check_ancestor_traverse,
+            remediation="",
+        ),
         # Chain 3: repo integrity
         Check(
             id="tooling_plane",
@@ -645,9 +790,7 @@ def topological_sort(checks: list[Check]) -> list[Check]:
                 adjacency[dep].append(c.id)
                 in_degree[c.id] += 1
 
-    queue: deque[str] = deque(
-        cid for cid, deg in in_degree.items() if deg == 0
-    )
+    queue: deque[str] = deque(cid for cid, deg in in_degree.items() if deg == 0)
     sorted_ids: list[str] = []
 
     while queue:
@@ -673,10 +816,7 @@ def run_checks(
 
     for check in ordered:
         # Check if any dependency failed
-        failed_deps = [
-            dep for dep in check.depends_on
-            if dep in results and results[dep].status in ("fail", "skip")
-        ]
+        failed_deps = [dep for dep in check.depends_on if dep in results and results[dep].status in ("fail", "skip")]
 
         if failed_deps:
             dep_names = ", ".join(failed_deps)
@@ -698,12 +838,23 @@ def run_check_subset(
     categories: list[str],
     user: str,
     distro: str | None,
+    *,
+    exclude_ids: set[str] | None = None,
 ) -> list[CheckResult]:
     """Execute a filtered subset of doctor checks by category.
 
     Filters ``build_check_registry()`` by ``Check.category``, validates the
     cross-chain invariant (all ``depends_on`` references must resolve within
     the subset), then delegates to ``run_checks``.
+
+    Args:
+        categories: Category names to include.
+        user: Unprivileged user to check.
+        distro: Linux distribution name or None.
+        exclude_ids: Optional set of check IDs to exclude from the subset.
+            Excluded checks are removed *before* the cross-chain invariant
+            validation. Checks that ``depends_on`` an excluded ID will be
+            auto-skipped by the dependency engine.
 
     Raises:
         ValueError: If any ``depends_on`` reference in the filtered subset
@@ -714,13 +865,14 @@ def run_check_subset(
 
     registry = build_check_registry()
     category_set = set(categories)
-    subset = [c for c in registry if c.category in category_set]
+    excluded = exclude_ids or set()
+    subset = [c for c in registry if c.category in category_set and c.id not in excluded]
 
     # Assert cross-chain invariant: every depends_on must resolve internally
     subset_ids = {c.id for c in subset}
     for check in subset:
         for dep in check.depends_on:
-            if dep not in subset_ids:
+            if dep not in subset_ids and dep not in excluded:
                 raise ValueError(
                     f"Check '{check.id}' depends on '{dep}' which is outside "
                     f"the subset (categories: {categories}). Cross-chain "

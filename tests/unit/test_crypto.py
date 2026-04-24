@@ -1,6 +1,5 @@
 """Tests for core/crypto.py — credential generation and htpasswd writing."""
 
-
 from pathlib import Path
 
 from core.crypto import (
