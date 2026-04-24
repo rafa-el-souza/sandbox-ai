@@ -2201,9 +2201,9 @@ class TestACLPlanAsymmetry:
         ]
         for subdir in expected_subdirs:
             target = str(instance_dir / subdir)
-            assert any(
-                d == f"rw mount source: {target}" for d in descriptions
-            ), f"Missing rw mount source entry for {subdir}"
+            assert any(d == f"rw mount source: {target}" for d in descriptions), (
+                f"Missing rw mount source entry for {subdir}"
+            )
             # Verify setfacl args contain -R -m and rwX
             source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
             assert len(source_entries) == 1
@@ -2233,9 +2233,9 @@ class TestACLPlanAsymmetry:
         ]
         for subdir in expected_subdirs:
             target = str(instance_dir / subdir)
-            assert any(
-                d == f"rw mount default: {target}" for d in descriptions
-            ), f"Missing rw mount default entry for {subdir}"
+            assert any(d == f"rw mount default: {target}" for d in descriptions), (
+                f"Missing rw mount default entry for {subdir}"
+            )
             # Verify setfacl args contain -d and -m
             default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
             assert len(default_entries) == 1
@@ -2262,17 +2262,17 @@ class TestACLPlanAsymmetry:
         for subdir in expected_subdirs:
             target = str(instance_dir / subdir)
             # Effective removal
-            assert any(
-                d == f"rw mount source: {target}" for d in descriptions
-            ), f"Missing rw mount source revoke for {subdir}"
+            assert any(d == f"rw mount source: {target}" for d in descriptions), (
+                f"Missing rw mount source revoke for {subdir}"
+            )
             source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
             assert "-x" in source_entries[0][0]
             assert "-R" in source_entries[0][0]
 
             # Default removal
-            assert any(
-                d == f"rw mount default: {target}" for d in descriptions
-            ), f"Missing rw mount default revoke for {subdir}"
+            assert any(d == f"rw mount default: {target}" for d in descriptions), (
+                f"Missing rw mount default revoke for {subdir}"
+            )
             default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
             assert "-d" in default_entries[0][0]
             assert "-x" in default_entries[0][0]

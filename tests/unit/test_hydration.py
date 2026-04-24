@@ -910,8 +910,13 @@ class TestReadOnlyDomainsGeneration:
 
         # Instance dirs
         for d in [
-            "docker/core", "docker/admin", "docker/extras",
-            "config/admin", "config/core", "config/dns-sidecar", "config/proxy",
+            "docker/core",
+            "docker/admin",
+            "docker/extras",
+            "config/admin",
+            "config/core",
+            "config/dns-sidecar",
+            "config/proxy",
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
@@ -953,8 +958,13 @@ class TestReadOnlyDomainsGeneration:
             (config_dir / "core" / f).write_text(f"# {f}\n")
 
         for d in [
-            "docker/core", "docker/admin", "docker/extras",
-            "config/admin", "config/core", "config/dns-sidecar", "config/proxy",
+            "docker/core",
+            "docker/admin",
+            "docker/extras",
+            "config/admin",
+            "config/core",
+            "config/dns-sidecar",
+            "config/proxy",
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
@@ -1029,4 +1039,3 @@ class TestValidTomlBackwardCompatibility:
         # User-supplied mutable tags are accepted — defaults would be digests
         assert config.core.base_image == "cgr.dev/chainguard/wolfi-base:latest"
         assert config.admin.base_image == "debian:trixie-slim"
-

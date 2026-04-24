@@ -334,15 +334,19 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
     for subdir in rw_mount_sources:
         target = os.path.join(instance_dir, subdir)
         # Effective ACL: rwX for existing files/dirs
-        plan.append((
-            ["setfacl", "-R", "-m", f"u:{host_user}:rwX", target],
-            f"rw mount source: {target}",
-        ))
+        plan.append(
+            (
+                ["setfacl", "-R", "-m", f"u:{host_user}:rwX", target],
+                f"rw mount source: {target}",
+            )
+        )
         # Default ACL: rwX for future files/dirs created by containers
-        plan.append((
-            ["setfacl", "-R", "-d", "-m", f"u:{host_user}:rwX", target],
-            f"rw mount default: {target}",
-        ))
+        plan.append(
+            (
+                ["setfacl", "-R", "-d", "-m", f"u:{host_user}:rwX", target],
+                f"rw mount default: {target}",
+            )
+        )
 
     return plan
 
@@ -402,14 +406,18 @@ def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str],
     ]
     for subdir in rw_mount_sources:
         target = os.path.join(instance_dir, subdir)
-        plan.append((
-            ["setfacl", "-R", "-x", f"u:{host_user}", target],
-            f"rw mount source: {target}",
-        ))
-        plan.append((
-            ["setfacl", "-R", "-d", "-x", f"u:{host_user}", target],
-            f"rw mount default: {target}",
-        ))
+        plan.append(
+            (
+                ["setfacl", "-R", "-x", f"u:{host_user}", target],
+                f"rw mount source: {target}",
+            )
+        )
+        plan.append(
+            (
+                ["setfacl", "-R", "-d", "-x", f"u:{host_user}", target],
+                f"rw mount default: {target}",
+            )
+        )
 
     return plan
 

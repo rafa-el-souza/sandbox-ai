@@ -28,8 +28,7 @@ logger = logging.getLogger(__name__)
 #
 IMAGE_DIGESTS: dict[str, str] = {
     "wolfi_base": (
-        "cgr.dev/chainguard/wolfi-base"
-        "@sha256:3490ac41800d82ab3c97f8d4f9e762e9a937f4527c6f21ba81bd7dc23aee8097"
+        "cgr.dev/chainguard/wolfi-base@sha256:3490ac41800d82ab3c97f8d4f9e762e9a937f4527c6f21ba81bd7dc23aee8097"
     ),
     "debian_trixie": "debian@sha256:a15012b5f8fbefd7bfa43e253e6b3e879e63d8e37e5e2e5fc6c8e5e62ee5f2a3",
     "squid": "ubuntu/squid@sha256:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
@@ -240,9 +239,7 @@ def build_jinja_context(
         # Proxy whitelist
         "proxy_whitelist_domains": config.proxy_whitelist.domains,
         # CoreDNS zones: strip leading dot (zones are inherently suffix-matching)
-        "proxy_whitelist_domains_coredns": [
-            d.lstrip(".") for d in config.proxy_whitelist.domains
-        ],
+        "proxy_whitelist_domains_coredns": [d.lstrip(".") for d in config.proxy_whitelist.domains],
         # Read-only registry domains (N4)
         "proxy_whitelist_read_only_domains": config.proxy_whitelist.read_only_domains,
         # Extras: db-postgres

@@ -1,17 +1,19 @@
 .PHONY: test coverage lint format typecheck
+SHELL := /bin/bash
+.SHELLFLAGS := -o pipefail -c
 
 coverage:
-	uv run --with pytest-cov pytest --cov=core --cov=cli --cov-report=term-missing tests/unit/
+	@uv run --quiet --with pytest-cov pytest --cov=core --cov=cli --cov-fail-under=100 --cov-report=term-missing:skip-covered -q --tb=short --no-header 2>&1 | sed -E '/^[.FEsxX ]+(\[|$$)/d; /^_.*coverage:/d'
 
 test:
-	uv run pytest tests/unit/
+	@uv run --quiet pytest -q --tb=short --no-header 2>&1 | sed -E '/^[.FEsxX ]+(\[|$$)/d'
 
 lint:
-	uv run ruff check core/ cli/ tests/
+	@uv run --quiet ruff check --output-format concise .
 
 format:
-	uv run ruff format core/ cli/ tests/
-	uv run ruff check --fix core/ cli/ tests/
+	@uv run --quiet ruff format .
+	@uv run --quiet ruff check --fix .
 
 typecheck:
-	uv run mypy core/ cli/ tests/
+	@uv run --quiet mypy --no-error-summary .
