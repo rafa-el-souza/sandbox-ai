@@ -31,9 +31,12 @@ USER root
 RUN curl -sS https://starship.rs/install.sh | sh -s -- -y
 
 # Gitmux
-RUN wget https://github.com/arl/gitmux/releases/latest/download/gitmux_Linux_x86_64.tar.gz && \
-    tar xzfv gitmux_Linux_x86_64.tar.gz -C /usr/local/bin && \
-    rm gitmux_Linux_x86_64.tar.gz
+ARG GITMUX_VERSION="v0.11.5"
+ARG GITMUX_SHA256="d46a10f5fe07ab5b8a902ac29c937e4d3c8d7f33ea30fa335d682601697b5a71"
+RUN wget -q "https://github.com/arl/gitmux/releases/download/${GITMUX_VERSION}/gitmux_${GITMUX_VERSION}_linux_amd64.tar.gz" -O /tmp/gitmux.tar.gz && \
+    echo "${GITMUX_SHA256}  /tmp/gitmux.tar.gz" | sha256sum -c - && \
+    tar xzf /tmp/gitmux.tar.gz -C /usr/local/bin && \
+    rm /tmp/gitmux.tar.gz
 
 USER ${USERNAME}
 
