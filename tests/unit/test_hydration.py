@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 from core.hydration import (
+    IMAGE_DIGESTS,
     AdminConfig,
     CoreConfig,
     DbPostgresConfig,
+    ProxyWhitelistConfig,
     SandboxConfig,
     build_jinja_context,
     render_templates,
@@ -408,7 +410,7 @@ class TestRenderTemplates:
         # admin static configs
         admin_cfg = config_dir / "admin"
         admin_cfg.mkdir(parents=True)
-        for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml"]:
+        for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (admin_cfg / f).write_text(f"# {f}\n")
 
         # core static configs
@@ -606,13 +608,15 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "admin_memswap_limit": "8gb",
         "admin_cpus": "4.0",
         "runtime": "runsc",
-        "dns_image": "coredns/coredns:1.11.1",
-        "proxy_image": "ubuntu/squid:latest",
+        "dns_image": IMAGE_DIGESTS["coredns"],
+        "proxy_image": IMAGE_DIGESTS["squid"],
+        "db_postgres_image": IMAGE_DIGESTS["postgres"],
         "nvm_version": "0.39.7",
         "node_version": "20.12.2",
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
         "proxy_whitelist_domains": [".github.com", ".npmjs.com"],
         "proxy_whitelist_domains_coredns": ["github.com", "npmjs.com"],
+        "proxy_whitelist_read_only_domains": [".npmjs.com"],
         "pg_user": "sandbox",
         "pg_db": "sandbox_db",
         "warmup_prompt": "",
@@ -763,6 +767,8 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     # Static (gitmux.conf, starship.toml)
     for f in ["gitmux.conf", "starship.toml"]:
         (admin_cfg / f).write_text(f"# {f}\n")
+    # Rendered (admin/.gitconfig)
+    (admin_cfg / ".gitconfig").write_text("# gitconfig {{ custom_config_admin }}\n")
     # Core: rendered templates + static files
     core_cfg = config_dir / "core"
     core_cfg.mkdir(parents=True)
@@ -868,3 +874,159 @@ class TestMcpFirecrawlTemplateRendering:
 
         assert "env_file:" in rendered
         assert ".sandbox.env" in rendered
+
+
+class TestReadOnlyDomainsGeneration:
+    """Task 7.4: read_only_domains.txt generation from context key."""
+
+    def test_read_only_domains_file_generated(self, tmp_path: Path) -> None:
+        """read_only_domains.txt is generated from proxy_whitelist_read_only_domains."""
+        tooling = tmp_path / "tooling"
+        instance = tmp_path / "instance"
+
+        # Minimal tooling plane
+        docker_dir = tooling / ".docker"
+        docker_dir.mkdir(parents=True)
+        (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+        core_dir = docker_dir / "core"
+        core_dir.mkdir()
+        (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
+        (core_dir / "entrypoint.sh").write_text("#!/bin/bash\n")
+        admin_dir = docker_dir / "admin"
+        admin_dir.mkdir()
+        (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
+        (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+
+        config_dir = tooling / ".config"
+        for d in ["dns-sidecar", "proxy", "admin", "core"]:
+            (config_dir / d).mkdir(parents=True, exist_ok=True)
+        (config_dir / "dns-sidecar" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "proxy" / "squid.conf").write_text("# {{ proxy_ip }}\n")
+        (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
+        for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
+            (config_dir / "admin" / f).write_text(f"# {f}\n")
+        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+            (config_dir / "core" / f).write_text(f"# {f}\n")
+
+        # Instance dirs
+        for d in [
+            "docker/core", "docker/admin", "docker/extras",
+            "config/admin", "config/core", "config/dns-sidecar", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        ctx["proxy_whitelist_read_only_domains"] = [".pypi.org", ".npmjs.com"]
+
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        domains_file = instance / "config" / "proxy" / "read_only_domains.txt"
+        assert domains_file.exists()
+        content = domains_file.read_text()
+        assert ".pypi.org" in content
+        assert ".npmjs.com" in content
+
+    def test_empty_read_only_domains_produces_empty_file(self, tmp_path: Path) -> None:
+        """Empty read_only_domains produces an empty file."""
+        tooling = tmp_path / "tooling"
+        instance = tmp_path / "instance"
+
+        docker_dir = tooling / ".docker"
+        docker_dir.mkdir(parents=True)
+        (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+        (docker_dir / "core").mkdir()
+        (docker_dir / "core" / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
+        (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
+        (docker_dir / "admin").mkdir()
+        (docker_dir / "admin" / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
+        (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/sh\n")
+
+        config_dir = tooling / ".config"
+        for d in ["dns-sidecar", "proxy", "admin", "core"]:
+            (config_dir / d).mkdir(parents=True, exist_ok=True)
+        (config_dir / "dns-sidecar" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "proxy" / "squid.conf").write_text("# {{ proxy_ip }}\n")
+        (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
+        for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
+            (config_dir / "admin" / f).write_text(f"# {f}\n")
+        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+            (config_dir / "core" / f).write_text(f"# {f}\n")
+
+        for d in [
+            "docker/core", "docker/admin", "docker/extras",
+            "config/admin", "config/core", "config/dns-sidecar", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        ctx["proxy_whitelist_read_only_domains"] = []
+
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        domains_file = instance / "config" / "proxy" / "read_only_domains.txt"
+        assert domains_file.exists()
+        assert domains_file.read_text() == ""
+
+
+class TestProxyWhitelistReadOnlyDomains:
+    """Task 7.5: ProxyWhitelistConfig.read_only_domains field validation and defaults."""
+
+    def test_default_is_empty_list(self) -> None:
+        """read_only_domains defaults to empty list."""
+        config = ProxyWhitelistConfig()
+        assert config.read_only_domains == []
+
+    def test_accepts_domain_list(self) -> None:
+        """read_only_domains accepts a list of strings."""
+        config = ProxyWhitelistConfig(read_only_domains=[".pypi.org", ".npmjs.com"])
+        assert config.read_only_domains == [".pypi.org", ".npmjs.com"]
+
+    def test_backward_compatible_with_missing_field(self, tmp_path: Path) -> None:
+        """Existing sandbox.toml without read_only_domains still parses correctly."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        assert config.proxy_whitelist.read_only_domains == []
+
+
+class TestImageDigestContextValues:
+    """Task 7.6: image-related context values use digest format."""
+
+    def test_context_dns_image_is_digest(self, tmp_path: Path) -> None:
+        """dns_image uses @sha256: digest format."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "@sha256:" in ctx["dns_image"]
+
+    def test_context_proxy_image_is_digest(self, tmp_path: Path) -> None:
+        """proxy_image uses @sha256: digest format."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "@sha256:" in ctx["proxy_image"]
+
+    def test_context_db_postgres_image_present(self, tmp_path: Path) -> None:
+        """db_postgres_image is present in context."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "db_postgres_image" in ctx
+        assert "@sha256:" in ctx["db_postgres_image"]
+
+
+class TestValidTomlBackwardCompatibility:
+    """Task 7.7: VALID_TOML fixtures remain backward-compatible with mutable tags."""
+
+    def test_mutable_tags_accepted(self, tmp_path: Path) -> None:
+        """VALID_TOML with mutable tags parses without errors."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        # User-supplied mutable tags are accepted — defaults would be digests
+        assert config.core.base_image == "cgr.dev/chainguard/wolfi-base:latest"
+        assert config.admin.base_image == "debian:trixie-slim"
+

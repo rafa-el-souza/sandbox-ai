@@ -101,7 +101,7 @@ services:
     volumes:
       - "{{ instance_dir }}/config/proxy/squid.conf:/etc/squid/squid.conf:ro"
       - "{{ instance_dir }}/config/proxy/allowed_domains.txt:/etc/squid/allowed_domains.txt:ro"
-      - "{{ instance_dir }}/config/proxy/trusted_clients.acl:/etc/squid/trusted_clients.acl:ro"
+      - "{{ instance_dir }}/config/proxy/read_only_domains.txt:/etc/squid/read_only_domains.txt:ro"
       - "{{ instance_dir }}/config/proxy/.htpasswd:/etc/squid/htpasswd:ro"
       - "{{ instance_dir }}/config/proxy/ERR_SANDBOX_403:/usr/share/squid/errors/en/ERR_SANDBOX_403:ro"
     sysctls:
@@ -262,6 +262,7 @@ services:
       - "{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw"
       - admin-ipc_vol:/sock
       - "{{ instance_dir }}/log/admin:/home/human/.log:rw"
+      - "{{ instance_dir }}/config/admin/.gitconfig:/home/human/.gitconfig:ro"
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.default.disable_ipv6=1
