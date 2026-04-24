@@ -48,11 +48,15 @@ The system SHALL remove all named Docker volumes when `sandbox stop --clean` is 
 - **THEN** `docker compose down -v` has been executed and all named volumes for the instance are absent from the Docker volume list
 
 ### Requirement: ACL Revocation After Shutdown
-The system SHALL revoke the `sandbox` user's ACL grants on instance root, `docker/`, `config/`, and `.sandbox.env` after containers are confirmed down. Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
+The system SHALL revoke the `sandbox` user's ACL grants on instance root, `docker/`, `config/`, `.sandbox.env`, and rw bind-mount source subdirectories (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`) after containers are confirmed down. Revocation of rw bind-mount sources SHALL remove both effective and default ACL entries. Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
 
 #### Scenario: sandbox ACL removed after stop
 - **WHEN** `docker compose down` confirms all containers have exited
 - **THEN** `setfacl -x u:<host_unprivileged_user>` is applied independently to `sandboxes/<id>/`, `sandboxes/<id>/docker/` (recursive), `sandboxes/<id>/config/` (recursive), and `sandboxes/<id>/.sandbox.env`
+
+#### Scenario: rw bind-mount source ACLs revoked after stop
+- **WHEN** `docker compose down` confirms all containers have exited
+- **THEN** `setfacl -R -x u:<host_unprivileged_user>` (effective) and `setfacl -R -d -x u:<host_unprivileged_user>` (default) are applied independently to `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`
 
 #### Scenario: Partial revocation failure reported as warning
 - **WHEN** one or more ACL revocation targets fail during stop

@@ -2,7 +2,7 @@
 # 1. Isolated Lateral Boundary
 # Blackholes internal execution names to prevent
 # lateral subnet probing requests from escaping to the public internet natively.
-cluster.local .local internal {
+cluster.local local internal {
     template ANY ANY . {
         rcode NXDOMAIN
     }
@@ -11,13 +11,13 @@ cluster.local .local internal {
 # 2. Whitelisted Domains Upstream (DNS-over-TLS Enforced)
 # Standard CoreDNS distributions lack dynamic `dstdomain "/file"` reading.
 # Ensure no leading wildcards in the allow list.
-{{ proxy_whitelist_domains | join(' ') }} {
+{{ proxy_whitelist_domains_coredns | join(' ') }} {
     log # Algorithmically interleaves successful queries into `sandbox-cli logs`
     
     # IPv6 Complete Algorithmic Elimination
     # Forces valid IPv4 domain packets to drop their AAAA requests instantly securely natively.
     template ANY AAAA {
-        rcode NODATA
+        rcode NOERROR
     }
     
     # Native DoT Upstreaming perfectly resolving the OpenSpec SSL MITM avoidance mandate natively

@@ -144,3 +144,22 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 #### Scenario: Failure with ACL cleanup emits diagnostic
 - **WHEN** Phase 5 or Phase 6 fails and ACL cleanup is triggered
 - **THEN** the error output includes the traverse failure diagnostic (if applicable) followed by the ACL cleanup status
+
+### Requirement: ACL Grants for rw Bind-Mount Sources
+The system SHALL grant `rwX` ACLs (effective and default) to the `host_unprivileged_user` on each rw bind-mount source subdirectory during Phase 5 (ACL grant). The grant plan SHALL include both effective ACL entries (`-m`) and default ACL entries (`-d -m`) to ensure files created by containers inside the bind-mount inherit the sandbox user's write permission.
+
+#### Scenario: rw bind-mount source directories receive effective ACLs
+- **WHEN** `_acl_grant_plan()` is called for an instance
+- **THEN** the returned plan includes `setfacl -R -m u:<host_user>:rwX <target>` entries for `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`
+
+#### Scenario: rw bind-mount source directories receive default ACLs
+- **WHEN** `_acl_grant_plan()` is called for an instance
+- **THEN** the returned plan includes `setfacl -R -d -m u:<host_user>:rwX <target>` entries for `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`
+
+#### Scenario: Non-bind-mounted log directories excluded from grants
+- **WHEN** `_acl_grant_plan()` is called for an instance
+- **THEN** the returned plan does NOT include entries for `log/proxy` or `log/orchestrator` (these directories are not bind-mounted into containers)
+
+#### Scenario: rw bind-mount ACLs appear in dry-run preview
+- **WHEN** `sandbox start --dry-run` is invoked
+- **THEN** the command preview includes the rw bind-mount source ACL entries from `_acl_grant_plan()`

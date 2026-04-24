@@ -42,6 +42,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     runtime: "{{ runtime }}"
     read_only: true
     tmpfs:
@@ -80,12 +82,16 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
     runtime: "{{ runtime }}"
     read_only: true
     tmpfs:
-      - /var/spool/squid
-      - /var/run/squid
-      - /var/log/squid
+      - /var/spool/squid:noexec,nosuid,nodev
+      - /var/run/squid:noexec,nosuid,nodev
+      - /var/log/squid:noexec,nosuid,nodev
+      - /run:size=1m,noexec,nosuid,nodev
       - /tmp:noexec,nosuid,nodev
       - /var/tmp:noexec,nosuid,nodev
     networks:

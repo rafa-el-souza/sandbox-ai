@@ -158,4 +158,8 @@ ENV SHELL=/bin/bash
 ENV EDITOR=/usr/bin/nano
 ENV VISUAL=/usr/bin/nano
 
-ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/entrypoint.sh"]
+USER root
+RUN mkdir -p /sock && chown agent:agent /sock
+USER ${USERNAME}
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

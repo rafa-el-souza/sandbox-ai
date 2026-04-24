@@ -320,6 +320,30 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
         )
     )
 
+    # ── rw bind-mount sources for rootless Docker ──────────────────────
+    # Rootless Docker's namespace-root maps to host_user. Every rw bind-mount
+    # source needs write access from that user for mountpoint creation.
+    # Grant rwX on specific subdirectories, not the entire cache/ or log/ tree.
+
+    rw_mount_sources = [
+        "cache/core/.claude",
+        "cache/admin/tmux_resurrect",
+        "log/core",
+        "log/admin",
+    ]
+    for subdir in rw_mount_sources:
+        target = os.path.join(instance_dir, subdir)
+        # Effective ACL: rwX for existing files/dirs
+        plan.append((
+            ["setfacl", "-R", "-m", f"u:{host_user}:rwX", target],
+            f"rw mount source: {target}",
+        ))
+        # Default ACL: rwX for future files/dirs created by containers
+        plan.append((
+            ["setfacl", "-R", "-d", "-m", f"u:{host_user}:rwX", target],
+            f"rw mount default: {target}",
+        ))
+
     return plan
 
 
@@ -328,7 +352,9 @@ def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str],
 
     Ancestors are NOT revoked (D3 — grant-only model). Returns a list of
     (setfacl_args, description) tuples for: instance root, docker/ (recursive),
-    config/ (recursive), and .sandbox.env.
+    config/ (recursive), .sandbox.env, and rw bind-mount sources
+    (cache/core/.claude, cache/admin/tmux_resurrect, log/core, log/admin)
+    with both effective and default ACL entries.
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -366,6 +392,24 @@ def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str],
             f"env file: {env_file}",
         )
     )
+
+    # rw bind-mount sources — effective + default ACL removal
+    rw_mount_sources = [
+        "cache/core/.claude",
+        "cache/admin/tmux_resurrect",
+        "log/core",
+        "log/admin",
+    ]
+    for subdir in rw_mount_sources:
+        target = os.path.join(instance_dir, subdir)
+        plan.append((
+            ["setfacl", "-R", "-x", f"u:{host_user}", target],
+            f"rw mount source: {target}",
+        ))
+        plan.append((
+            ["setfacl", "-R", "-d", "-x", f"u:{host_user}", target],
+            f"rw mount default: {target}",
+        ))
 
     return plan
 
