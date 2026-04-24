@@ -11,6 +11,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from core.crypto import generate_credential
+from core.hydration import IMAGE_DIGESTS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -61,7 +62,7 @@ shm_size = "2gb"
 pids_limit = 400
 mem_limit = "8gb"
 cpus = 4.0
-base_image = "cgr.dev/chainguard/wolfi-base:latest"
+base_image = "{core_base_image}"
 base_distro_family = "wolfi"
 git_user = "{git_user}"
 git_email = "{git_email}"
@@ -71,7 +72,7 @@ shm_size = "2gb"
 pids_limit = 400
 mem_limit = "8gb"
 cpus = 4.0
-base_image = "debian:trixie-slim"
+base_image = "{admin_base_image}"
 base_distro_family = "debian"
 
 [runtimes]
@@ -93,6 +94,7 @@ enabled = true
 expose_host_ports = [5432]
 pg_user = "sandbox"
 pg_db = "sandbox_db"
+image = "{db_postgres_image}"
 
 [components.ingress]
 web_ports = [3000, 8080]
@@ -106,6 +108,18 @@ domains = [
   ".npmjs.org",
   ".pypi.org",
   ".pythonhosted.org",
+  ".crates.io",
+  ".rust-lang.org",
+  ".golang.org",
+  ".go.dev",
+  ".debian.org",
+  ".ubuntu.com",
+]
+read_only_domains = [
+  ".pypi.org",
+  ".pythonhosted.org",
+  ".npmjs.com",
+  ".npmjs.org",
   ".crates.io",
   ".rust-lang.org",
   ".golang.org",
@@ -132,6 +146,9 @@ def write_sandbox_toml(
         host_uid=str(os.getuid()),
         git_user=git_user,
         git_email=git_email,
+        core_base_image=IMAGE_DIGESTS["wolfi_base"],
+        admin_base_image=IMAGE_DIGESTS["debian_trixie"],
+        db_postgres_image=IMAGE_DIGESTS["postgres"],
     )
     toml_path = os.path.join(instance_dir, "sandbox.toml")
     with open(toml_path, "w") as f:

@@ -1,0 +1,5 @@
+[core]
+    hooksPath = /dev/null
+
+[include]
+    path = {{ custom_config_admin }}/.gitconfig

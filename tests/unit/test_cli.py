@@ -1735,6 +1735,7 @@ def _create_tooling_plane(home: Path) -> None:
     (config_dir / "admin" / ".tmux.conf").write_text("# tmux\n")
     (config_dir / "admin" / "gitmux.conf").write_text("# gitmux\n")
     (config_dir / "admin" / "starship.toml").write_text("# starship\n")
+    (config_dir / "admin" / ".gitconfig").write_text("# gitconfig\n")
     (config_dir / "core").mkdir(parents=True, exist_ok=True)
     (config_dir / "core" / ".bashrc").write_text("# bashrc\n")
     (config_dir / "core" / ".npmrc").write_text("# npmrc\n")

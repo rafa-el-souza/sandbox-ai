@@ -3,7 +3,7 @@ volumes:
 
 services:
   db-postgres:
-    image: postgres:16-alpine
+    image: {{ db_postgres_image }}
     init: true
     pids_limit: {{ core_pids_limit }}
     logging:
