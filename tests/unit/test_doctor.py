@@ -8,6 +8,7 @@ and Rich output renderer.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, mock_open, patch
@@ -245,9 +246,7 @@ class TestUserAndSystemdChecks:
     def test_user_exists(self) -> None:
         from core.doctor import check_user_exists
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="uid=1000(sandbox)", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="uid=1000(sandbox)", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_user_exists("sandbox", None)
             assert result.status == "pass"
@@ -256,9 +255,7 @@ class TestUserAndSystemdChecks:
     def test_user_not_exists(self) -> None:
         from core.doctor import check_user_exists
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="no such user"
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="no such user")
         with patch("subprocess.run", return_value=mock_result):
             result = check_user_exists("sandbox", None)
             assert result.status == "fail"
@@ -267,9 +264,7 @@ class TestUserAndSystemdChecks:
     def test_systemd_machined_active(self) -> None:
         from core.doctor import check_systemd_machined
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="active\n", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="active\n", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_systemd_machined("sandbox", None)
             assert result.status == "pass"
@@ -277,9 +272,7 @@ class TestUserAndSystemdChecks:
     def test_systemd_machined_inactive(self) -> None:
         from core.doctor import check_systemd_machined
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=3, stdout="inactive\n", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=3, stdout="inactive\n", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_systemd_machined("sandbox", None)
             assert result.status == "fail"
@@ -295,9 +288,7 @@ class TestMachinectlReachable:
     def test_reachable_success(self) -> None:
         from core.doctor import check_machinectl_reachable
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok\n", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_machinectl_reachable("sandbox", None)
             assert result.status == "pass"
@@ -316,9 +307,7 @@ class TestMachinectlReachable:
     def test_reachable_nonzero_exit(self) -> None:
         from core.doctor import check_machinectl_reachable
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="No machine 'sandbox' known"
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="No machine 'sandbox' known")
         with patch("subprocess.run", return_value=mock_result):
             result = check_machinectl_reachable("sandbox", None)
             assert result.status == "fail"
@@ -334,9 +323,7 @@ class TestDockerChecks:
     def test_docker_available_pass(self) -> None:
         from core.doctor import check_docker_available
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="24.0.7\n", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="24.0.7\n", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_docker_available("sandbox", None)
             assert result.status == "pass"
@@ -345,9 +332,7 @@ class TestDockerChecks:
     def test_docker_available_fail(self) -> None:
         from core.doctor import check_docker_available
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="command not found"
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="command not found")
         with patch("subprocess.run", return_value=mock_result):
             result = check_docker_available("sandbox", None)
             assert result.status == "fail"
@@ -355,9 +340,7 @@ class TestDockerChecks:
     def test_docker_rootless_pass(self) -> None:
         from core.doctor import check_docker_rootless
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="[rootless, cgroupns]", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="[rootless, cgroupns]", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_docker_rootless("sandbox", None)
             assert result.status == "pass"
@@ -365,9 +348,7 @@ class TestDockerChecks:
     def test_docker_rootless_system_docker(self) -> None:
         from core.doctor import check_docker_rootless
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="[apparmor, seccomp]", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="[apparmor, seccomp]", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_docker_rootless("sandbox", None)
             assert result.status == "fail"
@@ -377,9 +358,7 @@ class TestDockerChecks:
         from core.doctor import check_runsc_registered
 
         docker_info = '{"runsc": {}, "runc": {}}'
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_registered("sandbox", None)
             assert result.status == "pass"
@@ -388,9 +367,7 @@ class TestDockerChecks:
         from core.doctor import check_runsc_registered
 
         docker_info = '{"runc": {}}'
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_registered("sandbox", None)
             assert result.status == "fail"
@@ -411,9 +388,7 @@ class TestFilesystemChecks:
         ):
             mock_tmp.return_value.__enter__ = lambda s: MagicMock(name="/tmp/test")
             mock_tmp.return_value.__exit__ = lambda s, *a: None
-            mock_run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="", stderr=""
-            )
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             result = check_acl_support("sandbox", None)
             assert result.status == "pass"
 
@@ -478,7 +453,7 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 13
+        assert len(checks) == 14
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert "machinectl_reachable" in ids
@@ -632,9 +607,7 @@ class TestRunscJsonDecodeError:
     def test_runsc_bad_json_output(self) -> None:
         from core.doctor import check_runsc_registered
 
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="NOT-VALID-JSON{{{", stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="NOT-VALID-JSON{{{", stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_registered("sandbox", None)
             assert result.status == "fail"
@@ -662,8 +635,8 @@ class TestRunCheckSubset:
         from core.doctor import run_check_subset
 
         results = run_check_subset(["Filesystem"], "sandbox", None)
-        # Chain 2 has 2 checks: setfacl, ACL support
-        assert len(results) == 2
+        # Chain 2 has 3 checks: setfacl, ACL support, ancestor traverse
+        assert len(results) == 3
         names = {r.name for r in results}
         assert "setfacl" in names or "setfacl binary" in names
 
@@ -672,8 +645,8 @@ class TestRunCheckSubset:
         from core.doctor import run_check_subset
 
         results = run_check_subset(["Filesystem", "Repo Integrity"], "sandbox", None)
-        # Chain 2 (2 checks) + Chain 3 (2 checks) = 4
-        assert len(results) == 4
+        # Chain 2 (3 checks) + Chain 3 (2 checks) = 5
+        assert len(results) == 5
         names = {r.name for r in results}
         # Must contain checks from both categories
         assert "tooling plane" in names or "state dir writable" in names
@@ -686,13 +659,11 @@ class TestRunCheckSubset:
 
         # setfacl fails → ACL support should be skipped
         def fake_setfacl(user: str, distro: str | None) -> CheckResult:
-            return CheckResult(
-                status="fail", name="setfacl", detail="not found", category="Filesystem"
-            )
+            return CheckResult(status="fail", name="setfacl", detail="not found", category="Filesystem")
 
         with patch("core.doctor.check_setfacl", fake_setfacl):
             results = run_check_subset(["Filesystem"], "sandbox", None)
-            assert len(results) == 2
+            assert len(results) == 3
             statuses = {r.name: r.status for r in results}
             assert statuses["setfacl"] == "fail" or statuses["setfacl binary"] == "fail"
             # ACL support depends on setfacl → must be skip
@@ -706,6 +677,21 @@ class TestRunCheckSubset:
         results = run_check_subset([], "sandbox", None)
         assert results == []
 
+    def test_exclude_ids_removes_checks(self) -> None:
+        """exclude_ids removes specified checks and tolerates their dependents."""
+        from core.doctor import run_check_subset
+
+        results = run_check_subset(
+            ["Filesystem"],
+            "sandbox",
+            None,
+            exclude_ids={"ancestor_traverse"},
+        )
+        names = {r.name for r in results}
+        assert "ancestor traverse" not in names
+        # Other filesystem checks still run
+        assert "setfacl binary" in names or "ACL support" in names
+
     def test_cross_chain_dependency_raises_valueerror(self) -> None:
         """ValueError raised if a filtered subset has a depends_on pointing outside the subset."""
         from core.doctor import Check, CheckResult
@@ -716,13 +702,20 @@ class TestRunCheckSubset:
 
         fake_checks = [
             Check(
-                id="setfacl", name="setfacl", category="Filesystem",
+                id="setfacl",
+                name="setfacl",
+                category="Filesystem",
                 depends_on=["sudo"],  # cross-chain dependency!
-                run=noop, remediation="",
+                run=noop,
+                remediation="",
             ),
             Check(
-                id="sudo", name="sudo", category="Privilege Boundary",
-                depends_on=[], run=noop, remediation="",
+                id="sudo",
+                name="sudo",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=noop,
+                remediation="",
             ),
         ]
 
@@ -818,8 +811,11 @@ class TestWarnStatus:
 
         results = [
             CheckResult(
-                status="warn", name="Advisory Check", detail="something suboptimal",
-                remediation="do better", category="Test",
+                status="warn",
+                name="Advisory Check",
+                detail="something suboptimal",
+                remediation="do better",
+                category="Test",
             ),
         ]
         render_results(results, console=captured_console.console)
@@ -840,15 +836,15 @@ class TestCheckRunscRuntimeArgs:
         """Task 9.6: Returns pass when both --oci-seccomp and --debug-log present."""
         from core.doctor import check_runsc_runtimeargs
 
-        docker_info = json.dumps({
-            "runsc": {
-                "path": "/usr/local/bin/runsc",
-                "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
+        docker_info = json.dumps(
+            {
+                "runsc": {
+                    "path": "/usr/local/bin/runsc",
+                    "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
+                }
             }
-        })
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
         )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "pass"
@@ -859,15 +855,15 @@ class TestCheckRunscRuntimeArgs:
         """Task 9.7: Returns warn when --oci-seccomp missing."""
         from core.doctor import check_runsc_runtimeargs
 
-        docker_info = json.dumps({
-            "runsc": {
-                "path": "/usr/local/bin/runsc",
-                "runtimeArgs": ["--debug-log=/var/log/runsc/%ID%/"],
+        docker_info = json.dumps(
+            {
+                "runsc": {
+                    "path": "/usr/local/bin/runsc",
+                    "runtimeArgs": ["--debug-log=/var/log/runsc/%ID%/"],
+                }
             }
-        })
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
         )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
@@ -877,15 +873,15 @@ class TestCheckRunscRuntimeArgs:
         """Task 9.8: Returns warn when --debug-log missing."""
         from core.doctor import check_runsc_runtimeargs
 
-        docker_info = json.dumps({
-            "runsc": {
-                "path": "/usr/local/bin/runsc",
-                "runtimeArgs": ["--oci-seccomp"],
+        docker_info = json.dumps(
+            {
+                "runsc": {
+                    "path": "/usr/local/bin/runsc",
+                    "runtimeArgs": ["--oci-seccomp"],
+                }
             }
-        })
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
         )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
@@ -895,14 +891,14 @@ class TestCheckRunscRuntimeArgs:
         """Task 9.9: Returns warn when runtimeArgs is empty/absent."""
         from core.doctor import check_runsc_runtimeargs
 
-        docker_info = json.dumps({
-            "runsc": {
-                "path": "/usr/local/bin/runsc",
+        docker_info = json.dumps(
+            {
+                "runsc": {
+                    "path": "/usr/local/bin/runsc",
+                }
             }
-        })
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
         )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
@@ -914,9 +910,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps({"runsc": {"path": "/usr/local/bin/runsc"}})
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=docker_info, stderr=""
-        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
         with patch("subprocess.run", return_value=mock_result):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.remediation is not None
@@ -927,7 +921,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 13
+        assert len(checks) == 14
 
     def test_privilege_boundary_subset_contains_9_checks(self) -> None:
         """Task 9.12: Privilege boundary subset contains 9 checks (was 8)."""
@@ -948,12 +942,360 @@ class TestCheckRunscRuntimeArgs:
             return CheckResult(status="pass", name="runsc runtimeArgs", detail="ok")
 
         checks = [
-            Check(id="runsc", name="gVisor runsc", category="Privilege Boundary",
-                  depends_on=[], run=fail_runsc, remediation=""),
-            Check(id="runsc_runtimeargs", name="runsc runtimeArgs", category="Privilege Boundary",
-                  depends_on=["runsc"], run=pass_runtimeargs, remediation=""),
+            Check(
+                id="runsc",
+                name="gVisor runsc",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=fail_runsc,
+                remediation="",
+            ),
+            Check(
+                id="runsc_runtimeargs",
+                name="runsc runtimeArgs",
+                category="Privilege Boundary",
+                depends_on=["runsc"],
+                run=pass_runtimeargs,
+                remediation="",
+            ),
         ]
         results = run_checks(checks, "sandbox", None)
         assert results[0].status == "fail"
         assert results[1].status == "skip"
 
+
+# ── Section 12: Ancestor Traverse Check ─────────────────────────────────────
+#
+# All os.stat/pwd.getpwnam calls are fully mocked to avoid host filesystem
+# dependency. Tests construct synthetic stat results with deterministic
+# uid/gid/mode values — no real filesystem stat calls on host paths.
+
+
+def _make_stat(uid: int = 0, gid: int = 0, mode: int = 0o755) -> MagicMock:
+    """Create a synthetic os.stat_result with controlled uid/gid/mode."""
+    st = MagicMock(spec=os.stat_result)
+    st.st_uid = uid
+    st.st_gid = gid
+    st.st_mode = mode
+    return st
+
+
+def _mock_pwd(user: str = "sandbox", uid: int = 2000, gid: int = 2000) -> MagicMock:
+    """Create a synthetic pwd entry."""
+    pw = MagicMock()
+    pw.pw_uid = uid
+    pw.pw_gid = gid
+    pw.pw_name = user
+    return pw
+
+
+class TestCheckAncestorTraverse:
+    """Task 9.4: ancestor traverse check — pass, fail, user not found, symlink."""
+
+    def test_pass_all_traversable(self) -> None:
+        """WHEN all ancestors have other-exec, THEN status=pass."""
+        from core.doctor import check_ancestor_traverse
+
+        # Synthetic path: /synthetic/project/sandboxes
+        # Components: ["/", "/synthetic", "/synthetic/project", "/synthetic/project/sandboxes"]
+        # All have o+x (0o755), target user uid=2000/gid=2000, dirs owned by root (uid=0)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", return_value=traversable),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "pass"
+            assert "traversable" in result.detail
+
+    def test_fail_user_not_found(self) -> None:
+        """WHEN user doesn't exist, THEN status=fail with useradd remediation."""
+        from core.doctor import check_ancestor_traverse
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", side_effect=KeyError("nonexistent")),
+        ):
+            result = check_ancestor_traverse("nonexistent_user_xyz", None)
+            assert result.status == "fail"
+            assert "does not exist" in result.detail
+
+    def test_fail_missing_execute(self) -> None:
+        """WHEN an ancestor lacks --x, THEN status=fail with setfacl fix command."""
+        from core.doctor import check_ancestor_traverse
+
+        # /synthetic has 0o700 (no other-exec), target user is "other"
+        blocked = _make_stat(uid=0, gid=0, mode=0o700)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                return blocked
+            return traversable
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "fail"
+            assert "lacks execute" in result.detail
+            assert "setfacl" in (result.remediation or "")
+
+    def test_acl_support_skip_cascades(self) -> None:
+        """WHEN acl_support fails, THEN ancestor_traverse is skipped (depends_on)."""
+        from core.doctor import CheckResult, run_check_subset
+
+        def fake_acl_support(user: str, distro: str | None) -> CheckResult:
+            return CheckResult(status="fail", name="ACL support", detail="no ACL", category="Filesystem")
+
+        with (
+            patch("core.doctor.check_acl_support", fake_acl_support),
+            patch(
+                "core.doctor.check_setfacl",
+                return_value=CheckResult(status="pass", name="setfacl binary", detail="ok", category="Filesystem"),
+            ),
+        ):
+            results = run_check_subset(["Filesystem"], "sandbox", None)
+            by_name = {r.name: r for r in results}
+            assert by_name["ACL support"].status == "fail"
+            assert by_name["ancestor traverse"].status == "skip"
+
+
+# ── Coverage Gap Tests (doctor) ─────────────────────────────────────────────
+
+
+class TestRunscRuntimeArgsEdgeCases:
+    """Cover L391 (nonzero exit), L400-401 (JSON decode error)."""
+
+    def test_nonzero_exit_returns_warn(self) -> None:
+        """L391: docker info returns nonzero → warn."""
+        from core.doctor import check_runsc_runtimeargs
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.status == "warn"
+            assert "Could not query" in result.detail
+
+    def test_json_decode_error_returns_warn(self) -> None:
+        """L400-401: bad JSON from docker info → warn."""
+        from core.doctor import check_runsc_runtimeargs
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="{{INVALID}}", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_runsc_runtimeargs("sandbox", None)
+            assert result.status == "warn"
+            assert "parse" in result.detail.lower()
+
+
+class TestAncestorTraverseEdgeCases:
+    """Cover L527 (symlink), L536-537 (OSError), L549 (group exec).
+
+    All tests use fully synthetic stat results — no real filesystem access.
+    """
+
+    def test_symlink_divergence_warns(self) -> None:
+        """L527, L563: symlink divergence produces warn status."""
+        from core.doctor import check_ancestor_traverse
+
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", return_value=traversable),
+            # Force realpath to return something different from abspath
+            patch("os.path.realpath", return_value="/other/real/path"),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "warn"
+            assert "Symlink divergence" in result.detail
+
+    def test_oserror_on_stat_returns_fail(self) -> None:
+        """L536-537: OSError during ancestor stat → fail."""
+        from core.doctor import check_ancestor_traverse
+
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                raise OSError("permission denied")
+            return traversable
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "fail"
+            assert "Cannot stat" in result.detail
+
+    def test_group_exec_branch(self) -> None:
+        """L549: group exec branch — uid differs, gid matches, S_IXGRP set."""
+        from core.doctor import check_ancestor_traverse
+
+        # Target user: uid=2000, gid=2000
+        # /synthetic: owned by uid=9999, gid=2000, mode=0o750 (group exec set)
+        # All other dirs: root-owned, o+x
+        group_match = _make_stat(uid=9999, gid=2000, mode=0o750)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                return group_match
+            return traversable
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox", uid=2000, gid=2000)),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "pass"
+
+    def test_user_owner_exec_branch(self) -> None:
+        """L547: user-owner exec branch — directory owned by target user, S_IXUSR set."""
+        from core.doctor import check_ancestor_traverse
+
+        # Target user: uid=2000, gid=2000
+        # /synthetic: owned by uid=2000 (same as user), mode=0o700 (user exec only)
+        user_owned = _make_stat(uid=2000, gid=2000, mode=0o700)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                return user_owned
+            return traversable
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox", uid=2000, gid=2000)),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "pass"
+
+
+class TestHasAclExec:
+    """Tests for _has_acl_exec — getfacl probe for named-user ACL execute."""
+
+    def test_acl_exec_found(self) -> None:
+        """WHEN getfacl shows user:<name>:--x, THEN returns True."""
+        from core.doctor import _has_acl_exec
+
+        getfacl_output = (
+            "# file: /home/dev\n"
+            "# owner: dev\n"
+            "# group: dev\n"
+            "user::rwx\n"
+            "user:sandbox:--x\n"
+            "group::r-x\n"
+            "mask::r-x\n"
+            "other::---\n"
+        )
+        mock_result = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            assert _has_acl_exec("/home/dev", "sandbox") is True
+
+    def test_acl_no_exec(self) -> None:
+        """WHEN getfacl shows user:<name>:r-- (no exec), THEN returns False."""
+        from core.doctor import _has_acl_exec
+
+        getfacl_output = "user::rwx\nuser:sandbox:r--\nother::---\n"
+        mock_result = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            assert _has_acl_exec("/home/dev", "sandbox") is False
+
+    def test_acl_user_not_present(self) -> None:
+        """WHEN getfacl has no entry for user, THEN returns False."""
+        from core.doctor import _has_acl_exec
+
+        getfacl_output = "user::rwx\ngroup::r-x\nother::---\n"
+        mock_result = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            assert _has_acl_exec("/home/dev", "sandbox") is False
+
+    def test_getfacl_nonzero_returns_false(self) -> None:
+        """WHEN getfacl exits nonzero, THEN returns False."""
+        from core.doctor import _has_acl_exec
+
+        mock_result = subprocess.CompletedProcess([], 1, stdout="", stderr="error")
+        with patch("subprocess.run", return_value=mock_result):
+            assert _has_acl_exec("/home/dev", "sandbox") is False
+
+    def test_getfacl_timeout_returns_false(self) -> None:
+        """WHEN getfacl times out, THEN returns False."""
+        from core.doctor import _has_acl_exec
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("getfacl", 5)):
+            assert _has_acl_exec("/home/dev", "sandbox") is False
+
+    def test_getfacl_oserror_returns_false(self) -> None:
+        """WHEN getfacl binary is missing, THEN returns False."""
+        from core.doctor import _has_acl_exec
+
+        with patch("subprocess.run", side_effect=OSError("not found")):
+            assert _has_acl_exec("/home/dev", "sandbox") is False
+
+
+class TestAncestorTraverseWithAclFallback:
+    """Integration: mode bits deny but ACL grants execute → pass."""
+
+    def test_mode_deny_acl_grants_passes(self) -> None:
+        """WHEN mode bits deny and getfacl shows exec, THEN status=pass."""
+        from core.doctor import check_ancestor_traverse
+
+        # /synthetic: other::--- (mode bits deny), but ACL grants exec
+        blocked = _make_stat(uid=0, gid=0, mode=0o700)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                return blocked
+            return traversable
+
+        getfacl_output = "user::rwx\nuser:sandbox:--x\nother::---\n"
+        mock_getfacl = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
+
+        def controlled_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return mock_getfacl
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", side_effect=controlled_stat),
+            patch("subprocess.run", side_effect=controlled_run),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "pass"
+
+    def test_mode_deny_acl_deny_fails(self) -> None:
+        """WHEN both mode bits and ACL deny, THEN status=fail."""
+        from core.doctor import check_ancestor_traverse
+
+        blocked = _make_stat(uid=0, gid=0, mode=0o700)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                return blocked
+            return traversable
+
+        # getfacl has no entry for sandbox
+        getfacl_output = "user::rwx\nother::---\n"
+        mock_getfacl = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
+
+        with (
+            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", side_effect=controlled_stat),
+            patch("subprocess.run", return_value=mock_getfacl),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "fail"
+            assert "lacks execute" in result.detail

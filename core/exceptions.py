@@ -4,4 +4,5 @@ class SandboxExecutionError(Exception):
     Strictly masks physical host variables or complex python stack traces
     when communicating errors to the CLI/UI.
     """
+
     pass

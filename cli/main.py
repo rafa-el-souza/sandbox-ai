@@ -74,9 +74,7 @@ def _resolve_project_dir() -> str:
     return os.path.abspath(os.getcwd())
 
 
-def _resolve_instance(
-    sandbox_ai_home: str, project_dir: str
-) -> tuple[str | None, str | None]:
+def _resolve_instance(sandbox_ai_home: str, project_dir: str) -> tuple[str | None, str | None]:
     """Look up instance from registry. Returns (instance_dir, instance_id) or (None, None)."""
     registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
     registry = InstanceRegistry(registry_path)
@@ -95,6 +93,7 @@ def _load_config(instance_dir: str) -> SandboxConfig:
 
 # ─── Warm state check ───────────────────────────────────────────────────────
 
+
 def _container_status(
     instance_dir: str,
     name: str,
@@ -111,16 +110,26 @@ def _container_status(
         return []
 
     compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(f"-f {f}" for f in compose_files)
+    files_str = " ".join(compose_files)
 
     executor = Executor()
     try:
         result = executor.run(
             [
-                "sudo", "machinectl", "shell", f"{host_user}@.host",
-                "/bin/bash", "-c",
-                f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} ps --format json",
-            ]
+                "sudo",
+                "machinectl",
+                "shell",
+                f"{host_user}@.host",
+                "/bin/bash",
+                "-c",
+                (
+                    f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={name} "
+                    f"docker compose {files_str} "
+                    f"--env-file {os.path.join(instance_dir, '.sandbox.env')} "
+                    f"--ansi never ps --format json"
+                ),
+            ],
+            sentinel=True,
         )
     except SandboxExecutionError:
         return []
@@ -133,21 +142,21 @@ def _container_status(
                 continue
             try:
                 data = _json.loads(line)
-                containers.append(ContainerInfo(
-                    name=data.get("Name", ""),
-                    service=data.get("Service", ""),
-                    state=data.get("State", ""),
-                    health=data.get("Health", None) or None,
-                    status=data.get("Status", ""),
-                ))
+                containers.append(
+                    ContainerInfo(
+                        name=data.get("Name", ""),
+                        service=data.get("Service", ""),
+                        state=data.get("State", ""),
+                        health=data.get("Health", None) or None,
+                        status=data.get("Status", ""),
+                    )
+                )
             except _json.JSONDecodeError:
                 continue
     return containers
 
 
-def _warm_check(
-    instance_dir: str, name: str, host_user: str
-) -> bool:
+def _warm_check(instance_dir: str, name: str, host_user: str) -> bool:
     """Check if containers are already running. Returns True if warm.
 
     Delegates to _container_status (D-3) — returns True if any containers exist.
@@ -225,14 +234,217 @@ def _phase_hydrate(
     )
 
 
-def _phase_acl_grant(instance_dir: str, host_user: str) -> None:
-    """Phase 5: Grant sandbox user read access to docker/ and config/ (Pattern A)."""
-    for subdir in ["docker/", "config/"]:
-        target = os.path.join(instance_dir, subdir)
-        subprocess.run(
-            ["setfacl", "-R", "-m", f"u:{host_user}:rX", target],
-            check=True,
+def _compute_ancestors(instance_dir: str) -> list[str]:
+    """Walk ancestor directories from instance_dir up to the ownership boundary.
+
+    Returns directories owned by the current UID, excluding root (/) and
+    the instance_dir itself. Stops at the first directory not owned by
+    the current process UID.
+
+    Returns:
+        List of ancestor paths in top-down order (shallowest first).
+    """
+    current_uid = os.getuid()
+    abs_path = os.path.abspath(instance_dir)
+    ancestors: list[str] = []
+
+    parent = os.path.dirname(abs_path)
+    while parent != "/":
+        try:
+            stat = os.stat(parent)
+        except OSError:
+            break
+        if stat.st_uid != current_uid:
+            break
+        ancestors.append(parent)
+        parent = os.path.dirname(parent)
+
+    # Return in top-down order (shallowest ancestor first)
+    ancestors.reverse()
+    return ancestors
+
+
+def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], str]]:
+    """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
+
+    Returns a list of (setfacl_args, description) tuples:
+    - Ancestors: ``--x`` (traverse only)
+    - Instance root: ``r-x``
+    - docker/: ``rX`` recursive
+    - config/: ``rX`` recursive
+    - .sandbox.env: ``r``
+    """
+    plan: list[tuple[list[str], str]] = []
+
+    # Ancestors — execute-only traverse
+    for ancestor in _compute_ancestors(instance_dir):
+        plan.append(
+            (
+                ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
+                f"ancestor traverse: {ancestor}",
+            )
         )
+
+    # Instance root — read + execute
+    plan.append(
+        (
+            ["setfacl", "-m", f"u:{host_user}:r-x", instance_dir],
+            f"instance root: {instance_dir}",
+        )
+    )
+
+    # docker/ — recursive read + conditional execute
+    docker_dir = os.path.join(instance_dir, "docker/")
+    plan.append(
+        (
+            ["setfacl", "-R", "-m", f"u:{host_user}:rX", docker_dir],
+            f"docker config: {docker_dir}",
+        )
+    )
+
+    # config/ — recursive read + conditional execute
+    config_dir = os.path.join(instance_dir, "config/")
+    plan.append(
+        (
+            ["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir],
+            f"config files: {config_dir}",
+        )
+    )
+
+    # .sandbox.env — read only
+    env_file = os.path.join(instance_dir, ".sandbox.env")
+    plan.append(
+        (
+            ["setfacl", "-m", f"u:{host_user}:r", env_file],
+            f"env file: {env_file}",
+        )
+    )
+
+    return plan
+
+
+def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], str]]:
+    """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
+
+    Ancestors are NOT revoked (D3 — grant-only model). Returns a list of
+    (setfacl_args, description) tuples for: instance root, docker/ (recursive),
+    config/ (recursive), and .sandbox.env.
+    """
+    plan: list[tuple[list[str], str]] = []
+
+    # Instance root
+    plan.append(
+        (
+            ["setfacl", "-x", f"u:{host_user}", instance_dir],
+            f"instance root: {instance_dir}",
+        )
+    )
+
+    # docker/ — recursive
+    docker_dir = os.path.join(instance_dir, "docker/")
+    plan.append(
+        (
+            ["setfacl", "-R", "-x", f"u:{host_user}", docker_dir],
+            f"docker config: {docker_dir}",
+        )
+    )
+
+    # config/ — recursive
+    config_dir = os.path.join(instance_dir, "config/")
+    plan.append(
+        (
+            ["setfacl", "-R", "-x", f"u:{host_user}", config_dir],
+            f"config files: {config_dir}",
+        )
+    )
+
+    # .sandbox.env
+    env_file = os.path.join(instance_dir, ".sandbox.env")
+    plan.append(
+        (
+            ["setfacl", "-x", f"u:{host_user}", env_file],
+            f"env file: {env_file}",
+        )
+    )
+
+    return plan
+
+
+def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
+    """Diagnose which ancestor directory lacks execute permission for the sandbox user.
+
+    Walks the ancestor chain from instance_dir upward, checking ``--x`` via
+    ``os.stat()`` mode bits. Reports the first failure point with a fix command.
+
+    Only runs on the failure path — lightweight (D10).
+
+    Returns:
+        Diagnostic message string, or empty string if no failure found.
+    """
+    import pwd
+    import stat
+
+    try:
+        pw = pwd.getpwnam(host_user)
+        target_uid = pw.pw_uid
+        target_gid = pw.pw_gid
+    except KeyError:
+        return f"Diagnosis: user '{host_user}' does not exist on this host."
+
+    abs_path = os.path.abspath(instance_dir)
+    components: list[str] = []
+    current = abs_path
+    while current != "/":
+        components.append(current)
+        current = os.path.dirname(current)
+    components.append("/")
+    components.reverse()
+
+    for directory in components:
+        try:
+            st = os.stat(directory)
+        except OSError:
+            return f"Diagnosis: cannot stat '{directory}'.\nFix: verify directory exists and is accessible."
+
+        mode = st.st_mode
+        # Check execute permission for the target user
+        has_exec = False
+        if st.st_uid == target_uid:
+            has_exec = bool(mode & stat.S_IXUSR)
+        elif st.st_gid == target_gid:
+            has_exec = bool(mode & stat.S_IXGRP)
+        else:
+            has_exec = bool(mode & stat.S_IXOTH)
+
+        if not has_exec:
+            return (
+                f"Diagnosis: sandbox user '{host_user}' lacks execute permission"
+                f" on {directory}\n"
+                f"Fix: setfacl -m u:{host_user}:--x {directory}\n"
+                f"Run 'sandbox doctor' for full host readiness diagnostics."
+            )
+
+    return ""
+
+
+def _phase_acl_grant(instance_dir: str, host_user: str) -> None:
+    """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
+
+    Each setfacl call runs as direct subprocess.run (NOT via Executor.run —
+    sentinel injection would corrupt the setfacl command, per I-1).
+    CalledProcessError is wrapped in SandboxExecutionError (D6).
+    """
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user):
+        try:
+            subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            diag = _diagnose_traverse_failure(instance_dir, host_user)
+            error_msg = f"ACL grant failed for {description}"
+            if e.stderr:
+                error_msg += f": {e.stderr.strip()}"
+            if diag:
+                error_msg += f"\n{diag}"
+            raise SandboxExecutionError(error_msg) from e
 
 
 def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
@@ -247,25 +459,38 @@ def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
     return files
 
 
-def _phase_compose_up(
-    instance_dir: str, name: str, host_user: str, config: SandboxConfig
-) -> None:
-    """Phase 6: docker compose up -d --build --wait via machinectl."""
+def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: SandboxConfig) -> None:
+    """Phase 6: docker compose up -d --build --wait via machinectl.
+
+    - Source suppression env prefix: TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain (D2 Layer 1)
+    - --ansi never flag (D2 Layer 1)
+    - --env-file injection for .sandbox.env (D14)
+    - sentinel=True for exit code recovery (D1)
+    """
     compose_files = _build_compose_files(instance_dir, config)
     files_str = " ".join(compose_files)
-    cmd = f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} up -d --build --wait"
+    env_file = os.path.join(instance_dir, ".sandbox.env")
+    cmd = (
+        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
+        f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
+        f"--ansi never --env-file {env_file} up -d --build --wait"
+    )
     executor = Executor()
     executor.run(
         [
-            "sudo", "machinectl", "shell", f"{host_user}@.host",
-            "/bin/bash", "-c", cmd,
-        ]
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{host_user}@.host",
+            "/bin/bash",
+            "-c",
+            cmd,
+        ],
+        sentinel=True,
     )
 
 
-def _phase_handover(
-    name: str, host_user: str, warmup_prompt: str = ""
-) -> None:
+def _phase_handover(name: str, host_user: str, warmup_prompt: str = "") -> None:
     """Phase 7: PTY handover — docker exec -it via machinectl."""
     executor = Executor()
     exec_args = ["exec"]
@@ -275,8 +500,12 @@ def _phase_handover(
 
     executor.run(
         [
-            "sudo", "machinectl", "shell", f"{host_user}@.host",
-            "/usr/bin/docker", *exec_args,
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{host_user}@.host",
+            "/usr/bin/docker",
+            *exec_args,
         ],
         interactive=True,
     )
@@ -297,25 +526,43 @@ def _compose_down(
     compose_files = _build_compose_files(instance_dir, config)
     files_str = " ".join(compose_files)
     v_flag = " -v" if volumes else ""
-    cmd = f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} down{v_flag}"
+    env_file = os.path.join(instance_dir, ".sandbox.env")
+    cmd = (
+        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
+        f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
+        f"--ansi never --env-file {env_file} down{v_flag}"
+    )
     executor = Executor()
     executor.run(
         [
-            "sudo", "machinectl", "shell", f"{host_user}@.host",
-            "/bin/bash", "-c", cmd,
-        ]
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{host_user}@.host",
+            "/bin/bash",
+            "-c",
+            cmd,
+        ],
+        sentinel=True,
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str) -> None:
-    """Revoke sandbox user's ACL entries on docker/ and config/ (Pattern A revoke)."""
-    for subdir in ["docker/", "config/"]:
-        target = os.path.join(instance_dir, subdir)
-        subprocess.run(
-            ["setfacl", "-R", "-x", f"u:{host_user}", target],
-            check=True,
-        )
+def _revoke_acls(instance_dir: str, host_user: str) -> list[str]:
+    """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
+    Iterates _acl_revoke_plan(). Uses check=False; failures are collected
+    as warning strings, not raised. Returns list of warning messages.
+    """
+    warnings: list[str] = []
+    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user):
+        try:
+            result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
+            if result.returncode != 0:
+                detail = result.stderr.strip() if result.stderr else f"exit {result.returncode}"
+                warnings.append(f"ACL revoke warning for {description}: {detail}")
+        except OSError as e:
+            warnings.append(f"ACL revoke warning for {description}: {e}")
+    return warnings
 
 
 # ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
@@ -391,23 +638,22 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     console.print("\n  [bold]Commands that would execute:[/bold]")
 
-    # ACL grants
-    for subdir in ["docker/", "config/"]:
-        target = os.path.join(instance_dir, subdir)
-        console.print(f"    $ setfacl -R -m u:{host_user}:rX {target}", style="dim")
+    # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user):
+        console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
-    # Compose up
+    # Compose up — match actual _phase_compose_up command
+    env_file = os.path.join(instance_dir, ".sandbox.env")
     compose_cmd = (
         f"sudo machinectl shell {host_user}@.host -- /bin/bash -c "
-        f"'COMPOSE_PROJECT_NAME={name} docker compose {files_str} up -d --build --wait'"
+        f"'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
+        f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
+        f"--ansi never --env-file {env_file} up -d --build --wait'"
     )
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
-    handover_cmd = (
-        f"sudo machinectl shell {host_user}@.host -- "
-        f"/usr/bin/docker exec -it {name}-admin-1 zsh"
-    )
+    handover_cmd = f"sudo machinectl shell {host_user}@.host -- /usr/bin/docker exec -it {name}-admin-1 zsh"
     console.print(f"    $ {handover_cmd}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
@@ -457,17 +703,21 @@ def init(
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
     if instance_dir is not None:
         console.print(
-            "Instance already initialized for this directory. "
-            "Run `sandbox destroy` first.",
+            "Instance already initialized for this directory. Run `sandbox destroy` first.",
             style="red",
         )
         raise typer.Exit(code=1)
 
     # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
+    # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
+    # so the ancestor check would always fail on first init (D10).
     if not dry_run:
         distro = detect_distro()
         preflight_results = run_check_subset(
-            ["Filesystem", "Repo Integrity"], user, distro
+            ["Filesystem", "Repo Integrity"],
+            user,
+            distro,
+            exclude_ids={"ancestor_traverse"},
         )
         has_failures = any(r.status == "fail" for r in preflight_results)
         if has_failures:
@@ -502,8 +752,12 @@ def init(
 
     # S2: sandbox.toml
     write_sandbox_toml(
-        instance_dir, project_name, project_dir, user,
-        git_user=git_user, git_email=git_email,
+        instance_dir,
+        project_name,
+        project_dir,
+        user,
+        git_user=git_user,
+        git_email=git_email,
     )
 
     # S3: .sandbox.env
@@ -538,7 +792,6 @@ def init(
     write_initialized_sentinel(instance_dir)
 
     console.print(f"Sandbox '{project_name}' initialized. Run `sandbox start` to launch.")
-
 
 
 @app.command()
@@ -601,9 +854,7 @@ def start(
 
     # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
     distro = detect_distro()
-    preflight_results = run_check_subset(
-        ["Privilege Boundary"], host_user, distro
-    )
+    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)
@@ -611,9 +862,7 @@ def start(
 
     # Pre-lock warm check (D-52)
     if _warm_check(instance_dir, name, host_user):
-        console.print(
-            f"Sandbox '{name}' is already running. Use 'sandbox attach' to reconnect."
-        )
+        console.print(f"Sandbox '{name}' is already running. Use 'sandbox attach' to reconnect.")
         return
 
     # Phase 1: Locking
@@ -627,6 +876,7 @@ def start(
         )
         raise typer.Exit(code=1) from None
 
+    acl_granted = False
     try:
         # Phase 2: IPAM
         base_index = _phase_ipam(sandbox_ai_home, instance_id)
@@ -641,6 +891,7 @@ def start(
         console.print("✓ Hydration — templates rendered")
 
         # Phase 5: ACL grants (Pattern A)
+        acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user)
         console.print("✓ ACL — filesystem permissions granted")
 
@@ -651,6 +902,11 @@ def start(
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
         console.print(f"[FATAL] {e}", style="red bold")
+        # ACL cleanup on failure — only if Phase 5 has begun (D7)
+        if acl_granted:
+            acl_warnings = _revoke_acls(instance_dir, host_user)
+            for w in acl_warnings:
+                console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
             _release_lock(lock_fd)
         raise typer.Exit(code=1) from None
@@ -683,16 +939,28 @@ def stop(clean: bool = False) -> None:
         console.print(f"Sandbox '{name}' is not running. Nothing to stop.")
         return
 
+    # Lock acquisition (D8)
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red bold",
+        )
+        raise typer.Exit(code=1) from None
+
     # Compose down
     _compose_down(instance_dir, name, host_user, config, volumes=clean)
 
-    # ACL revocation (Pattern A)
-    _revoke_acls(instance_dir, host_user)
+    # ACL revocation (Pattern A) — fault-isolated (D5)
+    acl_warnings = _revoke_acls(instance_dir, host_user)
+    for w in acl_warnings:
+        console.print(f"⚠ {w}", style="yellow")
+
+    _release_lock(lock_fd)
 
     if clean:
-        console.print(
-            f"Sandbox '{name}' stopped. Named volumes destroyed — data unrecoverable."
-        )
+        console.print(f"Sandbox '{name}' stopped. Named volumes destroyed — data unrecoverable.")
     else:
         console.print(f"Sandbox '{name}' stopped. Named volumes preserved.")
 
@@ -714,9 +982,7 @@ def attach() -> None:
 
     # Warm check — reject if cold
     if not _warm_check(instance_dir, name, host_user):
-        console.print(
-            f"Sandbox '{name}' is not running. Use 'sandbox start' to launch."
-        )
+        console.print(f"Sandbox '{name}' is not running. Use 'sandbox start' to launch.")
         raise typer.Exit(code=1)
 
     # Direct handover — no hydration, no credentials, no locking
@@ -749,12 +1015,8 @@ def destroy(force: bool = False) -> None:
 
     # Phase 0: Confirmation
     if not force:
-        console.print(
-            f"WARNING: This permanently deletes sandbox '{name}' and all its state."
-        )
-        console.print(
-            f"         Your project at {config.project.user_project_root} is NOT affected."
-        )
+        console.print(f"WARNING: This permanently deletes sandbox '{name}' and all its state.")
+        console.print(f"         Your project at {config.project.user_project_root} is NOT affected.")
         typed_name = typer.prompt("Type the sandbox name to confirm")
         if typed_name != name:
             console.print("Aborted.")
@@ -764,32 +1026,45 @@ def destroy(force: bool = False) -> None:
     lock_fd = _acquire_state_lock(instance_dir)
 
     try:
-        # Phase 2: Container and volume teardown
-        _compose_down(instance_dir, name, host_user, config, volumes=True)
+        # Phase 2: Container and volume teardown — fault-isolated (D12)
+        try:
+            _compose_down(instance_dir, name, host_user, config, volumes=True)
+        except SandboxExecutionError as e:
+            console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
-        # Phase 3: ACL revocation
-        _revoke_acls(instance_dir, host_user)
+        # Phase 3: ACL revocation — fault-isolated (D5)
+        acl_warnings = _revoke_acls(instance_dir, host_user)
+        for w in acl_warnings:
+            console.print(f"⚠ {w}", style="yellow")
 
-        # Phase 4: State cleanup — IPAM
-        ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-        ledger = IPAMLedger(ipam_path)
-        ledger.release(instance_id)
+        # Phase 4: Directory removal — fault-isolated (D12)
+        # FileNotFoundError silenced (idempotent); PermissionError propagates
+        try:
+            shutil.rmtree(instance_dir)
+        except FileNotFoundError:
+            pass
 
-        # Phase 4: State cleanup — Registry
-        registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-        registry = InstanceRegistry(registry_path)
-        registry.remove(project_dir)
+        # Phase 5: State cleanup — IPAM — fault-isolated (D12)
+        try:
+            ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
+            ledger = IPAMLedger(ipam_path)
+            ledger.release(instance_id)
+        except Exception as e:
+            console.print(f"⚠ IPAM release warning: {e}", style="yellow")
 
-        # Phase 5: Directory removal
-        shutil.rmtree(instance_dir)
+        # Phase 6: State cleanup — Registry — fault-isolated (D12)
+        try:
+            registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
+            registry = InstanceRegistry(registry_path)
+            registry.remove(project_dir)
+        except Exception as e:
+            console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
 
     finally:
-        # Close lock fd (file already deleted by rmtree)
+        # Close lock fd — safe after rmtree: kernel keeps inode alive while fd is open
         _release_lock(lock_fd)
 
-    console.print(
-        f"Sandbox '{name}' permanently destroyed. IPAM slot freed for reuse."
-    )
+    console.print(f"Sandbox '{name}' permanently destroyed. IPAM slot freed for reuse.")
 
 
 @app.command()
@@ -826,10 +1101,7 @@ def status() -> None:
     # Container status
     containers = _container_status(instance_dir, name, host_user, config)
     is_running = len(containers) > 0
-    has_unhealthy = any(
-        c.health is not None and c.health.lower() in ("unhealthy", "starting")
-        for c in containers
-    )
+    has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
     # Determine state
     if is_running and has_unhealthy:

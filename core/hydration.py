@@ -122,17 +122,9 @@ class SandboxConfig(BaseModel):
             "project": raw.get("project", {}),
             "core": raw.get("core", {}),
             "admin": raw.get("admin", {}),
-            "runtimes": {
-                k: v
-                for k, v in raw.get("runtimes", {}).items()
-                if k != "node"
-            },
+            "runtimes": {k: v for k, v in raw.get("runtimes", {}).items() if k != "node"},
             "runtimes_node": raw.get("runtimes", {}).get("node", {}),
-            "components": {
-                k: v
-                for k, v in components_raw.items()
-                if isinstance(v, bool)
-            },
+            "components": {k: v for k, v in components_raw.items() if isinstance(v, bool)},
             "components_db_postgres": components_raw.get("db_postgres", {}),
             "components_ingress": components_raw.get("ingress", {}),
             "proxy_whitelist": raw.get("proxy", {}).get("whitelist", {}),
@@ -229,9 +221,7 @@ def build_jinja_context(
         "db_postgres_enabled": config.components_db_postgres.enabled,
         "mcp_firecrawl_enabled": config.components.mcp_firecrawl,
         # Custom CLAUDE.md rules (user-authored, concatenated into rendered output)
-        "custom_claude_rules": _read_optional_file(
-            os.path.join(instance_dir, "custom/config/core/CLAUDE.md")
-        ),
+        "custom_claude_rules": _read_optional_file(os.path.join(instance_dir, "custom/config/core/CLAUDE.md")),
     }
 
 
@@ -407,14 +397,14 @@ def validate_templates(
     validated = 0
 
     # Build the full list of templates from the authoritative registries
-    templates: list[str] = [
-        f".docker/{src_rel}" for src_rel, _ in _JINJA_RENDERED_DOCKER
-    ] + [
-        f".config/{src_rel}" for src_rel, _ in _JINJA_RENDERED_CONFIG
-    ] + [
-        f".docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
-        f".docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
-    ]
+    templates: list[str] = (
+        [f".docker/{src_rel}" for src_rel, _ in _JINJA_RENDERED_DOCKER]
+        + [f".config/{src_rel}" for src_rel, _ in _JINJA_RENDERED_CONFIG]
+        + [
+            f".docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
+            f".docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
+        ]
+    )
 
     if db_postgres:
         templates.append(".docker/extras/db-postgres.yml")
@@ -451,4 +441,3 @@ def validate_templates(
             errors.append(f"Static file missing: {rel_path}")
 
     return validated, errors
-

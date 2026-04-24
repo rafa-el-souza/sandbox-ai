@@ -84,8 +84,7 @@ class IPAMLedger:
                     return candidate
 
             raise IPAMExhaustedError(
-                f"All {MAX_SLOTS} IPAM slots are consumed. "
-                "Free slots by running 'sandbox destroy' on unused instances."
+                f"All {MAX_SLOTS} IPAM slots are consumed. Free slots by running 'sandbox destroy' on unused instances."
             )
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -122,8 +121,7 @@ class IPAMLedger:
                 return candidate, False
 
         raise IPAMExhaustedError(
-            f"All {MAX_SLOTS} IPAM slots are consumed. "
-            "Free slots by running 'sandbox destroy' on unused instances."
+            f"All {MAX_SLOTS} IPAM slots are consumed. Free slots by running 'sandbox destroy' on unused instances."
         )
 
 

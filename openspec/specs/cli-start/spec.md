@@ -74,6 +74,54 @@ The system SHALL validate instance readiness before beginning provisioning. Pre-
 - **WHEN** sentinel exists, all required secrets are populated, and all Chain 1 checks pass
 - **THEN** provisioning proceeds normally
 
+### Requirement: ACL Cleanup on Start Failure
+The system SHALL revoke ACL grants if Phase 6 (compose up) fails after Phase 5 (ACL grants) has begun. Cleanup scope SHALL be limited to ACLs — earlier phases are idempotent and do not require rollback.
+
+#### Scenario: Phase 6 failure triggers ACL cleanup
+- **WHEN** `_phase_compose_up` raises `SandboxExecutionError` after Phase 5 has begun
+- **THEN** `_revoke_acls()` is called in the error handler before releasing the lock
+
+#### Scenario: Phase 5 partial failure triggers ACL cleanup
+- **WHEN** `_phase_acl_grant` raises `SandboxExecutionError` after some ACL grants have succeeded
+- **THEN** `_revoke_acls()` is called in the error handler (the phase sentinel is set before Phase 5 begins)
+
+#### Scenario: Pre-Phase-5 failure does not attempt ACL cleanup
+- **WHEN** a phase before Phase 5 (IPAM, credentials, hydration) raises an error
+- **THEN** ACL revocation is NOT attempted (no ACLs to revoke)
+
+### Requirement: ACL Grant Error Wrapping
+The system SHALL wrap `CalledProcessError` from `setfacl` subprocess calls in `SandboxExecutionError` so that ACL grant failures enter the start command's handled exception path.
+
+#### Scenario: setfacl failure wrapped with context
+- **WHEN** `subprocess.run(["setfacl", ...], check=True)` raises `CalledProcessError` during Phase 5
+- **THEN** the error is caught and re-raised as `SandboxExecutionError` containing the target path that failed and the runtime traverse diagnostic output
+
+### Requirement: Runtime Traverse Failure Diagnostic
+The system SHALL provide a diagnostic helper that identifies which specific ancestor directory lacks execute permission for the sandbox user. This diagnostic SHALL only run on the failure path.
+
+#### Scenario: Traverse diagnostic on ACL grant failure
+- **WHEN** `_phase_acl_grant` or `_phase_compose_up` fails
+- **THEN** `_diagnose_traverse_failure()` walks the ancestor chain, checks `--x` for the sandbox user on each directory, and reports the first failure point
+
+#### Scenario: Diagnostic output format
+- **WHEN** a traverse permission gap is found
+- **THEN** the output includes the specific directory, the sandbox username, a fix command (`setfacl -m u:<user>:--x <dir>`), and a reference to `sandbox doctor`
+
+### Requirement: Compose Environment File Flag
+The system SHALL pass `--env-file <instance_dir>/.sandbox.env` to all `docker compose` invocations to enable compose-level `${VAR}` interpolation.
+
+#### Scenario: --env-file on compose up
+- **WHEN** `_phase_compose_up` constructs the compose command
+- **THEN** the command includes `--env-file <instance_dir>/.sandbox.env`
+
+#### Scenario: --env-file on warm check
+- **WHEN** `_container_status` constructs the compose ps command
+- **THEN** the command includes `--env-file <instance_dir>/.sandbox.env`
+
+#### Scenario: Compose file flags not double-wrapped
+- **WHEN** `_container_status` constructs the compose ps command with multiple compose files from `_build_compose_files()`
+- **THEN** each compose file appears exactly once in the `-f` flag list (flags are used directly from `_build_compose_files()` without re-wrapping)
+
 ### Requirement: Phase Progress Output
 The system SHALL display progress for each provisioning phase using Rich formatted output.
 
@@ -92,3 +140,7 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 #### Scenario: Warmup prompt injected at exec time
 - **WHEN** `sandbox.toml` declares a non-empty `project.warmup_prompt`
 - **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this variable on shell init to auto-invoke claude
+
+#### Scenario: Failure with ACL cleanup emits diagnostic
+- **WHEN** Phase 5 or Phase 6 fails and ACL cleanup is triggered
+- **THEN** the error output includes the traverse failure diagnostic (if applicable) followed by the ACL cleanup status

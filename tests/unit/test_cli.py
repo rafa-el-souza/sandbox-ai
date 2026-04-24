@@ -6,8 +6,9 @@ Tests validate the full phase sequencing per the orchestrator design spec.
 
 import json
 import os
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -72,13 +73,9 @@ web_ports = [3000, 8080]
 domains = [".github.com"]
 """
 
-RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(
-    b'name = "myproject"', b'name = "renamed-project"'
-)
+RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-project"')
 
-WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(
-    b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"'
-)
+WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"')
 
 
 @pytest.fixture
@@ -135,9 +132,7 @@ def _write_ipam(home: Path, project_id: str, base_index: int) -> None:
 class TestStartHappyPath:
     """Task 8.2: sandbox start happy path — all phases sequenced correctly."""
 
-    def test_start_existing_instance_full_sequence(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_existing_instance_full_sequence(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Existing instance: full start sequence (registry hit -> compose -> handover)."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -169,9 +164,7 @@ class TestStartHappyPath:
             mock_compose.assert_called_once()
             mock_handover.assert_called_once()
 
-    def test_start_no_init_errors(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_no_init_errors(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """New project: registry miss → error with init guidance."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
@@ -186,9 +179,7 @@ class TestStartHappyPath:
             assert result.exit_code == 1
             assert "sandbox init" in result.output.lower()
 
-    def test_start_partial_init_errors(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_partial_init_errors(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Instance registered but .initialized sentinel missing → error."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -207,9 +198,7 @@ class TestStartHappyPath:
             assert result.exit_code == 1
             assert "partially initialized" in result.output.lower() or "destroy" in result.output.lower()
 
-    def test_start_progress_output(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_progress_output(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Start shows phase progress indicators."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -241,9 +230,7 @@ class TestStartHappyPath:
             assert "ipam" in out or "network" in out
             assert "compose" in out or "containers" in out
 
-    def test_start_handover_indication(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_handover_indication(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Start shows handover indication before PTY exec."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -277,9 +264,7 @@ class TestStartHappyPath:
 class TestStartSecretCompletenessGate:
     """Task 4.4a: secret completeness gate — must run before _acquire_state_lock."""
 
-    def test_start_exits_on_missing_secrets(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_exits_on_missing_secrets(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """start exits code 1 when _check_secrets returns missing secrets."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -306,9 +291,7 @@ class TestStartSecretCompletenessGate:
 class TestStartDoctorChain1PreFlight:
     """Task 4.5a: doctor Chain 1 (Privilege Boundary) pre-flight in start."""
 
-    def test_start_exits_on_doctor_chain1_failure(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_exits_on_doctor_chain1_failure(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """start exits code 1 when run_check_subset returns fail for Privilege Boundary."""
         from core.doctor import CheckResult
 
@@ -341,9 +324,7 @@ class TestStartDoctorChain1PreFlight:
 class TestStartComposeSpinner:
     """Task 4.6a: console.status() spinner during compose-up phase."""
 
-    def test_start_uses_console_status_for_compose(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_uses_console_status_for_compose(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """start uses console.status() context manager during compose-up."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -379,13 +360,10 @@ class TestStartComposeSpinner:
             mock_status.return_value.__enter__.assert_called()
 
 
-
 class TestStartWarmExit:
     """Task 8.2: pre-lock warm-exit — no locks acquired."""
 
-    def test_warm_instance_exits_before_locking(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_warm_instance_exits_before_locking(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -409,9 +387,7 @@ class TestStartWarmExit:
 class TestStartLockContention:
     """Task 8.2: lock contention exit."""
 
-    def test_lock_contention_exits_with_message(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_lock_contention_exits_with_message(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -434,9 +410,7 @@ class TestStartLockContention:
 class TestStartIPAMExhausted:
     """Task 8.2: IPAM exhausted exit."""
 
-    def test_ipam_exhausted_releases_lock_and_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_ipam_exhausted_releases_lock_and_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -462,9 +436,7 @@ class TestStartIPAMExhausted:
 class TestStartComposeUnhealthy:
     """Task 8.2: compose unhealthy exit."""
 
-    def test_unhealthy_compose_releases_lock_and_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_unhealthy_compose_releases_lock_and_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -494,9 +466,7 @@ class TestStartComposeUnhealthy:
 class TestStartProjectNameImmutabilityWarning:
     """Spec: sandbox-toml-schema — project.name immutability warning."""
 
-    def test_divergent_name_emits_warning(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_divergent_name_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """WHEN project.name differs from instance_id name component, THEN warning is emitted."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -527,9 +497,7 @@ class TestStartProjectNameImmutabilityWarning:
             assert "project.name has changed" in result.output
             assert "COMPOSE_PROJECT_NAME" in result.output
 
-    def test_matching_name_no_warning(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_matching_name_no_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """WHEN project.name matches instance_id name component, THEN no warning."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -593,9 +561,7 @@ class TestStopWarm:
 class TestStopCold:
     """Task 8.2: sandbox stop — cold instance."""
 
-    def test_stop_cold_instance_warns_and_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_stop_cold_instance_warns_and_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -617,9 +583,7 @@ class TestStopCold:
 class TestStopClean:
     """Task 8.2: sandbox stop --clean removes volumes."""
 
-    def test_stop_clean_passes_volume_flag(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_stop_clean_passes_volume_flag(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -646,9 +610,7 @@ class TestStopClean:
 class TestAttachWarm:
     """Task 8.2: sandbox attach — warm pass."""
 
-    def test_attach_warm_instance_hands_over_terminal(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_attach_warm_instance_hands_over_terminal(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -669,9 +631,7 @@ class TestAttachWarm:
 class TestAttachCold:
     """Task 8.2: sandbox attach — cold reject."""
 
-    def test_attach_cold_instance_rejects(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_attach_cold_instance_rejects(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -694,9 +654,7 @@ class TestAttachCold:
 class TestDestroyConfirmation:
     """Task 8.2: sandbox destroy — confirmation accepted/rejected."""
 
-    def test_destroy_accepted_performs_full_teardown(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_accepted_performs_full_teardown(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
@@ -720,9 +678,7 @@ class TestDestroyConfirmation:
             mock_down.assert_called_once()
             mock_rmtree.assert_called_once()
 
-    def test_destroy_rejected_aborts_silently(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_rejected_aborts_silently(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
@@ -739,9 +695,7 @@ class TestDestroyConfirmation:
             assert result.exit_code == 0
             mock_rmtree.assert_not_called()
 
-    def test_destroy_force_bypasses_confirmation(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_force_bypasses_confirmation(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
@@ -767,9 +721,7 @@ class TestDestroyConfirmation:
 class TestDestroyPrefixGuard:
     """Task 8.2: sandbox destroy — prefix guard triggered."""
 
-    def test_destroy_rejects_path_outside_sandboxes(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_rejects_path_outside_sandboxes(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         # Manually write a corrupted registry pointing outside sandboxes/
@@ -792,9 +744,7 @@ class TestDestroyPrefixGuard:
 class TestDestroyIPAMAndRegistryCleanup:
     """Task 8.2: IPAM+registry cleared after destroy."""
 
-    def test_destroy_clears_ipam_and_registry(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_clears_ipam_and_registry(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
@@ -827,9 +777,7 @@ class TestDestroyIPAMAndRegistryCleanup:
 class TestDestroyRmtree:
     """Task 8.2: shutil.rmtree called on instance_dir."""
 
-    def test_destroy_removes_instance_directory(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_removes_instance_directory(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
@@ -1017,14 +965,16 @@ class TestPhaseHydrateDirect:
         from cli.main import _phase_hydrate
         from core.hydration import SandboxConfig
 
-        mock_config = SandboxConfig.model_validate({
-            "project": {
-                "name": "test",
-                "user_project_root": "/home/dev/test",
-                "host_unprivileged_user": "sandbox",
-                "host_uid": "1000",
+        mock_config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "test",
+                    "user_project_root": "/home/dev/test",
+                    "host_unprivileged_user": "sandbox",
+                    "host_uid": "1000",
+                }
             }
-        })
+        )
 
         with (
             patch("cli.main.build_jinja_context", return_value={}) as mock_ctx,
@@ -1038,15 +988,23 @@ class TestPhaseHydrateDirect:
 class TestPhaseACLDirect:
     """Direct test for _phase_acl_grant."""
 
-    def test_phase_acl_grant_calls_setfacl(self) -> None:
+    def test_phase_acl_grant_calls_setfacl_for_all_plan_entries(self, tmp_path: Path) -> None:
         from cli.main import _phase_acl_grant
 
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
         with patch("subprocess.run") as mock_run:
-            _phase_acl_grant("/inst", "sandbox")
-            assert mock_run.call_count == 2
-            calls = mock_run.call_args_list
-            assert "u:sandbox:rX" in calls[0][0][0]
-            assert "u:sandbox:rX" in calls[1][0][0]
+            _phase_acl_grant(str(instance_dir), "sandbox")
+            # At minimum: instance root + docker/ + config/ + .sandbox.env = 4
+            # Plus ancestors (varies by tmp_path depth)
+            assert mock_run.call_count >= 4
+            # Verify setfacl is called in every invocation
+            for call in mock_run.call_args_list:
+                assert call[0][0][0] == "setfacl"
 
 
 class TestBuildComposeFiles:
@@ -1056,14 +1014,18 @@ class TestBuildComposeFiles:
         from cli.main import _build_compose_files
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-            "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
-            "components_db_postgres": {"enabled": False},
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+                "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
+                "components_db_postgres": {"enabled": False},
+            }
+        )
         files = _build_compose_files("/inst", config)
         assert len(files) == 2  # -f, path
 
@@ -1071,14 +1033,18 @@ class TestBuildComposeFiles:
         from cli.main import _build_compose_files
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-            "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
-            "components_db_postgres": {"enabled": True},
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+                "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
+                "components_db_postgres": {"enabled": True},
+            }
+        )
         files = _build_compose_files("/inst", config)
         assert len(files) == 6  # base + postgres + firecrawl
 
@@ -1090,12 +1056,16 @@ class TestPhaseComposeUpDirect:
         from cli.main import _phase_compose_up
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         with patch("cli.main.Executor") as MockExec:
             _phase_compose_up("/inst", "myproj", "sandbox", config)
@@ -1134,12 +1104,16 @@ class TestComposeDownDirect:
         from cli.main import _compose_down
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         with patch("cli.main.Executor") as MockExec:
             _compose_down("/inst", "myproj", "sandbox", config, volumes=False)
@@ -1151,12 +1125,16 @@ class TestComposeDownDirect:
         from cli.main import _compose_down
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         with patch("cli.main.Executor") as MockExec:
             _compose_down("/inst", "myproj", "sandbox", config, volumes=True)
@@ -1165,34 +1143,69 @@ class TestComposeDownDirect:
 
 
 class TestRevokeACLsDirect:
-    """Direct test for _revoke_acls."""
+    """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings."""
 
-    def test_revoke_acls_calls_setfacl(self) -> None:
+    def test_revoke_acls_calls_setfacl_for_all_plan_entries(self) -> None:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run") as mock_run:
-            _revoke_acls("/inst", "sandbox")
-            assert mock_run.call_count == 2
+            mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            warnings = _revoke_acls("/inst", "sandbox")
+            # instance root + docker/ + config/ + .sandbox.env = 4
+            assert mock_run.call_count == 4
+            assert warnings == []
+
+    def test_partial_failure_continues_and_collects_warnings(self) -> None:
+        """WHEN one setfacl fails, THEN remaining targets still attempted."""
+        from cli.main import _revoke_acls
+
+        call_count = 0
+
+        def side_effect(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return subprocess.CompletedProcess([], 1, "", "No such file")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch("subprocess.run", side_effect=side_effect):
+            warnings = _revoke_acls("/inst", "sandbox")
+
+        assert call_count == 4  # All 4 entries attempted
+        assert len(warnings) == 1
+        assert "No such file" in warnings[0]
+
+    def test_oserror_collected_as_warning(self) -> None:
+        """WHEN setfacl raises OSError, THEN collected as warning, not raised."""
+        from cli.main import _revoke_acls
+
+        with patch("subprocess.run", side_effect=OSError("setfacl not found")):
+            warnings = _revoke_acls("/inst", "sandbox")
+
+        assert len(warnings) == 4  # All fail with OSError
+        assert all("setfacl not found" in w for w in warnings)
 
 
 class TestInitScaffoldDirect:
     """Task 9.1: init command creates full instance (migrated from _scaffold_instance)."""
 
-    def test_init_creates_full_instance(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_creates_full_instance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.hydration import SandboxConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
-        mock_config = SandboxConfig.model_validate({
-            "project": {
-                "name": "newproject", "user_project_root": project_dir,
-                "host_unprivileged_user": "sandbox", "host_uid": "1000",
-            },
-        })
+        mock_config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "newproject",
+                    "user_project_root": project_dir,
+                    "host_unprivileged_user": "sandbox",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
@@ -1223,9 +1236,7 @@ class TestInitScaffoldDirect:
 class TestStopNoInstance:
     """Cover stop with unregistered instance."""
 
-    def test_stop_no_instance_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_stop_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
         with (
@@ -1240,9 +1251,7 @@ class TestStopNoInstance:
 class TestAttachNoInstance:
     """Cover attach with unregistered instance."""
 
-    def test_attach_no_instance_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_attach_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
         with (
@@ -1257,9 +1266,7 @@ class TestAttachNoInstance:
 class TestDestroyNoInstance:
     """Cover destroy with unregistered instance."""
 
-    def test_destroy_no_instance_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_destroy_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
         with (
@@ -1274,9 +1281,7 @@ class TestDestroyNoInstance:
 class TestDestroyPrefixGuardInternal:
     """Cover the internal prefix guard path (not mocked)."""
 
-    def test_prefix_guard_rejects_bad_path(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_prefix_guard_rejects_bad_path(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
 
         from cli.main import app
@@ -1296,23 +1301,25 @@ class TestDestroyPrefixGuardInternal:
 class TestInitFirecrawl:
     """Task 9.1: init command's firecrawl branch (migrated from _scaffold_instance)."""
 
-    def test_init_with_firecrawl_includes_secret(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_with_firecrawl_includes_secret(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.hydration import SandboxConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/fc-project"
 
-        mock_config = SandboxConfig.model_validate({
-            "project": {
-                "name": "fc-project", "user_project_root": project_dir,
-                "host_unprivileged_user": "sandbox", "host_uid": "1000",
-            },
-            "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
-            "components_db_postgres": {"enabled": True},
-        })
+        mock_config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "fc-project",
+                    "user_project_root": project_dir,
+                    "host_unprivileged_user": "sandbox",
+                    "host_uid": "1000",
+                },
+                "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
+                "components_db_postgres": {"enabled": True},
+            }
+        )
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
@@ -1347,10 +1354,7 @@ class TestDoctorAllPass:
         from cli.main import app
         from core.doctor import CheckResult
 
-        all_pass = [
-            CheckResult(status="pass", name=f"check-{i}", detail="ok")
-            for i in range(12)
-        ]
+        all_pass = [CheckResult(status="pass", name=f"check-{i}", detail="ok") for i in range(12)]
         with (
             patch("cli.main.detect_distro", return_value="debian"),
             patch("cli.main.build_check_registry", return_value=[]),
@@ -1412,15 +1416,14 @@ class TestDoctorRunnerInvoked:
             mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
             mock_render.assert_called_once()
 
+
 # ── sandbox init ─────────────────────────────────────────────────────────────
 
 
 class TestInitHappyPath:
     """Task 3.1: sandbox init --user — happy path scaffold."""
 
-    def test_init_creates_instance(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_creates_instance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init scaffolds a new instance successfully."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
@@ -1428,12 +1431,16 @@ class TestInitHappyPath:
         from cli.main import app
         from core.hydration import SandboxConfig
 
-        mock_config = SandboxConfig.model_validate({
-            "project": {
-                "name": "newproject", "user_project_root": project_dir,
-                "host_unprivileged_user": "sandbox", "host_uid": "1000",
-            },
-        })
+        mock_config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "newproject",
+                    "user_project_root": project_dir,
+                    "host_unprivileged_user": "sandbox",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
@@ -1455,9 +1462,7 @@ class TestInitHappyPath:
 class TestInitReInitRejection:
     """Task 3.1: sandbox init — re-init rejected."""
 
-    def test_reinit_rejected(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_reinit_rejected(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init errors when instance already exists."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1477,9 +1482,7 @@ class TestInitReInitRejection:
 class TestInitDryRun:
     """Task 3.1: sandbox init --dry-run previews without writing."""
 
-    def test_init_dry_run_no_state(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_dry_run_no_state(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init --dry-run does not create any files or registry entries."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
@@ -1502,9 +1505,7 @@ class TestInitDryRun:
 class TestInitDoctorPreFlightFailure:
     """Task 3.1: sandbox init — doctor pre-flight failure aborts."""
 
-    def test_init_aborts_on_doctor_failure(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_aborts_on_doctor_failure(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init aborts when doctor pre-flight checks fail."""
         from core.doctor import CheckResult
 
@@ -1513,9 +1514,7 @@ class TestInitDoctorPreFlightFailure:
 
         from cli.main import app
 
-        failed_results = [
-            CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")
-        ]
+        failed_results = [CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")]
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
@@ -1529,9 +1528,7 @@ class TestInitDoctorPreFlightFailure:
 class TestInitNonTTY:
     """Task 3.1: sandbox init in non-TTY environment."""
 
-    def test_init_non_tty_completes(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_non_tty_completes(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init completes in non-TTY mode (prompt_secrets skips)."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
@@ -1539,12 +1536,16 @@ class TestInitNonTTY:
         from cli.main import app
         from core.hydration import SandboxConfig
 
-        mock_config = SandboxConfig.model_validate({
-            "project": {
-                "name": "newproject", "user_project_root": project_dir,
-                "host_unprivileged_user": "sandbox", "host_uid": "1000",
-            },
-        })
+        mock_config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "newproject",
+                    "user_project_root": project_dir,
+                    "host_unprivileged_user": "sandbox",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
@@ -1579,9 +1580,7 @@ class TestInitMissingUser:
 class TestDryRunExistingInstance:
     """Task 12.1: --dry-run with existing instance."""
 
-    def test_dry_run_skips_warm_check(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_skips_warm_check(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Warm state check is skipped when --dry-run is set."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1602,9 +1601,7 @@ class TestDryRunExistingInstance:
             mock_warm.assert_not_called()
             assert result.exit_code == 0
 
-    def test_dry_run_existing_instance_exit_0(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_existing_instance_exit_0(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Existing instance dry-run passes with exit code 0."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1621,9 +1618,7 @@ class TestDryRunExistingInstance:
             result = runner.invoke(app, ["start", "--dry-run"])
             assert result.exit_code == 0
 
-    def test_dry_run_shows_ipam_preview(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_shows_ipam_preview(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """IPAM slot is previewed with 'subject to concurrent changes' note."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1642,9 +1637,7 @@ class TestDryRunExistingInstance:
             # Should mention the IPAM slot
             assert "5" in result.output or "slot" in result.output.lower()
 
-    def test_dry_run_shows_compose_command(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_shows_compose_command(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Compose command is displayed in dry-run output."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1661,9 +1654,7 @@ class TestDryRunExistingInstance:
             result = runner.invoke(app, ["start", "--dry-run"])
             assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
 
-    def test_dry_run_template_error_exits_1(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_template_error_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Template error causes exit code 1."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1682,9 +1673,7 @@ class TestDryRunExistingInstance:
             result = runner.invoke(app, ["start", "--dry-run"])
             assert result.exit_code == 1
 
-    def test_dry_run_missing_env_keys_reported(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_missing_env_keys_reported(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Missing .sandbox.env keys are reported in dry-run."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1709,9 +1698,7 @@ class TestDryRunExistingInstance:
 class TestDryRunNewInstance:
     """Task 5.1: --dry-run with no existing instance → error with guidance."""
 
-    def test_dry_run_no_instance_errors_with_guidance(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_no_instance_errors_with_guidance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """No-instance dry-run errors with init guidance message."""
         home = mock_sandbox_ai_home
 
@@ -1726,33 +1713,22 @@ class TestDryRunNewInstance:
             assert "sandbox init" in result.output.lower()
 
 
-
 def _create_tooling_plane(home: Path) -> None:
     """Create minimal tooling plane files needed for dry-run template validation."""
     # Jinja2 templates
     docker_dir = home / ".docker"
-    (docker_dir / "compose.yml").write_text(
-        "# compose for {{ project_name }}\nversion: '3'\n"
-    )
+    (docker_dir / "compose.yml").write_text("# compose for {{ project_name }}\nversion: '3'\n")
     (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
-    (docker_dir / "core" / "Dockerfile.core.wolfi").write_text(
-        "FROM {{ core_base_image }}\n"
-    )
+    (docker_dir / "core" / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
     (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/bash\n")
-    (docker_dir / "admin" / "Dockerfile.admin.debian").write_text(
-        "FROM {{ admin_base_image }}\n"
-    )
+    (docker_dir / "admin" / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
     (docker_dir / "extras").mkdir(parents=True, exist_ok=True)
     (docker_dir / "extras" / "db-postgres.yml").write_text("# postgres\n")
 
     config_dir = home / ".config"
     (config_dir / "dns-sidecar").mkdir(parents=True, exist_ok=True)
-    (config_dir / "dns-sidecar" / "Corefile").write_text(
-        "# Corefile for {{ project_name }}\n"
-    )
-    (config_dir / "proxy" / "squid.conf").write_text(
-        "# squid for {{ proxy_ip }}\n"
-    )
+    (config_dir / "dns-sidecar" / "Corefile").write_text("# Corefile for {{ project_name }}\n")
+    (config_dir / "proxy" / "squid.conf").write_text("# squid for {{ proxy_ip }}\n")
     (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("403 Forbidden\n")
     (config_dir / "admin").mkdir(parents=True, exist_ok=True)
     (config_dir / "admin" / ".zshrc").write_text("# zshrc\n")
@@ -1770,9 +1746,7 @@ def _create_tooling_plane(home: Path) -> None:
 class TestDryRunIpamExhausted:
     """Cover IPAM exhaustion path in dry-run pipeline."""
 
-    def test_dry_run_ipam_exhausted_exits_1(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_ipam_exhausted_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """IPAM exhaustion during dry-run exits with code 1."""
         from core.ipam import IPAMExhaustedError
 
@@ -1799,9 +1773,7 @@ class TestDryRunIpamExhausted:
 class TestCheckSecretsFirecrawl:
     """Cover firecrawl secret branch in _check_secrets."""
 
-    def test_check_secrets_firecrawl_missing(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_check_secrets_firecrawl_missing(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Firecrawl secret reported when mcp_firecrawl=true."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -1811,9 +1783,7 @@ class TestCheckSecretsFirecrawl:
 
         # Write a sandbox.toml with mcp_firecrawl=true
         firecrawl_toml = (inst / "sandbox.toml").read_bytes().decode()
-        firecrawl_toml = firecrawl_toml.replace(
-            "mcp_firecrawl = false", "mcp_firecrawl = true"
-        )
+        firecrawl_toml = firecrawl_toml.replace("mcp_firecrawl = false", "mcp_firecrawl = true")
         (inst / "sandbox.toml").write_text(firecrawl_toml)
 
         # Also need mcp-firecrawl.yml in tooling plane
@@ -1845,12 +1815,16 @@ class TestContainerStatus:
         from cli.main import ContainerInfo, _container_status
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         ndjson = (
             '{"Name":"t-core-1","Service":"core","State":"running","Health":"healthy","Status":"Up 5s"}\n'
@@ -1880,12 +1854,16 @@ class TestContainerStatus:
         from cli.main import _container_status
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         compose = tmp_path / "docker" / "compose.yml"
@@ -1904,12 +1882,16 @@ class TestContainerStatus:
         from core.exceptions import SandboxExecutionError
         from core.hydration import SandboxConfig
 
-        config = SandboxConfig.model_validate({
-            "project": {
-                "name": "t", "user_project_root": "/x",
-                "host_unprivileged_user": "s", "host_uid": "1000",
-            },
-        })
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+            }
+        )
 
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
@@ -1928,9 +1910,7 @@ class TestContainerStatus:
 class TestStatusNoInstance:
     """Task 7.1: sandbox status — no instance error."""
 
-    def test_status_no_instance_exits_1(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_status_no_instance_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
         with (
@@ -1945,9 +1925,7 @@ class TestStatusNoInstance:
 class TestStatusRunning:
     """Task 7.1: sandbox status — running instance."""
 
-    def test_status_running_shows_state(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_status_running_shows_state(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -1979,9 +1957,7 @@ class TestStatusRunning:
 class TestStatusStopped:
     """Task 7.1: sandbox status — stopped instance."""
 
-    def test_status_stopped_shows_state(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_status_stopped_shows_state(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -2003,9 +1979,7 @@ class TestStatusStopped:
 class TestStatusDegraded:
     """Task 7.1: sandbox status — degraded state."""
 
-    def test_status_degraded_shows_warning(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_status_degraded_shows_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -2032,9 +2006,7 @@ class TestStatusDegraded:
 class TestStatusIPAM:
     """Task 7.1: sandbox status — IPAM display."""
 
-    def test_status_shows_ipam_subnets(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_status_shows_ipam_subnets(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -2058,9 +2030,7 @@ class TestStatusIPAM:
 class TestStatusConfigWarnings:
     """Task 9.2: status output shows ⊘ and missing secret names."""
 
-    def test_status_warns_on_missing_secrets(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_status_warns_on_missing_secrets(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
@@ -2082,3 +2052,732 @@ class TestStatusConfigWarnings:
             assert result.exit_code == 0
             assert "⊘" in result.output
             assert "PG_PASSWORD" in result.output
+
+
+# ── ACL Plan Function tests ──────────────────────────────────────────────────
+
+
+class TestComputeAncestors:
+    """Task 2.4: _compute_ancestors — ownership boundary, root exclusion."""
+
+    def test_ownership_boundary_stops_walk(self, tmp_path: Path) -> None:
+        """Walk stops at the first dir not owned by current UID."""
+        from cli.main import _compute_ancestors
+
+        # tmp_path is owned by current user; its parents (e.g., /tmp) are root-owned
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+
+        result = _compute_ancestors(str(instance_dir))
+        # Should include tmp_path and tmp_path/sandboxes (both user-owned)
+        # but NOT /tmp or /
+        assert str(tmp_path) in result
+        assert str(tmp_path / "sandboxes") in result
+        assert "/" not in result
+
+    def test_root_excluded(self, tmp_path: Path) -> None:
+        """Root directory is never included."""
+        from cli.main import _compute_ancestors
+
+        instance_dir = tmp_path / "a"
+        instance_dir.mkdir()
+
+        result = _compute_ancestors(str(instance_dir))
+        assert "/" not in result
+
+    def test_single_level_path(self, tmp_path: Path) -> None:
+        """Instance dir directly under tmp_path — one ancestor."""
+        from cli.main import _compute_ancestors
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+
+        result = _compute_ancestors(str(instance_dir))
+        assert str(tmp_path) in result
+
+    def test_pathological_root_instance_dir(self) -> None:
+        """Pathological case: instance_dir is / — walk produces empty list."""
+        from cli.main import _compute_ancestors
+
+        result = _compute_ancestors("/")
+        assert result == []
+
+    def test_top_down_order(self, tmp_path: Path) -> None:
+        """Ancestors returned in shallowest-first order."""
+        from cli.main import _compute_ancestors
+
+        instance_dir = tmp_path / "a" / "b" / "c"
+        instance_dir.mkdir(parents=True)
+
+        result = _compute_ancestors(str(instance_dir))
+        # Shallowest first
+        if len(result) >= 2:
+            for i in range(len(result) - 1):
+                assert len(result[i]) <= len(result[i + 1])
+
+
+class TestACLPlanAsymmetry:
+    """Task 2.5: grant/revoke plan asymmetry — ancestors in grant, absent from revoke."""
+
+    def test_grant_plan_includes_ancestors(self, tmp_path: Path) -> None:
+        """Grant plan includes ancestor --x entries."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        descriptions = [desc for _, desc in plan]
+        assert any("ancestor traverse" in d for d in descriptions)
+
+    def test_revoke_plan_excludes_ancestors(self, tmp_path: Path) -> None:
+        """Revoke plan does NOT include ancestor entries."""
+        from cli.main import _acl_revoke_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox")
+        descriptions = [desc for _, desc in plan]
+        assert not any("ancestor" in d for d in descriptions)
+
+    def test_both_plans_include_env_file(self, tmp_path: Path) -> None:
+        """Both plans include .sandbox.env."""
+        from cli.main import _acl_grant_plan, _acl_revoke_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        grant = _acl_grant_plan(str(instance_dir), "sandbox")
+        revoke = _acl_revoke_plan(str(instance_dir), "sandbox")
+
+        grant_descs = [d for _, d in grant]
+        revoke_descs = [d for _, d in revoke]
+        assert any("env file" in d for d in grant_descs)
+        assert any("env file" in d for d in revoke_descs)
+
+    def test_grant_plan_includes_instance_root(self, tmp_path: Path) -> None:
+        """Grant plan includes instance root with r-x."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        descriptions = [d for _, d in plan]
+        assert any("instance root" in d for d in descriptions)
+        # Verify r-x permission on instance root
+        root_entries = [(args, d) for args, d in plan if "instance root" in d]
+        assert any("r-x" in " ".join(args) for args, _ in root_entries)
+
+
+class TestPhaseACLGrantErrorWrapping:
+    """Task 3.4: CalledProcessError → SandboxExecutionError with target path context."""
+
+    def test_setfacl_failure_wrapped_in_sandbox_error(self, tmp_path: Path) -> None:
+        """WHEN setfacl fails, THEN SandboxExecutionError raised with description."""
+        from cli.main import _phase_acl_grant
+        from core.exceptions import SandboxExecutionError
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["setfacl"], stderr="Operation not supported"),
+            ),
+            patch("cli.main._diagnose_traverse_failure", return_value=""),
+            pytest.raises(SandboxExecutionError) as exc_info,
+        ):
+            _phase_acl_grant(str(instance_dir), "sandbox")
+
+        error_text = str(exc_info.value)
+        assert "ACL grant failed" in error_text
+
+    def test_setfacl_failure_includes_stderr(self, tmp_path: Path) -> None:
+        """WHEN setfacl fails with stderr, THEN error includes stderr content."""
+        from cli.main import _phase_acl_grant
+        from core.exceptions import SandboxExecutionError
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["setfacl"], stderr="setfacl: /nonexistent: No such file"),
+            ),
+            patch("cli.main._diagnose_traverse_failure", return_value=""),
+            pytest.raises(SandboxExecutionError) as exc_info,
+        ):
+            _phase_acl_grant(str(instance_dir), "sandbox")
+
+        assert "No such file" in str(exc_info.value)
+
+
+class TestDiagnoseTraverseFailure:
+    """Task 3.5: _diagnose_traverse_failure — missing --x, fix command, no-failure path.
+
+    All os.stat/pwd.getpwnam calls fully mocked to avoid host filesystem dependency.
+    """
+
+    def test_user_not_found(self) -> None:
+        """WHEN host_user doesn't exist, THEN diagnostic reports it."""
+        from cli.main import _diagnose_traverse_failure
+
+        with patch("pwd.getpwnam", side_effect=KeyError("nonexistent")):
+            result = _diagnose_traverse_failure("/some/path", "nonexistent_user_xyz")
+            assert "does not exist" in result
+
+    def test_no_failure_found_returns_empty(self) -> None:
+        """WHEN all ancestors are traversable, THEN returns empty string."""
+        from cli.main import _diagnose_traverse_failure
+
+        fake_pw = MagicMock()
+        fake_pw.pw_uid = 2000
+        fake_pw.pw_gid = 2000
+
+        traversable = MagicMock(spec=os.stat_result)
+        traversable.st_uid = 0
+        traversable.st_gid = 0
+        traversable.st_mode = 0o755
+
+        # /synthetic/project owned by target user — exercises L413 (user-owner exec)
+        user_owned = MagicMock(spec=os.stat_result)
+        user_owned.st_uid = 2000
+        user_owned.st_gid = 2000
+        user_owned.st_mode = 0o700
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic/project":
+                return user_owned
+            return traversable
+
+        with (
+            patch("pwd.getpwnam", return_value=fake_pw),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = _diagnose_traverse_failure("/synthetic/project", "sandbox")
+            assert result == ""
+
+    def test_missing_execute_reported_with_fix_command(self) -> None:
+        """WHEN an ancestor lacks --x for the user, THEN fix command is reported."""
+        from cli.main import _diagnose_traverse_failure
+
+        fake_pw = MagicMock()
+        fake_pw.pw_uid = 2000
+        fake_pw.pw_gid = 2000
+
+        # /synthetic: no other-exec (0o700)
+        blocked = MagicMock(spec=os.stat_result)
+        blocked.st_uid = 0
+        blocked.st_gid = 0
+        blocked.st_mode = 0o700
+
+        traversable = MagicMock(spec=os.stat_result)
+        traversable.st_uid = 0
+        traversable.st_gid = 0
+        traversable.st_mode = 0o755
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic":
+                return blocked
+            return traversable
+
+        with (
+            patch("pwd.getpwnam", return_value=fake_pw),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = _diagnose_traverse_failure("/synthetic/project/child", "sandbox")
+            assert "lacks execute permission" in result
+            assert "setfacl -m" in result
+            assert "/synthetic" in result
+
+
+class TestStartErrorHandlerACLCleanup:
+    """Task 5.7: start error handler — ACL cleanup conditional on acl_granted."""
+
+    def test_compose_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN Phase 6 fails, THEN _revoke_acls is called (acl_granted=True)."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
+            patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_called_once()
+
+    def test_ipam_failure_does_not_trigger_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN IPAM fails (pre-Phase-5), THEN _revoke_acls is NOT called."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+        from core.ipam import IPAMExhaustedError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", side_effect=IPAMExhaustedError("full")),
+            patch("cli.main._revoke_acls") as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_not_called()
+
+
+class TestStopLock:
+    """Task 7.3: stop lock — acquired on success, BlockingIOError fails fast."""
+
+    def test_stop_acquires_lock(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN stop succeeds, THEN lock is acquired and released."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99) as mock_lock,
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock") as mock_release,
+        ):
+            result = runner.invoke(app, ["stop"])
+            assert result.exit_code == 0
+            mock_lock.assert_called_once()
+            mock_release.assert_called_once()
+
+    def test_stop_lock_contention_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN BlockingIOError raised, THEN exit code 1."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", side_effect=BlockingIOError("locked")),
+            patch("cli.main._compose_down") as mock_down,
+        ):
+            result = runner.invoke(app, ["stop"])
+            assert result.exit_code == 1
+            assert "already in progress" in result.output.lower()
+            mock_down.assert_not_called()
+
+
+class TestDestroyFaultIsolation:
+    """Task 8.6: destroy fault isolation — each phase independently handled."""
+
+    def test_compose_down_failure_continues(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN compose-down fails, THEN destroy continues to rmtree/IPAM/registry."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down", side_effect=SandboxExecutionError("timeout")),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree") as mock_rmtree,
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 0
+            # rmtree still called despite compose failure
+            mock_rmtree.assert_called_once()
+            # Warning emitted
+            assert "warning" in result.output.lower() or "⚠" in result.output
+
+    def test_rmtree_file_not_found_silenced(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN rmtree raises FileNotFoundError, THEN silenced (idempotent)."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree", side_effect=FileNotFoundError("gone")),
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 0
+
+
+# ── Coverage Gap Tests ──────────────────────────────────────────────────────
+
+
+class TestContainerStatusEdgeCases:
+    """Cover L110 (missing compose.yml), L142 (blank NDJSON), L154-155 (bad JSON)."""
+
+    def test_missing_compose_file_returns_empty(self) -> None:
+        """L110: compose.yml absent → empty list immediately."""
+        from cli.main import _container_status
+        from core.hydration import SandboxConfig
+
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+                "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
+                "components_db_postgres": {"enabled": False},
+            }
+        )
+        result = _container_status("/nonexistent/dir", "t", "s", config)
+        assert result == []
+
+    def test_blank_and_malformed_ndjson_skipped(self, tmp_path: Path) -> None:
+        """L142, L154-155: blank lines and bad JSON are silently skipped."""
+        from cli.main import _container_status
+        from core.hydration import SandboxConfig
+
+        # Create compose.yml so the early return is bypassed
+        docker_dir = tmp_path / "docker"
+        docker_dir.mkdir()
+        (docker_dir / "compose.yml").write_text("")
+        (tmp_path / ".sandbox.env").write_text("")
+
+        config = SandboxConfig.model_validate(
+            {
+                "project": {
+                    "name": "t",
+                    "user_project_root": "/x",
+                    "host_unprivileged_user": "s",
+                    "host_uid": "1000",
+                },
+                "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
+                "components_db_postgres": {"enabled": False},
+            }
+        )
+
+        # Mix of blank, malformed, and valid NDJSON — blank between content lines survives strip()
+        stdout = 'NOT-JSON\n   \n{"Name":"c1","Service":"svc","State":"running","Health":"","Status":"Up"}'
+        mock_result = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+
+        from core.executor import Executor
+
+        with patch.object(Executor, "run", return_value=mock_result):
+            containers = _container_status(str(tmp_path), "t", "s", config)
+            assert len(containers) == 1
+            assert containers[0].name == "c1"
+
+
+class TestComputeAncestorsOSError:
+    """Cover L255-256: _compute_ancestors OSError on stat."""
+
+    def test_oserror_breaks_walk(self) -> None:
+        from cli.main import _compute_ancestors
+
+        # Fully mock os.stat: /fake/deep succeeds (owned by us), /fake raises OSError
+        fake_stat_ok = MagicMock()
+        fake_stat_ok.st_uid = os.getuid()
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/fake":
+                raise OSError("permission denied")
+            return fake_stat_ok
+
+        with patch("os.stat", side_effect=controlled_stat):
+            result = _compute_ancestors("/fake/deep/child")
+            # /fake/deep/child → parent /fake/deep (ok) → parent /fake (OSError → break)
+            assert "/fake" not in result
+
+
+class TestDiagnoseTraverseFailureEdgeCases:
+    """Cover L406-407 (OSError), L415 (group exec), L446 (diag in error msg)."""
+
+    def test_oserror_returns_cannot_stat(self) -> None:
+        """L406-407: OSError on stat returns diagnostic."""
+
+        from cli.main import _diagnose_traverse_failure
+
+        fake_pw = MagicMock()
+        fake_pw.pw_uid = 2000
+        fake_pw.pw_gid = 2000
+
+        traversable = MagicMock(spec=os.stat_result)
+        traversable.st_uid = 0
+        traversable.st_gid = 0
+        traversable.st_mode = 0o755
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/vanished":
+                raise OSError("gone")
+            return traversable
+
+        with (
+            patch("pwd.getpwnam", return_value=fake_pw),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = _diagnose_traverse_failure("/vanished/dir", "sandbox")
+            assert "cannot stat" in result.lower()
+
+    def test_diag_appended_to_error_message(self, tmp_path: Path) -> None:
+        """L446: when diag returns a non-empty string, it's included in the error."""
+        from cli.main import _phase_acl_grant
+        from core.exceptions import SandboxExecutionError
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["setfacl"], stderr="boom"),
+            ),
+            patch(
+                "cli.main._diagnose_traverse_failure",
+                return_value="Diagnosis: user lacks execute on /home",
+            ),
+            pytest.raises(SandboxExecutionError) as exc_info,
+        ):
+            _phase_acl_grant(str(instance_dir), "sandbox")
+
+        assert "Diagnosis: user lacks execute" in str(exc_info.value)
+
+
+class TestStopACLWarningEmission:
+    """Cover L947: stop command emits ACL revoke warnings."""
+
+    def test_stop_emits_acl_warnings(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=["ACL revoke warning for test: fail"]),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop"])
+            assert result.exit_code == 0
+            assert "ACL revoke warning" in result.output
+
+
+class TestDestroyFaultIsolationWarnings:
+    """Cover L1027, L1041-1042, L1049-1050: destroy ACL/IPAM/registry warnings."""
+
+    def test_destroy_emits_acl_warnings(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """L1027: ACL revoke warnings emitted during destroy."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=["ACL warning: test"]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 0
+            assert "ACL warning" in result.output
+
+    def test_destroy_ipam_failure_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """L1041-1042: IPAM release failure emits warning, doesn't abort."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch("cli.main.IPAMLedger.release", side_effect=RuntimeError("corrupt")),
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 0
+            assert "IPAM release warning" in result.output
+
+    def test_destroy_registry_failure_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """L1049-1050: Registry cleanup failure emits warning, doesn't abort."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch("cli.main.InstanceRegistry.remove", side_effect=KeyError("not found")),
+        ):
+            result = runner.invoke(app, ["destroy", "--force"])
+            assert result.exit_code == 0
+            assert "Registry cleanup warning" in result.output
+
+
+class TestDiagnoseGroupExecBranch:
+    """Cover L415: _diagnose_traverse_failure group exec check branch."""
+
+    def test_group_exec_branch(self) -> None:
+        """L415: when file is group-owned by target user, checks S_IXGRP.
+
+        Fully mocked — no real filesystem or user database access.
+        """
+
+        from cli.main import _diagnose_traverse_failure
+
+        # Target user: uid=2000, gid=2000
+        fake_pw = MagicMock()
+        fake_pw.pw_uid = 2000
+        fake_pw.pw_gid = 2000
+
+        # /synthetic/grouptest: uid=9999 (not user), gid=2000 (matches user), mode=0o750 (group exec)
+        group_match = MagicMock(spec=os.stat_result)
+        group_match.st_uid = 9999
+        group_match.st_gid = 2000
+        group_match.st_mode = 0o750
+
+        # All other dirs: root-owned, o+x
+        traversable = MagicMock(spec=os.stat_result)
+        traversable.st_uid = 0
+        traversable.st_gid = 0
+        traversable.st_mode = 0o755
+
+        def controlled_stat(path: str) -> MagicMock:
+            if path == "/synthetic/grouptest":
+                return group_match
+            return traversable
+
+        with (
+            patch("pwd.getpwnam", return_value=fake_pw),
+            patch("os.stat", side_effect=controlled_stat),
+        ):
+            result = _diagnose_traverse_failure("/synthetic/grouptest/child", "sandbox")
+            # Group exec is set, so /synthetic/grouptest should not be flagged
+            assert result == "" or (result is not None and "/synthetic/grouptest" not in result)
+
+
+class TestStatusIPAMExhausted:
+    """Cover L1139-1140, L1171-1172: status IPAMExhaustedError passthrough."""
+
+    def test_status_ipam_exhausted_continues(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN IPAM is exhausted, THEN status still renders (no crash)."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+
+        from cli.main import ContainerInfo, app
+        from core.ipam import IPAMExhaustedError
+
+        containers = [
+            ContainerInfo(
+                name="test-core-1",
+                service="core",
+                state="running",
+                health="healthy",
+                status="Up 5 min",
+            )
+        ]
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._container_status", return_value=containers),
+            patch(
+                "cli.main.IPAMLedger.peek_next_slot",
+                side_effect=IPAMExhaustedError("full"),
+            ),
+        ):
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0
+            # Status renders despite IPAM exhaustion
+            assert "running" in result.output.lower() or "core" in result.output.lower()

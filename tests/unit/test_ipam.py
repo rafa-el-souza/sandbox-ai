@@ -88,7 +88,8 @@ class TestIPAMLedger:
             patch("fcntl.flock", side_effect=BlockingIOError(11, "Resource temporarily unavailable")),
             pytest.raises(IPAMLockException, match="Could not acquire IPAM lock"),
         ):
-                ledger.allocate("project-aaa")
+            ledger.allocate("project-aaa")
+
 
 class TestDeriveSubnets:
     def test_base_index_zero(self) -> None:
@@ -193,4 +194,3 @@ class TestPeekNextSlot:
         ledger = IPAMLedger(ledger_path)
         with pytest.raises(IPAMExhaustedError):
             ledger.peek_next_slot("one-more")
-

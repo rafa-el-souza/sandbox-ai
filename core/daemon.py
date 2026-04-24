@@ -14,6 +14,5 @@ class DaemonIPC:
     def assemble_tmux_payload(self, warmup_prompt: str) -> str:
         """Physically guarantee the tmux send-keys payload assembler correctly interpolates"""
         return (
-            f"tmux send-keys -t sandbox \"sandbox start --dangerously-skip-permissions"
-            f" && echo '{warmup_prompt}'\" C-m"
+            f"tmux send-keys -t sandbox \"sandbox start --dangerously-skip-permissions && echo '{warmup_prompt}'\" C-m"
         )
