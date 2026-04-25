@@ -511,6 +511,37 @@ def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
     return files
 
 
+def _phase_ipc_setup(name: str, host_user: str) -> None:
+    """Phase 5b: Set sticky bit on admin-ipc_vol before containers start.
+
+    Runs a disposable alpine container to:
+    - chown 1000:1000 /sock (agent uid/gid)
+    - chmod 1770 /sock (rwxrwx--- with sticky bit)
+
+    The sticky bit prevents the agent from deleting or renaming
+    admin.sock — only the socket owner or root can unlink.
+    """
+    cmd = (
+        f"docker run --rm "
+        f"-v {name}_admin-ipc_vol:/sock "
+        f"alpine:3.20 sh -c "
+        f"'chown 1000:1000 /sock && chmod 1770 /sock'"
+    )
+    executor = Executor()
+    executor.run(
+        [
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{host_user}@.host",
+            "/bin/bash",
+            "-c",
+            cmd,
+        ],
+        sentinel=True,
+    )
+
+
 def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: SandboxConfig) -> None:
     """Phase 6: docker compose up -d --build --wait via machinectl.
 
@@ -949,6 +980,10 @@ def start(
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user)
         console.print("✓ ACL — filesystem permissions granted")
+
+        # Phase 5b: IPC volume sticky bit (prevents agent socket deletion)
+        _phase_ipc_setup(name, host_user)
+        console.print("✓ IPC — sticky bit set on admin-ipc_vol")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):

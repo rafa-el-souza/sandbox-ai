@@ -154,6 +154,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate") as mock_hydrate,
             patch("cli.main._phase_acl_grant") as mock_acl,
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -220,6 +221,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -252,6 +254,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -346,6 +349,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -456,12 +460,94 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
             result = runner.invoke(app, ["start"])
             assert result.exit_code == 1
             mock_release.assert_called_once()
+
+
+class TestStartIpcStickyBit:
+    """6.T: start() sets sticky bit on admin-ipc_vol before compose up."""
+
+    def test_ipc_setup_called_between_acl_and_compose(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+    ) -> None:
+        """IPC setup runs after ACL grant and before compose up."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        call_order: list[str] = []
+
+        with (
+            patch(
+                "cli.main._resolve_sandbox_ai_home",
+                return_value=str(home),
+            ),
+            patch(
+                "cli.main._resolve_project_dir",
+                return_value=project_dir,
+            ),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch(
+                "cli.main._acquire_state_lock",
+                return_value=99,
+            ),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch(
+                "cli.main._phase_credentials",
+                return_value="pass",
+            ),
+            patch("cli.main._phase_hydrate"),
+            patch(
+                "cli.main._phase_acl_grant",
+                side_effect=lambda *a, **k: call_order.append(
+                    "acl"
+                ),
+            ),
+            patch(
+                "cli.main._phase_ipc_setup",
+                side_effect=lambda *a, **k: call_order.append(
+                    "ipc"
+                ),
+            ),
+            patch(
+                "cli.main._phase_compose_up",
+                side_effect=lambda *a, **k: call_order.append(
+                    "compose"
+                ),
+            ),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            assert call_order == ["acl", "ipc", "compose"]
+
+    def test_ipc_setup_unit(self) -> None:
+        """_phase_ipc_setup runs chown+chmod via machinectl."""
+        from cli.main import _phase_ipc_setup
+
+        with patch("cli.main.Executor") as mock_cls:
+            mock_exec = mock_cls.return_value
+            _phase_ipc_setup("myproj", "sandbox")
+            mock_exec.run.assert_called_once()
+            args = mock_exec.run.call_args
+            cmd_str = args[0][0][-1]  # last arg = bash -c cmd
+            assert "admin-ipc_vol" in cmd_str
+            assert "chown 1000:1000 /sock" in cmd_str
+            assert "chmod 1770 /sock" in cmd_str
 
 
 class TestStartProjectNameImmutabilityWarning:
@@ -489,6 +575,7 @@ class TestStartProjectNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -519,6 +606,7 @@ class TestStartProjectNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -2437,6 +2525,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
