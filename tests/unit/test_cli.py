@@ -109,7 +109,8 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     (inst / "config" / "proxy").mkdir(parents=True)
     (inst / "config" / "admin").mkdir(parents=True)
     (inst / "config" / "core").mkdir(parents=True)
-    (inst / "config" / "dns-sidecar").mkdir(parents=True)
+    (inst / "config" / "coredns").mkdir(parents=True)
+    (inst / "config" / "dnsdist").mkdir(parents=True)
     (inst / "log" / "orchestrator").mkdir(parents=True)
     # Write sandbox.toml
     (inst / "sandbox.toml").write_bytes(VALID_TOML_CONTENT)
@@ -1726,9 +1727,13 @@ def _create_tooling_plane(home: Path) -> None:
     (docker_dir / "extras" / "db-postgres.yml").write_text("# postgres\n")
 
     config_dir = home / ".config"
-    (config_dir / "dns-sidecar").mkdir(parents=True, exist_ok=True)
-    (config_dir / "dns-sidecar" / "Corefile").write_text("# Corefile for {{ project_name }}\n")
-    (config_dir / "proxy" / "squid.conf").write_text("# squid for {{ proxy_ip }}\n")
+    (config_dir / "coredns").mkdir(parents=True, exist_ok=True)
+    (config_dir / "coredns" / "Corefile").write_text("# Corefile for {{ project_name }}\n")
+    (config_dir / "dnsdist").mkdir(parents=True, exist_ok=True)
+    (config_dir / "dnsdist" / "dnsdist.conf").write_text(
+        'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
+    )
+    (config_dir / "proxy" / "squid.conf").write_text("# squid for {{ proxy_core_ip }}\n")
     (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("403 Forbidden\n")
     (config_dir / "admin").mkdir(parents=True, exist_ok=True)
     (config_dir / "admin" / ".zshrc").write_text("# zshrc\n")

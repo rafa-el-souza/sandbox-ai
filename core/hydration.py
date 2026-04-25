@@ -33,6 +33,7 @@ IMAGE_DIGESTS: dict[str, str] = {
     "debian_trixie": "debian@sha256:a15012b5f8fbefd7bfa43e253e6b3e879e63d8e37e5e2e5fc6c8e5e62ee5f2a3",
     "squid": "ubuntu/squid@sha256:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
     "coredns": "coredns/coredns@sha256:b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
+    "dnsdist": "powerdns/dnsdist-19@sha256:c2f859bb67865987878ff93c9c75758236fe659b4117b296da29da6b572affd0",
     "postgres": "postgres@sha256:c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
 }
 
@@ -180,13 +181,16 @@ def build_jinja_context(
         referenced in a template but absent from this context raises
         ``UndefinedError`` at render time and during ``--dry-run`` validation.
     """
-    isolated, proxy, egress = derive_subnets(base_index)
+    isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
 
     return {
-        # Network
+        # Network — 6-subnet topology
         "isolated_subnet": isolated,
-        "proxy_subnet": proxy,
+        "core_proxy_subnet": core_proxy,
+        "dns_subnet": dns,
+        "admin_subnet": admin,
+        "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
         **ips,
         # Credentials
@@ -234,6 +238,7 @@ def build_jinja_context(
         "runtime": "runsc",
         "dns_image": IMAGE_DIGESTS["coredns"],
         "proxy_image": IMAGE_DIGESTS["squid"],
+        "dnsdist_image": IMAGE_DIGESTS["dnsdist"],
         # Images — user-configurable
         "db_postgres_image": config.components_db_postgres.image,
         # Proxy whitelist
@@ -261,7 +266,8 @@ _JINJA_RENDERED_DOCKER = [
 ]
 
 _JINJA_RENDERED_CONFIG = [
-    ("dns-sidecar/Corefile", "config/dns-sidecar/Corefile"),
+    ("coredns/Corefile", "config/coredns/Corefile"),
+    ("dnsdist/dnsdist.conf", "config/dnsdist/dnsdist.conf"),
     ("proxy/squid.conf", "config/proxy/squid.conf"),
     ("core/.gitconfig", "config/core/.gitconfig"),
     ("core/.npmrc", "config/core/.npmrc"),

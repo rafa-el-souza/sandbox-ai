@@ -649,12 +649,15 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     ledger = IPAMLedger(ipam_path)
     try:
         slot, is_existing = ledger.peek_next_slot(instance_id)
-        isolated, proxy, egress = derive_subnets(slot)
+        isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(slot)
         status = "existing" if is_existing else "preview — subject to concurrent changes"
         console.print(f"\n  IPAM slot: {slot} ({status})")
-        console.print(f"    Isolated: {isolated}")
-        console.print(f"    Proxy:    {proxy}")
-        console.print(f"    Egress:   {egress}")
+        console.print(f"    Isolated:    {isolated}")
+        console.print(f"    Core Proxy:  {core_proxy}")
+        console.print(f"    DNS:         {dns}")
+        console.print(f"    Admin:       {admin}")
+        console.print(f"    Admin Proxy: {admin_proxy}")
+        console.print(f"    Egress:      {egress}")
     except IPAMExhaustedError as e:
         console.print(f"\n  [red]IPAM: {e}[/red]")
         raise typer.Exit(code=1) from None
@@ -1194,10 +1197,12 @@ def status() -> None:
                 # Map service names to IPs from IPAM
                 ip_map = {
                     "core": ips.get("agent_isolated_ip", ""),
-                    "admin": ips.get("admin_isolated_ip", ""),
-                    "dns-sidecar": ips.get("dns_sidecar_ip", ""),
+                    "admin": ips.get("admin_admin_ip", ""),
+                    "coredns": ips.get("coredns_dns_ip", ""),
+                    "dnsdist": ips.get("dnsdist_isolated_ip", ""),
                     "db-postgres": ips.get("db_postgres_ip", ""),
-                    "proxy": ips.get("proxy_ip", ""),
+                    "proxy": ips.get("proxy_core_ip", ""),
+                    "mcp-firecrawl": ips.get("mcp_firecrawl_proxy_ip", ""),
                 }
         except IPAMExhaustedError:
             pass
@@ -1226,11 +1231,14 @@ def status() -> None:
     try:
         slot, _is_existing = ledger.peek_next_slot(instance_id)
         if _is_existing:
-            isolated, proxy, egress = derive_subnets(slot)
+            isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(slot)
             console.print(f"\n[bold]IPAM[/bold] slot {slot}")
-            console.print(f"  Isolated: {isolated}")
-            console.print(f"  Proxy:    {proxy}")
-            console.print(f"  Egress:   {egress}")
+            console.print(f"  Isolated:    {isolated}")
+            console.print(f"  Core Proxy:  {core_proxy}")
+            console.print(f"  DNS:         {dns}")
+            console.print(f"  Admin:       {admin}")
+            console.print(f"  Admin Proxy: {admin_proxy}")
+            console.print(f"  Egress:      {egress}")
     except IPAMExhaustedError:
         pass
 

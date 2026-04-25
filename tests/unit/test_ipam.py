@@ -1,9 +1,10 @@
-"""Tests for the IPAM /24-triple allocator with slot reuse and overflow detection."""
+"""Tests for the IPAM /24-sextuple allocator with slot reuse and overflow detection."""
 
 import json
 
 import pytest
 from core.ipam import (
+    MAX_SLOTS,
     IPAMExhaustedError,
     IPAMLedger,
     derive_static_ips,
@@ -55,10 +56,10 @@ class TestIPAMLedger:
         ledger.release("nonexistent")
 
     def test_overflow_detection(self, tmp_path: object) -> None:
-        """IPAMExhaustedError raised when all 13312 slots consumed."""
+        """IPAMExhaustedError raised when all 6656 slots consumed."""
         ledger_path = str(tmp_path) + "/ipam.json"
         # Pre-fill ledger with all slots
-        data = {f"p{i}": i for i in range(13312)}
+        data = {f"p{i}": i for i in range(6656)}
         with open(ledger_path, "w") as f:
             json.dump(data, f)
 
@@ -91,65 +92,131 @@ class TestIPAMLedger:
             ledger.allocate("project-aaa")
 
 
+class TestMaxSlots:
+    """Wave 3: MAX_SLOTS updated for 6-subnet topology."""
+
+    def test_max_slots_value(self) -> None:
+        """MAX_SLOTS is 6656 for the 6-subnet-per-instance model."""
+        assert MAX_SLOTS == 6656
+
+
 class TestDeriveSubnets:
+    """Wave 3: derive_subnets returns 6-tuple (isolated, core_proxy, dns, admin, admin_proxy, egress)."""
+
     def test_base_index_zero(self) -> None:
-        """base_index=0 → g=0: 10.100.0.0/24, 10.100.1.0/24, 10.100.2.0/24."""
-        isolated, proxy, egress = derive_subnets(0)
+        """base_index=0 → g=0: six consecutive /24 subnets starting at 10.100.0.0."""
+        isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(0)
         assert isolated == "10.100.0.0/24"
-        assert proxy == "10.100.1.0/24"
-        assert egress == "10.100.2.0/24"
-
-    def test_base_index_max(self) -> None:
-        """base_index=13311 → g=39933: verify correct subnet derivation."""
-        g = 13311 * 3
-        expected_isolated = f"10.{100 + g // 256}.{g % 256}.0/24"
-        g1 = g + 1
-        expected_proxy = f"10.{100 + g1 // 256}.{g1 % 256}.0/24"
-        g2 = g + 2
-        expected_egress = f"10.{100 + g2 // 256}.{g2 % 256}.0/24"
-
-        isolated, proxy, egress = derive_subnets(13311)
-        assert isolated == expected_isolated
-        assert proxy == expected_proxy
-        assert egress == expected_egress
+        assert core_proxy == "10.100.1.0/24"
+        assert dns == "10.100.2.0/24"
+        assert admin == "10.100.3.0/24"
+        assert admin_proxy == "10.100.4.0/24"
+        assert egress == "10.100.5.0/24"
 
     def test_base_index_one(self) -> None:
-        """base_index=1 → g=3: 10.100.3.0/24, 10.100.4.0/24, 10.100.5.0/24."""
-        isolated, proxy, egress = derive_subnets(1)
-        assert isolated == "10.100.3.0/24"
-        assert proxy == "10.100.4.0/24"
-        assert egress == "10.100.5.0/24"
+        """base_index=1 → g=6: six consecutive /24 subnets starting at 10.100.6.0."""
+        isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(1)
+        assert isolated == "10.100.6.0/24"
+        assert core_proxy == "10.100.7.0/24"
+        assert dns == "10.100.8.0/24"
+        assert admin == "10.100.9.0/24"
+        assert admin_proxy == "10.100.10.0/24"
+        assert egress == "10.100.11.0/24"
+
+    def test_base_index_max_valid(self) -> None:
+        """base_index=6655 → g=39930: verify correct subnet derivation."""
+        g = 6655 * 6
+        expected = []
+        for offset in range(6):
+            gn = g + offset
+            expected.append(f"10.{100 + gn // 256}.{gn % 256}.0/24")
+
+        result = derive_subnets(6655)
+        assert len(result) == 6
+        for i in range(6):
+            assert result[i] == expected[i]
+
+    def test_overflow_raises_value_error(self) -> None:
+        """derive_subnets(6656) raises ValueError — bounds check guard."""
+        with pytest.raises(ValueError):
+            derive_subnets(6656)
 
 
 class TestDeriveStaticIPs:
+    """Wave 3: derive_static_ips returns expanded 16-key dict across 6 subnets."""
+
     def test_output_keys(self) -> None:
-        """derive_static_ips returns all required IP keys."""
+        """derive_static_ips returns all 16 required IP keys."""
         ips = derive_static_ips(0)
         expected_keys = {
-            "dns_sidecar_ip",
-            "db_postgres_ip",
-            "mcp_firecrawl_isolated_ip",
-            "mcp_firecrawl_proxy_ip",
             "agent_isolated_ip",
-            "admin_isolated_ip",
-            "proxy_ip",
             "agent_proxy_ip",
+            "proxy_core_ip",
+            "proxy_admin_ip",
+            "dnsdist_isolated_ip",
+            "dnsdist_dns_ip",
+            "dnsdist_admin_ip",
+            "coredns_dns_ip",
+            "coredns_admin_ip",
+            "coredns_egress_ip",
+            "admin_admin_ip",
             "admin_proxy_ip",
+            "db_postgres_ip",
+            "db_postgres_admin_ip",
+            "mcp_firecrawl_proxy_ip",
+            "firecrawl_dns_ip",
         }
         assert set(ips.keys()) == expected_keys
 
-    def test_values_at_index_zero(self) -> None:
-        """Verify specific IP values at base_index=0."""
+    def test_legacy_keys_absent(self) -> None:
+        """Legacy keys from the 3-subnet model are removed."""
         ips = derive_static_ips(0)
-        assert ips["dns_sidecar_ip"] == "10.100.0.53"
-        assert ips["db_postgres_ip"] == "10.100.0.54"
-        assert ips["mcp_firecrawl_isolated_ip"] == "10.100.0.55"
-        assert ips["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
+        assert "dns_sidecar_ip" not in ips
+        assert "admin_isolated_ip" not in ips
+        assert "mcp_firecrawl_isolated_ip" not in ips
+        assert "proxy_ip" not in ips
+
+    def test_specific_values_at_index_zero(self) -> None:
+        """Verify critical IP values at base_index=0 per spec scenarios."""
+        ips = derive_static_ips(0)
+        # coredns on dns_net (10.100.2.0/24) at .53
+        assert ips["coredns_dns_ip"] == "10.100.2.53"
+        # proxy on core_proxy_net (10.100.1.0/24) at .254
+        assert ips["proxy_core_ip"] == "10.100.1.254"
+        # dnsdist on isolated_net (10.100.0.0/24) at .56
+        assert ips["dnsdist_isolated_ip"] == "10.100.0.56"
+
+    def test_all_values_at_index_zero(self) -> None:
+        """Verify all 16 IP values at base_index=0."""
+        ips = derive_static_ips(0)
+        # isolated_net = 10.100.0.0/24
         assert ips["agent_isolated_ip"] == "10.100.0.3"
-        assert ips["admin_isolated_ip"] == "10.100.0.2"
-        assert ips["proxy_ip"] == "10.100.1.254"
+        assert ips["dnsdist_isolated_ip"] == "10.100.0.56"
+        assert ips["db_postgres_ip"] == "10.100.0.54"
+        # core_proxy_net = 10.100.1.0/24
         assert ips["agent_proxy_ip"] == "10.100.1.3"
-        assert ips["admin_proxy_ip"] == "10.100.1.2"
+        assert ips["proxy_core_ip"] == "10.100.1.254"
+        assert ips["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
+        # dns_net = 10.100.2.0/24
+        assert ips["coredns_dns_ip"] == "10.100.2.53"
+        assert ips["dnsdist_dns_ip"] == "10.100.2.56"
+        assert ips["firecrawl_dns_ip"] == "10.100.2.55"
+        # admin_net = 10.100.3.0/24
+        assert ips["admin_admin_ip"] == "10.100.3.2"
+        assert ips["dnsdist_admin_ip"] == "10.100.3.56"
+        assert ips["coredns_admin_ip"] == "10.100.3.53"
+        assert ips["db_postgres_admin_ip"] == "10.100.3.54"
+        # admin_proxy_net = 10.100.4.0/24
+        assert ips["admin_proxy_ip"] == "10.100.4.2"
+        assert ips["proxy_admin_ip"] == "10.100.4.254"
+        # egress_net = 10.100.5.0/24
+        assert ips["coredns_egress_ip"] == "10.100.5.53"
+
+    def test_deterministic_across_calls(self) -> None:
+        """Same base_index produces identical IPs across calls."""
+        ips1 = derive_static_ips(0)
+        ips2 = derive_static_ips(0)
+        assert ips1 == ips2
 
 
 class TestPeekNextSlot:
@@ -186,9 +253,9 @@ class TestPeekNextSlot:
         assert is_existing is False
 
     def test_peek_exhausted_raises(self, tmp_path: object) -> None:
-        """IPAMExhaustedError raised when all slots consumed."""
+        """IPAMExhaustedError raised when all 6656 slots consumed."""
         ledger_path = str(tmp_path) + "/ipam.json"
-        data = {f"p{i}": i for i in range(13312)}
+        data = {f"p{i}": i for i in range(6656)}
         with open(ledger_path, "w") as f:
             json.dump(data, f)
         ledger = IPAMLedger(ledger_path)

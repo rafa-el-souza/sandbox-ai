@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from core.hydration import (
+    _JINJA_RENDERED_CONFIG,
     IMAGE_DIGESTS,
     AdminConfig,
     CoreConfig,
@@ -139,10 +140,13 @@ class TestBuildJinjaContext:
         )
 
         assert ctx["isolated_subnet"] == "10.100.0.0/24"
-        assert ctx["proxy_subnet"] == "10.100.1.0/24"
-        assert ctx["egress_subnet"] == "10.100.2.0/24"
-        assert ctx["dns_sidecar_ip"] == "10.100.0.53"
-        assert ctx["proxy_ip"] == "10.100.1.254"
+        assert ctx["core_proxy_subnet"] == "10.100.1.0/24"
+        assert ctx["dns_subnet"] == "10.100.2.0/24"
+        assert ctx["admin_subnet"] == "10.100.3.0/24"
+        assert ctx["admin_proxy_subnet"] == "10.100.4.0/24"
+        assert ctx["egress_subnet"] == "10.100.5.0/24"
+        assert ctx["coredns_dns_ip"] == "10.100.2.53"
+        assert ctx["proxy_core_ip"] == "10.100.1.254"
         assert ctx["proxy_password"] == "secretpass"
         assert ctx["instance_dir"] == "/sandboxes/testproject-abc123"
         assert ctx["user_project_root"] == "/home/dev/testproject"
@@ -199,10 +203,10 @@ class TestBuildJinjaContext:
         assert ctx["pg_user"] == "sandbox"
         assert ctx["pg_db"] == "sandbox_db"
         # Firecrawl IPs from derive_static_ips (already flow through **ips)
-        assert "mcp_firecrawl_isolated_ip" in ctx
         assert "mcp_firecrawl_proxy_ip" in ctx
-        assert ctx["mcp_firecrawl_isolated_ip"] == "10.100.0.55"
+        assert "firecrawl_dns_ip" in ctx
         assert ctx["mcp_firecrawl_proxy_ip"] == "10.100.1.55"
+        assert ctx["firecrawl_dns_ip"] == "10.100.2.55"
 
     def test_custom_claude_rules_loaded_when_present(self, tmp_path: Path) -> None:
         """custom_claude_rules contains file content when custom/config/core/CLAUDE.md exists."""
@@ -396,10 +400,16 @@ class TestRenderTemplates:
 
         # Config templates
         config_dir = tooling / ".config"
-        # dns-sidecar
-        dns_dir = config_dir / "dns-sidecar"
+        # coredns
+        dns_dir = config_dir / "coredns"
         dns_dir.mkdir(parents=True)
         (dns_dir / "Corefile").write_text("{{ proxy_whitelist_domains_coredns | join(' ') }}\n")
+        # dnsdist
+        dnsdist_dir = config_dir / "dnsdist"
+        dnsdist_dir.mkdir(parents=True)
+        (dnsdist_dir / "dnsdist.conf").write_text(
+            'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
+        )
 
         # proxy
         proxy_dir = config_dir / "proxy"
@@ -426,7 +436,8 @@ class TestRenderTemplates:
             "docker/extras",
             "config/admin",
             "config/core",
-            "config/dns-sidecar",
+            "config/coredns",
+            "config/dnsdist",
             "config/proxy",
             "log/admin",
             "log/core",
@@ -510,7 +521,7 @@ class TestRenderTemplates:
 
         render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
 
-        corefile = (instance / "config" / "dns-sidecar" / "Corefile").read_text()
+        corefile = (instance / "config" / "coredns" / "Corefile").read_text()
         assert "github.com" in corefile
 
     def test_generates_allowed_domains(self, tooling_and_instance: tuple[Path, Path]) -> None:
@@ -579,7 +590,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
     from core.ipam import derive_static_ips, derive_subnets
 
-    isolated, proxy, egress = derive_subnets(0)
+    isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(0)
     ips = derive_static_ips(0)
 
     return {
@@ -587,7 +598,10 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "instance_dir": instance_dir,
         "user_project_root": "/home/dev/testproject",
         "isolated_subnet": isolated,
-        "proxy_subnet": proxy,
+        "core_proxy_subnet": core_proxy,
+        "dns_subnet": dns,
+        "admin_subnet": admin,
+        "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
         **ips,
         "proxy_password": "testpass",
@@ -610,6 +624,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "runtime": "runsc",
         "dns_image": IMAGE_DIGESTS["coredns"],
         "proxy_image": IMAGE_DIGESTS["squid"],
+        "dnsdist_image": IMAGE_DIGESTS["dnsdist"],
         "db_postgres_image": IMAGE_DIGESTS["postgres"],
         "nvm_version": "0.39.7",
         "node_version": "20.12.2",
@@ -751,12 +766,17 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     (extras_dir / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
 
     config_dir = tooling / ".config"
-    dns_dir = config_dir / "dns-sidecar"
+    dns_dir = config_dir / "coredns"
     dns_dir.mkdir(parents=True)
     (dns_dir / "Corefile").write_text("# {{ project_name }}\n")
+    dnsdist_dir = config_dir / "dnsdist"
+    dnsdist_dir.mkdir(parents=True)
+    (dnsdist_dir / "dnsdist.conf").write_text(
+        'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
+    )
     proxy_dir = config_dir / "proxy"
     proxy_dir.mkdir(parents=True)
-    (proxy_dir / "squid.conf").write_text("# {{ proxy_ip }}\n")
+    (proxy_dir / "squid.conf").write_text("# {{ proxy_core_ip }}\n")
     (proxy_dir / "ERR_SANDBOX_403").write_text("DENIED\n")
     # Admin: rendered templates + static files
     admin_cfg = config_dir / "admin"
@@ -898,10 +918,14 @@ class TestReadOnlyDomainsGeneration:
         (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
 
         config_dir = tooling / ".config"
-        for d in ["dns-sidecar", "proxy", "admin", "core"]:
+        for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
             (config_dir / d).mkdir(parents=True, exist_ok=True)
-        (config_dir / "dns-sidecar" / "Corefile").write_text("# {{ project_name }}\n")
-        (config_dir / "proxy" / "squid.conf").write_text("# {{ proxy_ip }}\n")
+        (config_dir / "coredns" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "dnsdist" / "dnsdist.conf").write_text(
+            'setLocal("0.0.0.0:53")\n'
+            'newServer({address="{{ coredns_dns_ip }}:53"})\n'
+        )
+        (config_dir / "proxy" / "squid.conf").write_text("# {{ proxy_core_ip }}\n")
         (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
         for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (config_dir / "admin" / f).write_text(f"# {f}\n")
@@ -915,7 +939,8 @@ class TestReadOnlyDomainsGeneration:
             "docker/extras",
             "config/admin",
             "config/core",
-            "config/dns-sidecar",
+            "config/coredns",
+            "config/dnsdist",
             "config/proxy",
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
@@ -947,10 +972,14 @@ class TestReadOnlyDomainsGeneration:
         (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/sh\n")
 
         config_dir = tooling / ".config"
-        for d in ["dns-sidecar", "proxy", "admin", "core"]:
+        for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
             (config_dir / d).mkdir(parents=True, exist_ok=True)
-        (config_dir / "dns-sidecar" / "Corefile").write_text("# {{ project_name }}\n")
-        (config_dir / "proxy" / "squid.conf").write_text("# {{ proxy_ip }}\n")
+        (config_dir / "coredns" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "dnsdist" / "dnsdist.conf").write_text(
+            'setLocal("0.0.0.0:53")\n'
+            'newServer({address="{{ coredns_dns_ip }}:53"})\n'
+        )
+        (config_dir / "proxy" / "squid.conf").write_text("# {{ proxy_core_ip }}\n")
         (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
         for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (config_dir / "admin" / f).write_text(f"# {f}\n")
@@ -963,7 +992,8 @@ class TestReadOnlyDomainsGeneration:
             "docker/extras",
             "config/admin",
             "config/core",
-            "config/dns-sidecar",
+            "config/coredns",
+            "config/dnsdist",
             "config/proxy",
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
@@ -1039,3 +1069,186 @@ class TestValidTomlBackwardCompatibility:
         # User-supplied mutable tags are accepted — defaults would be digests
         assert config.core.base_image == "cgr.dev/chainguard/wolfi-base:latest"
         assert config.admin.base_image == "debian:trixie-slim"
+
+
+class TestImageDigestsDnsdist:
+    """Wave 3: IMAGE_DIGESTS includes dnsdist entry."""
+
+    def test_dnsdist_key_present(self) -> None:
+        """IMAGE_DIGESTS contains 'dnsdist' key."""
+        assert "dnsdist" in IMAGE_DIGESTS
+
+    def test_dnsdist_value_format(self) -> None:
+        """dnsdist value uses digest format with powerdns/dnsdist-19."""
+        val = IMAGE_DIGESTS["dnsdist"]
+        assert val.startswith("powerdns/dnsdist-19@sha256:")
+        assert len(val.split("@sha256:")[1]) == 64
+
+    def test_image_digests_has_6_entries(self) -> None:
+        """IMAGE_DIGESTS has exactly 6 entries (wolfi_base, debian_trixie, squid, coredns, dnsdist, postgres)."""
+        assert len(IMAGE_DIGESTS) == 6
+        assert set(IMAGE_DIGESTS.keys()) == {"wolfi_base", "debian_trixie", "squid", "coredns", "dnsdist", "postgres"}
+
+
+class TestSixSubnetContextKeys:
+    """Wave 3: build_jinja_context returns 6 subnet + new IP keys."""
+
+    def test_six_subnet_keys_present(self, tmp_path: Path) -> None:
+        """Context contains all 6 subnet CIDR keys."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        subnet_keys = [
+            "isolated_subnet",
+            "core_proxy_subnet",
+            "dns_subnet",
+            "admin_subnet",
+            "admin_proxy_subnet",
+            "egress_subnet",
+        ]
+        for key in subnet_keys:
+            assert key in ctx, f"Missing context key: {key}"
+
+    def test_proxy_dual_ip_keys(self, tmp_path: Path) -> None:
+        """Context includes proxy_core_ip and proxy_admin_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "proxy_core_ip" in ctx
+        assert "proxy_admin_ip" in ctx
+
+    def test_dnsdist_ip_keys(self, tmp_path: Path) -> None:
+        """Context includes all 3 dnsdist IP keys."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        for key in ["dnsdist_isolated_ip", "dnsdist_dns_ip", "dnsdist_admin_ip"]:
+            assert key in ctx, f"Missing context key: {key}"
+
+    def test_coredns_ip_keys(self, tmp_path: Path) -> None:
+        """Context includes all 3 coredns IP keys."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        for key in ["coredns_dns_ip", "coredns_admin_ip", "coredns_egress_ip"]:
+            assert key in ctx, f"Missing context key: {key}"
+
+    def test_db_postgres_admin_ip_key(self, tmp_path: Path) -> None:
+        """Context includes db_postgres_admin_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "db_postgres_admin_ip" in ctx
+
+    def test_firecrawl_dns_ip_key(self, tmp_path: Path) -> None:
+        """Context includes firecrawl_dns_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "firecrawl_dns_ip" in ctx
+
+    def test_dnsdist_image_key(self, tmp_path: Path) -> None:
+        """Context includes dnsdist_image from IMAGE_DIGESTS."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "dnsdist_image" in ctx
+        assert ctx["dnsdist_image"] == IMAGE_DIGESTS["dnsdist"]
+
+    def test_legacy_keys_absent(self, tmp_path: Path) -> None:
+        """Legacy 3-subnet keys not in context."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "dns_sidecar_ip" not in ctx
+        assert "proxy_ip" not in ctx
+        assert "proxy_subnet" not in ctx
+
+
+class TestConfigRenderingRegistry:
+    """Wave 3: _JINJA_RENDERED_CONFIG renamed and extended."""
+
+    def test_coredns_corefile_in_registry(self) -> None:
+        """Registry contains coredns/Corefile."""
+        sources = [src for src, _dst in _JINJA_RENDERED_CONFIG]
+        assert "coredns/Corefile" in sources
+
+    def test_dnsdist_conf_in_registry(self) -> None:
+        """Registry contains dnsdist/dnsdist.conf."""
+        sources = [src for src, _dst in _JINJA_RENDERED_CONFIG]
+        assert "dnsdist/dnsdist.conf" in sources
+
+    def test_legacy_dns_sidecar_absent(self) -> None:
+        """Registry does NOT contain dns-sidecar/Corefile."""
+        sources = [src for src, _dst in _JINJA_RENDERED_CONFIG]
+        assert "dns-sidecar/Corefile" not in sources
+
+
+class TestDnsdistTemplateContent:
+    """Wave 3: dnsdist.conf template contains required DNS exfiltration defense directives."""
+
+    def test_dnsdist_wire_length_rule(self) -> None:
+        """Template contains QNameWireLengthRule filter."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        assert "QNameWireLengthRule(0, 65)" in content
+        assert "DropAction()" in content
+
+    def test_dnsdist_label_count_rule(self) -> None:
+        """Template contains QNameLabelsCountRule filter."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        assert "QNameLabelsCountRule(0, 7)" in content
+
+    def test_dnsdist_set_local(self) -> None:
+        """Template binds to 0.0.0.0:53."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        assert 'setLocal("0.0.0.0:53")' in content
+
+    def test_dnsdist_control_socket(self) -> None:
+        """Template has localhost-only control socket."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        assert 'controlSocket("127.0.0.1:5199")' in content
+
+    def test_dnsdist_backend_coredns(self) -> None:
+        """Template forwards to coredns via Jinja2 variable."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        assert "{{ coredns_dns_ip }}" in content
+        assert "newServer" in content
+
+
+class TestSquidFirecrawlAcl:
+    """Wave 3: proxy/squid.conf contains firecrawl ACL and safe_methods."""
+
+    def test_firecrawl_src_acl(self) -> None:
+        """squid.conf contains firecrawl_src source ACL."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        assert "acl firecrawl_src src" in content
+        assert "{{ mcp_firecrawl_proxy_ip }}" in content
+
+    def test_safe_methods_acl(self) -> None:
+        """squid.conf contains safe_methods ACL."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        assert "acl safe_methods method GET HEAD OPTIONS" in content
+
+    def test_firecrawl_allow_rule(self) -> None:
+        """squid.conf contains firecrawl allow rule with safe_methods."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        assert "http_access allow firecrawl_src authenticated_users safe_methods whitelist" in content
+
+    def test_firecrawl_after_agent_admin(self) -> None:
+        """Firecrawl allow rule appears after agent/admin allows and before deny all."""
+        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        agent_pos = content.index("http_access allow agent_src")
+        admin_pos = content.index("http_access allow admin_src")
+        firecrawl_pos = content.index("http_access allow firecrawl_src")
+        deny_pos = content.index("http_access deny all")
+        assert agent_pos < admin_pos < firecrawl_pos < deny_pos
+
+
