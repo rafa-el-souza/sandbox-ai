@@ -20,7 +20,7 @@ The system SHALL render all Jinja2 templates from the tooling plane into the ins
 
 #### Scenario: Config templates rendered
 - **WHEN** `sandbox start` proceeds to the hydration phase
-- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `sandboxes/<id>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `dns-sidecar/Corefile`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
+- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `sandboxes/<id>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
 
 #### Scenario: Extras templates resolve Jinja2 variables
 - **WHEN** an enabled extras template (e.g., `db-postgres.yml`) is rendered
@@ -42,15 +42,15 @@ The system SHALL render extension override files only for components that are en
 - **THEN** `.docker/extras/db-postgres.yml` is rendered into `sandboxes/<id>/docker/extras/db-postgres.yml`
 
 ### Requirement: Extras Jinja2 Context Completeness
-The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `agent_proxy_ip`, and `admin_proxy_ip`.
+The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `dnsdist_image`, `agent_proxy_ip`, and `admin_proxy_ip`.
 
 #### Scenario: Database context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `pg_user`, `pg_db`, `db_postgres_ip`, `db_postgres_image`, `core_pids_limit`, `runtime`, and `instance_dir`
+- **THEN** the returned context includes `pg_user`, `pg_db`, `db_postgres_ip`, `db_postgres_admin_ip`, `db_postgres_image`, `core_pids_limit`, `runtime`, and `instance_dir`
 
 #### Scenario: Firecrawl context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `mcp_firecrawl_isolated_ip`, `mcp_firecrawl_proxy_ip`, `proxy_password`, `dns_sidecar_ip`, `proxy_ip`, `db_postgres_ip`, `isolated_subnet`, `proxy_subnet`, `core_pids_limit`, `runtime`, and `instance_dir`
+- **THEN** the returned context includes `mcp_firecrawl_proxy_ip`, `firecrawl_dns_ip`, `proxy_password`, `coredns_dns_ip`, `proxy_core_ip`, `db_postgres_ip`, `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `core_pids_limit`, `runtime`, and `instance_dir`
 
 #### Scenario: Dry-run validation catches missing context keys
 - **WHEN** `validate_templates()` renders a template (including extras and config templates) and a required Jinja2 variable is missing from the context
@@ -98,7 +98,7 @@ The system SHALL include all values required by extras templates and config temp
 
 #### Scenario: Infrastructure image context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `proxy_image` and `dns_image` (from `IMAGE_DIGESTS`)
+- **THEN** the returned context includes `proxy_image` (from `IMAGE_DIGESTS["squid"]`), `dns_image` (from `IMAGE_DIGESTS["coredns"]`), and `dnsdist_image` (from `IMAGE_DIGESTS["dnsdist"]`)
 
 ### Requirement: Precious State Preservation
 The system SHALL never overwrite the user's persistent state files during hydration.
@@ -155,13 +155,13 @@ The rendered compose templates (main `compose.yml` and feature-gated extras) SHA
 - **WHEN** `compose.yml` is rendered
 - **THEN** both core and admin service blocks contain `ulimits` with `core: { soft: 0, hard: 0 }` (disabling core dumps) and `nofile: { soft: 65536, hard: 65536 }` (bounding file descriptors)
 
-#### Scenario: DNS sidecar IP forwarding disabled
+#### Scenario: coredns IP forwarding disabled
 - **WHEN** `compose.yml` is rendered
-- **THEN** the dns-sidecar service's `sysctls` block contains `net.ipv4.ip_forward=0`
+- **THEN** the coredns service's `sysctls` block contains `net.ipv4.ip_forward=0`
 
-#### Scenario: DNS sidecar capability grant
+#### Scenario: coredns capability grant
 - **WHEN** `compose.yml` is rendered
-- **THEN** the dns-sidecar service block contains `cap_drop: [ALL]` and `cap_add: [NET_BIND_SERVICE]`
+- **THEN** the coredns service block contains `cap_drop: [ALL]` and `cap_add: [NET_BIND_SERVICE]`
 
 #### Scenario: Proxy capability grants
 - **WHEN** `compose.yml` is rendered
@@ -253,8 +253,31 @@ The system SHALL include `db_postgres_image` in the Jinja2 context returned by `
 - **THEN** the returned context includes `db_postgres_image` (from `config.components_db_postgres.image`)
 
 ### Requirement: Infrastructure Image Context Keys
-The system SHALL include `proxy_image` and `dns_image` in the Jinja2 context returned by `build_jinja_context()`, sourced from `IMAGE_DIGESTS`.
+The system SHALL include `proxy_image`, `dns_image`, and `dnsdist_image` in the Jinja2 context returned by `build_jinja_context()`, sourced from `IMAGE_DIGESTS`.
 
 #### Scenario: Infrastructure image context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `proxy_image` (from `IMAGE_DIGESTS["squid"]`) and `dns_image` (from `IMAGE_DIGESTS["coredns"]`)
+- **THEN** the returned context includes `proxy_image` (from `IMAGE_DIGESTS["squid"]`), `dns_image` (from `IMAGE_DIGESTS["coredns"]`), and `dnsdist_image` (from `IMAGE_DIGESTS["dnsdist"]`)
+
+### Requirement: Six-Subnet Context Keys
+The system SHALL include all six subnet CIDR strings and all multi-network container IP addresses in the Jinja2 context returned by `build_jinja_context()`.
+
+#### Scenario: All six subnet context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `admin_subnet`, `admin_proxy_subnet`, and `egress_subnet`
+
+#### Scenario: Proxy dual-network IP context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `proxy_core_ip` and `proxy_admin_ip`
+
+#### Scenario: dnsdist multi-network IP context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `dnsdist_isolated_ip`, `dnsdist_dns_ip`, and `dnsdist_admin_ip`
+
+#### Scenario: coredns multi-network IP context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `coredns_dns_ip`, `coredns_admin_ip`, and `coredns_egress_ip`
+
+#### Scenario: db-postgres dual-network IP context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `db_postgres_ip` and `db_postgres_admin_ip`

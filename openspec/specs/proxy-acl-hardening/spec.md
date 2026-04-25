@@ -102,3 +102,30 @@ All IP-literal deny rules and method deny rules SHALL be placed before the allow
 #### Scenario: Deny rules precede allow rules
 - **WHEN** the rendered `squid.conf` is inspected
 - **THEN** all `http_access deny` rules for IP-literal ranges, `dstdom_regex`, and `write_methods` appear before any `http_access allow` rule
+
+### Requirement: Firecrawl Per-Container Proxy Source Binding
+The Squid proxy configuration SHALL bind firecrawl proxy access to its specific container IP address using `acl firecrawl_src src {{ mcp_firecrawl_proxy_ip }}`. The allow rule SHALL restrict firecrawl to safe HTTP methods (GET, HEAD, OPTIONS) only.
+
+#### Scenario: Firecrawl source ACL bound to specific IP
+- **WHEN** the rendered `squid.conf` is inspected
+- **THEN** it contains `acl firecrawl_src src {{ mcp_firecrawl_proxy_ip }}` (resolved from `derive_static_ips()`)
+
+#### Scenario: Safe methods ACL defined
+- **WHEN** the rendered `squid.conf` is inspected
+- **THEN** it contains `acl safe_methods method GET HEAD OPTIONS`
+
+#### Scenario: Firecrawl allow rule restricted to safe methods
+- **WHEN** the rendered `squid.conf` is inspected
+- **THEN** it contains `http_access allow firecrawl_src authenticated_users safe_methods whitelist`
+
+#### Scenario: Firecrawl POST denied
+- **WHEN** firecrawl sends a POST request through the proxy to an allowlisted domain with valid credentials
+- **THEN** the proxy denies the request because POST is not in `safe_methods` — the request falls through to `http_access deny all`
+
+#### Scenario: Firecrawl allow rule after agent/admin allows
+- **WHEN** the rendered `squid.conf` is inspected
+- **THEN** the `firecrawl_src` allow rule appears after the `agent_src` and `admin_src` allow rules and before the `http_access deny all` catch-all
+
+#### Scenario: Firecrawl subject to all deny layers
+- **WHEN** firecrawl sends an HTTP request through the proxy
+- **THEN** the request is evaluated against all deny rules (IP-literal, read-only registries, conn_limit, IPv6) before reaching the firecrawl allow rule

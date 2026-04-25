@@ -39,7 +39,7 @@ The system SHALL compute the IPAM slot that would be allocated without writing t
 
 #### Scenario: Preview slot for new instance
 - **WHEN** dry-run computes IPAM for a project not in the ledger
-- **THEN** the lowest available slot is displayed along with derived subnets, with a note that the slot is subject to concurrent changes
+- **THEN** the lowest available slot is displayed along with six derived subnets (isolated, core_proxy, dns, admin, admin_proxy, egress), with a note that the slot is subject to concurrent changes
 
 #### Scenario: Preview slot for existing instance
 - **WHEN** dry-run computes IPAM for a project already in the ledger
@@ -98,5 +98,5 @@ The `IPAMLedger` class SHALL provide a `peek_next_slot(project_id)` method that 
 - **THEN** it returns `(existing_base_index, True)`
 
 #### Scenario: Peek on exhausted ledger
-- **WHEN** `peek_next_slot` is called for a new project and all 13,312 slots are consumed
+- **WHEN** `peek_next_slot` is called for a new project and all 6,656 slots are consumed
 - **THEN** it raises `IPAMExhaustedError`

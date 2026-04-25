@@ -17,7 +17,7 @@ The system SHALL declare two module-level lists — `_JINJA_RENDERED_DOCKER` and
 
 #### Scenario: Registry covers all Jinja2-rendered config files
 - **WHEN** `_JINJA_RENDERED_CONFIG` is inspected
-- **THEN** it contains entries for `dns-sidecar/Corefile`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`
+- **THEN** it contains entries for `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`
 
 ### Requirement: Static Config Minimization
 The system SHALL classify files as static (copied via `shutil.copy2`) only when they contain zero Jinja2 template syntax. Files containing `{{ }}` or `{% %}` markers SHALL be in `_JINJA_RENDERED_CONFIG`.

@@ -31,11 +31,11 @@ The system SHALL acquire a per-instance `state.lock` (fcntl `LOCK_EX | LOCK_NB`)
 - **THEN** the second invocation exits with: "Another sandbox start is already in progress for this instance."
 
 ### Requirement: IPAM Allocation Before Launch
-The system SHALL allocate a `/24` subnet triple from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
+The system SHALL allocate six consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
 
 #### Scenario: New instance gets lowest available slot
 - **WHEN** `sandbox start` scaffolds a new instance with no existing IPAM entry
-- **THEN** the lowest available `base_index` (0–13311) is assigned and written to `ipam.json` before any compose command runs
+- **THEN** the lowest available `base_index` (0–6655) is assigned and written to `ipam.json` before any compose command runs
 
 #### Scenario: Existing instance reuses previous slot
 - **WHEN** `sandbox start` is invoked for an instance already present in `ipam.json`
