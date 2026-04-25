@@ -261,3 +261,56 @@ class TestPeekNextSlot:
         ledger = IPAMLedger(ledger_path)
         with pytest.raises(IPAMExhaustedError):
             ledger.peek_next_slot("one-more")
+
+
+class TestIpamEndToEnd:
+    """7.T: End-to-end IPAM integration — subnet count, IP count,
+    IP-within-subnet containment."""
+
+    def test_derive_subnets_returns_6(self) -> None:
+        """derive_subnets(0) produces exactly 6 subnets."""
+        subnets = derive_subnets(0)
+        assert len(subnets) == 6
+
+    def test_derive_static_ips_returns_16(self) -> None:
+        """derive_static_ips(0) produces exactly 16 IP keys."""
+        ips = derive_static_ips(0)
+        assert len(ips) == 16
+
+    def test_all_ips_within_expected_subnets(self) -> None:
+        """Every static IP falls within its expected subnet."""
+        import ipaddress
+
+        subnets = derive_subnets(0)
+        (
+            isolated, core_proxy, dns,
+            admin, admin_proxy, egress,
+        ) = subnets
+        ips = derive_static_ips(0)
+
+        # Map each IP key to its expected subnet
+        ip_subnet_map = {
+            "agent_isolated_ip": isolated,
+            "agent_proxy_ip": core_proxy,
+            "proxy_core_ip": core_proxy,
+            "proxy_admin_ip": admin_proxy,
+            "dnsdist_isolated_ip": isolated,
+            "dnsdist_dns_ip": dns,
+            "dnsdist_admin_ip": admin,
+            "coredns_dns_ip": dns,
+            "coredns_admin_ip": admin,
+            "coredns_egress_ip": egress,
+            "admin_admin_ip": admin,
+            "admin_proxy_ip": admin_proxy,
+            "db_postgres_ip": isolated,
+            "db_postgres_admin_ip": admin,
+            "mcp_firecrawl_proxy_ip": core_proxy,
+            "firecrawl_dns_ip": dns,
+        }
+
+        for ip_key, subnet_cidr in ip_subnet_map.items():
+            net = ipaddress.ip_network(subnet_cidr, strict=False)
+            addr = ipaddress.ip_address(ips[ip_key])
+            assert addr in net, (
+                f"{ip_key}={ips[ip_key]} not in {subnet_cidr}"
+            )

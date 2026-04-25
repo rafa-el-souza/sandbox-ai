@@ -434,12 +434,13 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
 
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
-# 15 unconditional source files in the tooling plane
+# 16 unconditional source files in the tooling plane
 _UNCONDITIONAL_FILES: list[str] = [
     ".docker/compose.yml",
     ".docker/core/entrypoint.sh",
     ".docker/admin/entrypoint.sh",
-    ".config/dns-sidecar/Corefile",
+    ".config/coredns/Corefile",
+    ".config/dnsdist/dnsdist.conf",
     ".config/proxy/squid.conf",
     ".config/proxy/ERR_SANDBOX_403",
     ".config/admin/.zshrc",
@@ -611,7 +612,7 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
 
 
 def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
-    """Check that all 15 unconditional tooling plane files exist."""
+    """Check that all 16 unconditional tooling plane files exist."""
     sandbox_home = _get_sandbox_ai_home()
     missing: list[str] = []
     for rel_path in _UNCONDITIONAL_FILES:
@@ -623,7 +624,7 @@ def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
         return CheckResult(
             status="pass",
             name="tooling plane",
-            detail="All 15 unconditional files present",
+            detail="All 16 unconditional files present",
         )
     return CheckResult(
         status="fail",

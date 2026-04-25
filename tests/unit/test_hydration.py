@@ -679,6 +679,34 @@ class TestValidateTemplates:
         assert count > 0
         assert errors == []
 
+    def test_validate_all_components_enabled(
+        self, tmp_path: Path,
+    ) -> None:
+        """7.T: All real templates valid with all components enabled.
+
+        Uses the actual project root as tooling_plane so
+        validate_templates() renders compose.yml, db-postgres.yml,
+        mcp-firecrawl.yml, Corefile, dnsdist.conf, squid.conf, and
+        every other Jinja2 template with StrictUndefined — catching
+        any variable that lacks a context key.
+        """
+        from core.hydration import validate_templates
+
+        project_root = str(
+            Path(__file__).parent.parent.parent
+        )
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx,
+            project_root,
+            db_postgres=True,
+            mcp_firecrawl=True,
+        )
+        assert count > 0
+        assert errors == [], (
+            f"UndefinedError with all components: {errors}"
+        )
+
     def test_validate_missing_template(self, tmp_path: Path) -> None:
         """Missing template file produces TemplateNotFound error."""
         from core.hydration import validate_templates
@@ -764,6 +792,9 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     extras_dir.mkdir()
     (extras_dir / "mcp-firecrawl.yml").write_text("# firecrawl\n")
     (extras_dir / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
+    (extras_dir / "db-postgres.yml").write_text(
+        "# postgres: {{ db_postgres_admin_ip }}\n"
+    )
 
     config_dir = tooling / ".config"
     dns_dir = config_dir / "coredns"
