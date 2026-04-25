@@ -1252,3 +1252,421 @@ class TestSquidFirecrawlAcl:
         assert agent_pos < admin_pos < firecrawl_pos < deny_pos
 
 
+def _render_compose(tmp_path: Path) -> str:
+    """Render compose.yml template through Jinja2 with StrictUndefined."""
+    import jinja2
+
+    ctx = _build_test_context(str(tmp_path / "inst"))
+    template_content = (
+        Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+    ).read_text()
+    env = jinja2.Environment(
+        loader=jinja2.BaseLoader(),
+        undefined=jinja2.StrictUndefined,
+    )
+    return env.from_string(template_content).render(ctx)
+
+
+def _render_extras(tmp_path: Path, filename: str) -> str:
+    """Render an extras template through Jinja2 with StrictUndefined."""
+    import jinja2
+
+    ctx = _build_test_context(str(tmp_path / "inst"))
+    template_content = (
+        Path(__file__).parent.parent.parent
+        / ".docker" / "extras" / filename
+    ).read_text()
+    env = jinja2.Environment(
+        loader=jinja2.BaseLoader(),
+        undefined=jinja2.StrictUndefined,
+    )
+    return env.from_string(template_content).render(ctx)
+
+
+class TestComposeSecurityBaseline:
+    """5.T: x-security-baseline anchor and service inheritance."""
+
+    def test_baseline_anchor_defined(self, tmp_path: Path) -> None:
+        """compose.yml source contains x-security-baseline anchor."""
+        raw = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "compose.yml"
+        ).read_text()
+        assert "x-security-baseline:" in raw
+        assert "&security-baseline" in raw
+
+    def test_baseline_contains_scalar_properties(
+        self, tmp_path: Path,
+    ) -> None:
+        """Baseline has security_opt, cap_drop, ipc, init, read_only."""
+        raw = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "compose.yml"
+        ).read_text()
+        # Find the baseline block (between x-security-baseline and networks:)
+        start = raw.index("x-security-baseline:")
+        end = raw.index("\nnetworks:")
+        block = raw[start:end]
+        assert "no-new-privileges:true" in block
+        assert "cap_drop:" in block
+        assert "ALL" in block
+        assert "ipc: private" in block
+        assert "init: true" in block
+        assert "read_only: true" in block
+
+    def test_baseline_excludes_list_properties(
+        self, tmp_path: Path,
+    ) -> None:
+        """Baseline does NOT contain cap_add, sysctls, or tmpfs."""
+        raw = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "compose.yml"
+        ).read_text()
+        start = raw.index("x-security-baseline:")
+        end = raw.index("\nnetworks:")
+        block = raw[start:end]
+        assert "cap_add:" not in block
+        assert "sysctls:" not in block
+        assert "tmpfs:" not in block
+
+    def test_core_overrides_read_only(self, tmp_path: Path) -> None:
+        """Core service overrides baseline read_only to false."""
+        rendered = _render_compose(tmp_path)
+        # Extract core service block
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "read_only: false" in core_block
+
+    def test_admin_overrides_read_only(self, tmp_path: Path) -> None:
+        """Admin service overrides baseline read_only to false."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "read_only: false" in admin_block
+
+
+class TestComposeNetworkDefinitions:
+    """5.T: 6-network topology with correct properties."""
+
+    def test_new_networks_defined(self, tmp_path: Path) -> None:
+        """compose.yml defines core_proxy_net, dns_net, admin_net,
+        admin_proxy_net."""
+        rendered = _render_compose(tmp_path)
+        for net in [
+            "core_proxy_net:", "dns_net:",
+            "admin_net:", "admin_proxy_net:",
+        ]:
+            assert net in rendered, f"Missing network: {net}"
+
+    def test_new_networks_internal(self, tmp_path: Path) -> None:
+        """All 4 new networks have internal: true."""
+        raw = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "compose.yml"
+        ).read_text()
+        for net_name in [
+            "core_proxy_net:", "dns_net:",
+            "admin_net:", "admin_proxy_net:",
+        ]:
+            idx = raw.index(net_name)
+            # Check within the next 200 chars
+            block = raw[idx:idx + 200]
+            assert "internal: true" in block, (
+                f"{net_name} missing internal: true"
+            )
+
+    def test_proxy_net_removed(self, tmp_path: Path) -> None:
+        """Legacy proxy_net network is no longer defined."""
+        raw = (
+            Path(__file__).parent.parent.parent
+            / ".docker" / "compose.yml"
+        ).read_text()
+        # Extract networks block only
+        net_start = raw.index("networks:")
+        svc_start = raw.index("services:")
+        net_block = raw[net_start:svc_start]
+        # proxy_net should not appear as a top-level network
+        # (core_proxy_net and admin_proxy_net contain "proxy_net"
+        # as substring, so check for exact key)
+        lines = net_block.split("\n")
+        top_keys = [
+            ln.strip().rstrip(":") for ln in lines
+            if ln and not ln.startswith(" ") and ln.strip().endswith(":")
+            and ln.strip() != "networks:"
+        ]
+        assert "proxy_net" not in top_keys
+
+
+class TestComposeServiceNetworkMembership:
+    """5.T: Zero-shared-network invariant, per-service membership."""
+
+    def test_core_on_isolated_and_core_proxy_only(
+        self, tmp_path: Path,
+    ) -> None:
+        """Core is on isolated_net and core_proxy_net only."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "isolated_net:" in core_block
+        assert "core_proxy_net:" in core_block
+        assert "admin_net:" not in core_block
+        assert "admin_proxy_net:" not in core_block
+
+    def test_admin_on_admin_and_admin_proxy_only(
+        self, tmp_path: Path,
+    ) -> None:
+        """Admin is on admin_net and admin_proxy_net only."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "admin_net:" in admin_block
+        assert "admin_proxy_net:" in admin_block
+        assert "isolated_net:" not in admin_block
+        assert "core_proxy_net:" not in admin_block
+
+    def test_zero_shared_networks(self, tmp_path: Path) -> None:
+        """Core and admin network sets have empty intersection."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        admin_block = rendered[admin_start:]
+        all_nets = [
+            "isolated_net", "core_proxy_net", "dns_net",
+            "admin_net", "admin_proxy_net", "egress_net",
+        ]
+        core_nets = {n for n in all_nets if f"{n}:" in core_block}
+        admin_nets = {n for n in all_nets if f"{n}:" in admin_block}
+        assert core_nets & admin_nets == set(), (
+            f"Shared networks: {core_nets & admin_nets}"
+        )
+
+    def test_coredns_exists_dns_sidecar_absent(
+        self, tmp_path: Path,
+    ) -> None:
+        """Service named coredns exists; dns-sidecar does not."""
+        rendered = _render_compose(tmp_path)
+        assert "coredns:" in rendered
+        assert "dns-sidecar:" not in rendered
+
+
+class TestComposeDnsdistService:
+    """5.T: dnsdist service definition and hardening."""
+
+    def test_dnsdist_cap_add(self, tmp_path: Path) -> None:
+        """dnsdist has cap_add NET_BIND_SERVICE."""
+        rendered = _render_compose(tmp_path)
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert "NET_BIND_SERVICE" in dnsdist_block
+
+    def test_dnsdist_user(self, tmp_path: Path) -> None:
+        """dnsdist runs as pdns:pdns."""
+        rendered = _render_compose(tmp_path)
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert 'user: "pdns:pdns"' in dnsdist_block
+
+    def test_dnsdist_resource_limits(self, tmp_path: Path) -> None:
+        """dnsdist has pids_limit 100 and mem_limit 512m."""
+        rendered = _render_compose(tmp_path)
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert "pids_limit: 100" in dnsdist_block
+        assert "512m" in dnsdist_block
+
+    def test_dnsdist_depends_on_coredns(self, tmp_path: Path) -> None:
+        """dnsdist depends_on coredns: condition: service_healthy."""
+        rendered = _render_compose(tmp_path)
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert "coredns:" in dnsdist_block
+        assert "service_healthy" in dnsdist_block
+
+    def test_dnsdist_ip_forward_disabled(self, tmp_path: Path) -> None:
+        """dnsdist sysctls contain ip_forward=0."""
+        rendered = _render_compose(tmp_path)
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert "net.ipv4.ip_forward=0" in dnsdist_block
+
+
+class TestComposeDnsRouting:
+    """5.T: Per-container DNS routing through dnsdist."""
+
+    def test_core_dns_points_to_dnsdist(self, tmp_path: Path) -> None:
+        """Core dns directive uses dnsdist_isolated_ip."""
+        from core.ipam import derive_static_ips
+
+        ips = derive_static_ips(0)
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert ips["dnsdist_isolated_ip"] in core_block
+
+    def test_admin_dns_points_to_dnsdist(self, tmp_path: Path) -> None:
+        """Admin dns directive uses dnsdist_admin_ip."""
+        from core.ipam import derive_static_ips
+
+        ips = derive_static_ips(0)
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert ips["dnsdist_admin_ip"] in admin_block
+
+
+class TestComposeExtraHosts:
+    """5.T: Per-container extra_hosts resolution."""
+
+    def test_core_extra_hosts_proxy(self, tmp_path: Path) -> None:
+        """Core extra_hosts has proxy with proxy_core_ip."""
+        from core.ipam import derive_static_ips
+
+        ips = derive_static_ips(0)
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert f"proxy:{ips['proxy_core_ip']}" in core_block
+
+    def test_admin_extra_hosts_proxy(self, tmp_path: Path) -> None:
+        """Admin extra_hosts has proxy with proxy_admin_ip."""
+        from core.ipam import derive_static_ips
+
+        ips = derive_static_ips(0)
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert f"proxy:{ips['proxy_admin_ip']}" in admin_block
+
+
+class TestComposeIpForward:
+    """5.T: All services have ip_forward=0."""
+
+    def test_core_ip_forward(self, tmp_path: Path) -> None:
+        """Core sysctls contain ip_forward=0."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "net.ipv4.ip_forward=0" in core_block
+
+    def test_admin_ip_forward(self, tmp_path: Path) -> None:
+        """Admin sysctls contain ip_forward=0."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "net.ipv4.ip_forward=0" in admin_block
+
+
+class TestComposeNoProxy:
+    """5.T: Per-container NO_PROXY scoping."""
+
+    def test_core_no_proxy_scoped(self, tmp_path: Path) -> None:
+        """Core NO_PROXY includes isolated/core_proxy,
+        excludes admin subnets."""
+        from core.ipam import derive_subnets
+
+        subnets = derive_subnets(0)
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        # isolated_subnet is subnets[0], core_proxy is subnets[1]
+        assert subnets[0] in core_block  # isolated_subnet
+        assert subnets[1] in core_block  # core_proxy_subnet
+        assert subnets[3] not in core_block  # admin_subnet
+
+    def test_admin_no_proxy_scoped(self, tmp_path: Path) -> None:
+        """Admin NO_PROXY includes admin/admin_proxy,
+        excludes core subnets."""
+        from core.ipam import derive_subnets
+
+        subnets = derive_subnets(0)
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        # admin_subnet is subnets[3], admin_proxy is subnets[4]
+        assert subnets[3] in admin_block  # admin_subnet
+        assert subnets[4] in admin_block  # admin_proxy_subnet
+        assert subnets[0] not in admin_block  # isolated_subnet
+
+
+class TestComposeDependsOn:
+    """5.T: Service dependency chain."""
+
+    def test_core_depends_on_dnsdist(self, tmp_path: Path) -> None:
+        """Core depends_on includes dnsdist."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "dnsdist:" in core_block
+        assert "service_healthy" in core_block
+
+    def test_admin_depends_on_dnsdist(self, tmp_path: Path) -> None:
+        """Admin depends_on includes dnsdist."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "dnsdist:" in admin_block
+        assert "service_healthy" in admin_block
+
+
+class TestDbPostgresTemplate:
+    """5.T: db-postgres.yml topology and hardening."""
+
+    def test_db_postgres_admin_net(self, tmp_path: Path) -> None:
+        """db-postgres has admin_net membership."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert "admin_net:" in rendered
+
+    def test_db_postgres_ip_forward(self, tmp_path: Path) -> None:
+        """db-postgres sysctls contain ip_forward=0."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert "net.ipv4.ip_forward=0" in rendered
+
+    def test_db_postgres_admin_ip(self, tmp_path: Path) -> None:
+        """db-postgres has db_postgres_admin_ip on admin_net."""
+        from core.ipam import derive_static_ips
+
+        ips = derive_static_ips(0)
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert ips["db_postgres_admin_ip"] in rendered
+
+
+class TestMcpFirecrawlTemplate:
+    """5.T: mcp-firecrawl.yml topology."""
+
+    def test_firecrawl_dns_points_to_dnsdist(
+        self, tmp_path: Path,
+    ) -> None:
+        """Firecrawl dns uses dnsdist_dns_ip."""
+        from core.ipam import derive_static_ips
+
+        ips = derive_static_ips(0)
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert ips["dnsdist_dns_ip"] in rendered
+
+    def test_firecrawl_no_dns_sidecar_refs(
+        self, tmp_path: Path,
+    ) -> None:
+        """Firecrawl has no dns-sidecar references."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "dns-sidecar" not in rendered
+
+    def test_firecrawl_depends_on_dnsdist(
+        self, tmp_path: Path,
+    ) -> None:
+        """Firecrawl depends_on dnsdist."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "dnsdist:" in rendered
+        assert "service_healthy" in rendered

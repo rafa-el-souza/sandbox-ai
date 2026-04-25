@@ -22,9 +22,12 @@ services:
       - SETUID
     runtime: {{ runtime }}
     read_only: true
+    ipc: private
     networks:
       isolated_net:
         ipv4_address: {{ db_postgres_ip }}
+      admin_net:
+        ipv4_address: {{ db_postgres_admin_ip }}
     env_file:
       - "{{ instance_dir }}/.sandbox.env"
     environment:
@@ -35,6 +38,8 @@ services:
       - /var/run/postgresql
       - /tmp:noexec,nosuid,nodev
       - /var/tmp:noexec,nosuid,nodev
+    sysctls:
+      - net.ipv4.ip_forward=0
     volumes:
       - db-postgres-data:/var/lib/postgresql/data:rw
     healthcheck:

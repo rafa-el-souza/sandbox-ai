@@ -29,7 +29,7 @@ services:
       dns_net:
         ipv4_address: {{ firecrawl_dns_ip }}
     dns:
-      - {{ dnsdist_isolated_ip }}
+      - {{ dnsdist_dns_ip }}
     extra_hosts:
       - "proxy:{{ proxy_core_ip }}"
       - "coredns:{{ coredns_dns_ip }}"
