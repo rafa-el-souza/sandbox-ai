@@ -426,7 +426,7 @@ class TestRenderTemplates:
         # core static configs
         core_cfg = config_dir / "core"
         core_cfg.mkdir(parents=True)
-        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        for f in [".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"]:
             (core_cfg / f).write_text(f"# {f}\n")
 
         # Create instance dirs
@@ -590,7 +590,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
     from core.ipam import derive_static_ips, derive_subnets
 
-    isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(0)
+    isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(0)
     ips = derive_static_ips(0)
 
     return {
@@ -603,6 +603,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "admin_subnet": admin,
         "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
+        "ipc_subnet": ipc,
         **ips,
         "proxy_password": "testpass",
         "proxy_url_core": "http://proxyuser:testpass@proxy:3128",
@@ -757,7 +758,7 @@ class TestValidateTemplates:
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".config" / "core" / ".claude.json").unlink()
+        (tooling / ".config" / "proxy" / "ERR_SANDBOX_403").unlink()
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
@@ -766,7 +767,7 @@ class TestValidateTemplates:
             mcp_firecrawl=False,
         )
         assert any("Static file missing" in e for e in errors)
-        assert any(".claude.json" in e for e in errors)
+        assert any("ERR_SANDBOX_403" in e for e in errors)
 
 
 def _build_minimal_tooling(tmp_path: Path) -> Path:
@@ -828,8 +829,25 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     (core_cfg / ".npmrc").write_text("proxy={{ proxy_url_core }}\n")
     (core_cfg / ".gitconfig").write_text("# git {{ git_user }} {{ git_email }}\n")
     (core_cfg / "CLAUDE.md").write_text("# CLAUDE {{ db_postgres_enabled }}\n")
-    # Static (.claude.json)
-    (core_cfg / ".claude.json").write_text('{"version": 1}\n')
+    (core_cfg / "sshd_config").write_text(
+        "ListenAddress {{ core_ipc_ip }}\n"
+        "Port 9999\n"
+        "PermitRootLogin no\n"
+        "AllowUsers agent\n"
+        "PasswordAuthentication no\n"
+        "KbdInteractiveAuthentication no\n"
+        "PubkeyAuthentication yes\n"
+        "HostKey /run/secrets/ipc_host_key\n"
+        "AuthorizedKeysFile /run/secrets/authorized_keys\n"
+        "X11Forwarding no\n"
+        "AllowAgentForwarding no\n"
+        "AllowTcpForwarding no\n"
+        "PermitTunnel no\n"
+        "AcceptEnv SANDBOX_WARMUP_PROMPT\n"
+        "MaxSessions 10\n"
+        "ClientAliveInterval 300\n"
+        "ClientAliveCountMax 2\n"
+    )
 
     return tooling
 
@@ -960,7 +978,7 @@ class TestReadOnlyDomainsGeneration:
         (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
         for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (config_dir / "admin" / f).write_text(f"# {f}\n")
-        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        for f in [".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"]:
             (config_dir / "core" / f).write_text(f"# {f}\n")
 
         # Instance dirs
@@ -1014,7 +1032,7 @@ class TestReadOnlyDomainsGeneration:
         (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
         for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (config_dir / "admin" / f).write_text(f"# {f}\n")
-        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        for f in [".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"]:
             (config_dir / "core" / f).write_text(f"# {f}\n")
 
         for d in [
@@ -1360,21 +1378,21 @@ class TestComposeSecurityBaseline:
         assert "sysctls:" not in block
         assert "tmpfs:" not in block
 
-    def test_core_overrides_read_only(self, tmp_path: Path) -> None:
-        """Core service overrides baseline read_only to false."""
+    def test_core_inherits_read_only(self, tmp_path: Path) -> None:
+        """Core service inherits baseline read_only: true (no override)."""
         rendered = _render_compose(tmp_path)
         # Extract core service block
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
-        assert "read_only: false" in core_block
+        assert "read_only: false" not in core_block
 
-    def test_admin_overrides_read_only(self, tmp_path: Path) -> None:
-        """Admin service overrides baseline read_only to false."""
+    def test_admin_inherits_read_only(self, tmp_path: Path) -> None:
+        """Admin service inherits baseline read_only: true (no override)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "read_only: false" in admin_block
+        assert "read_only: false" not in admin_block
 
 
 class TestComposeNetworkDefinitions:
@@ -1432,33 +1450,35 @@ class TestComposeNetworkDefinitions:
 class TestComposeServiceNetworkMembership:
     """5.T: Zero-shared-network invariant, per-service membership."""
 
-    def test_core_on_isolated_and_core_proxy_only(
+    def test_core_on_isolated_core_proxy_and_ipc(
         self, tmp_path: Path,
     ) -> None:
-        """Core is on isolated_net and core_proxy_net only."""
+        """Core is on isolated_net, core_proxy_net, and ipc_net."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
         assert "isolated_net:" in core_block
         assert "core_proxy_net:" in core_block
+        assert "ipc_net:" in core_block
         assert "admin_net:" not in core_block
         assert "admin_proxy_net:" not in core_block
 
-    def test_admin_on_admin_and_admin_proxy_only(
+    def test_admin_on_admin_admin_proxy_and_ipc(
         self, tmp_path: Path,
     ) -> None:
-        """Admin is on admin_net and admin_proxy_net only."""
+        """Admin is on admin_net, admin_proxy_net, and ipc_net."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
         assert "admin_net:" in admin_block
         assert "admin_proxy_net:" in admin_block
+        assert "ipc_net:" in admin_block
         assert "isolated_net:" not in admin_block
         assert "core_proxy_net:" not in admin_block
 
-    def test_zero_shared_networks(self, tmp_path: Path) -> None:
-        """Core and admin network sets have empty intersection."""
+    def test_ipc_net_is_only_shared_network(self, tmp_path: Path) -> None:
+        """Core and admin network sets intersect only on ipc_net."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
@@ -1466,11 +1486,11 @@ class TestComposeServiceNetworkMembership:
         admin_block = rendered[admin_start:]
         all_nets = [
             "isolated_net", "core_proxy_net", "dns_net",
-            "admin_net", "admin_proxy_net", "egress_net",
+            "admin_net", "admin_proxy_net", "egress_net", "ipc_net",
         ]
         core_nets = {n for n in all_nets if f"{n}:" in core_block}
         admin_nets = {n for n in all_nets if f"{n}:" in admin_block}
-        assert core_nets & admin_nets == set(), (
+        assert core_nets & admin_nets == {"ipc_net"}, (
             f"Shared networks: {core_nets & admin_nets}"
         )
 
@@ -1701,3 +1721,510 @@ class TestMcpFirecrawlTemplate:
         rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
         assert "dnsdist:" in rendered
         assert "service_healthy" in rendered
+
+
+class TestHydrationIpcContext:
+    """3.T RED: IPC context keys, sshd_config registry, programmatic .claude.json."""
+
+    def test_context_includes_ipc_subnet(self, tmp_path: Path) -> None:
+        """build_jinja_context returns ipc_subnet key."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(
+            config=config, base_index=0, proxy_password="x", instance_dir=str(tmp_path),
+        )
+        assert "ipc_subnet" in ctx
+        assert ctx["ipc_subnet"] == "10.100.6.0/24"
+
+    def test_context_includes_ipc_ips(self, tmp_path: Path) -> None:
+        """build_jinja_context contains core_ipc_ip and admin_ipc_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(
+            config=config, base_index=0, proxy_password="x", instance_dir=str(tmp_path),
+        )
+        assert "core_ipc_ip" in ctx
+        assert "admin_ipc_ip" in ctx
+
+    def test_context_includes_firecrawl_isolated_ip(self, tmp_path: Path) -> None:
+        """build_jinja_context contains firecrawl_isolated_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(
+            config=config, base_index=0, proxy_password="x", instance_dir=str(tmp_path),
+        )
+        assert "firecrawl_isolated_ip" in ctx
+
+    def test_sshd_config_in_jinja_rendered_config(self) -> None:
+        """_JINJA_RENDERED_CONFIG includes sshd_config entry."""
+        from core.hydration import _JINJA_RENDERED_CONFIG
+
+        sources = [src for src, _ in _JINJA_RENDERED_CONFIG]
+        assert "core/sshd_config" in sources
+
+    def test_claude_json_not_in_static_config_core(self) -> None:
+        """.claude.json must not be in _STATIC_CONFIG_CORE."""
+        from core.hydration import _STATIC_CONFIG_CORE
+
+        assert ".claude.json" not in _STATIC_CONFIG_CORE
+
+    def test_static_config_core_is_empty(self) -> None:
+        """_STATIC_CONFIG_CORE must be empty list."""
+        from core.hydration import _STATIC_CONFIG_CORE
+
+        assert _STATIC_CONFIG_CORE == []
+
+    def test_render_templates_generates_claude_json_with_firecrawl(
+        self, tmp_path: Path,
+    ) -> None:
+        """With mcp_firecrawl=True, .claude.json has mcpServers.firecrawl."""
+        import json
+
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras",
+            "config/admin", "config/core", "config/coredns",
+            "config/dnsdist", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=True)
+
+        claude_json = instance / "config" / "core" / ".claude.json"
+        assert claude_json.exists()
+        data = json.loads(claude_json.read_text())
+        assert "mcpServers" in data
+        assert "firecrawl" in data["mcpServers"]
+        firecrawl = data["mcpServers"]["firecrawl"]
+        assert firecrawl["type"] == "http"
+        assert ctx["firecrawl_isolated_ip"] in firecrawl["url"]
+
+    def test_render_templates_generates_empty_claude_json_without_firecrawl(
+        self, tmp_path: Path,
+    ) -> None:
+        """With mcp_firecrawl=False, .claude.json is '{}'."""
+        import json
+
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras",
+            "config/admin", "config/core", "config/coredns",
+            "config/dnsdist", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        claude_json = instance / "config" / "core" / ".claude.json"
+        assert claude_json.exists()
+        data = json.loads(claude_json.read_text())
+        assert data == {}
+
+
+class TestSshdConfigTemplate:
+    """4.T RED: sshd_config Jinja2 template rendering and directives."""
+
+    def test_sshd_config_renders_with_ipc_ip(self, tmp_path: Path) -> None:
+        """validate_templates passes with sshd_config in registry."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert errors == [], f"Unexpected errors: {errors}"
+        assert count > 0
+
+    def test_sshd_config_listen_address(self, tmp_path: Path) -> None:
+        """sshd_config contains all required directives per spec."""
+        import jinja2
+
+        tooling = _build_minimal_tooling(tmp_path)
+        env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(str(tooling)),
+            undefined=jinja2.StrictUndefined,
+        )
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        tpl = env.get_template(".config/core/sshd_config")
+        rendered = tpl.render(ctx)
+
+        assert "ListenAddress 10.100.6.3" in rendered
+        assert "Port 9999" in rendered
+        assert "PasswordAuthentication no" in rendered
+        assert "AllowUsers agent" in rendered
+        assert "PermitRootLogin no" in rendered
+        assert "HostKey /run/secrets/ipc_host_key" in rendered
+        assert "AuthorizedKeysFile /run/secrets/authorized_keys" in rendered
+        assert "AcceptEnv SANDBOX_WARMUP_PROMPT" in rendered
+        assert "0.0.0.0" not in rendered
+
+
+class TestComposeIpcNetAndW4Hardening:
+    """5.T RED: Compose template — ipc_net, volume removal, security baseline,
+    SSH credential mounts, tmpfs mounts, and per-service cap_add."""
+
+    # --- (a) core on ipc_net ---
+    def test_compose_core_on_ipc_net(self, tmp_path: Path) -> None:
+        """Core service networks include ipc_net."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "ipc_net:" in core_block
+
+    # --- (b) admin on ipc_net ---
+    def test_compose_admin_on_ipc_net(self, tmp_path: Path) -> None:
+        """Admin service networks include ipc_net."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_net:" in admin_block
+
+    # --- (c) ipc_net network definition ---
+    def test_compose_ipc_net_definition(self, tmp_path: Path) -> None:
+        """ipc_net network block contains internal: true and enable_ipv6: false."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        assert "ipc_net:" in raw
+        idx = raw.index("ipc_net:")
+        block = raw[idx:idx + 300]
+        assert "internal: true" in block
+        assert "enable_ipv6: false" in block
+
+    # --- (d) no admin-ipc_vol ---
+    def test_compose_no_admin_ipc_vol(self, tmp_path: Path) -> None:
+        """Rendered compose does NOT contain admin-ipc_vol."""
+        rendered = _render_compose(tmp_path)
+        assert "admin-ipc_vol" not in rendered
+
+    # --- (e) no mcp-ipc_vol ---
+    def test_compose_no_mcp_ipc_vol(self, tmp_path: Path) -> None:
+        """Rendered compose does NOT contain mcp-ipc_vol."""
+        rendered = _render_compose(tmp_path)
+        assert "mcp-ipc_vol" not in rendered
+
+    # --- (f) no /sock mount ---
+    def test_compose_no_sock_mount(self, tmp_path: Path) -> None:
+        """Rendered compose does NOT contain /sock."""
+        rendered = _render_compose(tmp_path)
+        assert "/sock" not in rendered
+
+    # --- (g) core no read_only: false ---
+    def test_compose_core_no_read_only_false(self, tmp_path: Path) -> None:
+        """Core service does NOT contain read_only: false."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "read_only: false" not in core_block
+
+    # --- (h) admin no read_only: false ---
+    def test_compose_admin_no_read_only_false(self, tmp_path: Path) -> None:
+        """Admin service does NOT contain read_only: false."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "read_only: false" not in admin_block
+
+    # --- (i) core cap_add SETUID/SETGID ---
+    def test_compose_core_cap_add_setuid(self, tmp_path: Path) -> None:
+        """Core service contains cap_add with SETUID and SETGID."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "cap_add:" in core_block
+        assert "SETUID" in core_block
+        assert "SETGID" in core_block
+
+    # --- (j) core ipc_host_key secret ---
+    def test_compose_core_ipc_host_key_secret(self, tmp_path: Path) -> None:
+        """Core service secrets contain ipc_host_key with uid '0' and mode 0600."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "ipc_host_key" in core_block
+        assert "uid: '0'" in core_block
+        assert "0600" in core_block
+
+    # --- (k) admin ipc_ssh_key secret ---
+    def test_compose_admin_ipc_ssh_key_secret(self, tmp_path: Path) -> None:
+        """Admin service secrets contain ipc_ssh_key with uid '1000' and mode 0600."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_ssh_key" in admin_block
+        assert "uid: '1000'" in admin_block
+        assert "0600" in admin_block
+
+    # --- (l) core tmpfs /run ---
+    def test_compose_core_tmpfs_run(self, tmp_path: Path) -> None:
+        """Core tmpfs includes /run."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        # Match /run tmpfs entry — must not match /var/run subpath
+        assert "/run:" in core_block or "/run\n" in core_block
+
+    # --- (m) core tmpfs ~/.config ---
+    def test_compose_core_tmpfs_config(self, tmp_path: Path) -> None:
+        """Core tmpfs includes /home/agent/.config."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "/home/agent/.config" in core_block
+
+    # --- (n) admin tmpfs ~/.cache ---
+    def test_compose_admin_tmpfs_cache(self, tmp_path: Path) -> None:
+        """Admin tmpfs includes /home/human/.cache."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "/home/human/.cache" in admin_block
+
+    # --- (o) admin tmpfs ~/.config ---
+    def test_compose_admin_tmpfs_config(self, tmp_path: Path) -> None:
+        """Admin tmpfs includes /home/human/.config."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "/home/human/.config" in admin_block
+
+    # --- (p) admin tmpfs ~/.zsh_sessions ---
+    def test_compose_admin_tmpfs_zsh_sessions(self, tmp_path: Path) -> None:
+        """Admin tmpfs includes /home/human/.zsh_sessions."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "/home/human/.zsh_sessions" in admin_block
+
+    # --- (q) core no command override ---
+    def test_compose_core_no_command_override(self, tmp_path: Path) -> None:
+        """Core service does NOT contain a command: directive."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "command:" not in core_block
+
+    # --- (r) core NO_PROXY includes ipc_subnet ---
+    def test_compose_core_no_proxy_includes_ipc(self, tmp_path: Path) -> None:
+        """Core service NO_PROXY includes ipc_subnet."""
+        from core.ipam import derive_subnets
+
+        subnets = derive_subnets(0)
+        ipc_subnet = subnets[6]
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert ipc_subnet in core_block
+
+    # --- (s) admin NO_PROXY includes ipc_subnet ---
+    def test_compose_admin_no_proxy_includes_ipc(self, tmp_path: Path) -> None:
+        """Admin service NO_PROXY includes ipc_subnet."""
+        from core.ipam import derive_subnets
+
+        subnets = derive_subnets(0)
+        ipc_subnet = subnets[6]
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert ipc_subnet in admin_block
+
+    # --- (t) core authorized_keys bind mount ---
+    def test_compose_core_authorized_keys_bind(self, tmp_path: Path) -> None:
+        """Core volumes contain authorized_keys:/run/secrets/authorized_keys:ro."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "authorized_keys:/run/secrets/authorized_keys:ro" in core_block
+
+    # --- (u) admin known_hosts bind mount ---
+    def test_compose_admin_known_hosts_bind(self, tmp_path: Path) -> None:
+        """Admin volumes contain ipc_known_hosts:/run/secrets/ipc_known_hosts:ro."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block
+
+    # --- (v) admin starship bind mount ---
+    def test_compose_admin_starship_bind(self, tmp_path: Path) -> None:
+        """Admin volumes contain starship.toml:/home/human/.config/starship.toml:ro."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "starship.toml:/home/human/.config/starship.toml:ro" in admin_block
+
+    # --- (w) infra services no read_only: false ---
+    def test_compose_infra_no_read_only_false(self, tmp_path: Path) -> None:
+        """coredns, proxy, and dnsdist services do NOT contain read_only: false."""
+        rendered = _render_compose(tmp_path)
+        # coredns block
+        coredns_start = rendered.index("\n  coredns:")
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        coredns_block = rendered[coredns_start:dnsdist_start]
+        assert "read_only: false" not in coredns_block
+        # dnsdist block
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert "read_only: false" not in dnsdist_block
+        # proxy block
+        core_start = rendered.index("\n  core:")
+        proxy_block = rendered[proxy_start:core_start]
+        assert "read_only: false" not in proxy_block
+
+    # --- (x) baseline excludes list-valued properties ---
+    def test_compose_baseline_excludes_list_valued(self, tmp_path: Path) -> None:
+        """x-security-baseline block does NOT contain cap_add, sysctls, or tmpfs."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        start = raw.index("x-security-baseline:")
+        end = raw.index("\nnetworks:")
+        block = raw[start:end]
+        assert "cap_add:" not in block
+        assert "sysctls:" not in block
+        assert "tmpfs:" not in block
+
+    # --- (y) coredns cap_add ---
+    def test_compose_coredns_cap_add(self, tmp_path: Path) -> None:
+        """coredns service has cap_add: [NET_BIND_SERVICE]."""
+        rendered = _render_compose(tmp_path)
+        coredns_start = rendered.index("\n  coredns:")
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        coredns_block = rendered[coredns_start:dnsdist_start]
+        assert "cap_add:" in coredns_block
+        assert "NET_BIND_SERVICE" in coredns_block
+
+    # --- (z) proxy cap_add ---
+    def test_compose_proxy_cap_add(self, tmp_path: Path) -> None:
+        """proxy service has cap_add: [SETUID, SETGID]."""
+        rendered = _render_compose(tmp_path)
+        proxy_start = rendered.index("\n  proxy:")
+        core_start = rendered.index("\n  core:")
+        proxy_block = rendered[proxy_start:core_start]
+        assert "cap_add:" in proxy_block
+        assert "SETUID" in proxy_block
+        assert "SETGID" in proxy_block
+
+
+class TestFirecrawlMcpHttpTransport:
+    """6.T RED: Firecrawl MCP transport migration to mcp-proxy Streamable HTTP."""
+
+    # --- (a) entrypoint is mcp-proxy ---
+    def test_mcp_firecrawl_entrypoint_is_mcp_proxy(self, tmp_path: Path) -> None:
+        """mcp-firecrawl.yml entrypoint contains mcp-proxy --server stream --port 3000."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "mcp-proxy" in rendered
+        assert "--server" in rendered
+        assert "stream" in rendered
+        assert "--port" in rendered
+        assert "3000" in rendered
+
+    # --- (b) firecrawl on isolated_net ---
+    def test_mcp_firecrawl_on_isolated_net(self, tmp_path: Path) -> None:
+        """Firecrawl service networks include isolated_net."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "isolated_net:" in rendered
+
+    # --- (c) no mcp-ipc_vol ---
+    def test_mcp_firecrawl_no_mcp_ipc_vol(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml does NOT contain mcp-ipc_vol."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "mcp-ipc_vol" not in rendered
+
+    # --- (d) no /var/run/mcp ---
+    def test_mcp_firecrawl_no_var_run_mcp(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml does NOT contain /var/run/mcp."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "/var/run/mcp" not in rendered
+
+
+# ── Section W4: Integration Verification ────────────────────────────────────
+
+
+class TestW4IntegrationVerification:
+    """13.T: End-to-end integration verification for Wave 4 containment hardening."""
+
+    def test_full_w4_template_validation(self, tmp_path: Path) -> None:
+        """Build a complete Jinja2 context with all 7-tuple fields, validate all templates."""
+        from core.hydration import SandboxConfig, build_jinja_context, validate_templates
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        # Use base_index=0 for deterministic IPs
+        context = build_jinja_context(config, base_index=0, proxy_password="testpass", instance_dir=str(tmp_path))
+
+        # Verify 7-tuple fields exist in context
+        assert "ipc_subnet" in context
+        assert "core_ipc_ip" in context
+        assert "admin_ipc_ip" in context
+        assert "firecrawl_isolated_ip" in context
+
+        tooling_plane = str(Path(__file__).resolve().parents[2])
+        validated, errors = validate_templates(
+            context, tooling_plane, db_postgres=True, mcp_firecrawl=True
+        )
+        assert errors == [], f"Template validation errors: {errors}"
+        assert validated > 0
+
+    def test_e2e_ipam_to_hydration_pipeline(self, tmp_path: Path) -> None:
+        """Full pipeline: IPAM allocate → derive subnets/IPs → build context → validate templates."""
+        from core.hydration import SandboxConfig, build_jinja_context, validate_templates
+        from core.ipam import derive_static_ips, derive_subnets
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        # Simulate IPAM allocation at slot 0
+        base_index = 0
+        subnets = derive_subnets(base_index)
+        assert len(subnets) == 7  # 7-tuple
+
+        ips = derive_static_ips(base_index)
+        assert "core_ipc_ip" in ips
+        assert "admin_ipc_ip" in ips
+
+        context = build_jinja_context(config, base_index, proxy_password="e2epass", instance_dir=str(tmp_path))
+
+        tooling_plane = str(Path(__file__).resolve().parents[2])
+        validated, errors = validate_templates(
+            context, tooling_plane, db_postgres=True, mcp_firecrawl=True
+        )
+        assert errors == [], f"E2E pipeline errors: {errors}"
+        assert validated > 0
+
+    def test_scaffold_creates_secrets_dir(self, tmp_path: Path) -> None:
+        """create_instance_dirs creates the secrets/ subdirectory."""
+        from core.scaffold import create_instance_dirs
+
+        instance_dir = tmp_path / "instance"
+        create_instance_dirs(str(instance_dir))
+        secrets_dir = instance_dir / "secrets"
+        assert secrets_dir.is_dir()
+
+    def test_acl_grant_plan_includes_secrets(self, tmp_path: Path) -> None:
+        """_acl_grant_plan includes at least one entry targeting secrets/ directory."""
+        from cli.main import _acl_grant_plan
+
+        plan = _acl_grant_plan(str(tmp_path), "sandbox")
+        secrets_entries = [desc for _, desc in plan if "secrets" in desc]
+        assert len(secrets_entries) >= 1
+

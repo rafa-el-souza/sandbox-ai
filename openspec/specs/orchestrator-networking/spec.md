@@ -5,11 +5,11 @@ This specification governs the zero-trust IPAM bridging logic isolating internal
 ## Requirements
 
 ### Requirement: Global IPv4 and Port Demilitarization
-The system SHALL allocate six consecutive `/24` subnets per sandbox instance from the `10.100.0.0–10.255.255.0` address space, with the allocation ledger mapping `project_id` to a reusable `base_index` integer.
+The system SHALL allocate seven consecutive `/24` subnets per sandbox instance from the `10.100.0.0–10.255.255.0` address space, with the allocation ledger mapping `project_id` to a reusable `base_index` integer.
 
-#### Scenario: Six /24 Subnet Allocation
+#### Scenario: Seven /24 Subnet Allocation
 - **WHEN** a new sandbox instance requires IPAM allocation
-- **THEN** the system assigns the lowest available `base_index` (integer, 0–6655) and derives six subnets as: `ISOLATED_NET = 10.(100 + g//256).(g%256).0/24`, `CORE_PROXY_NET = 10.(100 + (g+1)//256).((g+1)%256).0/24`, `DNS_NET = 10.(100 + (g+2)//256).((g+2)%256).0/24`, `ADMIN_NET = 10.(100 + (g+3)//256).((g+3)%256).0/24`, `ADMIN_PROXY_NET = 10.(100 + (g+4)//256).((g+4)%256).0/24`, `EGRESS_NET = 10.(100 + (g+5)//256).((g+5)%256).0/24` where `g = base_index * 6`
+- **THEN** the system assigns the lowest available `base_index` (integer, 0–5704) and derives seven subnets as: `ISOLATED_NET = 10.(100 + g//256).(g%256).0/24`, `CORE_PROXY_NET = 10.(100 + (g+1)//256).((g+1)%256).0/24`, `DNS_NET = 10.(100 + (g+2)//256).((g+2)%256).0/24`, `ADMIN_NET = 10.(100 + (g+3)//256).((g+3)%256).0/24`, `ADMIN_PROXY_NET = 10.(100 + (g+4)//256).((g+4)%256).0/24`, `EGRESS_NET = 10.(100 + (g+5)//256).((g+5)%256).0/24`, `IPC_NET = 10.(100 + (g+6)//256).((g+6)%256).0/24` where `g = base_index * 7`
 
 #### Scenario: Idempotent Re-Allocation on Restart
 - **WHEN** `sandbox start` is invoked for an instance already present in `ipam.json`
@@ -17,7 +17,7 @@ The system SHALL allocate six consecutive `/24` subnets per sandbox instance fro
 
 #### Scenario: COMPOSE_PROJECT_NAME Isolation
 - **WHEN** two `sandbox start` invocations execute from separate project directories
-- **THEN** each receives a distinct `base_index` and non-overlapping `/24` subnet sextuples, preventing Docker network and volume name collisions
+- **THEN** each receives a distinct `base_index` and non-overlapping `/24` subnet septuples, preventing Docker network and volume name collisions
 
 ### Requirement: IPAM Slot Reuse After Destroy
 The system SHALL support reuse of previously allocated `base_index` slots once their owning instance is destroyed.
@@ -27,10 +27,10 @@ The system SHALL support reuse of previously allocated `base_index` slots once t
 - **THEN** that `base_index` is eligible for allocation by the next new instance that invokes `sandbox start`
 
 ### Requirement: IPAM Overflow Detection
-The system SHALL detect when all 6,656 concurrent slots are in use and abort allocation with an actionable error message.
+The system SHALL detect when all 5,705 concurrent slots are in use and abort allocation with an actionable error message.
 
 #### Scenario: Exhausted ledger raises error
-- **WHEN** all base_index values 0–6655 are in use in `ipam.json` and a new allocation is attempted
+- **WHEN** all base_index values 0–5704 are in use in `ipam.json` and a new allocation is attempted
 - **THEN** the CLI raises `IPAMExhaustedError` with the message: "IPAM address space exhausted. Run 'sandbox destroy' on unused instances to free slots."
 
 ### Requirement: Component Static IP Derivation
@@ -38,7 +38,11 @@ The system SHALL derive static IP addresses for component containers from the sa
 
 #### Scenario: Core IPs derived from base_index
 - **WHEN** `derive_static_ips(base_index)` is called
-- **THEN** the returned dict includes `agent_isolated_ip` as `<isolated_base>.3` and `agent_proxy_ip` as `<core_proxy_base>.3`
+- **THEN** the returned dict includes `agent_isolated_ip` as `<isolated_base>.3`, `agent_proxy_ip` as `<core_proxy_base>.3`, and `core_ipc_ip` as `<ipc_base>.3`
+
+#### Scenario: Admin IPs derived from base_index
+- **WHEN** `derive_static_ips(base_index)` is called
+- **THEN** the returned dict includes `admin_admin_ip` as `<admin_base>.2`, `admin_proxy_ip` as `<admin_proxy_base>.2`, and `admin_ipc_ip` as `<ipc_base>.2`
 
 #### Scenario: Proxy IPs derived from base_index
 - **WHEN** `derive_static_ips(base_index)` is called
@@ -52,7 +56,7 @@ The system SHALL derive static IP addresses for component containers from the sa
 - **WHEN** `derive_static_ips(base_index)` is called
 - **THEN** the returned dict includes `coredns_dns_ip` as `<dns_base>.53`, `coredns_admin_ip` as `<admin_base>.53`, and `coredns_egress_ip` as `<egress_base>.53`
 
-#### Scenario: Admin IPs derived from base_index
+#### Scenario: Admin IPs derived from base_index (legacy position)
 - **WHEN** `derive_static_ips(base_index)` is called
 - **THEN** the returned dict includes `admin_admin_ip` as `<admin_base>.2` and `admin_proxy_ip` as `<admin_proxy_base>.2`
 
@@ -62,7 +66,7 @@ The system SHALL derive static IP addresses for component containers from the sa
 
 #### Scenario: Firecrawl IPs derived from base_index
 - **WHEN** `derive_static_ips(base_index)` is called
-- **THEN** the returned dict includes `mcp_firecrawl_proxy_ip` as `<core_proxy_base>.55` and `firecrawl_dns_ip` as `<dns_base>.55`
+- **THEN** the returned dict includes `mcp_firecrawl_proxy_ip` as `<core_proxy_base>.55`, `firecrawl_dns_ip` as `<dns_base>.55`, and `firecrawl_isolated_ip` as `<isolated_base>.55`
 
 #### Scenario: Component IPs are deterministic across restarts
 - **WHEN** `derive_static_ips()` is called with the same `base_index` on successive `sandbox start` invocations
@@ -70,14 +74,14 @@ The system SHALL derive static IP addresses for component containers from the sa
 
 #### Scenario: Legacy IP keys removed
 - **WHEN** `derive_static_ips(base_index)` is called
-- **THEN** the returned dict does NOT contain `dns_sidecar_ip` (replaced by `coredns_dns_ip`), `admin_isolated_ip` (replaced by `admin_admin_ip`), `mcp_firecrawl_isolated_ip` (firecrawl is no longer on isolated_net), or `proxy_ip` (replaced by `proxy_core_ip`)
+- **THEN** the returned dict does NOT contain `dns_sidecar_ip` (replaced by `coredns_dns_ip`), `admin_isolated_ip` (replaced by `admin_admin_ip`), `mcp_firecrawl_isolated_ip` (replaced by `firecrawl_isolated_ip`), or `proxy_ip` (replaced by `proxy_core_ip`)
 
 ### Requirement: Zero-Shared-Network Invariant
-The system SHALL ensure that core (agent) and admin (human) containers share zero Docker networks. All inter-container communication between core and admin SHALL occur exclusively via the `admin-ipc_vol` Unix socket.
+The system SHALL ensure that core (agent) and admin (human) containers share zero Docker networks for non-IPC traffic. The `ipc_net` subnet SHALL be the sole shared network, used exclusively for SSH-based IPC. All inter-container communication between core and admin SHALL occur exclusively via TCP on `ipc_net`.
 
-#### Scenario: Core and admin share no networks
+#### Scenario: Core and admin share only ipc_net
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the set of networks assigned to the core service and the set of networks assigned to the admin service have an empty intersection
+- **THEN** the intersection of networks assigned to the core service and the admin service is exactly `{ipc_net}`
 
 #### Scenario: Core has no path to admin networks
 - **WHEN** the rendered `compose.yml` is inspected
@@ -88,35 +92,39 @@ The system SHALL ensure that core (agent) and admin (human) containers share zer
 - **THEN** the admin service is NOT on `isolated_net` or `core_proxy_net`
 
 ### Requirement: Container Network Membership
-The system SHALL assign each container to the minimum set of networks required for its function. All new networks (`core_proxy_net`, `dns_net`, `admin_net`, `admin_proxy_net`) SHALL be `internal: true` with IPv6 disabled and IP masquerade disabled.
+The system SHALL assign each container to the minimum set of networks required for its function. The `ipc_net` network SHALL be `internal: true` with IPv6 disabled and IP masquerade disabled.
 
 #### Scenario: Core network membership
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the core service is on exactly `isolated_net` and `core_proxy_net`
+- **THEN** the core service is on exactly `isolated_net`, `core_proxy_net`, and `ipc_net`
 
 #### Scenario: Admin network membership
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the admin service is on exactly `admin_net` and `admin_proxy_net`
-
-#### Scenario: Proxy network membership
-- **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the proxy service is on exactly `core_proxy_net`, `admin_proxy_net`, and `egress_net`
-
-#### Scenario: coredns network membership
-- **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the coredns service is on exactly `dns_net`, `admin_net`, and `egress_net`
-
-#### Scenario: db-postgres network membership
-- **WHEN** the rendered `compose.yml` is inspected (including `db-postgres.yml` extras)
-- **THEN** the db-postgres service is on exactly `isolated_net` and `admin_net`
+- **THEN** the admin service is on exactly `admin_net`, `admin_proxy_net`, and `ipc_net`
 
 #### Scenario: Firecrawl network membership
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
-- **THEN** the firecrawl service is on exactly `core_proxy_net` and `dns_net`
+- **THEN** the firecrawl service is on exactly `core_proxy_net`, `dns_net`, and `isolated_net`
 
-#### Scenario: dnsdist network membership
+#### Scenario: ipc_net is internal
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** `ipc_net` has `internal: true`, `enable_ipv6: false`, and `com.docker.network.bridge.enable_ip_masquerade: 'false'`
+
+#### Scenario: Proxy network membership unchanged
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** the proxy service is on exactly `core_proxy_net`, `admin_proxy_net`, and `egress_net`
+
+#### Scenario: coredns network membership unchanged
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** the coredns service is on exactly `dns_net`, `admin_net`, and `egress_net`
+
+#### Scenario: dnsdist network membership unchanged
 - **WHEN** the rendered `compose.yml` is inspected
 - **THEN** the dnsdist service is on exactly `isolated_net`, `dns_net`, and `admin_net`
+
+#### Scenario: db-postgres network membership unchanged
+- **WHEN** the rendered `compose.yml` is inspected (including `db-postgres.yml` extras)
+- **THEN** the db-postgres service is on exactly `isolated_net` and `admin_net`
 
 #### Scenario: New networks are internal
 - **WHEN** the rendered `compose.yml` is inspected
@@ -127,11 +135,11 @@ The system SHALL set `NO_PROXY` environment variables per container, scoped to o
 
 #### Scenario: Core NO_PROXY scoped to its networks
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the core service's `NO_PROXY` includes `{{ isolated_subnet }}` and `{{ core_proxy_subnet }}` but does NOT include `{{ admin_subnet }}` or `{{ admin_proxy_subnet }}`
+- **THEN** the core service's `NO_PROXY` includes `{{ isolated_subnet }}`, `{{ core_proxy_subnet }}`, and `{{ ipc_subnet }}` but does NOT include `{{ admin_subnet }}` or `{{ admin_proxy_subnet }}`
 
 #### Scenario: Admin NO_PROXY scoped to its networks
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the admin service's `NO_PROXY` includes `{{ admin_subnet }}` and `{{ admin_proxy_subnet }}` but does NOT include `{{ isolated_subnet }}` or `{{ core_proxy_subnet }}`
+- **THEN** the admin service's `NO_PROXY` includes `{{ admin_subnet }}`, `{{ admin_proxy_subnet }}`, and `{{ ipc_subnet }}` but does NOT include `{{ isolated_subnet }}` or `{{ core_proxy_subnet }}`
 
 #### Scenario: Firecrawl NO_PROXY scoped to its networks
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
@@ -167,13 +175,3 @@ The system SHALL configure `extra_hosts` entries per container to resolve cross-
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
 - **THEN** the firecrawl service's `extra_hosts` does NOT contain entries for `db-postgres` or `dns-sidecar` (unreachable after network move)
 
-### Requirement: IPC Socket Sticky Bit
-The orchestrator SHALL set the sticky bit (`chmod 1770`) on the `admin-ipc_vol:/sock` directory before container start. This prevents the agent from deleting or renaming `admin.sock` (only the socket owner or root can unlink in a sticky directory).
-
-#### Scenario: Sticky bit set on IPC volume
-- **WHEN** `sandbox start` provisions the instance
-- **THEN** the orchestrator executes a preparatory container that sets ownership (`chown 1000:1000 /sock`) and permissions (`chmod 1770 /sock`) on the `admin-ipc_vol` volume
-
-#### Scenario: Agent cannot delete admin socket
-- **WHEN** the agent (core) container attempts to unlink `/sock/admin.sock`
-- **THEN** the operation fails with `EPERM` because the sticky bit prevents non-owner deletion

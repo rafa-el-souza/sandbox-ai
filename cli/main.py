@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 
 import typer
-from core.crypto import generate_credential, hash_proxy_password, write_htpasswd
+from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
     detect_distro,
@@ -206,13 +206,18 @@ def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
     return ledger.allocate(instance_id)
 
 
-def _phase_credentials(instance_dir: str) -> str:
-    """Phase 3: Generate proxy credentials. Returns proxy password."""
+def _phase_credentials(instance_dir: str, core_ipc_ip: str) -> str:
+    """Phase 3: Generate proxy credentials and SSH keypairs. Returns proxy password."""
     password = generate_credential()
     hashed = hash_proxy_password(password)
     htpasswd_line = f"proxyuser:{hashed}"
     config_proxy_dir = os.path.join(instance_dir, "config", "proxy")
     write_htpasswd(config_proxy_dir, htpasswd_line)
+
+    # SSH keypairs for IPC transport
+    generate_ssh_keypair(instance_dir, "auth")
+    generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
+
     return password
 
 
@@ -317,6 +322,15 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
         (
             ["setfacl", "-m", f"u:{host_user}:r", env_file],
             f"env file: {env_file}",
+        )
+    )
+
+    # secrets/ — recursive read + conditional execute
+    secrets_dir = os.path.join(instance_dir, "secrets/")
+    plan.append(
+        (
+            ["setfacl", "-R", "-m", f"u:{host_user}:rX", secrets_dir],
+            f"secrets dir: {secrets_dir}",
         )
     )
 
@@ -511,35 +525,6 @@ def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
     return files
 
 
-def _phase_ipc_setup(name: str, host_user: str) -> None:
-    """Phase 5b: Set sticky bit on admin-ipc_vol before containers start.
-
-    Runs a disposable alpine container to:
-    - chown 1000:1000 /sock (agent uid/gid)
-    - chmod 1770 /sock (rwxrwx--- with sticky bit)
-
-    The sticky bit prevents the agent from deleting or renaming
-    admin.sock — only the socket owner or root can unlink.
-    """
-    cmd = (
-        f"docker run --rm "
-        f"-v {name}_admin-ipc_vol:/sock "
-        f"alpine:3.20 sh -c "
-        f"'chown 1000:1000 /sock && chmod 1770 /sock'"
-    )
-    executor = Executor()
-    executor.run(
-        [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
-            "/bin/bash",
-            "-c",
-            cmd,
-        ],
-        sentinel=True,
-    )
 
 
 def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: SandboxConfig) -> None:
@@ -680,7 +665,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     ledger = IPAMLedger(ipam_path)
     try:
         slot, is_existing = ledger.peek_next_slot(instance_id)
-        isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(slot)
+        isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
         status = "existing" if is_existing else "preview — subject to concurrent changes"
         console.print(f"\n  IPAM slot: {slot} ({status})")
         console.print(f"    Isolated:    {isolated}")
@@ -689,6 +674,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
         console.print(f"    Admin:       {admin}")
         console.print(f"    Admin Proxy: {admin_proxy}")
         console.print(f"    Egress:      {egress}")
+        console.print(f"    IPC:         {ipc}")
     except IPAMExhaustedError as e:
         console.print(f"\n  [red]IPAM: {e}[/red]")
         raise typer.Exit(code=1) from None
@@ -969,8 +955,11 @@ def start(
         console.print("✓ IPAM — network allocation complete")
 
         # Phase 3: Credentials
-        proxy_password = _phase_credentials(instance_dir)
-        console.print("✓ Credentials — proxy auth configured")
+        proxy_password = _phase_credentials(
+            instance_dir,
+            core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
+        )
+        console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 
         # Phase 4: Hydration
         _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir)
@@ -980,10 +969,6 @@ def start(
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user)
         console.print("✓ ACL — filesystem permissions granted")
-
-        # Phase 5b: IPC volume sticky bit (prevents agent socket deletion)
-        _phase_ipc_setup(name, host_user)
-        console.print("✓ IPC — sticky bit set on admin-ipc_vol")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
@@ -1266,7 +1251,7 @@ def status() -> None:
     try:
         slot, _is_existing = ledger.peek_next_slot(instance_id)
         if _is_existing:
-            isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(slot)
+            isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
             console.print(f"\n[bold]IPAM[/bold] slot {slot}")
             console.print(f"  Isolated:    {isolated}")
             console.print(f"  Core Proxy:  {core_proxy}")
@@ -1274,6 +1259,7 @@ def status() -> None:
             console.print(f"  Admin:       {admin}")
             console.print(f"  Admin Proxy: {admin_proxy}")
             console.print(f"  Egress:      {egress}")
+            console.print(f"  IPC:         {ipc}")
     except IPAMExhaustedError:
         pass
 

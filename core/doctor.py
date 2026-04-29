@@ -1,8 +1,8 @@
 """Doctor module: host readiness diagnostics for sandbox operation.
 
-Provides 14 diagnostic checks across 3 independent chains:
-- Chain 1 (privilege boundary, 9 checks): sudo -> machinectl -> user -> machined
-  -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs
+Provides 15 diagnostic checks across 3 independent chains:
+- Chain 1 (privilege boundary, 10 checks): sudo -> machinectl -> user -> machined
+  -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs -> host_uds
 - Chain 2 (filesystem, 3 checks): setfacl → ACL support → ancestor traverse
 - Chain 3 (repo integrity, 2 checks): tooling plane, state dir (independent)
 """
@@ -432,6 +432,68 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
     )
 
 
+def check_host_uds(user: str, distro: str | None) -> CheckResult:
+    """Check that runsc runtimeArgs do NOT include --host-uds=all.
+
+    The default (--host-uds=none) is the correct security posture.
+    Returns PASS if --host-uds=all is absent, WARN if present.
+    """
+    result = subprocess.run(
+        [
+            "sudo",
+            "machinectl",
+            "shell",
+            f"{user}@.host",
+            "/bin/bash",
+            "-c",
+            "docker info --format '{{json .Runtimes}}'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if result.returncode != 0:
+        return CheckResult(
+            status="warn",
+            name="--host-uds=none",
+            detail="Could not query Docker runtimes",
+            remediation=(f"Verify Docker is accessible for user '{user}' and check ~{user}/.config/docker/daemon.json"),
+        )
+
+    try:
+        runtimes = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return CheckResult(
+            status="warn",
+            name="--host-uds=none",
+            detail="Could not parse Runtimes JSON",
+            remediation=f"Check ~{user}/.config/docker/daemon.json",
+        )
+
+    runsc_entry = runtimes.get("runsc", {})
+    runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
+
+    has_host_uds_all = any(arg == "--host-uds=all" for arg in runtime_args)
+
+    if has_host_uds_all:
+        return CheckResult(
+            status="warn",
+            name="--host-uds=none",
+            detail="--host-uds=all detected in runsc runtimeArgs",
+            remediation=(
+                f"Remove --host-uds=all from runtimeArgs in ~{user}/.config/docker/daemon.json "
+                f"(default 'none' is correct)"
+            ),
+        )
+
+    return CheckResult(
+        status="pass",
+        name="--host-uds=none",
+        detail="--host-uds=all not present (default 'none' is active)",
+    )
+
+
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
 # 16 unconditional source files in the tooling plane
@@ -450,7 +512,7 @@ _UNCONDITIONAL_FILES: list[str] = [
     ".config/core/.bashrc",
     ".config/core/.npmrc",
     ".config/core/.gitconfig",
-    ".config/core/.claude.json",
+    ".config/core/sshd_config",
     ".config/core/CLAUDE.md",
 ]
 
@@ -476,7 +538,7 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
             name="ACL support",
             detail="Filesystem supports POSIX ACLs",
         )
-    except subprocess.CalledProcessError, OSError:
+    except (subprocess.CalledProcessError, OSError):
         return CheckResult(
             status="fail",
             name="ACL support",
@@ -510,7 +572,7 @@ def _has_acl_exec(directory: str, user: str) -> bool:
                 perms = line[len(prefix) :]
                 if "x" in perms:
                     return True
-    except subprocess.TimeoutExpired, OSError:
+    except (subprocess.TimeoutExpired, OSError):
         pass
     return False
 
@@ -659,7 +721,7 @@ def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
 
 
 def build_check_registry() -> list[Check]:
-    """Build the full 13-check registry with dependency declarations."""
+    """Build the full 15-check registry with dependency declarations."""
     return [
         # Chain 1: privilege boundary
         Check(
@@ -732,6 +794,14 @@ def build_check_registry() -> list[Check]:
             category="Privilege Boundary",
             depends_on=["runsc"],
             run=check_runsc_runtimeargs,
+            remediation="",
+        ),
+        Check(
+            id="host_uds",
+            name="--host-uds=none",
+            category="Privilege Boundary",
+            depends_on=["runsc"],
+            run=check_host_uds,
             remediation="",
         ),
         # Chain 2: filesystem

@@ -30,7 +30,7 @@ zstyle ':completion:*' list-colors
 
 source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-fpath=(/usr/share/zsh-completions/src $fpath)
+fpath=(/usr/local/share/zsh-completions $fpath)
 [ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
 
 ######################################################################################################################################
@@ -57,7 +57,7 @@ export LC_ALL=en_US.UTF-8
 export OPENSPEC_TELEMETRY=0
 
 # NVM
-export NVM_DIR="$HOME/.nvm"
+export NVM_DIR="/usr/local/nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
@@ -86,8 +86,15 @@ if [ -f "{{ custom_config_admin }}/.zshrc" ]; then
     source "{{ custom_config_admin }}/.zshrc"
 fi
 
-# Warmup prompt: if set, launch claude in non-interactive mode on first shell init
+# Warmup prompt: if set, launch claude over SSH with SendEnv transport
 if [ -n "${SANDBOX_WARMUP_PROMPT:-}" ]; then
-    claude -p "$SANDBOX_WARMUP_PROMPT" --dangerously-skip-permissions
+    ssh -t \
+        -o StrictHostKeyChecking=yes \
+        -o UserKnownHostsFile=/run/secrets/ipc_known_hosts \
+        -i /run/secrets/ipc_ssh_key \
+        -o SendEnv=SANDBOX_WARMUP_PROMPT \
+        -p 9999 \
+        agent@{{ core_ipc_ip }} \
+        claude --dangerously-skip-permissions "\$SANDBOX_WARMUP_PROMPT"
     unset SANDBOX_WARMUP_PROMPT
 fi

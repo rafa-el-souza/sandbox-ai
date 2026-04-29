@@ -98,5 +98,5 @@ The `IPAMLedger` class SHALL provide a `peek_next_slot(project_id)` method that 
 - **THEN** it returns `(existing_base_index, True)`
 
 #### Scenario: Peek on exhausted ledger
-- **WHEN** `peek_next_slot` is called for a new project and all 6,656 slots are consumed
+- **WHEN** `peek_next_slot` is called for a new project and all 5,705 slots are consumed
 - **THEN** it raises `IPAMExhaustedError`

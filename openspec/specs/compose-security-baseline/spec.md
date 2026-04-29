@@ -28,18 +28,18 @@ The security baseline anchor SHALL contain only scalar properties. List-valued p
 
 #### Scenario: Per-service cap_add preserved
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** coredns has `cap_add: [NET_BIND_SERVICE]`, proxy has `cap_add: [SETUID, SETGID]`, and these values are defined per-service, not inherited from the baseline
+- **THEN** coredns has `cap_add: [NET_BIND_SERVICE]`, proxy has `cap_add: [SETUID, SETGID]`, core has `cap_add: [SETUID, SETGID]`, and these values are defined per-service, not inherited from the baseline
 
 ### Requirement: Core and Admin read_only Override
-Core and admin services SHALL override the baseline's `read_only: true` with `read_only: false` until writable-path enumeration is completed (Wave 4 dependency).
+Core and admin services SHALL inherit the baseline's `read_only: true` without override. The `read_only: false` overrides SHALL be removed.
 
-#### Scenario: Core overrides read_only
+#### Scenario: Core inherits read_only true
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the core service contains `read_only: false`
+- **THEN** the core service does NOT contain `read_only: false` and inherits `read_only: true` from the security baseline
 
-#### Scenario: Admin overrides read_only
+#### Scenario: Admin inherits read_only true
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the admin service contains `read_only: false`
+- **THEN** the admin service does NOT contain `read_only: false` and inherits `read_only: true` from the security baseline
 
 #### Scenario: Infrastructure services retain read_only true
 - **WHEN** the rendered `compose.yml` is inspected

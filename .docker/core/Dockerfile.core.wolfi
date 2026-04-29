@@ -1,8 +1,9 @@
+# ─── Build Stage: base tools for downloading ──────────────────────────────────
 ARG AGENT_BASE="{{ core_base_image }}"
 FROM ${AGENT_BASE} AS base
 
 USER root
-RUN apk update && apk add --no-cache curl bash git wget unzip jq python3 py3-pip coreutils file gzip tzdata ca-certificates socat nano
+RUN apk update && apk add --no-cache curl bash git wget unzip jq python3 py3-pip coreutils file gzip tzdata ca-certificates nano
 
 ARG USERNAME="agent"
 ARG HOME_DIR="/home/${USERNAME}"
@@ -10,9 +11,6 @@ ARG HOST_UID="1000"
 
 RUN addgroup -g ${HOST_UID} ${USERNAME} && \
     adduser -D -u ${HOST_UID} -G ${USERNAME} -s /bin/bash -h ${HOME_DIR} ${USERNAME} && \
-    mkdir -p ${HOME_DIR}/.local/bin && \
-    mkdir -p ${HOME_DIR}/.local/npm-python && \
-    mkdir -p ${HOME_DIR}/.local/npm-ts && \
     chown -R ${USERNAME}:${USERNAME} ${HOME_DIR}
 
 USER ${USERNAME}
@@ -20,7 +18,11 @@ WORKDIR ${HOME_DIR}
 
 ARG NVM_VERSION="0.39.7"
 ARG NODE_VERSION="20.12.2"
-ENV NVM_DIR="${HOME_DIR}/.nvm"
+ENV NVM_DIR="/usr/local/nvm"
+
+USER root
+RUN mkdir -p /usr/local/nvm && chown ${USERNAME}:${USERNAME} /usr/local/nvm
+USER ${USERNAME}
 
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v$NVM_VERSION/install.sh | bash && \
     . "$NVM_DIR/nvm.sh" && \
@@ -28,31 +30,29 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v$NVM_VERSION/install.
 
 ENV PATH="$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH"
 
-# -----------------
-# PARALLEL WORKERS
-# -----------------
+# ─── Parallel Builder Stages ──────────────────────────────────────────────────
 
 FROM base AS branch-rust
 ARG ENABLE_RUST=true
 USER root
-RUN mkdir -p /staging${HOME_DIR}/.local/bin
+RUN mkdir -p /staging/usr/local/bin
 RUN if [ "$ENABLE_RUST" = "true" ]; then \
-      curl -L https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c - > /staging${HOME_DIR}/.local/bin/rust-analyzer && \
-      chmod u+x /staging${HOME_DIR}/.local/bin/rust-analyzer; \
+      curl -L https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c - > /staging/usr/local/bin/rust-analyzer && \
+      chmod u+x /staging/usr/local/bin/rust-analyzer; \
     fi
 
 FROM base AS branch-typescript
 ARG ENABLE_TYPESCRIPT=true
 USER ${USERNAME}
-RUN mkdir -p /staging${HOME_DIR}/.local/npm-ts
+RUN mkdir -p /staging/usr/local/npm-ts
 RUN if [ "$ENABLE_TYPESCRIPT" = "true" ]; then \
-      npm install -g typescript-language-server typescript --prefix /staging${HOME_DIR}/.local/npm-ts; \
+      npm install -g typescript-language-server typescript --prefix /staging/usr/local/npm-ts; \
     fi
 
 FROM base AS branch-go
 ARG ENABLE_GO=true
 USER root
-RUN mkdir -p /staging/usr/local/go && mkdir -p /staging${HOME_DIR}/go/bin
+RUN mkdir -p /staging/usr/local/go && mkdir -p /staging/usr/local/go-workspace/bin
 RUN if [ "$ENABLE_GO" = "true" ]; then \
       OS="$(uname -s | tr '[:upper:]' '[:lower:]')" && \
       ARCH="$(uname -m)" && \
@@ -65,7 +65,7 @@ RUN if [ "$ENABLE_GO" = "true" ]; then \
       TMP_FILE="${TMP_DIR}/${TARBALL}" && \
       curl -sL "${DOWNLOAD_URL}" -o "${TMP_FILE}" && \
       tar -C /staging/usr/local -xzf "${TMP_FILE}" && \
-      export GOPATH=/staging${HOME_DIR}/go && \
+      export GOPATH=/staging/usr/local/go-workspace && \
       PATH=$PATH:/staging/usr/local/go/bin /staging/usr/local/go/bin/go install golang.org/x/tools/gopls@latest; \
     fi
 
@@ -74,35 +74,53 @@ ARG ENABLE_PYTHON=true
 USER root
 RUN mkdir -p /staging/usr/local/bin
 USER ${USERNAME}
-RUN mkdir -p /staging${HOME_DIR}/.local/npm-python
+RUN mkdir -p /staging/usr/local/npm-python
 RUN if [ "$ENABLE_PYTHON" = "true" ]; then \
       curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/staging/usr/local/bin" sh && \
-      npm install -g pyright --prefix /staging${HOME_DIR}/.local/npm-python; \
+      npm install -g pyright --prefix /staging/usr/local/npm-python; \
     fi
 
-# -----------
-# FINAL LAYER
-# -----------
-FROM base AS final
+FROM base AS branch-claude
+USER ${USERNAME}
+RUN mkdir -p /staging/usr/local/bin && \
+    npm install -g @fission-ai/openspec@latest && \
+    curl -fsSL https://claude.ai/install.sh | bash && \
+    cp ${HOME_DIR}/.claude/local/claude /staging/usr/local/bin/claude
+
+# ─── Runtime Stage: no curl, wget, unzip, socat ──────────────────────────────
+FROM ${AGENT_BASE} AS runtime
 
 USER root
-# Flatten isolated payloads resolving cache collisions
-COPY --from=branch-rust --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/.local/bin ${HOME_DIR}/.local/bin
+RUN apk update && apk add --no-cache bash git jq python3 py3-pip openssh-server coreutils file gzip tzdata ca-certificates nano
+
+ARG USERNAME="agent"
+ARG HOME_DIR="/home/${USERNAME}"
+ARG HOST_UID="1000"
+
+RUN addgroup -g ${HOST_UID} ${USERNAME} && \
+    adduser -D -u ${HOST_UID} -G ${USERNAME} -s /bin/bash -h ${HOME_DIR} ${USERNAME} && \
+    chown -R ${USERNAME}:${USERNAME} ${HOME_DIR}
+
+# Copy NVM from base (contains node + npm)
+COPY --from=base --chown=root:root /usr/local/nvm /usr/local/nvm
+
+# Copy toolchains from builder stages into /usr/local/
+COPY --from=branch-rust --chown=root:root /staging/usr/local/bin /usr/local/bin
 COPY --from=branch-go --chown=root:root /staging/usr/local/go /usr/local/go
-COPY --from=branch-go --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/go ${HOME_DIR}/go
+COPY --from=branch-go --chown=root:root /staging/usr/local/go-workspace /usr/local/go-workspace
 COPY --from=branch-python --chown=root:root /staging/usr/local/bin/uv /usr/local/bin/uv
-COPY --from=branch-typescript --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/.local/npm-ts ${HOME_DIR}/.local/npm-ts
-COPY --from=branch-python --chown=${USERNAME}:${USERNAME} /staging${HOME_DIR}/.local/npm-python ${HOME_DIR}/.local/npm-python
+COPY --from=branch-typescript --chown=root:root /staging/usr/local/npm-ts /usr/local/npm-ts
+COPY --from=branch-python --chown=root:root /staging/usr/local/npm-python /usr/local/npm-python
+COPY --from=branch-claude --chown=root:root /staging/usr/local/bin/claude /usr/local/bin/claude
 
-# Append bounded PATHs
-ENV GOPATH="${HOME_DIR}/go"
-ENV PATH="$PATH:/usr/local/go/bin:${HOME_DIR}/go/bin:${HOME_DIR}/.local/npm-ts/bin:${HOME_DIR}/.local/npm-python/bin:${HOME_DIR}/.local/bin"
+# Copy openspec globally installed npm package
+COPY --from=branch-claude --chown=root:root /usr/local/nvm/versions/node /usr/local/nvm/versions/node
 
-USER ${USERNAME}
-
-# UNIVERSAL BINARIES
-RUN npm install -g @fission-ai/openspec@latest && \
-    curl -fsSL https://claude.ai/install.sh | bash
+ARG NVM_VERSION="0.39.7"
+ARG NODE_VERSION="20.12.2"
+ENV NVM_DIR="/usr/local/nvm"
+ENV GOPATH="/usr/local/go-workspace"
+ENV PATH="$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH:/usr/local/go/bin:/usr/local/go-workspace/bin:/usr/local/npm-ts/bin:/usr/local/npm-python/bin:/usr/local/bin"
 
 # CLAUDE PLUGINS — currently none installed.
 # See temp/next-changes.md "Configurable Claude Plugin Management" for
@@ -112,8 +130,7 @@ ENV SHELL=/bin/bash
 ENV EDITOR=/usr/bin/nano
 ENV VISUAL=/usr/bin/nano
 
+# sshd requires root for L1 UID separation (setuid(agent) per session)
 USER root
-RUN mkdir -p /sock && chown agent:agent /sock
-USER ${USERNAME}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -9,7 +9,7 @@ The system SHALL provide a `sandbox doctor --user <name>` command that validates
 
 #### Scenario: Doctor invoked with user parameter
 - **WHEN** the operator runs `sandbox doctor --user sandbox`
-- **THEN** the system executes all 13 diagnostic checks and reports results grouped by category
+- **THEN** the system executes all 15 diagnostic checks and reports results grouped by category
 
 #### Scenario: Doctor invoked without user parameter
 - **WHEN** the operator runs `sandbox doctor` without `--user`
@@ -111,7 +111,7 @@ The system SHALL verify that the `runsc` runtime is registered in Docker.
 - **THEN** the check reports FAIL with a link to gVisor installation documentation
 
 ### Requirement: runsc RuntimeArgs Validation
-The system SHALL verify that the sandbox user's rootless Docker daemon has `--oci-seccomp` and `--debug-log` configured in the `runsc` runtime's `runtimeArgs`. This check SHALL use `warn` severity — it is a defense-in-depth advisory, not a hard prerequisite.
+The system SHALL verify that the sandbox user's rootless Docker daemon has `--oci-seccomp` and `--debug-log` configured in the `runsc` runtime's `runtimeArgs`, and does NOT have `--host-uds=all`. This check SHALL use `warn` severity — it is a defense-in-depth advisory, not a hard prerequisite.
 
 **Dependencies:** gVisor Runtime Registration (`runsc` check)
 
@@ -134,6 +134,23 @@ The system SHALL verify that the sandbox user's rootless Docker daemon has `--oc
 #### Scenario: runsc dependency failed — check skipped
 - **WHEN** the `runsc` check has failed or been skipped
 - **THEN** the runtimeArgs check is skipped with annotation `requires: runsc`
+
+### Requirement: Host UDS Runtime Validation
+The system SHALL verify that the `runsc` runtime does NOT have `--host-uds=all` configured. This check SHALL use `warn` severity — it is a defense-in-depth advisory confirming that the default `--host-uds=none` is in effect.
+
+**Dependencies:** gVisor Runtime Registration (`runsc` check)
+
+#### Scenario: --host-uds=none confirmed (default)
+- **WHEN** `docker info --format '{{json .Runtimes}}'` (via machinectl) returns a `runsc` entry whose `runtimeArgs` does NOT contain `--host-uds=all`
+- **THEN** the check reports PASS
+
+#### Scenario: --host-uds=all detected
+- **WHEN** the `runsc` runtime's `runtimeArgs` contains `--host-uds=all`
+- **THEN** the check reports WARN with remediation: remove `--host-uds=all` from `runtimeArgs` in `~<user>/.config/docker/daemon.json` (the default `none` is correct for this architecture)
+
+#### Scenario: runsc dependency failed — check skipped
+- **WHEN** the `runsc` check has failed or been skipped
+- **THEN** the `--host-uds` check is skipped with annotation `requires: runsc`
 
 ### Requirement: Warn Severity Status
 The system SHALL support a `warn` status in `CheckResult` for defense-in-depth advisories that inform without blocking. `warn` results SHALL NOT cascade skip to dependent checks. `warn` results SHALL NOT block `sandbox start` pre-flight gates. `warn` results SHALL NOT cause a non-zero exit code from `sandbox doctor`.
@@ -206,7 +223,7 @@ The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) th
 - **THEN** the check still executes successfully using the provided user parameter (no cross-chain `depends_on` required)
 
 ### Requirement: Tooling Plane Integrity
-The system SHALL verify that the 15 unconditional template and static files exist in `.docker/` and `.config/`.
+The system SHALL verify that the unconditional template and static files exist in `.docker/` and `.config/`.
 
 **Dependencies:** None (root check)
 
