@@ -1,4 +1,4 @@
-.PHONY: test coverage lint format typecheck
+.PHONY: test test-file coverage lint format typecheck
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
@@ -7,6 +7,9 @@ coverage:
 
 test:
 	@uv run --quiet pytest -q --tb=short --no-header 2>&1 | sed -E '/^[.FEsxX ]+(\[|$$)/d'
+
+test-file:
+	@uv run --quiet pytest $(FILE) -q --tb=short --no-header 2>&1 | sed -E '/^[.FEsxX ]+(\[|$$)/d'
 
 lint:
 	@uv run --quiet ruff check --output-format concise .
