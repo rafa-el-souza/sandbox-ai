@@ -2120,3 +2120,35 @@ class TestComposeIpcNetAndW4Hardening:
         assert "cap_add:" in proxy_block
         assert "SETUID" in proxy_block
         assert "SETGID" in proxy_block
+
+
+class TestFirecrawlMcpHttpTransport:
+    """6.T RED: Firecrawl MCP transport migration to mcp-proxy Streamable HTTP."""
+
+    # --- (a) entrypoint is mcp-proxy ---
+    def test_mcp_firecrawl_entrypoint_is_mcp_proxy(self, tmp_path: Path) -> None:
+        """mcp-firecrawl.yml entrypoint contains mcp-proxy --server stream --port 3000."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "mcp-proxy" in rendered
+        assert "--server" in rendered
+        assert "stream" in rendered
+        assert "--port" in rendered
+        assert "3000" in rendered
+
+    # --- (b) firecrawl on isolated_net ---
+    def test_mcp_firecrawl_on_isolated_net(self, tmp_path: Path) -> None:
+        """Firecrawl service networks include isolated_net."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "isolated_net:" in rendered
+
+    # --- (c) no mcp-ipc_vol ---
+    def test_mcp_firecrawl_no_mcp_ipc_vol(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml does NOT contain mcp-ipc_vol."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "mcp-ipc_vol" not in rendered
+
+    # --- (d) no /var/run/mcp ---
+    def test_mcp_firecrawl_no_var_run_mcp(self, tmp_path: Path) -> None:
+        """Rendered mcp-firecrawl.yml does NOT contain /var/run/mcp."""
+        rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
+        assert "/var/run/mcp" not in rendered
