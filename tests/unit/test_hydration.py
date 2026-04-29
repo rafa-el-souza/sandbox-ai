@@ -426,7 +426,7 @@ class TestRenderTemplates:
         # core static configs
         core_cfg = config_dir / "core"
         core_cfg.mkdir(parents=True)
-        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        for f in [".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"]:
             (core_cfg / f).write_text(f"# {f}\n")
 
         # Create instance dirs
@@ -758,7 +758,7 @@ class TestValidateTemplates:
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".config" / "core" / ".claude.json").unlink()
+        (tooling / ".config" / "proxy" / "ERR_SANDBOX_403").unlink()
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
@@ -767,7 +767,7 @@ class TestValidateTemplates:
             mcp_firecrawl=False,
         )
         assert any("Static file missing" in e for e in errors)
-        assert any(".claude.json" in e for e in errors)
+        assert any("ERR_SANDBOX_403" in e for e in errors)
 
 
 def _build_minimal_tooling(tmp_path: Path) -> Path:
@@ -829,8 +829,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     (core_cfg / ".npmrc").write_text("proxy={{ proxy_url_core }}\n")
     (core_cfg / ".gitconfig").write_text("# git {{ git_user }} {{ git_email }}\n")
     (core_cfg / "CLAUDE.md").write_text("# CLAUDE {{ db_postgres_enabled }}\n")
-    # Static (.claude.json)
-    (core_cfg / ".claude.json").write_text('{"version": 1}\n')
+    (core_cfg / "sshd_config").write_text("# sshd {{ core_ipc_ip }}\n")
 
     return tooling
 
@@ -961,7 +960,7 @@ class TestReadOnlyDomainsGeneration:
         (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
         for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (config_dir / "admin" / f).write_text(f"# {f}\n")
-        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        for f in [".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"]:
             (config_dir / "core" / f).write_text(f"# {f}\n")
 
         # Instance dirs
@@ -1015,7 +1014,7 @@ class TestReadOnlyDomainsGeneration:
         (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("DENIED\n")
         for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
             (config_dir / "admin" / f).write_text(f"# {f}\n")
-        for f in [".bashrc", ".npmrc", ".gitconfig", ".claude.json", "CLAUDE.md"]:
+        for f in [".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"]:
             (config_dir / "core" / f).write_text(f"# {f}\n")
 
         for d in [
@@ -1702,3 +1701,108 @@ class TestMcpFirecrawlTemplate:
         rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
         assert "dnsdist:" in rendered
         assert "service_healthy" in rendered
+
+
+class TestHydrationIpcContext:
+    """3.T RED: IPC context keys, sshd_config registry, programmatic .claude.json."""
+
+    def test_context_includes_ipc_subnet(self, tmp_path: Path) -> None:
+        """build_jinja_context returns ipc_subnet key."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(
+            config=config, base_index=0, proxy_password="x", instance_dir=str(tmp_path),
+        )
+        assert "ipc_subnet" in ctx
+        assert ctx["ipc_subnet"] == "10.100.6.0/24"
+
+    def test_context_includes_ipc_ips(self, tmp_path: Path) -> None:
+        """build_jinja_context contains core_ipc_ip and admin_ipc_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(
+            config=config, base_index=0, proxy_password="x", instance_dir=str(tmp_path),
+        )
+        assert "core_ipc_ip" in ctx
+        assert "admin_ipc_ip" in ctx
+
+    def test_context_includes_firecrawl_isolated_ip(self, tmp_path: Path) -> None:
+        """build_jinja_context contains firecrawl_isolated_ip."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(
+            config=config, base_index=0, proxy_password="x", instance_dir=str(tmp_path),
+        )
+        assert "firecrawl_isolated_ip" in ctx
+
+    def test_sshd_config_in_jinja_rendered_config(self) -> None:
+        """_JINJA_RENDERED_CONFIG includes sshd_config entry."""
+        from core.hydration import _JINJA_RENDERED_CONFIG
+
+        sources = [src for src, _ in _JINJA_RENDERED_CONFIG]
+        assert "core/sshd_config" in sources
+
+    def test_claude_json_not_in_static_config_core(self) -> None:
+        """.claude.json must not be in _STATIC_CONFIG_CORE."""
+        from core.hydration import _STATIC_CONFIG_CORE
+
+        assert ".claude.json" not in _STATIC_CONFIG_CORE
+
+    def test_static_config_core_is_empty(self) -> None:
+        """_STATIC_CONFIG_CORE must be empty list."""
+        from core.hydration import _STATIC_CONFIG_CORE
+
+        assert _STATIC_CONFIG_CORE == []
+
+    def test_render_templates_generates_claude_json_with_firecrawl(
+        self, tmp_path: Path,
+    ) -> None:
+        """With mcp_firecrawl=True, .claude.json has mcpServers.firecrawl."""
+        import json
+
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras",
+            "config/admin", "config/core", "config/coredns",
+            "config/dnsdist", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=True)
+
+        claude_json = instance / "config" / "core" / ".claude.json"
+        assert claude_json.exists()
+        data = json.loads(claude_json.read_text())
+        assert "mcpServers" in data
+        assert "firecrawl" in data["mcpServers"]
+        firecrawl = data["mcpServers"]["firecrawl"]
+        assert firecrawl["type"] == "http"
+        assert ctx["firecrawl_isolated_ip"] in firecrawl["url"]
+
+    def test_render_templates_generates_empty_claude_json_without_firecrawl(
+        self, tmp_path: Path,
+    ) -> None:
+        """With mcp_firecrawl=False, .claude.json is '{}'."""
+        import json
+
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras",
+            "config/admin", "config/core", "config/coredns",
+            "config/dnsdist", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        claude_json = instance / "config" / "core" / ".claude.json"
+        assert claude_json.exists()
+        data = json.loads(claude_json.read_text())
+        assert data == {}

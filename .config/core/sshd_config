@@ -1,0 +1,4 @@
+# sshd_config — placeholder for Wave 4 SSH IPC
+# Full implementation in Group 4
+Port 9999
+ListenAddress {{ core_ipc_ip }}

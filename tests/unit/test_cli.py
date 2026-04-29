@@ -1833,8 +1833,8 @@ def _create_tooling_plane(home: Path) -> None:
     (config_dir / "core" / ".bashrc").write_text("# bashrc\n")
     (config_dir / "core" / ".npmrc").write_text("# npmrc\n")
     (config_dir / "core" / ".gitconfig").write_text("# gitconfig\n")
-    (config_dir / "core" / ".claude.json").write_text("{}\n")
     (config_dir / "core" / "CLAUDE.md").write_text("# Claude\n")
+    (config_dir / "core" / "sshd_config").write_text("# sshd {{ core_ipc_ip }}\n")
 
 
 class TestDryRunIpamExhausted:

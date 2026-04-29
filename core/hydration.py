@@ -6,6 +6,7 @@ Implements the PHASE 4 (HYDRATION) from the orchestrator design:
 3. Render templates from tooling plane → instance directory
 """
 
+import json
 import logging
 import os
 import shutil
@@ -181,7 +182,7 @@ def build_jinja_context(
         referenced in a template but absent from this context raises
         ``UndefinedError`` at render time and during ``--dry-run`` validation.
     """
-    isolated, core_proxy, dns, admin, admin_proxy, egress, _ipc = derive_subnets(base_index)
+    isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
 
     return {
@@ -192,6 +193,7 @@ def build_jinja_context(
         "admin_subnet": admin,
         "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
+        "ipc_subnet": ipc,
         **ips,
         # Credentials
         "proxy_password": proxy_password,
@@ -273,6 +275,7 @@ _JINJA_RENDERED_CONFIG = [
     ("core/.npmrc", "config/core/.npmrc"),
     ("core/.bashrc", "config/core/.bashrc"),
     ("core/CLAUDE.md", "config/core/CLAUDE.md"),
+    ("core/sshd_config", "config/core/sshd_config"),
     ("admin/.zshrc", "config/admin/.zshrc"),
     ("admin/.tmux.conf", "config/admin/.tmux.conf"),
     ("admin/.gitconfig", "config/admin/.gitconfig"),
@@ -280,7 +283,7 @@ _JINJA_RENDERED_CONFIG = [
 
 # Static files copied as-is (no Jinja2 processing)
 _STATIC_CONFIG_ADMIN = ["gitmux.conf", "starship.toml"]
-_STATIC_CONFIG_CORE = [".claude.json"]
+_STATIC_CONFIG_CORE: list[str] = []
 _STATIC_CONFIG_PROXY = ["ERR_SANDBOX_403"]
 
 
@@ -385,8 +388,27 @@ def render_templates(
     for filename in _STATIC_CONFIG_ADMIN:
         _copy_file(tooling_plane, f".config/admin/{filename}", instance_dir, f"config/admin/{filename}")
 
-    for filename in _STATIC_CONFIG_CORE:
-        _copy_file(tooling_plane, f".config/core/{filename}", instance_dir, f"config/core/{filename}")
+    # ── Programmatic .claude.json ─────────────────────────────────────────
+    # Generated (not copied) so firecrawl MCP endpoint can be injected
+    # dynamically based on the instance's IPAM-derived IP address.
+
+    claude_json_data: dict[str, object]
+    if mcp_firecrawl:
+        claude_json_data = {
+            "mcpServers": {
+                "firecrawl": {
+                    "type": "http",
+                    "url": f"http://{context['firecrawl_isolated_ip']}:3000/mcp",
+                },
+            },
+        }
+    else:
+        claude_json_data = {}
+
+    claude_json_path = os.path.join(instance_dir, "config/core/.claude.json")
+    with open(claude_json_path, "w") as f:
+        json.dump(claude_json_data, f, indent=2)
+        f.write("\n")
 
 
 def _render_file(
