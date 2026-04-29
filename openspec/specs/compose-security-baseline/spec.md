@@ -63,3 +63,53 @@ All containers SHALL include `net.ipv4.ip_forward=0` in their `sysctls` block as
 #### Scenario: Firecrawl has ip_forward disabled
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
 - **THEN** the firecrawl service's `sysctls` block contains `net.ipv4.ip_forward=0`
+
+### Requirement: CoreDNS Healthcheck Probe
+The coredns service in `compose.yml` SHALL use a `CMD` (exec-form) healthcheck with a statically-linked `/wget` binary copied from a busybox multi-stage build. The coredns service SHALL use a `build` directive (not `image`) to incorporate the probe binary.
+
+#### Scenario: CoreDNS healthcheck uses exec-form CMD with /wget
+- **WHEN** the rendered `compose.yml` is inspected for the coredns service
+- **THEN** the healthcheck test is `CMD ["/wget", "--spider", "-q", "http://127.0.0.1:8080/health"]`
+
+#### Scenario: CoreDNS uses build directive
+- **WHEN** the rendered `compose.yml` is inspected for the coredns service
+- **THEN** it uses `build:` with `context`, `dockerfile`, and `args` keys (not a top-level `image:` directive)
+
+#### Scenario: CoreDNS build args include base images
+- **WHEN** the rendered `compose.yml` is inspected for the coredns service
+- **THEN** the `build.args` include `CORE_BASE` (from `dns_image`) and `BUSYBOX_BASE` (from `busybox_image`)
+
+#### Scenario: CMD-SHELL wget is not used
+- **WHEN** the rendered `compose.yml` is inspected for the coredns service
+- **THEN** the healthcheck does NOT use `CMD-SHELL` form (scratch images have no `/bin/sh`)
+
+### Requirement: Proxy Healthcheck Probe
+The proxy service in `compose.yml` SHALL use a `CMD` (exec-form) healthcheck with Bash's `/dev/tcp` pseudo-device for a TCP liveness probe against port 3128. This SHALL NOT require any external binary beyond `bash`.
+
+#### Scenario: Proxy healthcheck uses bash /dev/tcp
+- **WHEN** the rendered `compose.yml` is inspected for the proxy service
+- **THEN** the healthcheck test is `CMD ["bash", "-c", ": > /dev/tcp/127.0.0.1/3128"]`
+
+#### Scenario: squidclient is not used in healthcheck
+- **WHEN** the rendered `compose.yml` is inspected for the proxy service
+- **THEN** the healthcheck does NOT reference `squidclient`
+
+#### Scenario: CMD-SHELL is not used for proxy healthcheck
+- **WHEN** the rendered `compose.yml` is inspected for the proxy service
+- **THEN** the healthcheck uses `CMD` exec form (not `CMD-SHELL`), because the default `/bin/sh` (`dash`) does not support `/dev/tcp`
+
+### Requirement: CoreDNS Dockerfile Multi-Stage Build
+The system SHALL provide `.docker/coredns/Dockerfile.coredns` as a static (non-Jinja2) Dockerfile that uses a multi-stage build to copy a statically-linked `wget` binary from a busybox image into the coredns image.
+
+#### Scenario: Dockerfile uses multi-stage build
+- **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
+- **THEN** it contains a `FROM ${BUSYBOX_BASE} AS probe` stage and a `FROM ${CORE_BASE}` stage with `COPY --from=probe /bin/wget /wget`
+
+#### Scenario: Dockerfile accepts build args
+- **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
+- **THEN** it declares `ARG CORE_BASE` and `ARG BUSYBOX_BASE` at the top
+
+#### Scenario: No Jinja2 syntax in Dockerfile
+- **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
+- **THEN** it contains zero `{{ }}` or `{% %}` markers (values come via compose build.args, not Jinja2)
+

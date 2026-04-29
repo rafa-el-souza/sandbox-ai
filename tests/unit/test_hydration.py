@@ -1,15 +1,17 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
 import os
+import re
 from pathlib import Path
 
 import pytest
 from core.hydration import (
     _JINJA_RENDERED_CONFIG,
-    IMAGE_DIGESTS,
+    IMAGE_REGISTRY,
     AdminConfig,
     CoreConfig,
     DbPostgresConfig,
+    ImagePin,
     ProxyWhitelistConfig,
     SandboxConfig,
     build_jinja_context,
@@ -391,6 +393,11 @@ class TestRenderTemplates:
         (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
         (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
 
+        # CoreDNS Dockerfile (static copy, no Jinja)
+        coredns_dir = docker_dir / "coredns"
+        coredns_dir.mkdir()
+        (coredns_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
+
         # Extras
         extras_dir = docker_dir / "extras"
         extras_dir.mkdir()
@@ -623,10 +630,11 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "admin_memswap_limit": "8gb",
         "admin_cpus": "4.0",
         "runtime": "runsc",
-        "dns_image": IMAGE_DIGESTS["coredns"],
-        "proxy_image": IMAGE_DIGESTS["squid"],
-        "dnsdist_image": IMAGE_DIGESTS["dnsdist"],
-        "db_postgres_image": IMAGE_DIGESTS["postgres"],
+        "dns_image": IMAGE_REGISTRY["coredns"].pinned,
+        "proxy_image": IMAGE_REGISTRY["squid"].pinned,
+        "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
+        "busybox_image": IMAGE_REGISTRY["busybox_musl"].pinned,
+        "db_postgres_image": IMAGE_REGISTRY["postgres"].pinned,
         "nvm_version": "0.39.7",
         "node_version": "20.12.2",
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
@@ -789,6 +797,9 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     admin_dir.mkdir()
     (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
     (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+    coredns_dir = docker_dir / "coredns"
+    coredns_dir.mkdir()
+    (coredns_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
     extras_dir = docker_dir / "extras"
     extras_dir.mkdir()
     (extras_dir / "mcp-firecrawl.yml").write_text("# firecrawl\n")
@@ -965,6 +976,9 @@ class TestReadOnlyDomainsGeneration:
         admin_dir.mkdir()
         (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
         (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+        coredns_dock_dir = docker_dir / "coredns"
+        coredns_dock_dir.mkdir()
+        (coredns_dock_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
 
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
@@ -1019,6 +1033,8 @@ class TestReadOnlyDomainsGeneration:
         (docker_dir / "admin").mkdir()
         (docker_dir / "admin" / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
         (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/sh\n")
+        (docker_dir / "coredns").mkdir()
+        (docker_dir / "coredns" / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
 
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
@@ -1121,22 +1137,25 @@ class TestValidTomlBackwardCompatibility:
 
 
 class TestImageDigestsDnsdist:
-    """Wave 3: IMAGE_DIGESTS includes dnsdist entry."""
+    """Wave 3: IMAGE_REGISTRY includes dnsdist entry."""
 
     def test_dnsdist_key_present(self) -> None:
-        """IMAGE_DIGESTS contains 'dnsdist' key."""
-        assert "dnsdist" in IMAGE_DIGESTS
+        """IMAGE_REGISTRY contains 'dnsdist' key."""
+        assert "dnsdist" in IMAGE_REGISTRY
 
     def test_dnsdist_value_format(self) -> None:
         """dnsdist value uses digest format with powerdns/dnsdist-19."""
-        val = IMAGE_DIGESTS["dnsdist"]
-        assert val.startswith("powerdns/dnsdist-19@sha256:")
-        assert len(val.split("@sha256:")[1]) == 64
+        pin = IMAGE_REGISTRY["dnsdist"]
+        assert pin.ref == "powerdns/dnsdist-19"
+        assert pin.digest.startswith("sha256:")
+        assert len(pin.digest.split("sha256:")[1]) == 64
 
-    def test_image_digests_has_6_entries(self) -> None:
-        """IMAGE_DIGESTS has exactly 6 entries (wolfi_base, debian_trixie, squid, coredns, dnsdist, postgres)."""
-        assert len(IMAGE_DIGESTS) == 6
-        assert set(IMAGE_DIGESTS.keys()) == {"wolfi_base", "debian_trixie", "squid", "coredns", "dnsdist", "postgres"}
+    def test_image_registry_has_7_entries(self) -> None:
+        """IMAGE_REGISTRY has exactly 7 entries."""
+        assert len(IMAGE_REGISTRY) == 7
+        assert set(IMAGE_REGISTRY.keys()) == {
+            "wolfi_base", "debian_trixie", "squid", "coredns", "dnsdist", "postgres", "busybox_musl",
+        }
 
 
 class TestSixSubnetContextKeys:
@@ -1203,13 +1222,13 @@ class TestSixSubnetContextKeys:
         assert "firecrawl_dns_ip" in ctx
 
     def test_dnsdist_image_key(self, tmp_path: Path) -> None:
-        """Context includes dnsdist_image from IMAGE_DIGESTS."""
+        """Context includes dnsdist_image from IMAGE_REGISTRY."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = SandboxConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "dnsdist_image" in ctx
-        assert ctx["dnsdist_image"] == IMAGE_DIGESTS["dnsdist"]
+        assert ctx["dnsdist_image"] == IMAGE_REGISTRY["dnsdist"].pinned
 
     def test_legacy_keys_absent(self, tmp_path: Path) -> None:
         """Legacy 3-subnet keys not in context."""
@@ -2227,4 +2246,656 @@ class TestW4IntegrationVerification:
         plan = _acl_grant_plan(str(tmp_path), "sandbox")
         secrets_entries = [desc for _, desc in plan if "secrets" in desc]
         assert len(secrets_entries) >= 1
+
+
+class TestImagePin:
+    """Group 1.T: ImagePin dataclass and IMAGE_REGISTRY validation."""
+
+    def test_registry_is_dict_with_7_keys(self) -> None:
+        """IMAGE_REGISTRY is a dict with exactly 7 keys."""
+        assert isinstance(IMAGE_REGISTRY, dict)
+        assert len(IMAGE_REGISTRY) == 7
+        assert set(IMAGE_REGISTRY.keys()) == {
+            "wolfi_base",
+            "debian_trixie",
+            "squid",
+            "coredns",
+            "dnsdist",
+            "postgres",
+            "busybox_musl",
+        }
+
+    def test_each_value_is_imagepin_with_str_fields(self) -> None:
+        """Each value is an ImagePin instance with ref, tag, digest str fields."""
+        for key, pin in IMAGE_REGISTRY.items():
+            assert isinstance(pin, ImagePin), f"{key} is not an ImagePin"
+            assert isinstance(pin.ref, str), f"{key}.ref is not str"
+            assert isinstance(pin.tag, str), f"{key}.tag is not str"
+            assert isinstance(pin.digest, str), f"{key}.digest is not str"
+
+    def test_pinned_property_returns_digest_qualified_ref(self) -> None:
+        """ImagePin.pinned returns f'{ref}@{digest}'."""
+        pin = IMAGE_REGISTRY["coredns"]
+        assert pin.pinned == f"{pin.ref}@{pin.digest}"
+
+    def test_tagged_property_returns_tag_qualified_ref(self) -> None:
+        """ImagePin.tagged returns f'{ref}:{tag}'."""
+        pin = IMAGE_REGISTRY["coredns"]
+        assert pin.tagged == f"{pin.ref}:{pin.tag}"
+
+    def test_imagepin_is_frozen(self) -> None:
+        """Assigning to an ImagePin field raises FrozenInstanceError."""
+        from dataclasses import FrozenInstanceError
+
+        pin = IMAGE_REGISTRY["coredns"]
+        with pytest.raises(FrozenInstanceError):
+            pin.digest = "x"  # type: ignore[misc]
+
+    def test_busybox_musl_entry(self) -> None:
+        """busybox_musl has tag='1.36.1-musl' and ref='busybox'."""
+        pin = IMAGE_REGISTRY["busybox_musl"]
+        assert pin.tag == "1.36.1-musl"
+        assert pin.ref == "busybox"
+
+    def test_all_digests_match_sha256_regex(self) -> None:
+        """All digest values match ^sha256:[a-f0-9]{64}$."""
+        import re
+
+        pattern = re.compile(r"^sha256:[a-f0-9]{64}$")
+        for key, pin in IMAGE_REGISTRY.items():
+            assert pattern.match(pin.digest), (
+                f"{key}.digest does not match sha256 pattern: {pin.digest}"
+            )
+
+    def test_legacy_image_digests_name_removed(self) -> None:
+        """hydration.py source does NOT contain 'IMAGE_DIGESTS ='."""
+        from pathlib import Path
+
+        source = Path(__file__).resolve().parents[2] / "core" / "hydration.py"
+        content = source.read_text()
+        assert "IMAGE_DIGESTS =" not in content
+
+
+class TestDownstreamConsumerMigration:
+    """Group 2.T: Verify all downstream consumers use IMAGE_REGISTRY.pinned."""
+
+    def test_context_proxy_image(self, tmp_path: Path) -> None:
+        """ctx['proxy_image'] == IMAGE_REGISTRY['squid'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["proxy_image"] == IMAGE_REGISTRY["squid"].pinned
+
+    def test_context_dns_image(self, tmp_path: Path) -> None:
+        """ctx['dns_image'] == IMAGE_REGISTRY['coredns'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["dns_image"] == IMAGE_REGISTRY["coredns"].pinned
+
+    def test_context_dnsdist_image(self, tmp_path: Path) -> None:
+        """ctx['dnsdist_image'] == IMAGE_REGISTRY['dnsdist'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["dnsdist_image"] == IMAGE_REGISTRY["dnsdist"].pinned
+
+    def test_context_busybox_image(self, tmp_path: Path) -> None:
+        """ctx['busybox_image'] == IMAGE_REGISTRY['busybox_musl'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["busybox_image"] == IMAGE_REGISTRY["busybox_musl"].pinned
+
+    def test_context_db_postgres_image(self, tmp_path: Path) -> None:
+        """ctx['db_postgres_image'] == IMAGE_REGISTRY['postgres'].pinned (default)."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["db_postgres_image"] == IMAGE_REGISTRY["postgres"].pinned
+
+    def test_core_config_default_uses_registry(self) -> None:
+        """CoreConfig().base_image == IMAGE_REGISTRY['wolfi_base'].pinned."""
+        assert CoreConfig().base_image == IMAGE_REGISTRY["wolfi_base"].pinned
+
+    def test_admin_config_default_uses_registry(self) -> None:
+        """AdminConfig().base_image == IMAGE_REGISTRY['debian_trixie'].pinned."""
+        assert AdminConfig().base_image == IMAGE_REGISTRY["debian_trixie"].pinned
+
+    def test_db_postgres_config_default_uses_registry(self) -> None:
+        """DbPostgresConfig().image == IMAGE_REGISTRY['postgres'].pinned."""
+        assert DbPostgresConfig().image == IMAGE_REGISTRY["postgres"].pinned
+
+    def test_build_jinja_context_source_no_legacy(self) -> None:
+        """build_jinja_context source does not contain IMAGE_DIGESTS[."""
+        import inspect
+
+        source = inspect.getsource(build_jinja_context)
+        assert "IMAGE_DIGESTS[" not in source
+
+    def test_pydantic_source_no_legacy(self) -> None:
+        """CoreConfig, AdminConfig, DbPostgresConfig source does not contain IMAGE_DIGESTS[."""
+        import inspect
+
+        for cls in (CoreConfig, AdminConfig, DbPostgresConfig):
+            source = inspect.getsource(cls)
+            assert "IMAGE_DIGESTS[" not in source, f"{cls.__name__} still uses IMAGE_DIGESTS"
+
+    def test_scaffold_imports_image_registry(self) -> None:
+        """scaffold.py source contains IMAGE_REGISTRY import (not IMAGE_DIGESTS)."""
+        from pathlib import Path
+
+        source = Path(__file__).resolve().parents[2] / "core" / "scaffold.py"
+        content = source.read_text()
+        assert "IMAGE_REGISTRY" in content
+        assert "IMAGE_DIGESTS" not in content
+
+
+def _build_default_context(tmp_path: Path) -> dict[str, object]:
+    """Build context via build_jinja_context with default SandboxConfig."""
+    toml_path = tmp_path / "sandbox.toml"
+    toml_path.write_text(VALID_TOML)
+    config = SandboxConfig.from_toml(str(toml_path))
+    return build_jinja_context(
+        config=config,
+        base_index=0,
+        proxy_password="testpass",
+        instance_dir=str(tmp_path / "instance"),
+    )
+
+
+def _get_dockerfile_lines(rel_path: str) -> list[str]:
+    """Read a Dockerfile from the project root and return its lines."""
+    root = Path(__file__).resolve().parents[2]
+    return (root / rel_path).read_text().splitlines()
+
+
+def _extract_stage(lines: list[str], stage_name: str) -> list[str]:
+    """Extract lines belonging to a specific FROM ... AS <stage_name>."""
+    result: list[str] = []
+    in_stage = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("FROM ") and f"AS {stage_name}" in stripped:
+            in_stage = True
+            result.append(line)
+            continue
+        if in_stage:
+            if stripped.upper().startswith("FROM "):
+                break  # Next stage
+            result.append(line)
+    return result
+
+
+class TestDockerfileUserContext:
+    """Group 3.T: Validate USER context correctness in Dockerfiles."""
+
+    def test_branch_typescript_user_root_before_staging_mkdir(self) -> None:
+        """branch-typescript: USER root before mkdir /staging."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-typescript")
+        stage_text = "\n".join(stage)
+        # USER root must appear before the staging mkdir
+        root_idx = next(
+            (i for i, line in enumerate(stage) if line.strip() == "USER root"),
+            None,
+        )
+        mkdir_idx = next(
+            (i for i, line in enumerate(stage) if "mkdir" in line and "/staging" in line),
+            None,
+        )
+        assert root_idx is not None, f"No 'USER root' in branch-typescript:\n{stage_text}"
+        assert mkdir_idx is not None, f"No 'mkdir /staging' in branch-typescript:\n{stage_text}"
+        assert root_idx < mkdir_idx, "USER root must appear before mkdir /staging in branch-typescript"
+
+    def test_branch_typescript_user_unprivileged_before_npm(self) -> None:
+        """branch-typescript: USER ${USERNAME} before npm install."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-typescript")
+        user_switch_idx = next(
+            (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
+            None,
+        )
+        npm_idx = next(
+            (i for i, line in enumerate(stage) if "npm install" in line),
+            None,
+        )
+        assert user_switch_idx is not None, "No USER ${USERNAME} in branch-typescript"
+        assert npm_idx is not None, "No npm install in branch-typescript"
+        assert user_switch_idx < npm_idx, "USER ${USERNAME} must appear before npm install in branch-typescript"
+
+    def test_branch_python_user_root_before_staging_mkdir(self) -> None:
+        """branch-python: USER root before staging mkdirs (both paths)."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-python")
+        # All staging mkdirs must be under USER root
+        user_context = "unknown"
+        for line in stage:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                user_context = stripped.split()[1]
+            if "mkdir" in stripped and "/staging" in stripped:
+                assert user_context == "root", (
+                    f"mkdir /staging under USER {user_context} (not root) in branch-python: {stripped}"
+                )
+
+    def test_branch_claude_user_root_before_staging_mkdir(self) -> None:
+        """branch-claude: USER root before mkdir /staging."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-claude")
+        root_idx = next(
+            (i for i, line in enumerate(stage) if line.strip() == "USER root"),
+            None,
+        )
+        mkdir_idx = next(
+            (i for i, line in enumerate(stage) if "mkdir" in line and "/staging" in line),
+            None,
+        )
+        assert root_idx is not None, "No USER root in branch-claude"
+        assert mkdir_idx is not None, "No mkdir /staging in branch-claude"
+        assert root_idx < mkdir_idx, "USER root must appear before mkdir /staging in branch-claude"
+
+    def test_branch_claude_user_unprivileged_before_npm(self) -> None:
+        """branch-claude: USER ${USERNAME} before npm install."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-claude")
+        user_switch_idx = next(
+            (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
+            None,
+        )
+        npm_idx = next(
+            (i for i, line in enumerate(stage) if "npm install" in line),
+            None,
+        )
+        assert user_switch_idx is not None, "No USER ${USERNAME} in branch-claude"
+        assert npm_idx is not None, "No npm install in branch-claude"
+        assert user_switch_idx < npm_idx, "USER ${USERNAME} must appear before npm install"
+
+    def test_admin_user_root_before_entrypoint_copy(self) -> None:
+        """Admin Dockerfile: USER root before COPY entrypoint.sh."""
+        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        user_context = "unknown"
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                user_context = stripped.split()[1]
+            if stripped.startswith("COPY") and "entrypoint.sh" in stripped:
+                assert user_context == "root", (
+                    f"COPY entrypoint.sh under USER {user_context} (not root)"
+                )
+
+    def test_admin_user_unprivileged_before_entrypoint(self) -> None:
+        """Admin Dockerfile: USER ${USERNAME} between chmod and ENTRYPOINT."""
+        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        chmod_idx = next(
+            (i for i, line in enumerate(lines) if "chmod" in line and "entrypoint" in line),
+            None,
+        )
+        entrypoint_idx = next(
+            (i for i, line in enumerate(lines) if line.strip().startswith("ENTRYPOINT")),
+            None,
+        )
+        assert chmod_idx is not None, "No chmod entrypoint line"
+        assert entrypoint_idx is not None, "No ENTRYPOINT line"
+        # Find USER ${USERNAME} between chmod and ENTRYPOINT
+        user_between = any(
+            "${USERNAME}" in lines[i] and lines[i].strip().startswith("USER")
+            for i in range(chmod_idx + 1, entrypoint_idx)
+        )
+        assert user_between, "USER ${USERNAME} must appear between chmod and ENTRYPOINT"
+
+    def test_claude_local_bin_path(self) -> None:
+        """Dockerfile.core.wolfi uses ${HOME_DIR}/.local/bin/claude (not .claude/local/claude)."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        content = "\n".join(lines)
+        assert "${HOME_DIR}/.local/bin/claude" in content or ".local/bin/claude" in content
+        assert ".claude/local/claude" not in content
+
+
+# ─── Dockerfile USER Structural Lint ─────────────────────────────────────────
+
+_ROOT_OWNED_PREFIXES = ("/staging", "/usr", "/etc", "/var", "/run", "/opt")
+_FS_OPS_PATTERN = re.compile(r"\b(mkdir|chmod|chown|touch|cp)\b")
+
+
+def _lint_dockerfile_user_context(content: str) -> list[str]:
+    """Lint a Dockerfile for filesystem operations under wrong USER context.
+
+    State machine:
+    - FROM resets USER to 'root' and clears chown grants
+    - USER directives update tracked context
+    - RUN lines with backslash continuations are joined into logical lines
+    - chown under USER root records granted subtrees
+    - Violations: mkdir/chmod/touch/cp targeting root-owned paths
+      when USER is not 'root' AND the path is not covered by a prior chown grant
+    """
+    violations: list[str] = []
+    current_user = "root"
+    chown_grants: list[str] = []  # paths that have been chown'd to non-root
+    raw_lines = content.splitlines()
+
+    # Join backslash-continued lines
+    logical_lines: list[tuple[int, str]] = []
+    i = 0
+    while i < len(raw_lines):
+        line = raw_lines[i]
+        start_lineno = i + 1  # 1-indexed
+        while line.rstrip().endswith("\\") and i + 1 < len(raw_lines):
+            line = line.rstrip()[:-1] + " " + raw_lines[i + 1].strip()
+            i += 1
+        logical_lines.append((start_lineno, line))
+        i += 1
+
+    _chown_path_re = re.compile(r"chown\s+(?:-R\s+)?[^\s]+\s+(.+)")
+
+    for lineno, line in logical_lines:
+        stripped = line.strip()
+
+        # FROM resets USER to root and clears chown grants
+        if stripped.upper().startswith("FROM "):
+            current_user = "root"
+            chown_grants.clear()
+            continue
+
+        # USER directive
+        if stripped.startswith("USER "):
+            current_user = stripped.split()[1]
+            continue
+
+        # Track chown grants under USER root
+        if stripped.startswith("RUN ") and current_user == "root":
+            m = _chown_path_re.search(stripped)
+            if m:
+                for path in m.group(1).split():
+                    path = path.strip()
+                    if path and path.startswith("/"):
+                        chown_grants.append(path)
+            continue
+
+        # RUN directive — check for fs operations under non-root
+        if stripped.startswith("RUN ") and current_user != "root" and _FS_OPS_PATTERN.search(stripped):
+            for prefix in _ROOT_OWNED_PREFIXES:
+                if prefix in stripped:
+                    # Check if any chown grant covers this path
+                    covered = any(
+                        prefix.startswith(grant) or grant.startswith(prefix)
+                        for grant in chown_grants
+                    )
+                    if not covered:
+                        violations.append(
+                            f"L{lineno}: {current_user} performing fs op on "
+                            f"{prefix}: {stripped[:80]}"
+                        )
+                    break
+
+    return violations
+
+
+class TestDockerfileUserLint:
+    """Group 4.T: Dockerfile USER context structural lint guard."""
+
+    def test_core_wolfi_zero_violations(self) -> None:
+        """Lint on current Dockerfile.core.wolfi returns zero violations."""
+        content = "\n".join(_get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi"))
+        violations = _lint_dockerfile_user_context(content)
+        assert violations == [], f"Violations in Dockerfile.core.wolfi: {violations}"
+
+    def test_admin_debian_zero_violations(self) -> None:
+        """Lint on current Dockerfile.admin.debian returns zero violations."""
+        content = "\n".join(_get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian"))
+        violations = _lint_dockerfile_user_context(content)
+        assert violations == [], f"Violations in Dockerfile.admin.debian: {violations}"
+
+    def test_synthetic_violation_detected(self) -> None:
+        """Synthetic Dockerfile with USER agent + mkdir /staging yields one violation."""
+        synthetic = "FROM base\nUSER agent\nRUN mkdir -p /staging/foo\n"
+        violations = _lint_dockerfile_user_context(synthetic)
+        assert len(violations) == 1
+        assert "agent" in violations[0]
+        assert "/staging" in violations[0]
+        assert "L3" in violations[0]
+
+    def test_from_resets_user_to_root(self) -> None:
+        """FROM ... AS stage resets tracked USER to root."""
+        synthetic = (
+            "FROM base AS build\n"
+            "USER agent\n"
+            "FROM base AS runtime\n"
+            "RUN mkdir -p /staging/foo\n"
+        )
+        violations = _lint_dockerfile_user_context(synthetic)
+        assert violations == [], f"FROM should reset USER to root: {violations}"
+
+    def test_backslash_continuation_joined(self) -> None:
+        r"""RUN with \ continuations is joined into single logical line."""
+        synthetic = (
+            "FROM base\n"
+            "USER agent\n"
+            "RUN mkdir -p \\\n"
+            "    /staging/foo\n"
+        )
+        violations = _lint_dockerfile_user_context(synthetic)
+        assert len(violations) == 1
+        assert "/staging" in violations[0]
+
+
+class TestHealthcheckFixes:
+    """Group 5.T: CoreDNS Dockerfile and Compose healthcheck fixes."""
+
+    def test_coredns_dockerfile_exists(self) -> None:
+        """Dockerfile.coredns exists in .docker/coredns/."""
+        root = Path(__file__).resolve().parents[2]
+        df = root / ".docker" / "coredns" / "Dockerfile.coredns"
+        assert df.exists(), "Dockerfile.coredns does not exist"
+
+    def test_coredns_dockerfile_structure(self) -> None:
+        """Dockerfile.coredns contains multi-stage build with probe stage."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "coredns" / "Dockerfile.coredns").read_text()
+        assert "FROM ${BUSYBOX_BASE} AS probe" in content
+        assert "FROM ${CORE_BASE}" in content
+        assert "COPY --from=probe /bin/wget /wget" in content
+        assert "ARG CORE_BASE" in content
+        assert "ARG BUSYBOX_BASE" in content
+        # No Jinja markers
+        assert "{{ }}" not in content
+        assert "{{" not in content
+
+    def test_compose_coredns_build_block(self) -> None:
+        """compose.yml template has coredns with build: block (not image:)."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "compose.yml").read_text()
+        assert "coredns:" in content
+        coredns_idx = content.index("  coredns:")
+        # Section ends at next blank line (double newline)
+        section_end = content.index("\n\n", coredns_idx)
+        section = content[coredns_idx:section_end]
+        assert "build:" in section, "coredns must use build: block"
+        assert "Dockerfile.coredns" in section
+        assert "CORE_BASE=" in section, "Missing CORE_BASE arg"
+        assert "BUSYBOX_BASE=" in section, "Missing BUSYBOX_BASE arg"
+        # Must NOT have image: directive within coredns section only
+        assert 'image:' not in section, "coredns must not have image: when using build:"
+
+    def test_coredns_healthcheck_no_cmd_shell(self) -> None:
+        """CoreDNS healthcheck uses CMD (not CMD-SHELL) with /wget."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "compose.yml").read_text()
+        # Find the coredns healthcheck test line
+        coredns_idx = content.index("coredns:")
+        # Find healthcheck test line within coredns section
+        section = content[coredns_idx:content.index("\n\n", coredns_idx)]
+        assert '"CMD"' in section or "'CMD'" in section, "Expected CMD in coredns healthcheck"
+        assert '"CMD-SHELL"' not in section, "coredns healthcheck must not use CMD-SHELL"
+        assert "/wget" in section, "coredns healthcheck must use /wget"
+
+    def test_proxy_healthcheck_tcp_probe(self) -> None:
+        """Proxy healthcheck uses TCP probe (not squidclient)."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "compose.yml").read_text()
+        # Find proxy service section
+        proxy_idx = content.index("\n  proxy:")
+        proxy_section = content[proxy_idx:content.index("\n\n", proxy_idx)]
+        # Must use CMD, not CMD-SHELL
+        assert '"CMD"' in proxy_section, "Expected CMD in proxy healthcheck"
+        assert "/dev/tcp" in proxy_section, "Expected /dev/tcp in proxy healthcheck"
+        assert "squidclient" not in proxy_section, "proxy healthcheck must not use squidclient"
+
+
+class TestHydrationPipelineRegistration:
+    """Group 6.T RED: CoreDNS Dockerfile pipeline registration in scaffold, hydration, and doctor."""
+
+    def test_docker_coredns_in_instance_subdirs(self) -> None:
+        """(a) 'docker/coredns' is in INSTANCE_SUBDIRS."""
+        from core.scaffold import INSTANCE_SUBDIRS
+
+        assert "docker/coredns" in INSTANCE_SUBDIRS
+
+    def test_render_copies_coredns_dockerfile(self, tmp_path: Path) -> None:
+        """(b) After render_templates(), docker/coredns/Dockerfile.coredns exists in instance
+        and is identical to .docker/coredns/Dockerfile.coredns."""
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns",
+            "config/dnsdist", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        rendered_df = instance / "docker" / "coredns" / "Dockerfile.coredns"
+        assert rendered_df.exists(), "Dockerfile.coredns not copied to instance dir"
+        source_df = tooling / ".docker" / "coredns" / "Dockerfile.coredns"
+        assert rendered_df.read_text() == source_df.read_text(), "Copied file differs from source"
+
+    def test_validate_templates_counts_coredns_dockerfile(self, tmp_path: Path) -> None:
+        """(c) validate_templates() includes Dockerfile.coredns in its validated total."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+
+        # Baseline count without coredns Dockerfile considered
+        count, errors = validate_templates(ctx, str(tooling), db_postgres=False, mcp_firecrawl=False)
+        assert errors == [], f"Unexpected errors: {errors}"
+
+        # The coredns Dockerfile must be included in validated count.
+        # We verify by checking that removing it causes a validation error.
+        coredns_df = tooling / ".docker" / "coredns" / "Dockerfile.coredns"
+        coredns_df.unlink()
+        count_missing, errors_missing = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert any(
+            "Dockerfile.coredns" in e for e in errors_missing
+        ), "validate_templates must report missing Dockerfile.coredns as error"
+
+    def test_unconditional_files_includes_coredns_dockerfile(self) -> None:
+        """(d) _UNCONDITIONAL_FILES contains '.docker/coredns/Dockerfile.coredns' and has length 17."""
+        from core.doctor import _UNCONDITIONAL_FILES
+
+        assert ".docker/coredns/Dockerfile.coredns" in _UNCONDITIONAL_FILES
+        assert len(_UNCONDITIONAL_FILES) == 17
+
+    def test_check_tooling_plane_references_17(self) -> None:
+        """(e) check_tooling_plane detail string references '17' (not '16')."""
+        from core.doctor import check_tooling_plane
+
+        # Run against the actual repo — should pass (all files present)
+        result = check_tooling_plane("testuser", None)
+        # If it passes, the detail must say "17"
+        if result.status == "pass":
+            assert "17" in result.detail, f"Expected '17' in detail: {result.detail}"
+            assert "16" not in result.detail, f"Detail still says '16': {result.detail}"
+
+
+# ── Section: Integration Verification ─────────────────────────────────────────
+
+
+class TestInfrastructureBugFixes:
+    """9.T INTEGRATION: End-to-end validation across groups 1-8.
+
+    All tests are expected to pass on first run. A failure is a regression.
+    """
+
+    def test_jinja_context_images_are_digest_pinned(self, tmp_path: Path) -> None:
+        """(a) build_jinja_context produces digest-pinned infrastructure images."""
+        ctx = _build_default_context(tmp_path)
+        for key in ("busybox_image", "dns_image", "proxy_image", "dnsdist_image"):
+            val = ctx[key]
+            assert isinstance(val, str), f"{key} should be str"
+            assert val, f"{key} should be non-empty"
+            assert "@sha256:" in val, f"{key} should contain '@sha256:': {val}"
+
+    def test_render_templates_produces_coredns_dockerfile(self, tmp_path: Path) -> None:
+        """(b) render_templates() produces docker/coredns/Dockerfile.coredns in instance."""
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "inst"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns", "config/dnsdist",
+            "config/proxy", "log/admin", "log/core", "cache/core/.claude",
+            "cache/admin/tmux_resurrect", "custom/config/admin", "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        coredns_dockerfile = instance / "docker" / "coredns" / "Dockerfile.coredns"
+        assert coredns_dockerfile.exists(), "Dockerfile.coredns should be rendered"
+
+    def test_validate_templates_zero_errors(self, tmp_path: Path) -> None:
+        """(c) validate_templates() reports zero errors and counts include coredns Dockerfile."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(ctx, str(tooling), db_postgres=False, mcp_firecrawl=False)
+        assert errors == [], f"Validation errors: {errors}"
+        assert count > 0, "Expected at least one validated template"
+
+    def test_compose_healthchecks_correct(self, tmp_path: Path) -> None:
+        """(d) compose.yml: coredns has build block, proxy healthcheck uses /dev/tcp,
+        coredns healthcheck uses /wget."""
+        # Use the actual repo tooling plane for realistic compose.yml rendering
+        tooling = Path(__file__).resolve().parents[2]
+        instance = tmp_path / "inst"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns", "config/dnsdist",
+            "config/proxy", "log/admin", "log/core", "cache/core/.claude",
+            "cache/admin/tmux_resurrect", "custom/config/admin", "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        compose = (instance / "docker" / "compose.yml").read_text()
+        # coredns should have build: block, not image:
+        assert "build:" in compose, "coredns should use build: block"
+        # Proxy healthcheck uses /dev/tcp
+        assert "/dev/tcp" in compose, "proxy healthcheck should use /dev/tcp"
+        # coredns healthcheck uses /wget
+        assert "/wget" in compose, "coredns healthcheck should use /wget"
+
+    def test_dockerfile_user_lint_zero_violations(self) -> None:
+        """(e) Dockerfile USER lint on both rendered Dockerfiles returns zero violations."""
+        core_path = Path(__file__).resolve().parent.parent.parent / ".docker" / "core" / "Dockerfile.core.wolfi"
+        admin_path = Path(__file__).resolve().parent.parent.parent / ".docker" / "admin" / "Dockerfile.admin.debian"
+
+        for path in (core_path, admin_path):
+            assert path.exists(), f"{path.name} not found"
+            content = path.read_text()
+            violations = _lint_dockerfile_user_context(content)
+            assert violations == [], f"{path.name} lint violations: {violations}"
+
+    def test_image_registry_integrity(self) -> None:
+        """(f) IMAGE_REGISTRY has 7 entries with valid sha256 digests and consistent properties."""
+        import re
+
+        from core.hydration import IMAGE_REGISTRY, ImagePin
+
+        assert len(IMAGE_REGISTRY) == 7, f"Expected 7 entries, got {len(IMAGE_REGISTRY)}"
+
+        sha256_re = re.compile(r"^sha256:[a-f0-9]{64}$")
+        for key, pin in IMAGE_REGISTRY.items():
+            assert isinstance(pin, ImagePin), f"{key} is not an ImagePin"
+            assert sha256_re.match(pin.digest), f"{key}: invalid digest {pin.digest}"
+            assert pin.pinned == f"{pin.ref}@{pin.digest}", f"{key}: .pinned mismatch"
+            assert pin.tagged == f"{pin.ref}:{pin.tag}", f"{key}: .tagged mismatch"
 
