@@ -2152,3 +2152,79 @@ class TestFirecrawlMcpHttpTransport:
         """Rendered mcp-firecrawl.yml does NOT contain /var/run/mcp."""
         rendered = _render_extras(tmp_path, "mcp-firecrawl.yml")
         assert "/var/run/mcp" not in rendered
+
+
+# ── Section W4: Integration Verification ────────────────────────────────────
+
+
+class TestW4IntegrationVerification:
+    """13.T: End-to-end integration verification for Wave 4 containment hardening."""
+
+    def test_full_w4_template_validation(self, tmp_path: Path) -> None:
+        """Build a complete Jinja2 context with all 7-tuple fields, validate all templates."""
+        from core.hydration import SandboxConfig, build_jinja_context, validate_templates
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        # Use base_index=0 for deterministic IPs
+        context = build_jinja_context(config, base_index=0, proxy_password="testpass", instance_dir=str(tmp_path))
+
+        # Verify 7-tuple fields exist in context
+        assert "ipc_subnet" in context
+        assert "core_ipc_ip" in context
+        assert "admin_ipc_ip" in context
+        assert "firecrawl_isolated_ip" in context
+
+        tooling_plane = str(Path(__file__).resolve().parents[2])
+        validated, errors = validate_templates(
+            context, tooling_plane, db_postgres=True, mcp_firecrawl=True
+        )
+        assert errors == [], f"Template validation errors: {errors}"
+        assert validated > 0
+
+    def test_e2e_ipam_to_hydration_pipeline(self, tmp_path: Path) -> None:
+        """Full pipeline: IPAM allocate → derive subnets/IPs → build context → validate templates."""
+        from core.hydration import SandboxConfig, build_jinja_context, validate_templates
+        from core.ipam import derive_static_ips, derive_subnets
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = SandboxConfig.from_toml(str(toml_path))
+
+        # Simulate IPAM allocation at slot 0
+        base_index = 0
+        subnets = derive_subnets(base_index)
+        assert len(subnets) == 7  # 7-tuple
+
+        ips = derive_static_ips(base_index)
+        assert "core_ipc_ip" in ips
+        assert "admin_ipc_ip" in ips
+
+        context = build_jinja_context(config, base_index, proxy_password="e2epass", instance_dir=str(tmp_path))
+
+        tooling_plane = str(Path(__file__).resolve().parents[2])
+        validated, errors = validate_templates(
+            context, tooling_plane, db_postgres=True, mcp_firecrawl=True
+        )
+        assert errors == [], f"E2E pipeline errors: {errors}"
+        assert validated > 0
+
+    def test_scaffold_creates_secrets_dir(self, tmp_path: Path) -> None:
+        """create_instance_dirs creates the secrets/ subdirectory."""
+        from core.scaffold import create_instance_dirs
+
+        instance_dir = tmp_path / "instance"
+        create_instance_dirs(str(instance_dir))
+        secrets_dir = instance_dir / "secrets"
+        assert secrets_dir.is_dir()
+
+    def test_acl_grant_plan_includes_secrets(self, tmp_path: Path) -> None:
+        """_acl_grant_plan includes at least one entry targeting secrets/ directory."""
+        from cli.main import _acl_grant_plan
+
+        plan = _acl_grant_plan(str(tmp_path), "sandbox")
+        secrets_entries = [desc for _, desc in plan if "secrets" in desc]
+        assert len(secrets_entries) >= 1
+
