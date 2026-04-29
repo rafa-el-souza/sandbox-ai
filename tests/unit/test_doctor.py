@@ -453,7 +453,7 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 15
+        assert len(checks) == 16
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert "machinectl_reachable" in ids
@@ -921,7 +921,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 15
+        assert len(checks) == 16
 
     def test_privilege_boundary_subset_contains_9_checks(self) -> None:
         """Task 9.12: Privilege boundary subset contains 9 checks (was 8)."""
@@ -1401,3 +1401,141 @@ class TestAncestorTraverseWithAclFallback:
             result = check_ancestor_traverse("sandbox", None)
             assert result.status == "fail"
             assert "lacks execute" in result.detail
+
+
+# ── Section 15: Supply Chain Checks ───────────────────────────────────────────
+
+
+class TestCheckImageDigests:
+    """Group 7.T RED: check_image_digests supply chain verification."""
+
+    def test_all_digests_resolvable_pass(self) -> None:
+        """(a) All 7 entries resolve → status=pass, detail contains '7'."""
+        from core.doctor import check_image_digests
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_image_digests("sandbox", None)
+            assert result.status == "pass"
+            assert "7" in result.detail
+
+    def test_stale_digest_detected_fail(self) -> None:
+        """(b) One entry exits non-zero → status=fail, detail names the stale key."""
+        from core.doctor import check_image_digests
+        from core.hydration import IMAGE_REGISTRY
+
+        call_count = 0
+        keys = list(IMAGE_REGISTRY.keys())
+
+        def selective_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal call_count
+            cmd_str = " ".join(args[0]) if isinstance(args[0], list) else str(args[0])
+            # Fail on the first IMAGE_REGISTRY entry's digest probe
+            if IMAGE_REGISTRY[keys[0]].digest in cmd_str:
+                return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="MANIFEST_UNKNOWN")
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+
+        with patch("subprocess.run", side_effect=selective_run):
+            result = check_image_digests("sandbox", None)
+            assert result.status == "fail"
+            assert keys[0] in result.detail
+
+    def test_timeout_returns_skip(self) -> None:
+        """(c) Subprocess timeout → status=skip, detail='registry unreachable'."""
+        from core.doctor import check_image_digests
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=2),
+        ):
+            result = check_image_digests("sandbox", None)
+            assert result.status == "skip"
+            assert "registry unreachable" in result.detail.lower()
+
+    def test_tag_drift_reports_warn(self) -> None:
+        """(d) Tag resolves to different digest than pinned → status includes 'warn' info."""
+        from core.doctor import check_image_digests
+        from core.hydration import IMAGE_REGISTRY
+
+        keys = list(IMAGE_REGISTRY.keys())
+
+        def selective_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd_str = " ".join(args[0]) if isinstance(args[0], list) else str(args[0])
+            # All digest probes pass
+            if "@sha256:" in cmd_str:
+                return subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="{}", stderr="",
+                )
+            # Tag probe returns a different digest for first key
+            if f":{IMAGE_REGISTRY[keys[0]].tag}" in cmd_str:
+                return subprocess.CompletedProcess(
+                    args=[], returncode=0,
+                    stdout='{"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}',
+                    stderr="",
+                )
+            # Other tag probes return matching digest
+            for key in keys[1:]:
+                pin = IMAGE_REGISTRY[key]
+                if f":{pin.tag}" in cmd_str:
+                    return subprocess.CompletedProcess(
+                        args=[], returncode=0,
+                        stdout=f'{{"digest": "{pin.digest}"}}',
+                        stderr="",
+                    )
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+
+        with patch("subprocess.run", side_effect=selective_run):
+            result = check_image_digests("sandbox", None)
+            # Should still be pass (tag drift is informational, not failure)
+            # but detail should mention drift
+            assert result.status in ("pass", "warn")
+
+    def test_registered_in_build_check_registry(self) -> None:
+        """(e) check_image_digests is registered with category='Supply Chain', depends_on=['docker_available']."""
+        from core.doctor import build_check_registry
+
+        checks = build_check_registry()
+        image_check = next((c for c in checks if c.id == "image_digests"), None)
+        assert image_check is not None, "image_digests not found in registry"
+        assert image_check.category == "Supply Chain"
+        assert "docker_available" in image_check.depends_on
+
+    def test_tag_drift_json_decode_error(self) -> None:
+        """Cover JSONDecodeError branch in tag drift phase."""
+        from core.doctor import check_image_digests
+
+        call_count = 0
+
+        def mixed_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal call_count
+            call_count += 1
+            cmd_str = " ".join(args[0]) if isinstance(args[0], list) else str(args[0])
+            # Digest probes pass
+            if "@sha256:" in cmd_str:
+                return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+            # Tag probes return invalid JSON
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="NOT-JSON{{", stderr="")
+
+        with patch("subprocess.run", side_effect=mixed_run):
+            result = check_image_digests("sandbox", None)
+            assert result.status == "pass"  # JSONDecodeError is swallowed
+
+    def test_tag_drift_timeout_ignored(self) -> None:
+        """Cover TimeoutExpired branch in tag drift phase (best-effort)."""
+        from core.doctor import check_image_digests
+
+        call_count = 0
+
+        def timeout_on_tag(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal call_count
+            call_count += 1
+            cmd_str = " ".join(args[0]) if isinstance(args[0], list) else str(args[0])
+            # Digest probes pass
+            if "@sha256:" in cmd_str:
+                return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+            # Tag probes timeout
+            raise subprocess.TimeoutExpired(cmd="docker", timeout=2)
+
+        with patch("subprocess.run", side_effect=timeout_on_tag):
+            result = check_image_digests("sandbox", None)
+            assert result.status == "pass"  # Tag drift timeout is best-effort

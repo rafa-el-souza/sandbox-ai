@@ -1,10 +1,11 @@
 """Doctor module: host readiness diagnostics for sandbox operation.
 
-Provides 15 diagnostic checks across 3 independent chains:
+Provides 16 diagnostic checks across 4 independent chains:
 - Chain 1 (privilege boundary, 10 checks): sudo -> machinectl -> user -> machined
   -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs -> host_uds
 - Chain 2 (filesystem, 3 checks): setfacl → ACL support → ancestor traverse
 - Chain 3 (repo integrity, 2 checks): tooling plane, state dir (independent)
+- Chain 4 (supply chain, 1 check): image_digests (depends on docker_available)
 """
 
 from __future__ import annotations
@@ -494,6 +495,93 @@ def check_host_uds(user: str, distro: str | None) -> CheckResult:
     )
 
 
+# ─── Section 6b: Supply Chain Checks ────────────────────────────────────────
+
+
+def check_image_digests(user: str, distro: str | None) -> CheckResult:
+    """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
+
+    Iterates IMAGE_REGISTRY and runs ``docker manifest inspect <ref>@<digest>``
+    via machinectl for each entry. Returns PASS if all resolve, FAIL if any are
+    stale, or SKIP if the registry is unreachable (timeout/network error).
+
+    Additionally checks for tag drift (upstream tag re-pushed with a different
+    digest) and reports it as informational detail.
+    """
+    from core.hydration import IMAGE_REGISTRY
+
+    stale: list[str] = []
+    drift: list[str] = []
+
+    for key, pin in IMAGE_REGISTRY.items():
+        # Phase 1: verify pinned digest is resolvable
+        try:
+            result = subprocess.run(
+                [
+                    "sudo", "machinectl", "shell", f"{user}@.host",
+                    "/bin/bash", "-c",
+                    f"docker manifest inspect {pin.pinned}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return CheckResult(
+                status="skip",
+                name="image digests",
+                detail="Registry unreachable (timeout during manifest inspection)",
+            )
+
+        if result.returncode != 0:
+            stale.append(key)
+            continue
+
+        # Phase 2: check tag drift (informational)
+        try:
+            tag_result = subprocess.run(
+                [
+                    "sudo", "machinectl", "shell", f"{user}@.host",
+                    "/bin/bash", "-c",
+                    f"docker manifest inspect {pin.tagged}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if tag_result.returncode == 0:
+                try:
+                    manifest = json.loads(tag_result.stdout.strip())
+                    tag_digest = manifest.get("digest", "")
+                    if tag_digest and tag_digest != pin.digest:
+                        drift.append(key)
+                except json.JSONDecodeError:
+                    pass
+        except subprocess.TimeoutExpired:
+            pass  # Tag drift check is best-effort
+
+    if stale:
+        return CheckResult(
+            status="fail",
+            name="image digests",
+            detail=f"Stale digests: {', '.join(stale)}",
+            remediation="Run scripts/rotate-digests.py to update pinned digests",
+        )
+
+    count = len(IMAGE_REGISTRY)
+    detail = f"All {count} pinned digests verified"
+    if drift:
+        detail += f" (tag drift detected: {', '.join(drift)})"
+
+    return CheckResult(
+        status="pass",
+        name="image digests",
+        detail=detail,
+    )
+
+
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
 # 17 unconditional source files in the tooling plane
@@ -845,6 +933,15 @@ def build_check_registry() -> list[Check]:
             category="Repo Integrity",
             depends_on=[],
             run=check_state_dir_writable,
+            remediation="",
+        ),
+        # Chain 4: supply chain
+        Check(
+            id="image_digests",
+            name="image digests",
+            category="Supply Chain",
+            depends_on=["docker_available"],
+            run=check_image_digests,
             remediation="",
         ),
     ]
