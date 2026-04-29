@@ -567,7 +567,7 @@ def check_image_digests(user: str, distro: str | None) -> CheckResult:
             status="fail",
             name="image digests",
             detail=f"Stale digests: {', '.join(stale)}",
-            remediation="Run scripts/rotate-digests.py to update pinned digests",
+            remediation="Run scripts/rotate_digests.py to update pinned digests",
         )
 
     count = len(IMAGE_REGISTRY)

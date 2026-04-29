@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 #   .pinned → "ref@sha256:..."  (for Dockerfile FROM / compose image:)
 #   .tagged → "ref:tag"         (for human-readable display / rotation)
 #
-# Rotation procedure: scripts/rotate-digests.py
+# Rotation procedure: scripts/rotate_digests.py
 #   Resolves current tag digests, verifies signatures, patches this file.
 #
 
