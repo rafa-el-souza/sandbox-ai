@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -154,7 +154,6 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate") as mock_hydrate,
             patch("cli.main._phase_acl_grant") as mock_acl,
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -221,7 +220,6 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -254,7 +252,6 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -349,7 +346,6 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -460,7 +456,6 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -469,85 +464,41 @@ class TestStartComposeUnhealthy:
             mock_release.assert_called_once()
 
 
-class TestStartIpcStickyBit:
-    """6.T: start() sets sticky bit on admin-ipc_vol before compose up."""
+class TestStartSshKeypairGeneration:
+    """11.T: _phase_credentials generates SSH keypairs and IPC setup is removed."""
 
-    def test_ipc_setup_called_between_acl_and_compose(
-        self,
-        runner: CliRunner,
-        mock_sandbox_ai_home: Path,
-    ) -> None:
-        """IPC setup runs after ACL grant and before compose up."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+    def test_phase_credentials_generates_ssh_keys(self, tmp_path: Path) -> None:
+        """_phase_credentials calls generate_ssh_keypair for auth and host."""
+        from cli.main import _phase_credentials
 
-        from cli.main import app
-
-        call_order: list[str] = []
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
 
         with (
-            patch(
-                "cli.main._resolve_sandbox_ai_home",
-                return_value=str(home),
-            ),
-            patch(
-                "cli.main._resolve_project_dir",
-                return_value=project_dir,
-            ),
-            patch("cli.main._check_secrets", return_value=[]),
-            patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main._warm_check", return_value=False),
-            patch(
-                "cli.main._acquire_state_lock",
-                return_value=99,
-            ),
-            patch("cli.main._phase_ipam", return_value=0),
-            patch(
-                "cli.main._phase_credentials",
-                return_value="pass",
-            ),
-            patch("cli.main._phase_hydrate"),
-            patch(
-                "cli.main._phase_acl_grant",
-                side_effect=lambda *a, **k: call_order.append(
-                    "acl"
-                ),
-            ),
-            patch(
-                "cli.main._phase_ipc_setup",
-                side_effect=lambda *a, **k: call_order.append(
-                    "ipc"
-                ),
-            ),
-            patch(
-                "cli.main._phase_compose_up",
-                side_effect=lambda *a, **k: call_order.append(
-                    "compose"
-                ),
-            ),
-            patch("cli.main._phase_handover"),
-            patch("cli.main._release_lock"),
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair") as mock_ssh,
         ):
-            result = runner.invoke(app, ["start"])
-            assert result.exit_code == 0
-            assert call_order == ["acl", "ipc", "compose"]
+            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3")
+            assert mock_ssh.call_count == 2
+            calls = mock_ssh.call_args_list
+            assert calls[0] == call(str(tmp_path), "auth")
+            assert calls[1] == call(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
 
-    def test_ipc_setup_unit(self) -> None:
-        """_phase_ipc_setup runs chown+chmod via machinectl."""
-        from cli.main import _phase_ipc_setup
+    def test_phase_ipc_setup_not_in_start(self) -> None:
+        """_phase_ipc_setup function no longer exists in cli.main."""
+        import cli.main
 
-        with patch("cli.main.Executor") as mock_cls:
-            mock_exec = mock_cls.return_value
-            _phase_ipc_setup("myproj", "sandbox")
-            mock_exec.run.assert_called_once()
-            args = mock_exec.run.call_args
-            cmd_str = args[0][0][-1]  # last arg = bash -c cmd
-            assert "admin-ipc_vol" in cmd_str
-            assert "chown 1000:1000 /sock" in cmd_str
-            assert "chmod 1770 /sock" in cmd_str
+        assert not hasattr(cli.main, "_phase_ipc_setup")
+
+    def test_acl_grant_plan_includes_secrets(self, tmp_path: Path) -> None:
+        """_acl_grant_plan includes at least one entry targeting secrets/ directory."""
+        from cli.main import _acl_grant_plan
+
+        plan = _acl_grant_plan(str(tmp_path), "sandbox")
+        secrets_entries = [desc for _, desc in plan if "secrets" in desc]
+        assert len(secrets_entries) >= 1
 
 
 class TestStartProjectNameImmutabilityWarning:
@@ -575,7 +526,6 @@ class TestStartProjectNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -606,7 +556,6 @@ class TestStartProjectNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -1037,10 +986,14 @@ class TestPhaseCredentialsDirect:
 
         proxy_dir = tmp_path / "config" / "proxy"
         proxy_dir.mkdir(parents=True)
-        inst_dir = tmp_path
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
 
-        with patch("cli.main.write_htpasswd") as mock_write:
-            password = _phase_credentials(str(inst_dir))
+        with (
+            patch("cli.main.write_htpasswd") as mock_write,
+            patch("cli.main.generate_ssh_keypair"),
+        ):
+            password = _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3")
             assert len(password) > 0
             mock_write.assert_called_once()
             line = mock_write.call_args[0][1]
@@ -2525,7 +2478,6 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_ipc_setup"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
