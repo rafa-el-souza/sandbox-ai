@@ -410,7 +410,7 @@ class TestFilesystemChecks:
         with patch("os.path.exists", return_value=True):
             result = check_tooling_plane("sandbox", None)
             assert result.status == "pass"
-            assert "16" in result.detail
+            assert "17" in result.detail
 
     def test_tooling_plane_missing_files(self) -> None:
         from core.doctor import check_tooling_plane

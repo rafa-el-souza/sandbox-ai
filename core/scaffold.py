@@ -22,6 +22,7 @@ INSTANCE_SUBDIRS = [
     "docker/core",
     "docker/admin",
     "docker/extras",
+    "docker/coredns",
     "config/admin",
     "config/core",
     "config/coredns",

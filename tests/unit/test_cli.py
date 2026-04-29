@@ -1766,6 +1766,8 @@ def _create_tooling_plane(home: Path) -> None:
     (docker_dir / "admin" / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
     (docker_dir / "extras").mkdir(parents=True, exist_ok=True)
     (docker_dir / "extras" / "db-postgres.yml").write_text("# postgres\n")
+    (docker_dir / "coredns").mkdir(parents=True, exist_ok=True)
+    (docker_dir / "coredns" / "Dockerfile.coredns").write_text("FROM busybox\n")
 
     config_dir = home / ".config"
     (config_dir / "coredns").mkdir(parents=True, exist_ok=True)

@@ -552,6 +552,7 @@ def validate_templates(
         + [f".config/admin/{f}" for f in _STATIC_CONFIG_ADMIN]
         + [f".config/core/{f}" for f in _STATIC_CONFIG_CORE]
         + [".docker/core/entrypoint.sh", ".docker/admin/entrypoint.sh"]
+        + [".docker/coredns/Dockerfile.coredns"]
     )
     if mcp_firecrawl:
         static_files.append(".docker/extras/Dockerfile.mcp-firecrawl")

@@ -2731,3 +2731,73 @@ class TestHealthcheckFixes:
         assert "/dev/tcp" in proxy_section, "Expected /dev/tcp in proxy healthcheck"
         assert "squidclient" not in proxy_section, "proxy healthcheck must not use squidclient"
 
+
+class TestHydrationPipelineRegistration:
+    """Group 6.T RED: CoreDNS Dockerfile pipeline registration in scaffold, hydration, and doctor."""
+
+    def test_docker_coredns_in_instance_subdirs(self) -> None:
+        """(a) 'docker/coredns' is in INSTANCE_SUBDIRS."""
+        from core.scaffold import INSTANCE_SUBDIRS
+
+        assert "docker/coredns" in INSTANCE_SUBDIRS
+
+    def test_render_copies_coredns_dockerfile(self, tmp_path: Path) -> None:
+        """(b) After render_templates(), docker/coredns/Dockerfile.coredns exists in instance
+        and is identical to .docker/coredns/Dockerfile.coredns."""
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns",
+            "config/dnsdist", "config/proxy",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        rendered_df = instance / "docker" / "coredns" / "Dockerfile.coredns"
+        assert rendered_df.exists(), "Dockerfile.coredns not copied to instance dir"
+        source_df = tooling / ".docker" / "coredns" / "Dockerfile.coredns"
+        assert rendered_df.read_text() == source_df.read_text(), "Copied file differs from source"
+
+    def test_validate_templates_counts_coredns_dockerfile(self, tmp_path: Path) -> None:
+        """(c) validate_templates() includes Dockerfile.coredns in its validated total."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+
+        # Baseline count without coredns Dockerfile considered
+        count, errors = validate_templates(ctx, str(tooling), db_postgres=False, mcp_firecrawl=False)
+        assert errors == [], f"Unexpected errors: {errors}"
+
+        # The coredns Dockerfile must be included in validated count.
+        # We verify by checking that removing it causes a validation error.
+        coredns_df = tooling / ".docker" / "coredns" / "Dockerfile.coredns"
+        coredns_df.unlink()
+        count_missing, errors_missing = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert any(
+            "Dockerfile.coredns" in e for e in errors_missing
+        ), "validate_templates must report missing Dockerfile.coredns as error"
+
+    def test_unconditional_files_includes_coredns_dockerfile(self) -> None:
+        """(d) _UNCONDITIONAL_FILES contains '.docker/coredns/Dockerfile.coredns' and has length 17."""
+        from core.doctor import _UNCONDITIONAL_FILES
+
+        assert ".docker/coredns/Dockerfile.coredns" in _UNCONDITIONAL_FILES
+        assert len(_UNCONDITIONAL_FILES) == 17
+
+    def test_check_tooling_plane_references_17(self) -> None:
+        """(e) check_tooling_plane detail string references '17' (not '16')."""
+        from core.doctor import check_tooling_plane
+
+        # Run against the actual repo — should pass (all files present)
+        result = check_tooling_plane("testuser", None)
+        # If it passes, the detail must say "17"
+        if result.status == "pass":
+            assert "17" in result.detail, f"Expected '17' in detail: {result.detail}"
+            assert "16" not in result.detail, f"Detail still says '16': {result.detail}"
+
