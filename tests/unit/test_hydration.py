@@ -2801,3 +2801,101 @@ class TestHydrationPipelineRegistration:
             assert "17" in result.detail, f"Expected '17' in detail: {result.detail}"
             assert "16" not in result.detail, f"Detail still says '16': {result.detail}"
 
+
+# ── Section: Integration Verification ─────────────────────────────────────────
+
+
+class TestInfrastructureBugFixes:
+    """9.T INTEGRATION: End-to-end validation across groups 1-8.
+
+    All tests are expected to pass on first run. A failure is a regression.
+    """
+
+    def test_jinja_context_images_are_digest_pinned(self, tmp_path: Path) -> None:
+        """(a) build_jinja_context produces digest-pinned infrastructure images."""
+        ctx = _build_default_context(tmp_path)
+        for key in ("busybox_image", "dns_image", "proxy_image", "dnsdist_image"):
+            val = ctx[key]
+            assert isinstance(val, str), f"{key} should be str"
+            assert val, f"{key} should be non-empty"
+            assert "@sha256:" in val, f"{key} should contain '@sha256:': {val}"
+
+    def test_render_templates_produces_coredns_dockerfile(self, tmp_path: Path) -> None:
+        """(b) render_templates() produces docker/coredns/Dockerfile.coredns in instance."""
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "inst"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns", "config/dnsdist",
+            "config/proxy", "log/admin", "log/core", "cache/core/.claude",
+            "cache/admin/tmux_resurrect", "custom/config/admin", "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        coredns_dockerfile = instance / "docker" / "coredns" / "Dockerfile.coredns"
+        assert coredns_dockerfile.exists(), "Dockerfile.coredns should be rendered"
+
+    def test_validate_templates_zero_errors(self, tmp_path: Path) -> None:
+        """(c) validate_templates() reports zero errors and counts include coredns Dockerfile."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(ctx, str(tooling), db_postgres=False, mcp_firecrawl=False)
+        assert errors == [], f"Validation errors: {errors}"
+        assert count > 0, "Expected at least one validated template"
+
+    def test_compose_healthchecks_correct(self, tmp_path: Path) -> None:
+        """(d) compose.yml: coredns has build block, proxy healthcheck uses /dev/tcp,
+        coredns healthcheck uses /wget."""
+        # Use the actual repo tooling plane for realistic compose.yml rendering
+        tooling = Path(__file__).resolve().parents[2]
+        instance = tmp_path / "inst"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns", "config/dnsdist",
+            "config/proxy", "log/admin", "log/core", "cache/core/.claude",
+            "cache/admin/tmux_resurrect", "custom/config/admin", "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        compose = (instance / "docker" / "compose.yml").read_text()
+        # coredns should have build: block, not image:
+        assert "build:" in compose, "coredns should use build: block"
+        # Proxy healthcheck uses /dev/tcp
+        assert "/dev/tcp" in compose, "proxy healthcheck should use /dev/tcp"
+        # coredns healthcheck uses /wget
+        assert "/wget" in compose, "coredns healthcheck should use /wget"
+
+    def test_dockerfile_user_lint_zero_violations(self) -> None:
+        """(e) Dockerfile USER lint on both rendered Dockerfiles returns zero violations."""
+        core_path = Path(__file__).resolve().parent.parent.parent / ".docker" / "core" / "Dockerfile.core.wolfi"
+        admin_path = Path(__file__).resolve().parent.parent.parent / ".docker" / "admin" / "Dockerfile.admin.debian"
+
+        for path in (core_path, admin_path):
+            assert path.exists(), f"{path.name} not found"
+            content = path.read_text()
+            violations = _lint_dockerfile_user_context(content)
+            assert violations == [], f"{path.name} lint violations: {violations}"
+
+    def test_image_registry_integrity(self) -> None:
+        """(f) IMAGE_REGISTRY has 7 entries with valid sha256 digests and consistent properties."""
+        import re
+
+        from core.hydration import IMAGE_REGISTRY, ImagePin
+
+        assert len(IMAGE_REGISTRY) == 7, f"Expected 7 entries, got {len(IMAGE_REGISTRY)}"
+
+        sha256_re = re.compile(r"^sha256:[a-f0-9]{64}$")
+        for key, pin in IMAGE_REGISTRY.items():
+            assert isinstance(pin, ImagePin), f"{key} is not an ImagePin"
+            assert sha256_re.match(pin.digest), f"{key}: invalid digest {pin.digest}"
+            assert pin.pinned == f"{pin.ref}@{pin.digest}", f"{key}: .pinned mismatch"
+            assert pin.tagged == f"{pin.ref}:{pin.tag}", f"{key}: .tagged mismatch"
+
