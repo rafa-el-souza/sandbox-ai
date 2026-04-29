@@ -496,7 +496,7 @@ def check_host_uds(user: str, distro: str | None) -> CheckResult:
 
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
-# 17 unconditional source files in the tooling plane
+# 16 unconditional source files in the tooling plane
 _UNCONDITIONAL_FILES: list[str] = [
     ".docker/compose.yml",
     ".docker/core/entrypoint.sh",
@@ -512,7 +512,6 @@ _UNCONDITIONAL_FILES: list[str] = [
     ".config/core/.bashrc",
     ".config/core/.npmrc",
     ".config/core/.gitconfig",
-    ".config/core/.claude.json",
     ".config/core/sshd_config",
     ".config/core/CLAUDE.md",
 ]
@@ -539,7 +538,7 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
             name="ACL support",
             detail="Filesystem supports POSIX ACLs",
         )
-    except subprocess.CalledProcessError, OSError:
+    except (subprocess.CalledProcessError, OSError):
         return CheckResult(
             status="fail",
             name="ACL support",
@@ -573,7 +572,7 @@ def _has_acl_exec(directory: str, user: str) -> bool:
                 perms = line[len(prefix) :]
                 if "x" in perms:
                     return True
-    except subprocess.TimeoutExpired, OSError:
+    except (subprocess.TimeoutExpired, OSError):
         pass
     return False
 
@@ -675,7 +674,7 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
 
 
 def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
-    """Check that all 17 unconditional tooling plane files exist."""
+    """Check that all 16 unconditional tooling plane files exist."""
     sandbox_home = _get_sandbox_ai_home()
     missing: list[str] = []
     for rel_path in _UNCONDITIONAL_FILES:
@@ -687,7 +686,7 @@ def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
         return CheckResult(
             status="pass",
             name="tooling plane",
-            detail="All 17 unconditional files present",
+            detail="All 16 unconditional files present",
         )
     return CheckResult(
         status="fail",
@@ -722,7 +721,7 @@ def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
 
 
 def build_check_registry() -> list[Check]:
-    """Build the full 13-check registry with dependency declarations."""
+    """Build the full 15-check registry with dependency declarations."""
     return [
         # Chain 1: privilege boundary
         Check(
