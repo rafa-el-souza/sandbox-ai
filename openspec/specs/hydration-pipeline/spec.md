@@ -20,7 +20,7 @@ The system SHALL render all Jinja2 templates from the tooling plane into the ins
 
 #### Scenario: Config templates rendered
 - **WHEN** `sandbox start` proceeds to the hydration phase
-- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `sandboxes/<id>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
+- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `sandboxes/<id>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `core/sshd_config`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
 
 #### Scenario: Extras templates resolve Jinja2 variables
 - **WHEN** an enabled extras template (e.g., `db-postgres.yml`) is rendered
@@ -50,7 +50,7 @@ The system SHALL include all values required by extras templates and config temp
 
 #### Scenario: Firecrawl context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `mcp_firecrawl_proxy_ip`, `firecrawl_dns_ip`, `proxy_password`, `coredns_dns_ip`, `proxy_core_ip`, `db_postgres_ip`, `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `core_pids_limit`, `runtime`, and `instance_dir`
+- **THEN** the returned context includes `mcp_firecrawl_proxy_ip`, `firecrawl_dns_ip`, `firecrawl_isolated_ip`, `proxy_password`, `coredns_dns_ip`, `proxy_core_ip`, `db_postgres_ip`, `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `core_pids_limit`, `runtime`, and `instance_dir`
 
 #### Scenario: Dry-run validation catches missing context keys
 - **WHEN** `validate_templates()` renders a template (including extras and config templates) and a required Jinja2 variable is missing from the context
@@ -259,12 +259,20 @@ The system SHALL include `proxy_image`, `dns_image`, and `dnsdist_image` in the 
 - **WHEN** `build_jinja_context()` is called
 - **THEN** the returned context includes `proxy_image` (from `IMAGE_DIGESTS["squid"]`), `dns_image` (from `IMAGE_DIGESTS["coredns"]`), and `dnsdist_image` (from `IMAGE_DIGESTS["dnsdist"]`)
 
-### Requirement: Six-Subnet Context Keys
-The system SHALL include all six subnet CIDR strings and all multi-network container IP addresses in the Jinja2 context returned by `build_jinja_context()`.
+### Requirement: Seven-Subnet Context Keys
+The system SHALL include all seven subnet CIDR strings and all multi-network container IP addresses in the Jinja2 context returned by `build_jinja_context()`.
 
-#### Scenario: All six subnet context keys present
+#### Scenario: All seven subnet context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `admin_subnet`, `admin_proxy_subnet`, and `egress_subnet`
+- **THEN** the returned context includes `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `admin_subnet`, `admin_proxy_subnet`, `egress_subnet`, and `ipc_subnet`
+
+#### Scenario: IPC IP context keys present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `core_ipc_ip` and `admin_ipc_ip`
+
+#### Scenario: Firecrawl isolated IP context key present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `firecrawl_isolated_ip`
 
 #### Scenario: Proxy dual-network IP context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -281,3 +289,18 @@ The system SHALL include all six subnet CIDR strings and all multi-network conta
 #### Scenario: db-postgres dual-network IP context keys present
 - **WHEN** `build_jinja_context()` is called
 - **THEN** the returned context includes `db_postgres_ip` and `db_postgres_admin_ip`
+
+### Requirement: Programmatic .claude.json Generation
+The system SHALL generate `.claude.json` programmatically in `render_templates()` using `json.dump`, with conditional `mcpServers` registration. This follows the existing pattern for `allowed_domains.txt` and `read_only_domains.txt`.
+
+#### Scenario: .claude.json generated during render_templates
+- **WHEN** `render_templates()` completes
+- **THEN** `sandboxes/<id>/config/core/.claude.json` exists and contains valid JSON
+
+#### Scenario: Firecrawl MCP registered when enabled
+- **WHEN** `render_templates()` runs with `mcp_firecrawl_enabled = True`
+- **THEN** `.claude.json` contains `mcpServers.firecrawl` with `type: "http"` and `url: "http://<firecrawl_isolated_ip>:3000/mcp"`
+
+#### Scenario: Empty config when no MCP enabled
+- **WHEN** `render_templates()` runs with `mcp_firecrawl_enabled = False`
+- **THEN** `.claude.json` contains `{}`

@@ -123,6 +123,10 @@ The system SHALL enforce separation between the immutable tooling plane (`.docke
 - **WHEN** the admin and core containers are started
 - **THEN** the bind mounts for shell history are at the **directory** level (`sandboxes/<id>/log/admin/` and `sandboxes/<id>/log/core/`), and the `HISTFILE` environment variable inside each container points to a specific path within that mounted directory
 
+#### Scenario: SSH Credentials in Secrets Directory
+- **WHEN** the hydration pipeline runs
+- **THEN** SSH keypair files are written exclusively under `SANDBOX_AI_HOME/sandboxes/<id>/secrets/`
+
 ### Requirement: Deep VFS Annihilation
 The system SHALL support volume removal on explicit operator request, scoped strictly to Docker named volumes owned by the instance.
 
@@ -132,7 +136,19 @@ The system SHALL support volume removal on explicit operator request, scoped str
 
 #### Scenario: The `destroy` Full Annihilation
 - **WHEN** the human operator confirms `sandbox destroy`
-- **THEN** `docker compose down -v` removes all named Docker volumes, after which `shutil.rmtree(sandboxes/<id>/)` removes the entire instance directory including logs and cache
+- **THEN** `docker compose down -v` removes all named Docker volumes, after which `shutil.rmtree(sandboxes/<id>/)` removes the entire instance directory including logs, cache, and secrets
+
+#### Scenario: admin-ipc_vol absent from volumes
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** there is NO volume definition for `admin-ipc_vol`
+
+#### Scenario: mcp-ipc_vol absent from volumes
+- **WHEN** the rendered `compose.yml` and `mcp-firecrawl.yml` are inspected
+- **THEN** there is NO volume definition for `mcp-ipc_vol`
+
+#### Scenario: /sock mount absent from all services
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** no service contains a volume mount referencing `/sock`
 
 ### Requirement: Custom Config Override Bind Mounts
 The rendered `compose.yml` SHALL include read-only bind mounts provisioning the custom config override directories inside each container. Without these mounts, the override hooks in `.bashrc`, `.gitconfig`, `.zshrc`, and `.tmux.conf` would silently no-op.

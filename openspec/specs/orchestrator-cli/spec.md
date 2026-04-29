@@ -13,7 +13,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start`
-- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight, validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet sextuple, runs the Pydantic + Jinja2 hydration pipeline, applies ACL grants, executes `docker compose up -d --build --wait` via `machinectl`, and hands the terminal over to the admin container via `docker exec -it`, displaying progress for each phase
+- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight, validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet septuple, runs the Pydantic + Jinja2 hydration pipeline, applies ACL grants, executes `docker compose up -d --build --wait` via `machinectl`, and hands the terminal over to the admin container via `docker exec -it`, displaying progress for each phase
 
 #### Scenario: Instance State Query
 - **WHEN** the human operator executes `sandbox status`

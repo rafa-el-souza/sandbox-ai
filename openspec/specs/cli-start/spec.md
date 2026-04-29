@@ -31,11 +31,11 @@ The system SHALL acquire a per-instance `state.lock` (fcntl `LOCK_EX | LOCK_NB`)
 - **THEN** the second invocation exits with: "Another sandbox start is already in progress for this instance."
 
 ### Requirement: IPAM Allocation Before Launch
-The system SHALL allocate six consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
+The system SHALL allocate seven consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
 
 #### Scenario: New instance gets lowest available slot
 - **WHEN** `sandbox start` scaffolds a new instance with no existing IPAM entry
-- **THEN** the lowest available `base_index` (0–6655) is assigned and written to `ipam.json` before any compose command runs
+- **THEN** the lowest available `base_index` (0–5704) is assigned and written to `ipam.json` before any compose command runs
 
 #### Scenario: Existing instance reuses previous slot
 - **WHEN** `sandbox start` is invoked for an instance already present in `ipam.json`
@@ -60,7 +60,7 @@ The system SHALL hand over the terminal to the admin container via `machinectl s
 - **THEN** `sudo machinectl shell <host_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed and the user's terminal is now owned by that session
 
 ### Requirement: Instance Pre-Flight Checks
-The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks.
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. SSH keypair generation SHALL occur during `_phase_credentials()`.
 
 #### Scenario: Secret completeness gate
 - **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
@@ -73,6 +73,10 @@ The system SHALL validate instance readiness before beginning provisioning. Pre-
 #### Scenario: Pre-flight passes
 - **WHEN** sentinel exists, all required secrets are populated, and all Chain 1 checks pass
 - **THEN** provisioning proceeds normally
+
+#### Scenario: SSH keypairs generated during credentials phase
+- **WHEN** `_phase_credentials()` runs
+- **THEN** SSH auth and host keypairs are generated (idempotent — skips if files exist)
 
 ### Requirement: ACL Cleanup on Start Failure
 The system SHALL revoke ACL grants if Phase 6 (compose up) fails after Phase 5 (ACL grants) has begun. Cleanup scope SHALL be limited to ACLs — earlier phases are idempotent and do not require rollback.
@@ -123,7 +127,7 @@ The system SHALL pass `--env-file <instance_dir>/.sandbox.env` to all `docker co
 - **THEN** each compose file appears exactly once in the `-f` flag list (flags are used directly from `_build_compose_files()` without re-wrapping)
 
 ### Requirement: Phase Progress Output
-The system SHALL display progress for each provisioning phase using Rich formatted output.
+The system SHALL display progress for each provisioning phase using Rich formatted output. The IPC setup phase (Phase 5b) SHALL NOT appear in the output.
 
 #### Scenario: Fast phase completion
 - **WHEN** a provisioning phase (IPAM, credentials, hydration, ACL grant) completes
@@ -139,7 +143,11 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 
 #### Scenario: Warmup prompt injected at exec time
 - **WHEN** `sandbox.toml` declares a non-empty `project.warmup_prompt`
-- **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this variable on shell init to auto-invoke claude
+- **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this variable on shell init to auto-invoke claude via SSH
+
+#### Scenario: IPC setup phase absent
+- **WHEN** `sandbox start` provisioning phases are inspected
+- **THEN** there is NO Phase 5b (IPC setup) — the disposable Alpine container for sticky bit is removed
 
 #### Scenario: Failure with ACL cleanup emits diagnostic
 - **WHEN** Phase 5 or Phase 6 fails and ACL cleanup is triggered
