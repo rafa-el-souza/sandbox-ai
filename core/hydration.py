@@ -394,6 +394,7 @@ def render_templates(
 
     _copy_file(tooling_plane, ".docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
     _copy_file(tooling_plane, ".docker/admin/entrypoint.sh", instance_dir, "docker/admin/entrypoint.sh")
+    _copy_file(tooling_plane, ".docker/coredns/Dockerfile.coredns", instance_dir, "docker/coredns/Dockerfile.coredns")
 
     # ── Feature-gated extras ──────────────────────────────────────────────
 

@@ -393,6 +393,11 @@ class TestRenderTemplates:
         (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
         (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
 
+        # CoreDNS Dockerfile (static copy, no Jinja)
+        coredns_dir = docker_dir / "coredns"
+        coredns_dir.mkdir()
+        (coredns_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
+
         # Extras
         extras_dir = docker_dir / "extras"
         extras_dir.mkdir()
@@ -792,6 +797,9 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     admin_dir.mkdir()
     (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
     (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+    coredns_dir = docker_dir / "coredns"
+    coredns_dir.mkdir()
+    (coredns_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
     extras_dir = docker_dir / "extras"
     extras_dir.mkdir()
     (extras_dir / "mcp-firecrawl.yml").write_text("# firecrawl\n")
@@ -968,6 +976,9 @@ class TestReadOnlyDomainsGeneration:
         admin_dir.mkdir()
         (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
         (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+        coredns_dock_dir = docker_dir / "coredns"
+        coredns_dock_dir.mkdir()
+        (coredns_dock_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
 
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
@@ -1022,6 +1033,8 @@ class TestReadOnlyDomainsGeneration:
         (docker_dir / "admin").mkdir()
         (docker_dir / "admin" / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
         (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/sh\n")
+        (docker_dir / "coredns").mkdir()
+        (docker_dir / "coredns" / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
 
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
@@ -2654,4 +2667,67 @@ class TestDockerfileUserLint:
         violations = _lint_dockerfile_user_context(synthetic)
         assert len(violations) == 1
         assert "/staging" in violations[0]
+
+
+class TestHealthcheckFixes:
+    """Group 5.T: CoreDNS Dockerfile and Compose healthcheck fixes."""
+
+    def test_coredns_dockerfile_exists(self) -> None:
+        """Dockerfile.coredns exists in .docker/coredns/."""
+        root = Path(__file__).resolve().parents[2]
+        df = root / ".docker" / "coredns" / "Dockerfile.coredns"
+        assert df.exists(), "Dockerfile.coredns does not exist"
+
+    def test_coredns_dockerfile_structure(self) -> None:
+        """Dockerfile.coredns contains multi-stage build with probe stage."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "coredns" / "Dockerfile.coredns").read_text()
+        assert "FROM ${BUSYBOX_BASE} AS probe" in content
+        assert "FROM ${CORE_BASE}" in content
+        assert "COPY --from=probe /bin/wget /wget" in content
+        assert "ARG CORE_BASE" in content
+        assert "ARG BUSYBOX_BASE" in content
+        # No Jinja markers
+        assert "{{ }}" not in content
+        assert "{{" not in content
+
+    def test_compose_coredns_build_block(self) -> None:
+        """compose.yml template has coredns with build: block (not image:)."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "compose.yml").read_text()
+        assert "coredns:" in content
+        coredns_idx = content.index("  coredns:")
+        # Section ends at next blank line (double newline)
+        section_end = content.index("\n\n", coredns_idx)
+        section = content[coredns_idx:section_end]
+        assert "build:" in section, "coredns must use build: block"
+        assert "Dockerfile.coredns" in section
+        assert "CORE_BASE=" in section, "Missing CORE_BASE arg"
+        assert "BUSYBOX_BASE=" in section, "Missing BUSYBOX_BASE arg"
+        # Must NOT have image: directive within coredns section only
+        assert 'image:' not in section, "coredns must not have image: when using build:"
+
+    def test_coredns_healthcheck_no_cmd_shell(self) -> None:
+        """CoreDNS healthcheck uses CMD (not CMD-SHELL) with /wget."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "compose.yml").read_text()
+        # Find the coredns healthcheck test line
+        coredns_idx = content.index("coredns:")
+        # Find healthcheck test line within coredns section
+        section = content[coredns_idx:content.index("\n\n", coredns_idx)]
+        assert '"CMD"' in section or "'CMD'" in section, "Expected CMD in coredns healthcheck"
+        assert '"CMD-SHELL"' not in section, "coredns healthcheck must not use CMD-SHELL"
+        assert "/wget" in section, "coredns healthcheck must use /wget"
+
+    def test_proxy_healthcheck_tcp_probe(self) -> None:
+        """Proxy healthcheck uses TCP probe (not squidclient)."""
+        root = Path(__file__).resolve().parents[2]
+        content = (root / ".docker" / "compose.yml").read_text()
+        # Find proxy service section
+        proxy_idx = content.index("\n  proxy:")
+        proxy_section = content[proxy_idx:content.index("\n\n", proxy_idx)]
+        # Must use CMD, not CMD-SHELL
+        assert '"CMD"' in proxy_section, "Expected CMD in proxy healthcheck"
+        assert "/dev/tcp" in proxy_section, "Expected /dev/tcp in proxy healthcheck"
+        assert "squidclient" not in proxy_section, "proxy healthcheck must not use squidclient"
 

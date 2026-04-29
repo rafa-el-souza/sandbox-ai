@@ -1,0 +1,14 @@
+# ─── CoreDNS Multi-Stage Build ────────────────────────────────────────────────
+# Stage 1 (probe): Extract wget from busybox for healthcheck binary.
+# Stage 2 (runtime): CoreDNS with injected wget for CMD-based healthcheck.
+#
+# This avoids CMD-SHELL and ensures the minimal coredns image has a
+# static binary for HTTP health probes without installing a shell.
+
+ARG CORE_BASE
+ARG BUSYBOX_BASE
+
+FROM ${BUSYBOX_BASE} AS probe
+
+FROM ${CORE_BASE}
+COPY --from=probe /bin/wget /wget
