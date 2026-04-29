@@ -40,3 +40,69 @@ def write_htpasswd(config_proxy_dir: str, htpasswd_line: str) -> None:
     with open(tmp_path, "w") as f:
         f.write(htpasswd_line + "\n")
     os.replace(tmp_path, htpasswd_path)
+
+
+def generate_ssh_keypair(
+    instance_dir: str,
+    pair_type: str,
+    *,
+    core_ipc_ip: str = "",
+) -> None:
+    """Generate an Ed25519 SSH keypair for IPC transport.
+
+    Args:
+        instance_dir: Instance directory (keypairs written to secrets/ subdirectory).
+        pair_type: Either "auth" (admin→core) or "host" (core identity).
+        core_ipc_ip: Required for pair_type="host" — used in known_hosts entry.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    secrets_dir = os.path.join(instance_dir, "secrets")
+
+    if pair_type == "auth":
+        private_key_path = os.path.join(secrets_dir, "ipc_ssh_key")
+        public_key_path = os.path.join(secrets_dir, "authorized_keys")
+    elif pair_type == "host":
+        private_key_path = os.path.join(secrets_dir, "ipc_host_key")
+        public_key_path = os.path.join(secrets_dir, "ipc_known_hosts")
+    else:
+        raise ValueError(f"Invalid pair_type: {pair_type!r} (expected 'auth' or 'host')")
+
+    # Idempotency: skip if private key already exists
+    if os.path.exists(private_key_path):
+        return
+
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+
+    # Write private key (PEM, no encryption)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    with open(private_key_path, "wb") as f:
+        f.write(private_pem)
+    os.chmod(private_key_path, 0o600)
+
+    # Write public key / known_hosts
+    public_ssh = public_key.public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    )
+
+    if pair_type == "auth":
+        # authorized_keys: ssh-ed25519 <base64> format (already in OpenSSH format)
+        with open(public_key_path, "wb") as f:
+            f.write(public_ssh)
+            f.write(b"\n")
+    else:
+        # known_hosts: <ip> ssh-ed25519 <base64>
+        # Extract just the base64 portion from the OpenSSH public key
+        parts = public_ssh.decode("ascii").split()
+        key_type = parts[0]
+        key_data = parts[1]
+        known_hosts_line = f"{core_ipc_ip} {key_type} {key_data}\n"
+        with open(public_key_path, "w") as f:
+            f.write(known_hosts_line)

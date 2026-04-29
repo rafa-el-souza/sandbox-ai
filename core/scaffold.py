@@ -35,6 +35,7 @@ INSTANCE_SUBDIRS = [
     "cache/admin/tmux_resurrect",
     "custom/config/admin",
     "custom/config/core",
+    "secrets",
 ]
 
 

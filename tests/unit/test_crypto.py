@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from core.crypto import (
     generate_credential,
     hash_proxy_password,
@@ -73,3 +74,66 @@ class TestWriteHtpasswd:
         content = (proxy_dir / ".htpasswd").read_text()
         assert "newhash" in content
         assert "old_content" not in content
+
+
+class TestGenerateSSHKeypair:
+    """2.T RED: SSH keypair generation — Ed25519 auth + host keypairs."""
+
+    def test_generate_ssh_auth_keypair_creates_files(self, tmp_path: Path) -> None:
+        """Auth keypair: ipc_ssh_key (PEM) and authorized_keys (ssh-ed25519)."""
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        generate_ssh_keypair(str(tmp_path), "auth")
+        assert (secrets_dir / "ipc_ssh_key").exists()
+        private_key = (secrets_dir / "ipc_ssh_key").read_text()
+        assert "BEGIN" in private_key  # PEM header
+        assert (secrets_dir / "authorized_keys").exists()
+        public_key = (secrets_dir / "authorized_keys").read_text()
+        assert public_key.startswith("ssh-ed25519")
+
+    def test_generate_ssh_host_keypair_creates_files(self, tmp_path: Path) -> None:
+        """Host keypair: ipc_host_key (PEM) and ipc_known_hosts (with IP)."""
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        generate_ssh_keypair(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
+        assert (secrets_dir / "ipc_host_key").exists()
+        private_key = (secrets_dir / "ipc_host_key").read_text()
+        assert "BEGIN" in private_key  # PEM header
+        assert (secrets_dir / "ipc_known_hosts").exists()
+        known_hosts = (secrets_dir / "ipc_known_hosts").read_text()
+        assert "10.100.6.3" in known_hosts
+
+    def test_generate_ssh_keypair_idempotent(self, tmp_path: Path) -> None:
+        """Second call does not overwrite existing key files."""
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        generate_ssh_keypair(str(tmp_path), "auth")
+        first_content = (secrets_dir / "ipc_ssh_key").read_text()
+        generate_ssh_keypair(str(tmp_path), "auth")
+        second_content = (secrets_dir / "ipc_ssh_key").read_text()
+        assert first_content == second_content
+
+    def test_generate_ssh_keypair_uses_ed25519(self, tmp_path: Path) -> None:
+        """Generated public key starts with ssh-ed25519."""
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        generate_ssh_keypair(str(tmp_path), "auth")
+        public_key = (secrets_dir / "authorized_keys").read_text()
+        assert public_key.startswith("ssh-ed25519")
+
+    def test_generate_ssh_keypair_invalid_pair_type(self, tmp_path: Path) -> None:
+        """Invalid pair_type raises ValueError."""
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        with pytest.raises(ValueError, match="Invalid pair_type"):
+            generate_ssh_keypair(str(tmp_path), "invalid")
