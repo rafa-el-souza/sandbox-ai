@@ -590,7 +590,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
     from core.ipam import derive_static_ips, derive_subnets
 
-    isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(0)
+    isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(0)
     ips = derive_static_ips(0)
 
     return {
@@ -603,6 +603,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "admin_subnet": admin,
         "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
+        "ipc_subnet": ipc,
         **ips,
         "proxy_password": "testpass",
         "proxy_url_core": "http://proxyuser:testpass@proxy:3128",

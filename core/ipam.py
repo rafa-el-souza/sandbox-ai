@@ -1,17 +1,17 @@
-"""IPAM allocator: /24-sextuple subnet allocation with lowest-slot scan and overflow detection.
+"""IPAM allocator: /24-septuple subnet allocation with lowest-slot scan and overflow detection.
 
-Each sandbox instance is assigned six consecutive /24 subnets (isolated, core_proxy, dns, admin,
-admin_proxy, egress) from the 10.100.0.0-10.255.255.0 range. The ledger maps project_id -> base_index
-(integer). Subnets are derived at runtime using: 10.(100 + g//256).(g%256).0/24 where g = base_index * 6.
+Each sandbox instance is assigned seven consecutive /24 subnets (isolated, core_proxy, dns, admin,
+admin_proxy, egress, ipc) from the 10.100.0.0-10.255.255.0 range. The ledger maps project_id -> base_index
+(integer). Subnets are derived at runtime using: 10.(100 + g//256).(g%256).0/24 where g = base_index * 7.
 
-Maximum concurrent instances: 6,656 (base_index 0-6655).
+Maximum concurrent instances: 5,705 (base_index 0-5704).
 """
 
 import fcntl
 import json
 import os
 
-MAX_SLOTS = 6656
+MAX_SLOTS = 5705
 
 
 class IPAMExhaustedError(Exception):
@@ -125,24 +125,25 @@ class IPAMLedger:
         )
 
 
-def derive_subnets(base_index: int) -> tuple[str, str, str, str, str, str]:
-    """Derive six /24 subnets from a base_index.
+def derive_subnets(base_index: int) -> tuple[str, str, str, str, str, str, str]:
+    """Derive seven /24 subnets from a base_index.
 
-    Formula: g = base_index * 6
+    Formula: g = base_index * 7
         isolated     = 10.(100 + g//256).(g%256).0/24
         core_proxy   = 10.(100 + (g+1)//256).((g+1)%256).0/24
         dns          = 10.(100 + (g+2)//256).((g+2)%256).0/24
         admin        = 10.(100 + (g+3)//256).((g+3)%256).0/24
         admin_proxy  = 10.(100 + (g+4)//256).((g+4)%256).0/24
         egress       = 10.(100 + (g+5)//256).((g+5)%256).0/24
+        ipc          = 10.(100 + (g+6)//256).((g+6)%256).0/24 (IPC_NET)
 
     Raises ValueError if base_index >= MAX_SLOTS.
     """
     if base_index >= MAX_SLOTS:
         raise ValueError(f"base_index {base_index} exceeds MAX_SLOTS ({MAX_SLOTS})")
-    g = base_index * 6
+    g = base_index * 7
     subnets = tuple(
-        f"10.{100 + (g + i) // 256}.{(g + i) % 256}.0/24" for i in range(6)
+        f"10.{100 + (g + i) // 256}.{(g + i) % 256}.0/24" for i in range(7)
     )
     return subnets  # type: ignore[return-value]
 
@@ -150,7 +151,7 @@ def derive_subnets(base_index: int) -> tuple[str, str, str, str, str, str]:
 def derive_static_ips(base_index: int) -> dict[str, str]:
     """Derive all static IP addresses from a base_index.
 
-    Uses six subnet bases for containers with multi-network membership.
+    Uses seven subnet bases for containers with multi-network membership.
     Each container gets a distinct static IP on every network it participates in.
     """
     (
@@ -160,6 +161,7 @@ def derive_static_ips(base_index: int) -> dict[str, str]:
         admin_subnet,
         admin_proxy_subnet,
         egress_subnet,
+        ipc_subnet,
     ) = derive_subnets(base_index)
 
     isolated_base = isolated_subnet.rsplit(".0/24", 1)[0]
@@ -168,11 +170,13 @@ def derive_static_ips(base_index: int) -> dict[str, str]:
     admin_base = admin_subnet.rsplit(".0/24", 1)[0]
     admin_proxy_base = admin_proxy_subnet.rsplit(".0/24", 1)[0]
     egress_base = egress_subnet.rsplit(".0/24", 1)[0]
+    ipc_base = ipc_subnet.rsplit(".0/24", 1)[0]
 
     return {
-        # Core (agent) — isolated_net + core_proxy_net
+        # Core (agent) — isolated_net + core_proxy_net + ipc_net
         "agent_isolated_ip": f"{isolated_base}.3",
         "agent_proxy_ip": f"{core_proxy_base}.3",
+        "core_ipc_ip": f"{ipc_base}.3",
         # Proxy (squid) — core_proxy_net + admin_proxy_net + egress_net
         "proxy_core_ip": f"{core_proxy_base}.254",
         "proxy_admin_ip": f"{admin_proxy_base}.254",
@@ -184,14 +188,16 @@ def derive_static_ips(base_index: int) -> dict[str, str]:
         "coredns_dns_ip": f"{dns_base}.53",
         "coredns_admin_ip": f"{admin_base}.53",
         "coredns_egress_ip": f"{egress_base}.53",
-        # Admin (human) — admin_net + admin_proxy_net
+        # Admin (human) — admin_net + admin_proxy_net + ipc_net
         "admin_admin_ip": f"{admin_base}.2",
         "admin_proxy_ip": f"{admin_proxy_base}.2",
+        "admin_ipc_ip": f"{ipc_base}.2",
         # db-postgres — isolated_net + admin_net
         "db_postgres_ip": f"{isolated_base}.54",
         "db_postgres_admin_ip": f"{admin_base}.54",
-        # mcp-firecrawl — core_proxy_net + dns_net
+        # mcp-firecrawl — core_proxy_net + dns_net + isolated_net
         "mcp_firecrawl_proxy_ip": f"{core_proxy_base}.55",
         "firecrawl_dns_ip": f"{dns_base}.55",
+        "firecrawl_isolated_ip": f"{isolated_base}.55",
     }
 

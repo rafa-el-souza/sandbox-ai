@@ -181,11 +181,11 @@ def build_jinja_context(
         referenced in a template but absent from this context raises
         ``UndefinedError`` at render time and during ``--dry-run`` validation.
     """
-    isolated, core_proxy, dns, admin, admin_proxy, egress = derive_subnets(base_index)
+    isolated, core_proxy, dns, admin, admin_proxy, egress, _ipc = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
 
     return {
-        # Network — 6-subnet topology
+        # Network — 7-subnet topology
         "isolated_subnet": isolated,
         "core_proxy_subnet": core_proxy,
         "dns_subnet": dns,
