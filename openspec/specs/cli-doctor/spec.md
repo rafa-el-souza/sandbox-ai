@@ -152,6 +152,31 @@ The system SHALL verify that the `runsc` runtime does NOT have `--host-uds=all` 
 - **WHEN** the `runsc` check has failed or been skipped
 - **THEN** the `--host-uds` check is skipped with annotation `requires: runsc`
 
+### Requirement: Image Digest Resolvability Check
+The system SHALL provide a `check_image_digests` doctor check in the `"Supply Chain"` category that verifies all `IMAGE_REGISTRY` entries are resolvable against their respective container registries. The check SHALL depend on `docker_available`. The check SHALL use `docker manifest inspect` via machinectl to probe each digest.
+
+**Dependencies:** Docker Availability (`docker_available` check)
+
+#### Scenario: All digests resolvable
+- **WHEN** `docker manifest inspect <ref>@<digest>` succeeds for every `IMAGE_REGISTRY` entry (via machinectl)
+- **THEN** the check reports PASS with the count of verified images
+
+#### Scenario: Stale digest detected
+- **WHEN** `docker manifest inspect <ref>@<digest>` returns `MANIFEST_UNKNOWN` or exits non-zero for any entry
+- **THEN** the check reports FAIL identifying the stale entry by key name and its unresolvable digest
+
+#### Scenario: Tag drift detected (informational)
+- **WHEN** the pinned digest for an entry differs from the current tag resolution (`docker manifest inspect <ref>:<tag>`)
+- **THEN** the check reports INFO (not FAIL) noting that the upstream tag has been re-pushed and rotation may be warranted
+
+#### Scenario: Registry unreachable
+- **WHEN** the manifest inspection times out (2-second timeout) or network is unavailable
+- **THEN** the check reports SKIP with `"registry unreachable"` — non-fatal, preserving offline/air-gapped use
+
+#### Scenario: docker_available dependency failed — check skipped
+- **WHEN** the `docker_available` check has failed or been skipped
+- **THEN** the `check_image_digests` check is skipped with annotation `requires: docker_available`
+
 ### Requirement: Warn Severity Status
 The system SHALL support a `warn` status in `CheckResult` for defense-in-depth advisories that inform without blocking. `warn` results SHALL NOT cascade skip to dependent checks. `warn` results SHALL NOT block `sandbox start` pre-flight gates. `warn` results SHALL NOT cause a non-zero exit code from `sandbox doctor`.
 
@@ -223,12 +248,12 @@ The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) th
 - **THEN** the check still executes successfully using the provided user parameter (no cross-chain `depends_on` required)
 
 ### Requirement: Tooling Plane Integrity
-The system SHALL verify that the unconditional template and static files exist in `.docker/` and `.config/`.
+The system SHALL verify that the unconditional template and static files exist in `.docker/` and `.config/`. The unconditional file count SHALL be 17 (16 original + `.docker/coredns/Dockerfile.coredns`).
 
 **Dependencies:** None (root check)
 
 #### Scenario: All files present
-- **WHEN** all 15 required files exist at their expected paths
+- **WHEN** all 17 required files exist at their expected paths (including `.docker/coredns/Dockerfile.coredns`)
 - **THEN** the check reports PASS with the file count
 
 #### Scenario: Files missing
@@ -305,7 +330,7 @@ The system SHALL render results using Rich, grouped by category, with compact su
 - **THEN** a summary line is displayed: `N/M passed · W warnings · X failed · Y skipped` (segments with zero count are omitted)
 
 ### Requirement: Check Subset API
-The system SHALL provide a function to execute a filtered subset of doctor checks by category, enabling `init` and `start` to run only their relevant dependency chains without duplicating check logic.
+The system SHALL provide a function to execute a filtered subset of doctor checks by category, enabling `init` and `start` to run only their relevant dependency chains without duplicating check logic. Note: the Privilege Boundary count is 10 (reflecting the already-implemented `host_uds` check from Wave 4, not the new `check_image_digests` which is in the `"Supply Chain"` category).
 
 #### Scenario: Init runs filesystem and repo checks
 - **WHEN** `sandbox init` invokes the doctor subset with categories `["Filesystem", "Repo Integrity"]`
@@ -313,7 +338,7 @@ The system SHALL provide a function to execute a filtered subset of doctor check
 
 #### Scenario: Start runs privilege boundary checks
 - **WHEN** `sandbox start` invokes the doctor subset with category `["Privilege Boundary"]`
-- **THEN** only the 9 checks in that category are executed (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc, runsc runtimeArgs), with dependency graph and cascading skip logic preserved
+- **THEN** only the 10 checks in that category are executed (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc, runsc runtimeArgs, --host-uds=none), with dependency graph and cascading skip logic preserved
 
 #### Scenario: Subset results match full doctor format
 - **WHEN** the subset API returns results

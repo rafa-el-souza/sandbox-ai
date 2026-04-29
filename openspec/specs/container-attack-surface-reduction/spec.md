@@ -143,3 +143,64 @@ The admin service in `compose.yml` SHALL include tmpfs mounts for all runtime-wr
 #### Scenario: Starship config bind-mount layers over tmpfs
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
 - **THEN** the `starship.toml` bind-mount at `/home/human/.config/starship.toml:ro` coexists with the `/home/human/.config` tmpfs mount (Docker processes tmpfs before bind-mounts)
+
+### Requirement: Parallel Builder Stage USER Context Correctness
+The core Dockerfile's parallel builder stages (`branch-typescript`, `branch-python`, `branch-claude`) SHALL use `USER root` for filesystem creation operations (`mkdir`, `chown`) on root-owned paths, then switch to `USER ${USERNAME}` before any network-facing tool installation. This ensures builder stages execute filesystem writes with correct privileges.
+
+#### Scenario: branch-typescript uses root for staging mkdir
+- **WHEN** the `branch-typescript` stage in `Dockerfile.core.wolfi` is inspected
+- **THEN** `USER root` precedes `RUN mkdir -p /staging/...` and `USER ${USERNAME}` precedes the `npm install` command
+
+#### Scenario: branch-python uses root for staging mkdir
+- **WHEN** the `branch-python` stage in `Dockerfile.core.wolfi` is inspected
+- **THEN** `USER root` precedes `RUN mkdir -p /staging/...` and `USER ${USERNAME}` precedes the `curl` and `npm install` commands
+
+#### Scenario: branch-claude uses root for staging mkdir
+- **WHEN** the `branch-claude` stage in `Dockerfile.core.wolfi` is inspected
+- **THEN** `USER root` precedes `RUN mkdir -p /staging/...` and `USER ${USERNAME}` precedes the `npm install` and `curl` commands
+
+#### Scenario: No unprivileged writes to root-owned paths in builder stages
+- **WHEN** the `Dockerfile.core.wolfi` template is inspected
+- **THEN** no `RUN mkdir`, `RUN chmod`, or `RUN chown` targeting `/staging`, `/usr`, `/etc`, `/var`, `/run`, or `/opt` occurs under an unprivileged `USER` context
+
+### Requirement: Admin Dockerfile Entrypoint Permission Context
+The admin Dockerfile SHALL use `USER root` before the `COPY --chown=root:root entrypoint.sh` and `chmod a+x` operations, then restore `USER ${USERNAME}` before the `ENTRYPOINT` directive.
+
+#### Scenario: Entrypoint copy runs as root
+- **WHEN** the `Dockerfile.admin.debian` is inspected
+- **THEN** `USER root` appears before `COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh` and `RUN chmod a+x /usr/local/bin/entrypoint.sh`
+
+#### Scenario: Final USER is unprivileged before ENTRYPOINT
+- **WHEN** the `Dockerfile.admin.debian` is inspected
+- **THEN** `USER ${USERNAME}` appears between the `chmod` and the `ENTRYPOINT` directive
+
+### Requirement: Claude CLI Installer Path
+The core Dockerfile SHALL reference `${HOME_DIR}/.local/bin/claude` as the source path for copying the Claude CLI binary to `/staging/usr/local/bin/claude`. The legacy path `${HOME_DIR}/.claude/local/claude` SHALL NOT be used.
+
+#### Scenario: Claude binary copied from .local/bin
+- **WHEN** the `branch-claude` stage in `Dockerfile.core.wolfi` is inspected
+- **THEN** the `cp` command sources from `${HOME_DIR}/.local/bin/claude`
+
+#### Scenario: Legacy claude path is absent
+- **WHEN** the `Dockerfile.core.wolfi` template source is inspected
+- **THEN** it does NOT contain `${HOME_DIR}/.claude/local/claude`
+
+### Requirement: Dockerfile USER Context Structural Lint
+The system SHALL include a unit test that scans rendered Dockerfile templates for filesystem write operations (`mkdir`, `chmod`, `chown`, `touch`, `cp`) targeting root-owned paths while the active `USER` is unprivileged. The lint SHALL use a state machine that tracks `USER` and `FROM` directives.
+
+#### Scenario: Lint passes on correctly-structured Dockerfiles
+- **WHEN** the structural lint runs against the current `Dockerfile.core.wolfi` and `Dockerfile.admin.debian`
+- **THEN** zero violations are reported
+
+#### Scenario: Lint detects unprivileged mkdir on root-owned path
+- **WHEN** the lint encounters `RUN mkdir -p /staging/...` under `USER agent` (not root)
+- **THEN** it reports a violation identifying the line, the active user, and the target path
+
+#### Scenario: Lint handles FROM resets
+- **WHEN** the lint encounters `FROM ... AS branch-typescript`
+- **THEN** it resets the tracked `USER` to `root` (Dockerfile default)
+
+#### Scenario: Lint handles line continuations
+- **WHEN** a `RUN` command spans multiple lines with `\` continuations
+- **THEN** the lint joins them into a single logical line before scanning for filesystem operations
+

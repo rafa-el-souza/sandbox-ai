@@ -98,7 +98,7 @@ The system SHALL include all values required by extras templates and config temp
 
 #### Scenario: Infrastructure image context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `proxy_image` (from `IMAGE_DIGESTS["squid"]`), `dns_image` (from `IMAGE_DIGESTS["coredns"]`), and `dnsdist_image` (from `IMAGE_DIGESTS["dnsdist"]`)
+- **THEN** the returned context includes `proxy_image` (from `IMAGE_REGISTRY["squid"].pinned`), `dns_image` (from `IMAGE_REGISTRY["coredns"].pinned`), and `dnsdist_image` (from `IMAGE_REGISTRY["dnsdist"].pinned`)
 
 ### Requirement: Precious State Preservation
 The system SHALL never overwrite the user's persistent state files during hydration.
@@ -253,11 +253,11 @@ The system SHALL include `db_postgres_image` in the Jinja2 context returned by `
 - **THEN** the returned context includes `db_postgres_image` (from `config.components_db_postgres.image`)
 
 ### Requirement: Infrastructure Image Context Keys
-The system SHALL include `proxy_image`, `dns_image`, and `dnsdist_image` in the Jinja2 context returned by `build_jinja_context()`, sourced from `IMAGE_DIGESTS`.
+The system SHALL include `proxy_image`, `dns_image`, `dnsdist_image`, and `busybox_image` in the Jinja2 context returned by `build_jinja_context()`, sourced from `IMAGE_REGISTRY`.
 
 #### Scenario: Infrastructure image context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `proxy_image` (from `IMAGE_DIGESTS["squid"]`), `dns_image` (from `IMAGE_DIGESTS["coredns"]`), and `dnsdist_image` (from `IMAGE_DIGESTS["dnsdist"]`)
+- **THEN** the returned context includes `proxy_image` (from `IMAGE_REGISTRY["squid"].pinned`), `dns_image` (from `IMAGE_REGISTRY["coredns"].pinned`), `dnsdist_image` (from `IMAGE_REGISTRY["dnsdist"].pinned`), and `busybox_image` (from `IMAGE_REGISTRY["busybox_musl"].pinned`)
 
 ### Requirement: Seven-Subnet Context Keys
 The system SHALL include all seven subnet CIDR strings and all multi-network container IP addresses in the Jinja2 context returned by `build_jinja_context()`.
@@ -304,3 +304,29 @@ The system SHALL generate `.claude.json` programmatically in `render_templates()
 #### Scenario: Empty config when no MCP enabled
 - **WHEN** `render_templates()` runs with `mcp_firecrawl_enabled = False`
 - **THEN** `.claude.json` contains `{}`
+
+### Requirement: Busybox Image Context Key
+The system SHALL include `busybox_image` in the Jinja2 context returned by `build_jinja_context()`, sourced from `IMAGE_REGISTRY["busybox_musl"].pinned`. This key is consumed by the coredns service's `build.args` in `compose.yml`.
+
+#### Scenario: busybox_image context key present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `busybox_image` with a value in the format `busybox@sha256:<64-hex-chars>`
+
+#### Scenario: busybox_image absent from context causes StrictUndefined error
+- **WHEN** `busybox_image` is removed from `build_jinja_context()` and `compose.yml` references `{{ busybox_image }}`
+- **THEN** `jinja2.UndefinedError` is raised during template rendering
+
+### Requirement: CoreDNS Dockerfile Static Copy
+The system SHALL copy `.docker/coredns/Dockerfile.coredns` as a static file (not Jinja2-rendered) during `render_templates()`, using the existing `_copy_file()` mechanism. The `docker/coredns` subdirectory SHALL be included in `INSTANCE_SUBDIRS`.
+
+#### Scenario: CoreDNS Dockerfile copied to instance
+- **WHEN** `render_templates()` completes
+- **THEN** `sandboxes/<id>/docker/coredns/Dockerfile.coredns` exists and is identical to `.docker/coredns/Dockerfile.coredns`
+
+#### Scenario: docker/coredns directory created by scaffold
+- **WHEN** `create_instance_dirs()` is called
+- **THEN** a `docker/coredns` subdirectory exists in the instance directory
+
+#### Scenario: CoreDNS Dockerfile validated as static file
+- **WHEN** `validate_templates()` runs
+- **THEN** `.docker/coredns/Dockerfile.coredns` is included in the static file existence check and counts toward the validated total
