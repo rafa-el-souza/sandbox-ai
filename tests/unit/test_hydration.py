@@ -1,6 +1,7 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -2526,4 +2527,131 @@ class TestDockerfileUserContext:
         content = "\n".join(lines)
         assert "${HOME_DIR}/.local/bin/claude" in content or ".local/bin/claude" in content
         assert ".claude/local/claude" not in content
+
+
+# ─── Dockerfile USER Structural Lint ─────────────────────────────────────────
+
+_ROOT_OWNED_PREFIXES = ("/staging", "/usr", "/etc", "/var", "/run", "/opt")
+_FS_OPS_PATTERN = re.compile(r"\b(mkdir|chmod|chown|touch|cp)\b")
+
+
+def _lint_dockerfile_user_context(content: str) -> list[str]:
+    """Lint a Dockerfile for filesystem operations under wrong USER context.
+
+    State machine:
+    - FROM resets USER to 'root' and clears chown grants
+    - USER directives update tracked context
+    - RUN lines with backslash continuations are joined into logical lines
+    - chown under USER root records granted subtrees
+    - Violations: mkdir/chmod/touch/cp targeting root-owned paths
+      when USER is not 'root' AND the path is not covered by a prior chown grant
+    """
+    violations: list[str] = []
+    current_user = "root"
+    chown_grants: list[str] = []  # paths that have been chown'd to non-root
+    raw_lines = content.splitlines()
+
+    # Join backslash-continued lines
+    logical_lines: list[tuple[int, str]] = []
+    i = 0
+    while i < len(raw_lines):
+        line = raw_lines[i]
+        start_lineno = i + 1  # 1-indexed
+        while line.rstrip().endswith("\\") and i + 1 < len(raw_lines):
+            line = line.rstrip()[:-1] + " " + raw_lines[i + 1].strip()
+            i += 1
+        logical_lines.append((start_lineno, line))
+        i += 1
+
+    _chown_path_re = re.compile(r"chown\s+(?:-R\s+)?[^\s]+\s+(.+)")
+
+    for lineno, line in logical_lines:
+        stripped = line.strip()
+
+        # FROM resets USER to root and clears chown grants
+        if stripped.upper().startswith("FROM "):
+            current_user = "root"
+            chown_grants.clear()
+            continue
+
+        # USER directive
+        if stripped.startswith("USER "):
+            current_user = stripped.split()[1]
+            continue
+
+        # Track chown grants under USER root
+        if stripped.startswith("RUN ") and current_user == "root":
+            m = _chown_path_re.search(stripped)
+            if m:
+                for path in m.group(1).split():
+                    path = path.strip()
+                    if path and path.startswith("/"):
+                        chown_grants.append(path)
+            continue
+
+        # RUN directive — check for fs operations under non-root
+        if stripped.startswith("RUN ") and current_user != "root" and _FS_OPS_PATTERN.search(stripped):
+            for prefix in _ROOT_OWNED_PREFIXES:
+                if prefix in stripped:
+                    # Check if any chown grant covers this path
+                    covered = any(
+                        prefix.startswith(grant) or grant.startswith(prefix)
+                        for grant in chown_grants
+                    )
+                    if not covered:
+                        violations.append(
+                            f"L{lineno}: {current_user} performing fs op on "
+                            f"{prefix}: {stripped[:80]}"
+                        )
+                    break
+
+    return violations
+
+
+class TestDockerfileUserLint:
+    """Group 4.T: Dockerfile USER context structural lint guard."""
+
+    def test_core_wolfi_zero_violations(self) -> None:
+        """Lint on current Dockerfile.core.wolfi returns zero violations."""
+        content = "\n".join(_get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi"))
+        violations = _lint_dockerfile_user_context(content)
+        assert violations == [], f"Violations in Dockerfile.core.wolfi: {violations}"
+
+    def test_admin_debian_zero_violations(self) -> None:
+        """Lint on current Dockerfile.admin.debian returns zero violations."""
+        content = "\n".join(_get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian"))
+        violations = _lint_dockerfile_user_context(content)
+        assert violations == [], f"Violations in Dockerfile.admin.debian: {violations}"
+
+    def test_synthetic_violation_detected(self) -> None:
+        """Synthetic Dockerfile with USER agent + mkdir /staging yields one violation."""
+        synthetic = "FROM base\nUSER agent\nRUN mkdir -p /staging/foo\n"
+        violations = _lint_dockerfile_user_context(synthetic)
+        assert len(violations) == 1
+        assert "agent" in violations[0]
+        assert "/staging" in violations[0]
+        assert "L3" in violations[0]
+
+    def test_from_resets_user_to_root(self) -> None:
+        """FROM ... AS stage resets tracked USER to root."""
+        synthetic = (
+            "FROM base AS build\n"
+            "USER agent\n"
+            "FROM base AS runtime\n"
+            "RUN mkdir -p /staging/foo\n"
+        )
+        violations = _lint_dockerfile_user_context(synthetic)
+        assert violations == [], f"FROM should reset USER to root: {violations}"
+
+    def test_backslash_continuation_joined(self) -> None:
+        r"""RUN with \ continuations is joined into single logical line."""
+        synthetic = (
+            "FROM base\n"
+            "USER agent\n"
+            "RUN mkdir -p \\\n"
+            "    /staging/foo\n"
+        )
+        violations = _lint_dockerfile_user_context(synthetic)
+        assert len(violations) == 1
+        assert "/staging" in violations[0]
 
