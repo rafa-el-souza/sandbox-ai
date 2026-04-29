@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 from core.hydration import (
     _JINJA_RENDERED_CONFIG,
-    IMAGE_DIGESTS,
+    IMAGE_REGISTRY,
     AdminConfig,
     CoreConfig,
     DbPostgresConfig,
+    ImagePin,
     ProxyWhitelistConfig,
     SandboxConfig,
     build_jinja_context,
@@ -623,10 +624,10 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "admin_memswap_limit": "8gb",
         "admin_cpus": "4.0",
         "runtime": "runsc",
-        "dns_image": IMAGE_DIGESTS["coredns"],
-        "proxy_image": IMAGE_DIGESTS["squid"],
-        "dnsdist_image": IMAGE_DIGESTS["dnsdist"],
-        "db_postgres_image": IMAGE_DIGESTS["postgres"],
+        "dns_image": IMAGE_REGISTRY["coredns"].pinned,
+        "proxy_image": IMAGE_REGISTRY["squid"].pinned,
+        "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
+        "db_postgres_image": IMAGE_REGISTRY["postgres"].pinned,
         "nvm_version": "0.39.7",
         "node_version": "20.12.2",
         "runtimes": {"python": True, "typescript": True, "rust": True, "go": False},
@@ -1121,22 +1122,25 @@ class TestValidTomlBackwardCompatibility:
 
 
 class TestImageDigestsDnsdist:
-    """Wave 3: IMAGE_DIGESTS includes dnsdist entry."""
+    """Wave 3: IMAGE_REGISTRY includes dnsdist entry."""
 
     def test_dnsdist_key_present(self) -> None:
-        """IMAGE_DIGESTS contains 'dnsdist' key."""
-        assert "dnsdist" in IMAGE_DIGESTS
+        """IMAGE_REGISTRY contains 'dnsdist' key."""
+        assert "dnsdist" in IMAGE_REGISTRY
 
     def test_dnsdist_value_format(self) -> None:
         """dnsdist value uses digest format with powerdns/dnsdist-19."""
-        val = IMAGE_DIGESTS["dnsdist"]
-        assert val.startswith("powerdns/dnsdist-19@sha256:")
-        assert len(val.split("@sha256:")[1]) == 64
+        pin = IMAGE_REGISTRY["dnsdist"]
+        assert pin.ref == "powerdns/dnsdist-19"
+        assert pin.digest.startswith("sha256:")
+        assert len(pin.digest.split("sha256:")[1]) == 64
 
-    def test_image_digests_has_6_entries(self) -> None:
-        """IMAGE_DIGESTS has exactly 6 entries (wolfi_base, debian_trixie, squid, coredns, dnsdist, postgres)."""
-        assert len(IMAGE_DIGESTS) == 6
-        assert set(IMAGE_DIGESTS.keys()) == {"wolfi_base", "debian_trixie", "squid", "coredns", "dnsdist", "postgres"}
+    def test_image_registry_has_7_entries(self) -> None:
+        """IMAGE_REGISTRY has exactly 7 entries."""
+        assert len(IMAGE_REGISTRY) == 7
+        assert set(IMAGE_REGISTRY.keys()) == {
+            "wolfi_base", "debian_trixie", "squid", "coredns", "dnsdist", "postgres", "busybox_musl",
+        }
 
 
 class TestSixSubnetContextKeys:
@@ -1203,13 +1207,13 @@ class TestSixSubnetContextKeys:
         assert "firecrawl_dns_ip" in ctx
 
     def test_dnsdist_image_key(self, tmp_path: Path) -> None:
-        """Context includes dnsdist_image from IMAGE_DIGESTS."""
+        """Context includes dnsdist_image from IMAGE_REGISTRY."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = SandboxConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "dnsdist_image" in ctx
-        assert ctx["dnsdist_image"] == IMAGE_DIGESTS["dnsdist"]
+        assert ctx["dnsdist_image"] == IMAGE_REGISTRY["dnsdist"].pinned
 
     def test_legacy_keys_absent(self, tmp_path: Path) -> None:
         """Legacy 3-subnet keys not in context."""
@@ -2227,4 +2231,72 @@ class TestW4IntegrationVerification:
         plan = _acl_grant_plan(str(tmp_path), "sandbox")
         secrets_entries = [desc for _, desc in plan if "secrets" in desc]
         assert len(secrets_entries) >= 1
+
+
+class TestImagePin:
+    """Group 1.T: ImagePin dataclass and IMAGE_REGISTRY validation."""
+
+    def test_registry_is_dict_with_7_keys(self) -> None:
+        """IMAGE_REGISTRY is a dict with exactly 7 keys."""
+        assert isinstance(IMAGE_REGISTRY, dict)
+        assert len(IMAGE_REGISTRY) == 7
+        assert set(IMAGE_REGISTRY.keys()) == {
+            "wolfi_base",
+            "debian_trixie",
+            "squid",
+            "coredns",
+            "dnsdist",
+            "postgres",
+            "busybox_musl",
+        }
+
+    def test_each_value_is_imagepin_with_str_fields(self) -> None:
+        """Each value is an ImagePin instance with ref, tag, digest str fields."""
+        for key, pin in IMAGE_REGISTRY.items():
+            assert isinstance(pin, ImagePin), f"{key} is not an ImagePin"
+            assert isinstance(pin.ref, str), f"{key}.ref is not str"
+            assert isinstance(pin.tag, str), f"{key}.tag is not str"
+            assert isinstance(pin.digest, str), f"{key}.digest is not str"
+
+    def test_pinned_property_returns_digest_qualified_ref(self) -> None:
+        """ImagePin.pinned returns f'{ref}@{digest}'."""
+        pin = IMAGE_REGISTRY["coredns"]
+        assert pin.pinned == f"{pin.ref}@{pin.digest}"
+
+    def test_tagged_property_returns_tag_qualified_ref(self) -> None:
+        """ImagePin.tagged returns f'{ref}:{tag}'."""
+        pin = IMAGE_REGISTRY["coredns"]
+        assert pin.tagged == f"{pin.ref}:{pin.tag}"
+
+    def test_imagepin_is_frozen(self) -> None:
+        """Assigning to an ImagePin field raises FrozenInstanceError."""
+        from dataclasses import FrozenInstanceError
+
+        pin = IMAGE_REGISTRY["coredns"]
+        with pytest.raises(FrozenInstanceError):
+            pin.digest = "x"  # type: ignore[misc]
+
+    def test_busybox_musl_entry(self) -> None:
+        """busybox_musl has tag='1.36.1-musl' and ref='busybox'."""
+        pin = IMAGE_REGISTRY["busybox_musl"]
+        assert pin.tag == "1.36.1-musl"
+        assert pin.ref == "busybox"
+
+    def test_all_digests_match_sha256_regex(self) -> None:
+        """All digest values match ^sha256:[a-f0-9]{64}$."""
+        import re
+
+        pattern = re.compile(r"^sha256:[a-f0-9]{64}$")
+        for key, pin in IMAGE_REGISTRY.items():
+            assert pattern.match(pin.digest), (
+                f"{key}.digest does not match sha256 pattern: {pin.digest}"
+            )
+
+    def test_legacy_image_digests_name_removed(self) -> None:
+        """hydration.py source does NOT contain 'IMAGE_DIGESTS ='."""
+        from pathlib import Path
+
+        source = Path(__file__).resolve().parents[2] / "core" / "hydration.py"
+        content = source.read_text()
+        assert "IMAGE_DIGESTS =" not in content
 

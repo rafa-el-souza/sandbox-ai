@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import tomllib
+from dataclasses import dataclass as _dataclass
 from typing import Any
 
 import jinja2
@@ -20,22 +21,74 @@ from core.ipam import derive_static_ips, derive_subnets
 
 logger = logging.getLogger(__name__)
 
+
 # ─── Image Digest Registry ──────────────────────────────────────────────────
 #
-# Centralized SHA256 digest references for all container images.
-# Rotation procedure (quarterly cadence):
-#   docker manifest inspect <image>:<tag> | jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest'
-# Then update the corresponding value below.
+# Centralized image pin registry. Each entry carries ref, tag, and digest
+# as separate fields. Derived properties:
+#   .pinned → "ref@sha256:..."  (for Dockerfile FROM / compose image:)
+#   .tagged → "ref:tag"         (for human-readable display / rotation)
 #
-IMAGE_DIGESTS: dict[str, str] = {
-    "wolfi_base": (
-        "cgr.dev/chainguard/wolfi-base@sha256:3490ac41800d82ab3c97f8d4f9e762e9a937f4527c6f21ba81bd7dc23aee8097"
+# Rotation procedure: scripts/rotate-digests.py
+#   Resolves current tag digests, verifies signatures, patches this file.
+#
+
+
+@_dataclass(frozen=True)
+class ImagePin:
+    """Immutable structured image pin with ref, tag, and digest fields."""
+
+    ref: str
+    tag: str
+    digest: str
+
+    @property
+    def pinned(self) -> str:
+        """Return digest-qualified reference: ref@sha256:..."""
+        return f"{self.ref}@{self.digest}"
+
+    @property
+    def tagged(self) -> str:
+        """Return tag-qualified reference: ref:tag."""
+        return f"{self.ref}:{self.tag}"
+
+
+IMAGE_REGISTRY: dict[str, ImagePin] = {
+    "wolfi_base": ImagePin(
+        ref="cgr.dev/chainguard/wolfi-base",
+        tag="latest",
+        digest="sha256:d6e31fc9dad5fd76d7160ba833502865e17c226ab261cb6893a0624b68198d7b",
     ),
-    "debian_trixie": "debian@sha256:a15012b5f8fbefd7bfa43e253e6b3e879e63d8e37e5e2e5fc6c8e5e62ee5f2a3",
-    "squid": "ubuntu/squid@sha256:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-    "coredns": "coredns/coredns@sha256:b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
-    "dnsdist": "powerdns/dnsdist-19@sha256:c2f859bb67865987878ff93c9c75758236fe659b4117b296da29da6b572affd0",
-    "postgres": "postgres@sha256:c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+    "debian_trixie": ImagePin(
+        ref="debian",
+        tag="trixie",
+        digest="sha256:35b8ff74ead4880f22090b617372daff0ccae742eb5674455d542bef71ef1999",
+    ),
+    "squid": ImagePin(
+        ref="ubuntu/squid",
+        tag="latest",
+        digest="sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
+    ),
+    "coredns": ImagePin(
+        ref="coredns/coredns",
+        tag="1.11.1",
+        digest="sha256:1eeb4c7316bacb1d4c8ead65571cd92dd21e27359f0d4917f1a5822a73b75db1",
+    ),
+    "dnsdist": ImagePin(
+        ref="powerdns/dnsdist-19",
+        tag="1.9.14",
+        digest="sha256:c2f859bb67865987878ff93c9c75758236fe659b4117b296da29da6b572affd0",
+    ),
+    "postgres": ImagePin(
+        ref="postgres",
+        tag="16-alpine",
+        digest="sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50",
+    ),
+    "busybox_musl": ImagePin(
+        ref="busybox",
+        tag="1.36.1-musl",
+        digest="sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213",
+    ),
 }
 
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
@@ -58,7 +111,7 @@ class CoreConfig(BaseModel):
     pids_limit: int = 400
     mem_limit: str = "8gb"
     cpus: float = 4.0
-    base_image: str = IMAGE_DIGESTS["wolfi_base"]
+    base_image: str = IMAGE_REGISTRY["wolfi_base"].pinned
     base_distro_family: str = "wolfi"
     git_user: str = ""
     git_email: str = ""
@@ -71,7 +124,7 @@ class AdminConfig(BaseModel):
     pids_limit: int = 400
     mem_limit: str = "8gb"
     cpus: float = 4.0
-    base_image: str = IMAGE_DIGESTS["debian_trixie"]
+    base_image: str = IMAGE_REGISTRY["debian_trixie"].pinned
     base_distro_family: str = "debian"
 
 
@@ -98,7 +151,7 @@ class DbPostgresConfig(BaseModel):
     expose_host_ports: list[int] = [5432]
     pg_user: str = "sandbox"
     pg_db: str = "sandbox_db"
-    image: str = IMAGE_DIGESTS["postgres"]
+    image: str = IMAGE_REGISTRY["postgres"].pinned
 
 
 class IngressConfig(BaseModel):
@@ -238,9 +291,9 @@ def build_jinja_context(
         "node_version": config.runtimes_node.version,
         # Images — infrastructure (not user-configurable)
         "runtime": "runsc",
-        "dns_image": IMAGE_DIGESTS["coredns"],
-        "proxy_image": IMAGE_DIGESTS["squid"],
-        "dnsdist_image": IMAGE_DIGESTS["dnsdist"],
+        "dns_image": IMAGE_REGISTRY["coredns"].pinned,
+        "proxy_image": IMAGE_REGISTRY["squid"].pinned,
+        "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
         # Images — user-configurable
         "db_postgres_image": config.components_db_postgres.image,
         # Proxy whitelist

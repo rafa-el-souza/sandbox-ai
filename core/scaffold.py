@@ -11,7 +11,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from core.crypto import generate_credential
-from core.hydration import IMAGE_DIGESTS
+from core.hydration import IMAGE_REGISTRY
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -148,9 +148,9 @@ def write_sandbox_toml(
         host_uid=str(os.getuid()),
         git_user=git_user,
         git_email=git_email,
-        core_base_image=IMAGE_DIGESTS["wolfi_base"],
-        admin_base_image=IMAGE_DIGESTS["debian_trixie"],
-        db_postgres_image=IMAGE_DIGESTS["postgres"],
+        core_base_image=IMAGE_REGISTRY["wolfi_base"].pinned,
+        admin_base_image=IMAGE_REGISTRY["debian_trixie"].pinned,
+        db_postgres_image=IMAGE_REGISTRY["postgres"].pinned,
     )
     toml_path = os.path.join(instance_dir, "sandbox.toml")
     with open(toml_path, "w") as f:
