@@ -1378,21 +1378,21 @@ class TestComposeSecurityBaseline:
         assert "sysctls:" not in block
         assert "tmpfs:" not in block
 
-    def test_core_overrides_read_only(self, tmp_path: Path) -> None:
-        """Core service overrides baseline read_only to false."""
+    def test_core_inherits_read_only(self, tmp_path: Path) -> None:
+        """Core service inherits baseline read_only: true (no override)."""
         rendered = _render_compose(tmp_path)
         # Extract core service block
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
-        assert "read_only: false" in core_block
+        assert "read_only: false" not in core_block
 
-    def test_admin_overrides_read_only(self, tmp_path: Path) -> None:
-        """Admin service overrides baseline read_only to false."""
+    def test_admin_inherits_read_only(self, tmp_path: Path) -> None:
+        """Admin service inherits baseline read_only: true (no override)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "read_only: false" in admin_block
+        assert "read_only: false" not in admin_block
 
 
 class TestComposeNetworkDefinitions:
@@ -1450,33 +1450,35 @@ class TestComposeNetworkDefinitions:
 class TestComposeServiceNetworkMembership:
     """5.T: Zero-shared-network invariant, per-service membership."""
 
-    def test_core_on_isolated_and_core_proxy_only(
+    def test_core_on_isolated_core_proxy_and_ipc(
         self, tmp_path: Path,
     ) -> None:
-        """Core is on isolated_net and core_proxy_net only."""
+        """Core is on isolated_net, core_proxy_net, and ipc_net."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
         assert "isolated_net:" in core_block
         assert "core_proxy_net:" in core_block
+        assert "ipc_net:" in core_block
         assert "admin_net:" not in core_block
         assert "admin_proxy_net:" not in core_block
 
-    def test_admin_on_admin_and_admin_proxy_only(
+    def test_admin_on_admin_admin_proxy_and_ipc(
         self, tmp_path: Path,
     ) -> None:
-        """Admin is on admin_net and admin_proxy_net only."""
+        """Admin is on admin_net, admin_proxy_net, and ipc_net."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
         assert "admin_net:" in admin_block
         assert "admin_proxy_net:" in admin_block
+        assert "ipc_net:" in admin_block
         assert "isolated_net:" not in admin_block
         assert "core_proxy_net:" not in admin_block
 
-    def test_zero_shared_networks(self, tmp_path: Path) -> None:
-        """Core and admin network sets have empty intersection."""
+    def test_ipc_net_is_only_shared_network(self, tmp_path: Path) -> None:
+        """Core and admin network sets intersect only on ipc_net."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
@@ -1484,11 +1486,11 @@ class TestComposeServiceNetworkMembership:
         admin_block = rendered[admin_start:]
         all_nets = [
             "isolated_net", "core_proxy_net", "dns_net",
-            "admin_net", "admin_proxy_net", "egress_net",
+            "admin_net", "admin_proxy_net", "egress_net", "ipc_net",
         ]
         core_nets = {n for n in all_nets if f"{n}:" in core_block}
         admin_nets = {n for n in all_nets if f"{n}:" in admin_block}
-        assert core_nets & admin_nets == set(), (
+        assert core_nets & admin_nets == {"ipc_net"}, (
             f"Shared networks: {core_nets & admin_nets}"
         )
 
@@ -1863,3 +1865,258 @@ class TestSshdConfigTemplate:
         assert "AuthorizedKeysFile /run/secrets/authorized_keys" in rendered
         assert "AcceptEnv SANDBOX_WARMUP_PROMPT" in rendered
         assert "0.0.0.0" not in rendered
+
+
+class TestComposeIpcNetAndW4Hardening:
+    """5.T RED: Compose template — ipc_net, volume removal, security baseline,
+    SSH credential mounts, tmpfs mounts, and per-service cap_add."""
+
+    # --- (a) core on ipc_net ---
+    def test_compose_core_on_ipc_net(self, tmp_path: Path) -> None:
+        """Core service networks include ipc_net."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "ipc_net:" in core_block
+
+    # --- (b) admin on ipc_net ---
+    def test_compose_admin_on_ipc_net(self, tmp_path: Path) -> None:
+        """Admin service networks include ipc_net."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_net:" in admin_block
+
+    # --- (c) ipc_net network definition ---
+    def test_compose_ipc_net_definition(self, tmp_path: Path) -> None:
+        """ipc_net network block contains internal: true and enable_ipv6: false."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        assert "ipc_net:" in raw
+        idx = raw.index("ipc_net:")
+        block = raw[idx:idx + 300]
+        assert "internal: true" in block
+        assert "enable_ipv6: false" in block
+
+    # --- (d) no admin-ipc_vol ---
+    def test_compose_no_admin_ipc_vol(self, tmp_path: Path) -> None:
+        """Rendered compose does NOT contain admin-ipc_vol."""
+        rendered = _render_compose(tmp_path)
+        assert "admin-ipc_vol" not in rendered
+
+    # --- (e) no mcp-ipc_vol ---
+    def test_compose_no_mcp_ipc_vol(self, tmp_path: Path) -> None:
+        """Rendered compose does NOT contain mcp-ipc_vol."""
+        rendered = _render_compose(tmp_path)
+        assert "mcp-ipc_vol" not in rendered
+
+    # --- (f) no /sock mount ---
+    def test_compose_no_sock_mount(self, tmp_path: Path) -> None:
+        """Rendered compose does NOT contain /sock."""
+        rendered = _render_compose(tmp_path)
+        assert "/sock" not in rendered
+
+    # --- (g) core no read_only: false ---
+    def test_compose_core_no_read_only_false(self, tmp_path: Path) -> None:
+        """Core service does NOT contain read_only: false."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "read_only: false" not in core_block
+
+    # --- (h) admin no read_only: false ---
+    def test_compose_admin_no_read_only_false(self, tmp_path: Path) -> None:
+        """Admin service does NOT contain read_only: false."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "read_only: false" not in admin_block
+
+    # --- (i) core cap_add SETUID/SETGID ---
+    def test_compose_core_cap_add_setuid(self, tmp_path: Path) -> None:
+        """Core service contains cap_add with SETUID and SETGID."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "cap_add:" in core_block
+        assert "SETUID" in core_block
+        assert "SETGID" in core_block
+
+    # --- (j) core ipc_host_key secret ---
+    def test_compose_core_ipc_host_key_secret(self, tmp_path: Path) -> None:
+        """Core service secrets contain ipc_host_key with uid '0' and mode 0600."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "ipc_host_key" in core_block
+        assert "uid: '0'" in core_block
+        assert "0600" in core_block
+
+    # --- (k) admin ipc_ssh_key secret ---
+    def test_compose_admin_ipc_ssh_key_secret(self, tmp_path: Path) -> None:
+        """Admin service secrets contain ipc_ssh_key with uid '1000' and mode 0600."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_ssh_key" in admin_block
+        assert "uid: '1000'" in admin_block
+        assert "0600" in admin_block
+
+    # --- (l) core tmpfs /run ---
+    def test_compose_core_tmpfs_run(self, tmp_path: Path) -> None:
+        """Core tmpfs includes /run."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        # Match /run tmpfs entry — must not match /var/run subpath
+        assert "/run:" in core_block or "/run\n" in core_block
+
+    # --- (m) core tmpfs ~/.config ---
+    def test_compose_core_tmpfs_config(self, tmp_path: Path) -> None:
+        """Core tmpfs includes /home/agent/.config."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "/home/agent/.config" in core_block
+
+    # --- (n) admin tmpfs ~/.cache ---
+    def test_compose_admin_tmpfs_cache(self, tmp_path: Path) -> None:
+        """Admin tmpfs includes /home/human/.cache."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "/home/human/.cache" in admin_block
+
+    # --- (o) admin tmpfs ~/.config ---
+    def test_compose_admin_tmpfs_config(self, tmp_path: Path) -> None:
+        """Admin tmpfs includes /home/human/.config."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "/home/human/.config" in admin_block
+
+    # --- (p) admin tmpfs ~/.zsh_sessions ---
+    def test_compose_admin_tmpfs_zsh_sessions(self, tmp_path: Path) -> None:
+        """Admin tmpfs includes /home/human/.zsh_sessions."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "/home/human/.zsh_sessions" in admin_block
+
+    # --- (q) core no command override ---
+    def test_compose_core_no_command_override(self, tmp_path: Path) -> None:
+        """Core service does NOT contain a command: directive."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "command:" not in core_block
+
+    # --- (r) core NO_PROXY includes ipc_subnet ---
+    def test_compose_core_no_proxy_includes_ipc(self, tmp_path: Path) -> None:
+        """Core service NO_PROXY includes ipc_subnet."""
+        from core.ipam import derive_subnets
+
+        subnets = derive_subnets(0)
+        ipc_subnet = subnets[6]
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert ipc_subnet in core_block
+
+    # --- (s) admin NO_PROXY includes ipc_subnet ---
+    def test_compose_admin_no_proxy_includes_ipc(self, tmp_path: Path) -> None:
+        """Admin service NO_PROXY includes ipc_subnet."""
+        from core.ipam import derive_subnets
+
+        subnets = derive_subnets(0)
+        ipc_subnet = subnets[6]
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert ipc_subnet in admin_block
+
+    # --- (t) core authorized_keys bind mount ---
+    def test_compose_core_authorized_keys_bind(self, tmp_path: Path) -> None:
+        """Core volumes contain authorized_keys:/run/secrets/authorized_keys:ro."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "authorized_keys:/run/secrets/authorized_keys:ro" in core_block
+
+    # --- (u) admin known_hosts bind mount ---
+    def test_compose_admin_known_hosts_bind(self, tmp_path: Path) -> None:
+        """Admin volumes contain ipc_known_hosts:/run/secrets/ipc_known_hosts:ro."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block
+
+    # --- (v) admin starship bind mount ---
+    def test_compose_admin_starship_bind(self, tmp_path: Path) -> None:
+        """Admin volumes contain starship.toml:/home/human/.config/starship.toml:ro."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "starship.toml:/home/human/.config/starship.toml:ro" in admin_block
+
+    # --- (w) infra services no read_only: false ---
+    def test_compose_infra_no_read_only_false(self, tmp_path: Path) -> None:
+        """coredns, proxy, and dnsdist services do NOT contain read_only: false."""
+        rendered = _render_compose(tmp_path)
+        # coredns block
+        coredns_start = rendered.index("\n  coredns:")
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        coredns_block = rendered[coredns_start:dnsdist_start]
+        assert "read_only: false" not in coredns_block
+        # dnsdist block
+        proxy_start = rendered.index("\n  proxy:")
+        dnsdist_block = rendered[dnsdist_start:proxy_start]
+        assert "read_only: false" not in dnsdist_block
+        # proxy block
+        core_start = rendered.index("\n  core:")
+        proxy_block = rendered[proxy_start:core_start]
+        assert "read_only: false" not in proxy_block
+
+    # --- (x) baseline excludes list-valued properties ---
+    def test_compose_baseline_excludes_list_valued(self, tmp_path: Path) -> None:
+        """x-security-baseline block does NOT contain cap_add, sysctls, or tmpfs."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        start = raw.index("x-security-baseline:")
+        end = raw.index("\nnetworks:")
+        block = raw[start:end]
+        assert "cap_add:" not in block
+        assert "sysctls:" not in block
+        assert "tmpfs:" not in block
+
+    # --- (y) coredns cap_add ---
+    def test_compose_coredns_cap_add(self, tmp_path: Path) -> None:
+        """coredns service has cap_add: [NET_BIND_SERVICE]."""
+        rendered = _render_compose(tmp_path)
+        coredns_start = rendered.index("\n  coredns:")
+        dnsdist_start = rendered.index("\n  dnsdist:")
+        coredns_block = rendered[coredns_start:dnsdist_start]
+        assert "cap_add:" in coredns_block
+        assert "NET_BIND_SERVICE" in coredns_block
+
+    # --- (z) proxy cap_add ---
+    def test_compose_proxy_cap_add(self, tmp_path: Path) -> None:
+        """proxy service has cap_add: [SETUID, SETGID]."""
+        rendered = _render_compose(tmp_path)
+        proxy_start = rendered.index("\n  proxy:")
+        core_start = rendered.index("\n  core:")
+        proxy_block = rendered[proxy_start:core_start]
+        assert "cap_add:" in proxy_block
+        assert "SETUID" in proxy_block
+        assert "SETGID" in proxy_block
