@@ -829,7 +829,25 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     (core_cfg / ".npmrc").write_text("proxy={{ proxy_url_core }}\n")
     (core_cfg / ".gitconfig").write_text("# git {{ git_user }} {{ git_email }}\n")
     (core_cfg / "CLAUDE.md").write_text("# CLAUDE {{ db_postgres_enabled }}\n")
-    (core_cfg / "sshd_config").write_text("# sshd {{ core_ipc_ip }}\n")
+    (core_cfg / "sshd_config").write_text(
+        "ListenAddress {{ core_ipc_ip }}\n"
+        "Port 9999\n"
+        "PermitRootLogin no\n"
+        "AllowUsers agent\n"
+        "PasswordAuthentication no\n"
+        "KbdInteractiveAuthentication no\n"
+        "PubkeyAuthentication yes\n"
+        "HostKey /run/secrets/ipc_host_key\n"
+        "AuthorizedKeysFile /run/secrets/authorized_keys\n"
+        "X11Forwarding no\n"
+        "AllowAgentForwarding no\n"
+        "AllowTcpForwarding no\n"
+        "PermitTunnel no\n"
+        "AcceptEnv SANDBOX_WARMUP_PROMPT\n"
+        "MaxSessions 10\n"
+        "ClientAliveInterval 300\n"
+        "ClientAliveCountMax 2\n"
+    )
 
     return tooling
 
@@ -1806,3 +1824,42 @@ class TestHydrationIpcContext:
         assert claude_json.exists()
         data = json.loads(claude_json.read_text())
         assert data == {}
+
+
+class TestSshdConfigTemplate:
+    """4.T RED: sshd_config Jinja2 template rendering and directives."""
+
+    def test_sshd_config_renders_with_ipc_ip(self, tmp_path: Path) -> None:
+        """validate_templates passes with sshd_config in registry."""
+        from core.hydration import validate_templates
+
+        tooling = _build_minimal_tooling(tmp_path)
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        count, errors = validate_templates(
+            ctx, str(tooling), db_postgres=False, mcp_firecrawl=False,
+        )
+        assert errors == [], f"Unexpected errors: {errors}"
+        assert count > 0
+
+    def test_sshd_config_listen_address(self, tmp_path: Path) -> None:
+        """sshd_config contains all required directives per spec."""
+        import jinja2
+
+        tooling = _build_minimal_tooling(tmp_path)
+        env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(str(tooling)),
+            undefined=jinja2.StrictUndefined,
+        )
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        tpl = env.get_template(".config/core/sshd_config")
+        rendered = tpl.render(ctx)
+
+        assert "ListenAddress 10.100.6.3" in rendered
+        assert "Port 9999" in rendered
+        assert "PasswordAuthentication no" in rendered
+        assert "AllowUsers agent" in rendered
+        assert "PermitRootLogin no" in rendered
+        assert "HostKey /run/secrets/ipc_host_key" in rendered
+        assert "AuthorizedKeysFile /run/secrets/authorized_keys" in rendered
+        assert "AcceptEnv SANDBOX_WARMUP_PROMPT" in rendered
+        assert "0.0.0.0" not in rendered

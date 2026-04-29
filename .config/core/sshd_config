@@ -1,4 +1,30 @@
-# sshd_config — placeholder for Wave 4 SSH IPC
-# Full implementation in Group 4
-Port 9999
+# Hardened sshd_config — Wave 4 SSH IPC Transport
+# Binds only to the instance's ipc_net IP. Password auth disabled.
+# See: openspec/changes/containment-ipc-hardening/specs/ssh-ipc-transport/spec.md
+
+# ── Network ──────────────────────────────────────────────────────────────────
 ListenAddress {{ core_ipc_ip }}
+Port 9999
+
+# ── Authentication ───────────────────────────────────────────────────────────
+PermitRootLogin no
+AllowUsers agent
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+HostKey /run/secrets/ipc_host_key
+AuthorizedKeysFile /run/secrets/authorized_keys
+
+# ── Forwarding (all disabled) ────────────────────────────────────────────────
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+
+# ── Environment ──────────────────────────────────────────────────────────────
+AcceptEnv SANDBOX_WARMUP_PROMPT
+
+# ── Session Limits ───────────────────────────────────────────────────────────
+MaxSessions 10
+ClientAliveInterval 300
+ClientAliveCountMax 2
