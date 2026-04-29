@@ -627,6 +627,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "dns_image": IMAGE_REGISTRY["coredns"].pinned,
         "proxy_image": IMAGE_REGISTRY["squid"].pinned,
         "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
+        "busybox_image": IMAGE_REGISTRY["busybox_musl"].pinned,
         "db_postgres_image": IMAGE_REGISTRY["postgres"].pinned,
         "nvm_version": "0.39.7",
         "node_version": "20.12.2",
@@ -2299,4 +2300,82 @@ class TestImagePin:
         source = Path(__file__).resolve().parents[2] / "core" / "hydration.py"
         content = source.read_text()
         assert "IMAGE_DIGESTS =" not in content
+
+
+class TestDownstreamConsumerMigration:
+    """Group 2.T: Verify all downstream consumers use IMAGE_REGISTRY.pinned."""
+
+    def test_context_proxy_image(self, tmp_path: Path) -> None:
+        """ctx['proxy_image'] == IMAGE_REGISTRY['squid'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["proxy_image"] == IMAGE_REGISTRY["squid"].pinned
+
+    def test_context_dns_image(self, tmp_path: Path) -> None:
+        """ctx['dns_image'] == IMAGE_REGISTRY['coredns'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["dns_image"] == IMAGE_REGISTRY["coredns"].pinned
+
+    def test_context_dnsdist_image(self, tmp_path: Path) -> None:
+        """ctx['dnsdist_image'] == IMAGE_REGISTRY['dnsdist'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["dnsdist_image"] == IMAGE_REGISTRY["dnsdist"].pinned
+
+    def test_context_busybox_image(self, tmp_path: Path) -> None:
+        """ctx['busybox_image'] == IMAGE_REGISTRY['busybox_musl'].pinned."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["busybox_image"] == IMAGE_REGISTRY["busybox_musl"].pinned
+
+    def test_context_db_postgres_image(self, tmp_path: Path) -> None:
+        """ctx['db_postgres_image'] == IMAGE_REGISTRY['postgres'].pinned (default)."""
+        ctx = _build_default_context(tmp_path)
+        assert ctx["db_postgres_image"] == IMAGE_REGISTRY["postgres"].pinned
+
+    def test_core_config_default_uses_registry(self) -> None:
+        """CoreConfig().base_image == IMAGE_REGISTRY['wolfi_base'].pinned."""
+        assert CoreConfig().base_image == IMAGE_REGISTRY["wolfi_base"].pinned
+
+    def test_admin_config_default_uses_registry(self) -> None:
+        """AdminConfig().base_image == IMAGE_REGISTRY['debian_trixie'].pinned."""
+        assert AdminConfig().base_image == IMAGE_REGISTRY["debian_trixie"].pinned
+
+    def test_db_postgres_config_default_uses_registry(self) -> None:
+        """DbPostgresConfig().image == IMAGE_REGISTRY['postgres'].pinned."""
+        assert DbPostgresConfig().image == IMAGE_REGISTRY["postgres"].pinned
+
+    def test_build_jinja_context_source_no_legacy(self) -> None:
+        """build_jinja_context source does not contain IMAGE_DIGESTS[."""
+        import inspect
+
+        source = inspect.getsource(build_jinja_context)
+        assert "IMAGE_DIGESTS[" not in source
+
+    def test_pydantic_source_no_legacy(self) -> None:
+        """CoreConfig, AdminConfig, DbPostgresConfig source does not contain IMAGE_DIGESTS[."""
+        import inspect
+
+        for cls in (CoreConfig, AdminConfig, DbPostgresConfig):
+            source = inspect.getsource(cls)
+            assert "IMAGE_DIGESTS[" not in source, f"{cls.__name__} still uses IMAGE_DIGESTS"
+
+    def test_scaffold_imports_image_registry(self) -> None:
+        """scaffold.py source contains IMAGE_REGISTRY import (not IMAGE_DIGESTS)."""
+        from pathlib import Path
+
+        source = Path(__file__).resolve().parents[2] / "core" / "scaffold.py"
+        content = source.read_text()
+        assert "IMAGE_REGISTRY" in content
+        assert "IMAGE_DIGESTS" not in content
+
+
+def _build_default_context(tmp_path: Path) -> dict[str, object]:
+    """Build context via build_jinja_context with default SandboxConfig."""
+    toml_path = tmp_path / "sandbox.toml"
+    toml_path.write_text(VALID_TOML)
+    config = SandboxConfig.from_toml(str(toml_path))
+    return build_jinja_context(
+        config=config,
+        base_index=0,
+        proxy_password="testpass",
+        instance_dir=str(tmp_path / "instance"),
+    )
 

@@ -294,6 +294,7 @@ def build_jinja_context(
         "dns_image": IMAGE_REGISTRY["coredns"].pinned,
         "proxy_image": IMAGE_REGISTRY["squid"].pinned,
         "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
+        "busybox_image": IMAGE_REGISTRY["busybox_musl"].pinned,
         # Images — user-configurable
         "db_postgres_image": config.components_db_postgres.image,
         # Proxy whitelist
