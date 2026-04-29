@@ -410,7 +410,7 @@ class TestFilesystemChecks:
         with patch("os.path.exists", return_value=True):
             result = check_tooling_plane("sandbox", None)
             assert result.status == "pass"
-            assert "16" in result.detail
+            assert "17" in result.detail
 
     def test_tooling_plane_missing_files(self) -> None:
         from core.doctor import check_tooling_plane
@@ -453,7 +453,7 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 14
+        assert len(checks) == 15
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert "machinectl_reachable" in ids
@@ -921,7 +921,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 14
+        assert len(checks) == 15
 
     def test_privilege_boundary_subset_contains_9_checks(self) -> None:
         """Task 9.12: Privilege boundary subset contains 9 checks (was 8)."""
@@ -929,7 +929,7 @@ class TestCheckRunscRuntimeArgs:
 
         checks = build_check_registry()
         pb_checks = [c for c in checks if c.category == "Privilege Boundary"]
-        assert len(pb_checks) == 9
+        assert len(pb_checks) == 10
 
     def test_runsc_runtimeargs_skipped_when_runsc_fails(self) -> None:
         """Task 9.13: check_runsc_runtimeargs is skipped when runsc check fails."""
@@ -964,7 +964,109 @@ class TestCheckRunscRuntimeArgs:
         assert results[1].status == "skip"
 
 
-# ── Section 12: Ancestor Traverse Check ─────────────────────────────────────
+# ── Section 12b: host-uds Validation Check ──────────────────────────────────
+
+
+class TestCheckHostUds:
+    """12.T: check_host_uds validates --host-uds=all is NOT in runsc runtimeArgs."""
+
+    def test_check_host_uds_none_passes(self) -> None:
+        """WHEN --host-uds=all is absent from runtimeArgs, THEN status='pass'."""
+        from core.doctor import check_host_uds
+
+        docker_info = json.dumps(
+            {
+                "runsc": {
+                    "path": "/usr/local/bin/runsc",
+                    "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
+                }
+            }
+        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_host_uds("sandbox", None)
+            assert result.status == "pass"
+
+    def test_check_host_uds_all_detected_warns(self) -> None:
+        """WHEN --host-uds=all is present in runtimeArgs, THEN status='warn'."""
+        from core.doctor import check_host_uds
+
+        docker_info = json.dumps(
+            {
+                "runsc": {
+                    "path": "/usr/local/bin/runsc",
+                    "runtimeArgs": ["--oci-seccomp", "--host-uds=all"],
+                }
+            }
+        )
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_host_uds("sandbox", None)
+            assert result.status == "warn"
+            assert "daemon.json" in (result.remediation or "")
+
+    def test_check_host_uds_skipped_when_runsc_failed(self) -> None:
+        """WHEN runsc check fails, THEN host_uds is auto-skipped by dependency engine."""
+        from core.doctor import Check, CheckResult, run_checks
+
+        def fail_runsc(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="fail", name="gVisor runsc", detail="not found")
+
+        def pass_host_uds(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="--host-uds=none", detail="ok")
+
+        checks = [
+            Check(
+                id="runsc",
+                name="gVisor runsc",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=fail_runsc,
+                remediation="",
+            ),
+            Check(
+                id="host_uds",
+                name="--host-uds=none",
+                category="Privilege Boundary",
+                depends_on=["runsc"],
+                run=pass_host_uds,
+                remediation="",
+            ),
+        ]
+        results = run_checks(checks, "sandbox", None)
+        assert results[0].status == "fail"
+        assert results[1].status == "skip"
+
+    def test_build_check_registry_includes_host_uds(self) -> None:
+        """build_check_registry() contains a check with id='host_uds'."""
+        from core.doctor import build_check_registry
+
+        checks = build_check_registry()
+        ids = [c.id for c in checks]
+        assert "host_uds" in ids
+
+    def test_check_host_uds_docker_query_failure(self) -> None:
+        """WHEN docker info fails, THEN status='warn' with remediation."""
+        from core.doctor import check_host_uds
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_host_uds("sandbox", None)
+            assert result.status == "warn"
+            assert "daemon.json" in (result.remediation or "")
+
+    def test_check_host_uds_json_parse_failure(self) -> None:
+        """WHEN docker info returns invalid JSON, THEN status='warn'."""
+        from core.doctor import check_host_uds
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="NOT-JSON{{{", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_host_uds("sandbox", None)
+            assert result.status == "warn"
+            assert "daemon.json" in (result.remediation or "")
+
+
+# ── Section 12c: Ancestor Traverse Check ─────────────────────────────────────
 #
 # All os.stat/pwd.getpwnam calls are fully mocked to avoid host filesystem
 # dependency. Tests construct synthetic stat results with deterministic
