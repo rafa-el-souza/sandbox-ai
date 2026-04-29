@@ -43,8 +43,9 @@ RUN if [ "$ENABLE_RUST" = "true" ]; then \
 
 FROM base AS branch-typescript
 ARG ENABLE_TYPESCRIPT=true
+USER root
+RUN mkdir -p /staging/usr/local/npm-ts && chown -R ${USERNAME}:${USERNAME} /staging
 USER ${USERNAME}
-RUN mkdir -p /staging/usr/local/npm-ts
 RUN if [ "$ENABLE_TYPESCRIPT" = "true" ]; then \
       npm install -g typescript-language-server typescript --prefix /staging/usr/local/npm-ts; \
     fi
@@ -72,20 +73,21 @@ RUN if [ "$ENABLE_GO" = "true" ]; then \
 FROM base AS branch-python
 ARG ENABLE_PYTHON=true
 USER root
-RUN mkdir -p /staging/usr/local/bin
+RUN mkdir -p /staging/usr/local/bin /staging/usr/local/npm-python && \
+    chown -R ${USERNAME}:${USERNAME} /staging
 USER ${USERNAME}
-RUN mkdir -p /staging/usr/local/npm-python
 RUN if [ "$ENABLE_PYTHON" = "true" ]; then \
       curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/staging/usr/local/bin" sh && \
       npm install -g pyright --prefix /staging/usr/local/npm-python; \
     fi
 
 FROM base AS branch-claude
+USER root
+RUN mkdir -p /staging/usr/local/bin && chown ${USERNAME}:${USERNAME} /staging/usr/local/bin
 USER ${USERNAME}
-RUN mkdir -p /staging/usr/local/bin && \
-    npm install -g @fission-ai/openspec@latest && \
+RUN npm install -g @fission-ai/openspec@latest && \
     curl -fsSL https://claude.ai/install.sh | bash && \
-    cp ${HOME_DIR}/.claude/local/claude /staging/usr/local/bin/claude
+    cp ${HOME_DIR}/.local/bin/claude /staging/usr/local/bin/claude
 
 # ─── Runtime Stage: no curl, wget, unzip, socat ──────────────────────────────
 FROM ${AGENT_BASE} AS runtime

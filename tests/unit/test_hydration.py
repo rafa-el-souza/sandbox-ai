@@ -2379,3 +2379,151 @@ def _build_default_context(tmp_path: Path) -> dict[str, object]:
         instance_dir=str(tmp_path / "instance"),
     )
 
+
+def _get_dockerfile_lines(rel_path: str) -> list[str]:
+    """Read a Dockerfile from the project root and return its lines."""
+    root = Path(__file__).resolve().parents[2]
+    return (root / rel_path).read_text().splitlines()
+
+
+def _extract_stage(lines: list[str], stage_name: str) -> list[str]:
+    """Extract lines belonging to a specific FROM ... AS <stage_name>."""
+    result: list[str] = []
+    in_stage = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("FROM ") and f"AS {stage_name}" in stripped:
+            in_stage = True
+            result.append(line)
+            continue
+        if in_stage:
+            if stripped.upper().startswith("FROM "):
+                break  # Next stage
+            result.append(line)
+    return result
+
+
+class TestDockerfileUserContext:
+    """Group 3.T: Validate USER context correctness in Dockerfiles."""
+
+    def test_branch_typescript_user_root_before_staging_mkdir(self) -> None:
+        """branch-typescript: USER root before mkdir /staging."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-typescript")
+        stage_text = "\n".join(stage)
+        # USER root must appear before the staging mkdir
+        root_idx = next(
+            (i for i, line in enumerate(stage) if line.strip() == "USER root"),
+            None,
+        )
+        mkdir_idx = next(
+            (i for i, line in enumerate(stage) if "mkdir" in line and "/staging" in line),
+            None,
+        )
+        assert root_idx is not None, f"No 'USER root' in branch-typescript:\n{stage_text}"
+        assert mkdir_idx is not None, f"No 'mkdir /staging' in branch-typescript:\n{stage_text}"
+        assert root_idx < mkdir_idx, "USER root must appear before mkdir /staging in branch-typescript"
+
+    def test_branch_typescript_user_unprivileged_before_npm(self) -> None:
+        """branch-typescript: USER ${USERNAME} before npm install."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-typescript")
+        user_switch_idx = next(
+            (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
+            None,
+        )
+        npm_idx = next(
+            (i for i, line in enumerate(stage) if "npm install" in line),
+            None,
+        )
+        assert user_switch_idx is not None, "No USER ${USERNAME} in branch-typescript"
+        assert npm_idx is not None, "No npm install in branch-typescript"
+        assert user_switch_idx < npm_idx, "USER ${USERNAME} must appear before npm install in branch-typescript"
+
+    def test_branch_python_user_root_before_staging_mkdir(self) -> None:
+        """branch-python: USER root before staging mkdirs (both paths)."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-python")
+        # All staging mkdirs must be under USER root
+        user_context = "unknown"
+        for line in stage:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                user_context = stripped.split()[1]
+            if "mkdir" in stripped and "/staging" in stripped:
+                assert user_context == "root", (
+                    f"mkdir /staging under USER {user_context} (not root) in branch-python: {stripped}"
+                )
+
+    def test_branch_claude_user_root_before_staging_mkdir(self) -> None:
+        """branch-claude: USER root before mkdir /staging."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-claude")
+        root_idx = next(
+            (i for i, line in enumerate(stage) if line.strip() == "USER root"),
+            None,
+        )
+        mkdir_idx = next(
+            (i for i, line in enumerate(stage) if "mkdir" in line and "/staging" in line),
+            None,
+        )
+        assert root_idx is not None, "No USER root in branch-claude"
+        assert mkdir_idx is not None, "No mkdir /staging in branch-claude"
+        assert root_idx < mkdir_idx, "USER root must appear before mkdir /staging in branch-claude"
+
+    def test_branch_claude_user_unprivileged_before_npm(self) -> None:
+        """branch-claude: USER ${USERNAME} before npm install."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        stage = _extract_stage(lines, "branch-claude")
+        user_switch_idx = next(
+            (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
+            None,
+        )
+        npm_idx = next(
+            (i for i, line in enumerate(stage) if "npm install" in line),
+            None,
+        )
+        assert user_switch_idx is not None, "No USER ${USERNAME} in branch-claude"
+        assert npm_idx is not None, "No npm install in branch-claude"
+        assert user_switch_idx < npm_idx, "USER ${USERNAME} must appear before npm install"
+
+    def test_admin_user_root_before_entrypoint_copy(self) -> None:
+        """Admin Dockerfile: USER root before COPY entrypoint.sh."""
+        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        user_context = "unknown"
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                user_context = stripped.split()[1]
+            if stripped.startswith("COPY") and "entrypoint.sh" in stripped:
+                assert user_context == "root", (
+                    f"COPY entrypoint.sh under USER {user_context} (not root)"
+                )
+
+    def test_admin_user_unprivileged_before_entrypoint(self) -> None:
+        """Admin Dockerfile: USER ${USERNAME} between chmod and ENTRYPOINT."""
+        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        chmod_idx = next(
+            (i for i, line in enumerate(lines) if "chmod" in line and "entrypoint" in line),
+            None,
+        )
+        entrypoint_idx = next(
+            (i for i, line in enumerate(lines) if line.strip().startswith("ENTRYPOINT")),
+            None,
+        )
+        assert chmod_idx is not None, "No chmod entrypoint line"
+        assert entrypoint_idx is not None, "No ENTRYPOINT line"
+        # Find USER ${USERNAME} between chmod and ENTRYPOINT
+        user_between = any(
+            "${USERNAME}" in lines[i] and lines[i].strip().startswith("USER")
+            for i in range(chmod_idx + 1, entrypoint_idx)
+        )
+        assert user_between, "USER ${USERNAME} must appear between chmod and ENTRYPOINT"
+
+    def test_claude_local_bin_path(self) -> None:
+        """Dockerfile.core.wolfi uses ${HOME_DIR}/.local/bin/claude (not .claude/local/claude)."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        content = "\n".join(lines)
+        assert "${HOME_DIR}/.local/bin/claude" in content or ".local/bin/claude" in content
+        assert ".claude/local/claude" not in content
+
