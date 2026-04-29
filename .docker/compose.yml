@@ -356,7 +356,7 @@ services:
       - "{{ user_project_root }}:/workspace:rw"
       - "{{ instance_dir }}/config/admin/.zshrc:/home/human/.zshrc:ro"
       - "{{ instance_dir }}/config/admin/.tmux.conf:/home/human/.tmux.conf:ro"
-      - "{{ instance_dir }}/config/admin/gitmux.conf:/home/human/.tmux/plugins/catppuccin/tmux/status/gitmux.conf:ro"
+      - "{{ instance_dir }}/config/admin/gitmux.conf:/usr/local/tmux-plugins/catppuccin/tmux/status/gitmux.conf:ro"
       - "{{ instance_dir }}/config/admin/starship.toml:/home/human/.config/starship.toml:ro"
       - "{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro"
       - "{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw"
