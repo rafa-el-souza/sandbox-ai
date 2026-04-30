@@ -155,7 +155,7 @@ services:
         ipv4_address: "{{ dnsdist_admin_ip }}"
     volumes:
       - "{{ instance_dir }}/config/dnsdist/dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro"
-    command: ["dnsdist", "--supervised", "-C", "/etc/dnsdist/dnsdist.conf"]
+    command: ["--supervised", "-C", "/etc/dnsdist/dnsdist.conf"]
     depends_on:
       coredns:
         condition: service_healthy
