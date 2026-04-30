@@ -3093,3 +3093,55 @@ class TestSecretsRemovalBindMounts:
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
         assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block
+
+
+class TestCoreNonRootSshd:
+    """3.T RED: Core Dockerfile transitions sshd to non-root agent-mode.
+
+    Implements: ssh-ipc-transport/spec.md §Core Dockerfile USER for Non-Root sshd,
+                §sshd-session File Capability for PTY Allocation
+    """
+
+    def test_dockerfile_final_user_is_agent(self) -> None:
+        """Dockerfile.core.wolfi last USER directive before ENTRYPOINT is USER ${USERNAME}."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        runtime_stage = _extract_stage(lines, "runtime")
+        # Find the last USER directive in the runtime stage
+        last_user = None
+        for line in runtime_stage:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                last_user = stripped
+        assert last_user is not None, "No USER directive in runtime stage"
+        assert last_user == "USER ${USERNAME}", (
+            f"Last USER directive must be 'USER ${'{'}USERNAME{'}'}', got: {last_user}"
+        )
+
+    def test_dockerfile_no_final_user_root(self) -> None:
+        """Dockerfile.core.wolfi does NOT have USER root as the last USER directive."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        runtime_stage = _extract_stage(lines, "runtime")
+        last_user = None
+        for line in runtime_stage:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                last_user = stripped
+        assert last_user != "USER root", (
+            "Last USER directive in runtime stage must NOT be 'USER root'"
+        )
+
+    def test_dockerfile_setcap_sshd_session(self) -> None:
+        """Dockerfile.core.wolfi contains setcap cap_chown+ep /usr/lib/ssh/sshd-session."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        content = "\n".join(lines)
+        assert "setcap cap_chown+ep /usr/lib/ssh/sshd-session" in content, (
+            "Dockerfile must contain setcap cap_chown+ep on sshd-session"
+        )
+
+    def test_dockerfile_setcap_not_targeting_sshd(self) -> None:
+        """Dockerfile.core.wolfi does NOT contain setcap targeting /usr/sbin/sshd."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        content = "\n".join(lines)
+        assert "setcap" not in content or "/usr/sbin/sshd" not in content, (
+            "setcap must NOT target /usr/sbin/sshd (must target /usr/lib/ssh/sshd-session)"
+        )

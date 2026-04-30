@@ -95,6 +95,13 @@ FROM ${AGENT_BASE} AS runtime
 USER root
 RUN apk update && apk add --no-cache bash git jq python3 py3-pip openssh-server coreutils file gzip tzdata ca-certificates nano
 
+# Grant cap_chown+ep on sshd-session for PTY allocation under non-root sshd.
+# OpenSSH 10.x splits into sshd → sshd-auth → sshd-session; chown(2) runs in
+# sshd-session only. Install libcap-utils, apply cap, purge in single layer.
+RUN apk add --no-cache libcap-utils && \
+    setcap cap_chown+ep /usr/lib/ssh/sshd-session && \
+    apk del libcap-utils
+
 ARG USERNAME="agent"
 ARG HOME_DIR="/home/${USERNAME}"
 ARG HOST_UID="1000"
@@ -132,7 +139,8 @@ ENV SHELL=/bin/bash
 ENV EDITOR=/usr/bin/nano
 ENV VISUAL=/usr/bin/nano
 
-# sshd requires root for L1 UID separation (setuid(agent) per session)
-USER root
+# Non-root sshd: euid ≠ 0 skips privilege separation (no chroot, no setuid).
+# sshd-session has cap_chown+ep for PTY allocation via file capability.
+USER ${USERNAME}
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
