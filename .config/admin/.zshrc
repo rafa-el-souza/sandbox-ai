@@ -77,7 +77,7 @@ export PATH="~/.install/gitmux:$PATH"
 #   1. Shell setup (completion, history, plugins, aliases, env)
 #   2. Starship init (prompt framework)
 #   3. User override hook (custom/config/admin/.zshrc — can customize starship, aliases, env)
-#   4. Warmup prompt (launches claude -p; must fire last so user env is fully configured)
+#   4. Warmup prompt (launches claude; must fire last so user env is fully configured)
 ######################################################################################################################################
 
 eval "$(starship init zsh)"
