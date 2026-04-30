@@ -3303,3 +3303,56 @@ class TestSquidDnsNameservers:
         assert "127.0.0.11" not in rendered, (
             "squid.conf must NOT contain Docker internal DNS proxy 127.0.0.11"
         )
+
+
+class TestAdminRuntimeRunc:
+    """7.T RED: Admin service hardcodes runc runtime.
+
+    Implements: gvisor-resource-tuning/spec.md §Admin Service runc Runtime Override
+    """
+
+    def test_admin_runtime_is_runc(self) -> None:
+        """Admin service in compose.yml template has runtime: "runc"."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        admin_start = raw.index("\n  admin:")
+        admin_block = raw[admin_start:]
+        # Find runtime: line in admin block
+        runtime_lines = [
+            line.strip() for line in admin_block.splitlines()
+            if line.strip().startswith("runtime:")
+        ]
+        assert len(runtime_lines) >= 1, "Admin service must have a runtime: directive"
+        assert runtime_lines[0] == 'runtime: "runc"', (
+            f"Admin runtime must be 'runc', got: {runtime_lines[0]}"
+        )
+
+    def test_admin_runtime_not_templated(self) -> None:
+        """Admin service runtime is NOT the Jinja2 variable {{ runtime }}."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        admin_start = raw.index("\n  admin:")
+        admin_block = raw[admin_start:]
+        runtime_lines = [
+            line.strip() for line in admin_block.splitlines()
+            if line.strip().startswith("runtime:")
+        ]
+        assert len(runtime_lines) >= 1
+        assert "{{ runtime }}" not in runtime_lines[0], (
+            "Admin runtime must NOT use {{ runtime }} template variable"
+        )
+
+    def test_core_retains_templated_runtime(self) -> None:
+        """Core service retains runtime: "{{ runtime }}" (gVisor)."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        core_start = raw.index("\n  core:")
+        admin_start = raw.index("\n  admin:")
+        core_block = raw[core_start:admin_start]
+        assert 'runtime: "{{ runtime }}"' in core_block, (
+            "Core service must retain templated runtime: \"{{ runtime }}\""
+        )
+

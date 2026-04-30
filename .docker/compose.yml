@@ -313,7 +313,7 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-    runtime: "{{ runtime }}"
+    runtime: "runc"
     tmpfs:
       - /home/human/.cache:nosuid,nodev
       - /home/human/.config:nosuid,nodev
