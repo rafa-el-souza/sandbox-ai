@@ -177,7 +177,7 @@ services:
       - /var/spool/squid:noexec,nosuid,nodev
       - /var/run/squid:noexec,nosuid,nodev
       - /var/log/squid:noexec,nosuid,nodev
-      - /run:size=1m,noexec,nosuid,nodev
+      - /run:size=1m,mode=0755,noexec,nosuid,nodev
       - /tmp:noexec,nosuid,nodev
       - /var/tmp:noexec,nosuid,nodev
     networks:
@@ -226,14 +226,15 @@ services:
         max-size: "50m"
         max-file: "5"
     cap_add:
-      - SETUID
-      - SETGID
+      - CHOWN
+    security_opt:
+      - no-new-privileges:false
     runtime: "{{ runtime }}"
     tmpfs:
       - /home/agent/.ssh:noexec,nosuid,nodev
       - /home/agent/.cache:nosuid,nodev
       - /home/agent/.config:nosuid,nodev
-      - /run:size=1m,noexec,nosuid,nodev
+      - /run:size=1m,mode=0755,noexec,nosuid,nodev
       - /tmp:nosuid,nodev
       - /var/tmp:nosuid,nodev
     networks:

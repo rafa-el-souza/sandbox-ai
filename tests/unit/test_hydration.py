@@ -1954,16 +1954,15 @@ class TestComposeIpcNetAndW4Hardening:
         admin_block = rendered[admin_start:]
         assert "read_only: false" not in admin_block
 
-    # --- (i) core cap_add SETUID/SETGID ---
+    # --- (i) core cap_add CHOWN ---
     def test_compose_core_cap_add_setuid(self, tmp_path: Path) -> None:
-        """Core service contains cap_add with SETUID and SETGID."""
+        """Core service contains cap_add with CHOWN (non-root sshd-session PTY allocation)."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
         assert "cap_add:" in core_block
-        assert "SETUID" in core_block
-        assert "SETGID" in core_block
+        assert "CHOWN" in core_block
 
     # --- (j) core ipc_host_key bind-mount ---
     def test_compose_core_ipc_host_key_secret(self, tmp_path: Path) -> None:
@@ -3144,4 +3143,91 @@ class TestCoreNonRootSshd:
         content = "\n".join(lines)
         assert "setcap" not in content or "/usr/sbin/sshd" not in content, (
             "setcap must NOT target /usr/sbin/sshd (must target /usr/lib/ssh/sshd-session)"
+        )
+
+
+class TestCoreCapAddSecurityOptTmpfs:
+    """4.T RED: Core cap_add CHOWN, security_opt override, tmpfs mode=0755.
+
+    Implements: compose-security-baseline/spec.md §Baseline Excludes List-Valued Properties,
+                §tmpfs Mode for sshd StrictModes Compliance
+    """
+
+    def test_core_cap_add_chown(self, tmp_path: Path) -> None:
+        """Core cap_add is [CHOWN], not [SETUID, SETGID]."""
+        from ruamel.yaml import YAML
+
+        rendered = _render_compose(tmp_path)
+        ry = YAML(typ="safe")
+        data = ry.load(rendered)
+        cap_add = data["services"]["core"]["cap_add"]
+        assert cap_add == ["CHOWN"], (
+            f"Core cap_add must be [CHOWN], got: {cap_add}"
+        )
+
+    def test_core_security_opt_no_new_privs_false(self, tmp_path: Path) -> None:
+        """Core has security_opt: [no-new-privileges:false]."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "no-new-privileges:false" in core_block, (
+            "Core must have security_opt: [no-new-privileges:false]"
+        )
+
+    def test_core_run_tmpfs_mode_0755(self, tmp_path: Path) -> None:
+        """Core /run tmpfs has mode=0755."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        # Find /run tmpfs entry (not /var/run, not /home/...)
+        assert "mode=0755" in core_block, (
+            "Core /run tmpfs must include mode=0755"
+        )
+
+    def test_proxy_run_tmpfs_mode_0755(self, tmp_path: Path) -> None:
+        """Proxy /run tmpfs has mode=0755."""
+        rendered = _render_compose(tmp_path)
+        proxy_start = rendered.index("\n  proxy:")
+        core_start = rendered.index("\n  core:")
+        proxy_block = rendered[proxy_start:core_start]
+        assert "mode=0755" in proxy_block, (
+            "Proxy /run tmpfs must include mode=0755"
+        )
+
+    def test_admin_no_run_tmpfs(self, tmp_path: Path) -> None:
+        """Admin service has no /run tmpfs."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        # Check that no /run entry exists in admin tmpfs (but /home/.cache etc are fine)
+        lines = admin_block.splitlines()
+        in_tmpfs = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("tmpfs:"):
+                in_tmpfs = True
+                continue
+            if in_tmpfs:
+                if stripped.startswith("- /"):
+                    # Check if this is a /run mount (not /var/run, not /home)
+                    mount_path = stripped.lstrip("- ").split(":")[0]
+                    assert mount_path != "/run", (
+                        "Admin service must NOT have a /run tmpfs entry"
+                    )
+                elif not stripped.startswith("- "):
+                    break  # End of tmpfs block
+
+    def test_non_core_retain_no_new_privs_true(self, tmp_path: Path) -> None:
+        """Non-core services (coredns, proxy, admin, dnsdist) retain no-new-privileges:true."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        # The baseline anchor must still have no-new-privileges:true
+        start = raw.index("x-security-baseline:")
+        end = raw.index("\nnetworks:")
+        block = raw[start:end]
+        assert "no-new-privileges:true" in block, (
+            "Security baseline must retain no-new-privileges:true"
         )
