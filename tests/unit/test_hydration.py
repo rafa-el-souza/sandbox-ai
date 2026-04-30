@@ -1954,37 +1954,32 @@ class TestComposeIpcNetAndW4Hardening:
         admin_block = rendered[admin_start:]
         assert "read_only: false" not in admin_block
 
-    # --- (i) core cap_add SETUID/SETGID ---
+    # --- (i) core cap_add CHOWN ---
     def test_compose_core_cap_add_setuid(self, tmp_path: Path) -> None:
-        """Core service contains cap_add with SETUID and SETGID."""
+        """Core service contains cap_add with CHOWN (non-root sshd-session PTY allocation)."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
         assert "cap_add:" in core_block
-        assert "SETUID" in core_block
-        assert "SETGID" in core_block
+        assert "CHOWN" in core_block
 
-    # --- (j) core ipc_host_key secret ---
+    # --- (j) core ipc_host_key bind-mount ---
     def test_compose_core_ipc_host_key_secret(self, tmp_path: Path) -> None:
-        """Core service secrets contain ipc_host_key with uid '0' and mode 0600."""
+        """Core service volumes contain ipc_host_key as bind-mount (not Docker secrets)."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
-        assert "ipc_host_key" in core_block
-        assert "uid: '0'" in core_block
-        assert "0600" in core_block
+        assert "ipc_host_key:/run/secrets/ipc_host_key:ro" in core_block
 
-    # --- (k) admin ipc_ssh_key secret ---
+    # --- (k) admin ipc_ssh_key bind-mount ---
     def test_compose_admin_ipc_ssh_key_secret(self, tmp_path: Path) -> None:
-        """Admin service secrets contain ipc_ssh_key with uid '1000' and mode 0600."""
+        """Admin service volumes contain ipc_ssh_key as bind-mount (not Docker secrets)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "ipc_ssh_key" in admin_block
-        assert "uid: '1000'" in admin_block
-        assert "0600" in admin_block
+        assert "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro" in admin_block
 
     # --- (l) core tmpfs /run ---
     def test_compose_core_tmpfs_run(self, tmp_path: Path) -> None:
@@ -2973,4 +2968,606 @@ class TestTmuxGvisorPollingConfig:
         )
         assert "visual-activity on" not in tmux_text, (
             "visual-activity on must not remain in template"
+        )
+
+
+class TestDbPostgresZeroCap:
+    """1.T RED: db-postgres runs as user 70:70 with zero capabilities.
+
+    Implements: compose-security-baseline/spec.md §Extras Services Zero-Capability Posture
+    """
+
+    def test_db_postgres_user_directive(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output contains user: "70:70"."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert 'user: "70:70"' in rendered, (
+            "db-postgres service must declare user: \"70:70\" (postgres uid:gid in Alpine)"
+        )
+
+    def test_db_postgres_no_cap_add(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output has no cap_add block."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert "cap_add:" not in rendered, (
+            "db-postgres service must NOT contain a cap_add block"
+        )
+
+    def test_db_postgres_cap_drop_all(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output contains cap_drop: [ALL]."""
+        from ruamel.yaml import YAML
+
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        ry = YAML(typ="safe")
+        data = ry.load(rendered)
+        svc = data["services"]["db-postgres"]
+        assert svc.get("cap_drop") == ["ALL"], (
+            "db-postgres service must have cap_drop: [ALL]"
+        )
+
+    def test_db_postgres_no_privilege_caps_in_cap_add(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output has no CHOWN/FOWNER/SETGID/SETUID in cap_add."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        from ruamel.yaml import YAML
+
+        ry = YAML(typ="safe")
+        data = ry.load(rendered)
+        svc = data["services"]["db-postgres"]
+        cap_add = svc.get("cap_add", [])
+        forbidden = {"CHOWN", "FOWNER", "SETGID", "SETUID"}
+        present = forbidden & set(cap_add)
+        assert present == set(), (
+            f"db-postgres cap_add must not contain {forbidden}, found: {present}"
+        )
+
+
+class TestSecretsRemovalBindMounts:
+    """2.T RED: Replace Docker Compose secrets: with bind-mounts.
+
+    Implements: ssh-ipc-transport/spec.md §SSH Credential Mounts
+    """
+
+    def test_compose_no_top_level_secrets(self, tmp_path: Path) -> None:
+        """compose.yml template source has no top-level secrets: block."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        # top-level secrets: is at column 0 (not indented)
+        lines = raw.splitlines()
+        top_level_secrets = [
+            i for i, line in enumerate(lines, 1)
+            if line.rstrip() == "secrets:" or line.startswith("secrets:")
+        ]
+        assert top_level_secrets == [], (
+            f"compose.yml must NOT contain a top-level secrets: block, found at lines: {top_level_secrets}"
+        )
+
+    def test_compose_core_no_service_secrets(self, tmp_path: Path) -> None:
+        """Core service block does NOT contain a secrets: entry."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "secrets:" not in core_block, (
+            "Core service must NOT contain a secrets: entry"
+        )
+
+    def test_compose_admin_no_service_secrets(self, tmp_path: Path) -> None:
+        """Admin service block does NOT contain a secrets: entry."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "secrets:" not in admin_block, (
+            "Admin service must NOT contain a secrets: entry"
+        )
+
+    def test_compose_core_ipc_host_key_bind_mount(self, tmp_path: Path) -> None:
+        """Core volumes include ipc_host_key:/run/secrets/ipc_host_key:ro bind-mount."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "ipc_host_key:/run/secrets/ipc_host_key:ro" in core_block, (
+            "Core volumes must include ipc_host_key bind-mount"
+        )
+
+    def test_compose_admin_ipc_ssh_key_bind_mount(self, tmp_path: Path) -> None:
+        """Admin volumes include ipc_ssh_key:/run/secrets/ipc_ssh_key:ro bind-mount."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro" in admin_block, (
+            "Admin volumes must include ipc_ssh_key bind-mount"
+        )
+
+    def test_compose_core_authorized_keys_unchanged(self, tmp_path: Path) -> None:
+        """Core authorized_keys bind-mount unchanged."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "authorized_keys:/run/secrets/authorized_keys:ro" in core_block
+
+    def test_compose_admin_known_hosts_unchanged(self, tmp_path: Path) -> None:
+        """Admin ipc_known_hosts bind-mount unchanged."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block
+
+
+class TestCoreNonRootSshd:
+    """3.T RED: Core Dockerfile transitions sshd to non-root agent-mode.
+
+    Implements: ssh-ipc-transport/spec.md §Core Dockerfile USER for Non-Root sshd,
+                §sshd-session File Capability for PTY Allocation
+    """
+
+    def test_dockerfile_final_user_is_agent(self) -> None:
+        """Dockerfile.core.wolfi last USER directive before ENTRYPOINT is USER ${USERNAME}."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        runtime_stage = _extract_stage(lines, "runtime")
+        # Find the last USER directive in the runtime stage
+        last_user = None
+        for line in runtime_stage:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                last_user = stripped
+        assert last_user is not None, "No USER directive in runtime stage"
+        assert last_user == "USER ${USERNAME}", (
+            f"Last USER directive must be 'USER ${'{'}USERNAME{'}'}', got: {last_user}"
+        )
+
+    def test_dockerfile_no_final_user_root(self) -> None:
+        """Dockerfile.core.wolfi does NOT have USER root as the last USER directive."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        runtime_stage = _extract_stage(lines, "runtime")
+        last_user = None
+        for line in runtime_stage:
+            stripped = line.strip()
+            if stripped.startswith("USER "):
+                last_user = stripped
+        assert last_user != "USER root", (
+            "Last USER directive in runtime stage must NOT be 'USER root'"
+        )
+
+    def test_dockerfile_setcap_sshd_session(self) -> None:
+        """Dockerfile.core.wolfi contains setcap cap_chown+ep /usr/lib/ssh/sshd-session."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        content = "\n".join(lines)
+        assert "setcap cap_chown+ep /usr/lib/ssh/sshd-session" in content, (
+            "Dockerfile must contain setcap cap_chown+ep on sshd-session"
+        )
+
+    def test_dockerfile_setcap_not_targeting_sshd(self) -> None:
+        """Dockerfile.core.wolfi does NOT contain setcap targeting /usr/sbin/sshd."""
+        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        content = "\n".join(lines)
+        assert "setcap" not in content or "/usr/sbin/sshd" not in content, (
+            "setcap must NOT target /usr/sbin/sshd (must target /usr/lib/ssh/sshd-session)"
+        )
+
+
+class TestCoreCapAddSecurityOptTmpfs:
+    """4.T RED: Core cap_add CHOWN, security_opt override, tmpfs mode=0755.
+
+    Implements: compose-security-baseline/spec.md §Baseline Excludes List-Valued Properties,
+                §tmpfs Mode for sshd StrictModes Compliance
+    """
+
+    def test_core_cap_add_chown(self, tmp_path: Path) -> None:
+        """Core cap_add is [CHOWN], not [SETUID, SETGID]."""
+        from ruamel.yaml import YAML
+
+        rendered = _render_compose(tmp_path)
+        ry = YAML(typ="safe")
+        data = ry.load(rendered)
+        cap_add = data["services"]["core"]["cap_add"]
+        assert cap_add == ["CHOWN"], (
+            f"Core cap_add must be [CHOWN], got: {cap_add}"
+        )
+
+    def test_core_security_opt_no_new_privs_false(self, tmp_path: Path) -> None:
+        """Core has security_opt: [no-new-privileges:false]."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "no-new-privileges:false" in core_block, (
+            "Core must have security_opt: [no-new-privileges:false]"
+        )
+
+    def test_core_run_tmpfs_mode_0755(self, tmp_path: Path) -> None:
+        """Core /run tmpfs has mode=0755."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        # Find /run tmpfs entry (not /var/run, not /home/...)
+        assert "mode=0755" in core_block, (
+            "Core /run tmpfs must include mode=0755"
+        )
+
+    def test_proxy_run_tmpfs_mode_0755(self, tmp_path: Path) -> None:
+        """Proxy /run tmpfs has mode=0755."""
+        rendered = _render_compose(tmp_path)
+        proxy_start = rendered.index("\n  proxy:")
+        core_start = rendered.index("\n  core:")
+        proxy_block = rendered[proxy_start:core_start]
+        assert "mode=0755" in proxy_block, (
+            "Proxy /run tmpfs must include mode=0755"
+        )
+
+    def test_admin_no_run_tmpfs(self, tmp_path: Path) -> None:
+        """Admin service has no /run tmpfs."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        # Check that no /run entry exists in admin tmpfs (but /home/.cache etc are fine)
+        lines = admin_block.splitlines()
+        in_tmpfs = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("tmpfs:"):
+                in_tmpfs = True
+                continue
+            if in_tmpfs:
+                if stripped.startswith("- /"):
+                    # Check if this is a /run mount (not /var/run, not /home)
+                    mount_path = stripped.lstrip("- ").split(":")[0]
+                    assert mount_path != "/run", (
+                        "Admin service must NOT have a /run tmpfs entry"
+                    )
+                elif not stripped.startswith("- "):
+                    break  # End of tmpfs block
+
+    def test_non_core_retain_no_new_privs_true(self, tmp_path: Path) -> None:
+        """Non-core services (coredns, proxy, admin, dnsdist) retain no-new-privileges:true."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        # The baseline anchor must still have no-new-privileges:true
+        start = raw.index("x-security-baseline:")
+        end = raw.index("\nnetworks:")
+        block = raw[start:end]
+        assert "no-new-privileges:true" in block, (
+            "Security baseline must retain no-new-privileges:true"
+        )
+
+
+class TestSshdPidFileEntrypoint:
+    """5.T RED: sshd_config PidFile none + entrypoint cleanup.
+
+    Implements: ssh-ipc-transport/spec.md §Hardened sshd_config Template,
+                §Core Container sshd Runtime Directory
+    """
+
+    def test_sshd_config_pidfile_none(self) -> None:
+        """sshd_config template contains PidFile none."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "core" / "sshd_config"
+        ).read_text()
+        assert "PidFile none" in content, (
+            "sshd_config must contain 'PidFile none' for non-root operation"
+        )
+
+    def test_entrypoint_no_mkdir_run_sshd(self) -> None:
+        """Core entrypoint.sh does NOT contain mkdir -p /run/sshd."""
+        content = (
+            Path(__file__).parent.parent.parent / ".docker" / "core" / "entrypoint.sh"
+        ).read_text()
+        assert "mkdir -p /run/sshd" not in content, (
+            "Entrypoint must NOT contain 'mkdir -p /run/sshd' — PidFile none eliminates need"
+        )
+
+
+def _render_squid_conf(tmp_path: Path) -> str:
+    """Render squid.conf template through Jinja2 with StrictUndefined."""
+    import jinja2
+
+    ctx = _build_test_context(str(tmp_path / "inst"))
+    template_content = (
+        Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf"
+    ).read_text()
+    env = jinja2.Environment(
+        loader=jinja2.BaseLoader(),
+        undefined=jinja2.StrictUndefined,
+    )
+    return env.from_string(template_content).render(ctx)
+
+
+class TestSquidDnsNameservers:
+    """6.T RED: Squid dns_nameservers points at CoreDNS egress IP.
+
+    Implements: proxy-dns-resolution/spec.md §Squid Explicit DNS Nameserver
+    """
+
+    def test_squid_dns_nameservers_present(self, tmp_path: Path) -> None:
+        """Rendered squid.conf contains dns_nameservers followed by the coredns egress IP."""
+        rendered = _render_squid_conf(tmp_path)
+        assert "dns_nameservers" in rendered, (
+            "squid.conf must contain a dns_nameservers directive"
+        )
+
+    def test_squid_dns_nameservers_uses_coredns_egress_ip(self, tmp_path: Path) -> None:
+        """Rendered squid.conf dns_nameservers resolves to the coredns egress IP."""
+        rendered = _render_squid_conf(tmp_path)
+        # coredns_egress_ip for slot 0 = 10.100.5.53
+        lines = [line.strip() for line in rendered.splitlines() if line.strip().startswith("dns_nameservers")]
+        assert len(lines) == 1, f"Expected exactly one dns_nameservers line, got: {lines}"
+        assert "10.100.5.53" in lines[0], (
+            f"dns_nameservers must resolve to coredns egress IP (10.100.5.53), got: {lines[0]}"
+        )
+
+    def test_squid_dns_nameservers_no_docker_dns(self, tmp_path: Path) -> None:
+        """Rendered squid.conf does NOT contain 127.0.0.11 as DNS nameserver."""
+        rendered = _render_squid_conf(tmp_path)
+        assert "127.0.0.11" not in rendered, (
+            "squid.conf must NOT contain Docker internal DNS proxy 127.0.0.11"
+        )
+
+
+class TestAdminRuntimeRunc:
+    """7.T RED: Admin service hardcodes runc runtime.
+
+    Implements: gvisor-resource-tuning/spec.md §Admin Service runc Runtime Override
+    """
+
+    def test_admin_runtime_is_runc(self) -> None:
+        """Admin service in compose.yml template has runtime: "runc"."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        admin_start = raw.index("\n  admin:")
+        admin_block = raw[admin_start:]
+        # Find runtime: line in admin block
+        runtime_lines = [
+            line.strip() for line in admin_block.splitlines()
+            if line.strip().startswith("runtime:")
+        ]
+        assert len(runtime_lines) >= 1, "Admin service must have a runtime: directive"
+        assert runtime_lines[0] == 'runtime: "runc"', (
+            f"Admin runtime must be 'runc', got: {runtime_lines[0]}"
+        )
+
+    def test_admin_runtime_not_templated(self) -> None:
+        """Admin service runtime is NOT the Jinja2 variable {{ runtime }}."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        admin_start = raw.index("\n  admin:")
+        admin_block = raw[admin_start:]
+        runtime_lines = [
+            line.strip() for line in admin_block.splitlines()
+            if line.strip().startswith("runtime:")
+        ]
+        assert len(runtime_lines) >= 1
+        assert "{{ runtime }}" not in runtime_lines[0], (
+            "Admin runtime must NOT use {{ runtime }} template variable"
+        )
+
+    def test_core_retains_templated_runtime(self) -> None:
+        """Core service retains runtime: "{{ runtime }}" (gVisor)."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        core_start = raw.index("\n  core:")
+        admin_start = raw.index("\n  admin:")
+        core_block = raw[core_start:admin_start]
+        assert 'runtime: "{{ runtime }}"' in core_block, (
+            "Core service must retain templated runtime: \"{{ runtime }}\""
+        )
+
+
+class TestTmuxPluginPaths:
+    """8.T RED: tmux plugin paths match Dockerfile install location.
+
+    Implements: admin-shell-config/spec.md §tmux Plugin Path Resolution
+    """
+
+    def test_tmux_plugin_manager_path_set(self) -> None:
+        """.tmux.conf contains TMUX_PLUGIN_MANAGER_PATH set to /usr/local/tmux-plugins."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "set-environment -g TMUX_PLUGIN_MANAGER_PATH '/usr/local/tmux-plugins'" in content, (
+            ".tmux.conf must set TMUX_PLUGIN_MANAGER_PATH to /usr/local/tmux-plugins"
+        )
+
+    def test_catppuccin_run_path_correct(self) -> None:
+        """Catppuccin run path is /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "run /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux" in content, (
+            "Catppuccin run directive must reference /usr/local/tmux-plugins/"
+        )
+
+    def test_tpm_run_path_correct(self) -> None:
+        """TPM run path is /usr/local/tmux-plugins/tpm/tpm."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "run /usr/local/tmux-plugins/tpm/tpm" in content, (
+            "TPM run directive must reference /usr/local/tmux-plugins/"
+        )
+
+    def test_no_stale_home_config_plugin_paths(self) -> None:
+        """.tmux.conf does NOT contain any ~/.config/tmux/plugins/ paths."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "~/.config/tmux/plugins/" not in content, (
+            ".tmux.conf must NOT contain stale ~/.config/tmux/plugins/ paths"
+        )
+
+
+class TestLocaleTermExport:
+    """9.T RED: C.UTF-8 locale and TERM default for admin shell.
+
+    Implements: admin-shell-config/spec.md §C.UTF-8 Locale Configuration,
+                §TERM Environment Variable Default
+    """
+
+    def test_zshrc_lang_c_utf8(self) -> None:
+        """.zshrc contains LANG=C.UTF-8."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc"
+        ).read_text()
+        assert "LANG=C.UTF-8" in content, (
+            ".zshrc must set LANG=C.UTF-8"
+        )
+
+    def test_zshrc_lc_all_c_utf8(self) -> None:
+        """.zshrc contains LC_ALL=C.UTF-8."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc"
+        ).read_text()
+        assert "LC_ALL=C.UTF-8" in content, (
+            ".zshrc must set LC_ALL=C.UTF-8"
+        )
+
+    def test_zshrc_no_en_us_utf8(self) -> None:
+        """.zshrc does NOT contain en_US.UTF-8."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc"
+        ).read_text()
+        assert "en_US.UTF-8" not in content, (
+            ".zshrc must NOT contain en_US.UTF-8 — locale is not installed in image"
+        )
+
+    def test_entrypoint_term_export_before_tmux(self) -> None:
+        """Admin entrypoint.sh contains TERM export before tmux new-session."""
+        content = (
+            Path(__file__).parent.parent.parent / ".docker" / "admin" / "entrypoint.sh"
+        ).read_text()
+        assert 'export TERM="${TERM:-xterm-256color}"' in content, (
+            "Admin entrypoint must export TERM with xterm-256color default"
+        )
+        # Verify ordering: TERM export before tmux
+        term_pos = content.index('export TERM="${TERM:-xterm-256color}"')
+        tmux_pos = content.index("tmux new-session")
+        assert term_pos < tmux_pos, (
+            "TERM export must appear before tmux new-session"
+        )
+
+
+class TestRootlessHardeningPosture:
+    """11.T: Integration verification of the complete rootless hardening posture.
+
+    Renders the full compose template + db-postgres extra and validates every
+    security invariant from the 10-group hardening cycle in a single assertion
+    group.  This is the capstone integration test — if this passes, the entire
+    rootless migration is structurally correct at the template level.
+    """
+
+    def test_complete_rootless_security_posture(self, tmp_path: Path) -> None:
+        """Full compose + db-postgres render validates the hardened security posture."""
+        from ruamel.yaml import YAML
+
+        compose_rendered = _render_compose(tmp_path)
+        postgres_rendered = _render_extras(tmp_path, "db-postgres.yml")
+
+        ry = YAML(typ="safe")
+        compose = ry.load(compose_rendered)
+        postgres = ry.load(postgres_rendered)
+
+        errors: list[str] = []
+
+        # ── Core: cap_add = [CHOWN] ───────────────────────────────────────
+        core_svc = compose["services"]["core"]
+        if core_svc.get("cap_add") != ["CHOWN"]:
+            errors.append(
+                f"Core cap_add must be ['CHOWN'], got: {core_svc.get('cap_add')}"
+            )
+
+        # ── Core: no-new-privileges:false ─────────────────────────────────
+        core_block = compose_rendered[
+            compose_rendered.index("\n  core:"):compose_rendered.index("\n  admin:")
+        ]
+        if "no-new-privileges:false" not in core_block:
+            errors.append(
+                "Core must have security_opt containing no-new-privileges:false"
+            )
+
+        # ── Core: /run tmpfs mode=0755 ────────────────────────────────────
+        if "mode=0755" not in core_block:
+            errors.append("Core /run tmpfs must include mode=0755")
+
+        # ── Proxy: /run tmpfs mode=0755 ───────────────────────────────────
+        proxy_block = compose_rendered[
+            compose_rendered.index("\n  proxy:"):compose_rendered.index("\n  core:")
+        ]
+        if "mode=0755" not in proxy_block:
+            errors.append("Proxy /run tmpfs must include mode=0755")
+
+        # ── Admin: runtime = runc ─────────────────────────────────────────
+        admin_block = compose_rendered[compose_rendered.index("\n  admin:"):]
+        admin_runtime_lines = [
+            line.strip() for line in admin_block.splitlines()
+            if line.strip().startswith("runtime:")
+        ]
+        if not admin_runtime_lines or admin_runtime_lines[0] != 'runtime: "runc"':
+            errors.append(
+                f"Admin runtime must be 'runc', got: {admin_runtime_lines}"
+            )
+
+        # ── No secrets: blocks ────────────────────────────────────────────
+        raw_template = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        top_level_secrets = [
+            line for line in raw_template.splitlines()
+            if line.rstrip() == "secrets:" or line.startswith("secrets:")
+        ]
+        if top_level_secrets:
+            errors.append(
+                f"compose.yml must NOT contain a top-level secrets: block, found: {top_level_secrets}"
+            )
+
+        if "secrets:" in core_block:
+            errors.append("Core service must NOT contain a secrets: entry")
+
+        if "secrets:" in admin_block:
+            errors.append("Admin service must NOT contain a secrets: entry")
+
+        # ── Bind-mounts present ───────────────────────────────────────────
+        bind_mount_checks = {
+            "core: ipc_host_key": (
+                core_block,
+                "ipc_host_key:/run/secrets/ipc_host_key:ro",
+            ),
+            "core: authorized_keys": (
+                core_block,
+                "authorized_keys:/run/secrets/authorized_keys:ro",
+            ),
+            "admin: ipc_ssh_key": (
+                admin_block,
+                "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro",
+            ),
+            "admin: ipc_known_hosts": (
+                admin_block,
+                "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro",
+            ),
+        }
+        for label, (block, expected) in bind_mount_checks.items():
+            if expected not in block:
+                errors.append(f"Missing bind-mount in {label}: {expected}")
+
+        # ── db-postgres: user=70:70, zero caps ───────────────────────────
+        pg_svc = postgres["services"]["db-postgres"]
+        if pg_svc.get("user") != "70:70":
+            errors.append(
+                f"db-postgres user must be '70:70', got: {pg_svc.get('user')}"
+            )
+        if "cap_add" in pg_svc:
+            errors.append(
+                f"db-postgres must NOT have cap_add, found: {pg_svc['cap_add']}"
+            )
+        if pg_svc.get("cap_drop") != ["ALL"]:
+            errors.append(
+                f"db-postgres cap_drop must be ['ALL'], got: {pg_svc.get('cap_drop')}"
+            )
+
+        # ── Final verdict ─────────────────────────────────────────────────
+        assert errors == [], (
+            "Rootless hardening posture violations:\n  - " + "\n  - ".join(errors)
         )

@@ -24,7 +24,7 @@ The core container SHALL run `sshd -D -e` as its primary entrypoint process. The
 - **THEN** the core service does NOT contain a `command:` directive (the legacy `command: ["sleep", "infinity"]` is removed — sshd entrypoint replaces it)
 
 ### Requirement: Hardened sshd_config Template
-The system SHALL provide a Jinja2-rendered `sshd_config` template with security-hardened defaults. The config SHALL bind to the IPC-specific IP address, not `0.0.0.0`.
+The system SHALL provide a Jinja2-rendered `sshd_config` template with security-hardened defaults. The config SHALL bind to the IPC-specific IP address, not `0.0.0.0`. The config SHALL disable PID file creation for non-root operation.
 
 #### Scenario: sshd binds to IPC IP only
 - **WHEN** the rendered `sshd_config` is inspected
@@ -62,6 +62,10 @@ The system SHALL provide a Jinja2-rendered `sshd_config` template with security-
 - **WHEN** the rendered `sshd_config` is inspected
 - **THEN** `MaxSessions 10` and `ClientAliveInterval 300` and `ClientAliveCountMax 2` are set
 
+#### Scenario: PID file disabled
+- **WHEN** the rendered `sshd_config` is inspected
+- **THEN** `PidFile none` is set
+
 ### Requirement: SSH Keypair Generation
 The orchestrator SHALL generate two Ed25519 keypairs per instance during credential provisioning using the `cryptography` Python library.
 
@@ -86,23 +90,54 @@ The orchestrator SHALL generate two Ed25519 keypairs per instance during credent
 - **THEN** it contains `"secrets"` so that `create_instance_dirs()` creates `sandboxes/<id>/secrets/` during `sandbox init`
 
 ### Requirement: SSH Credential Mounts
-The rendered `compose.yml` SHALL mount SSH credentials into core and admin containers with appropriate permissions.
+The rendered `compose.yml` SHALL mount SSH credentials into core and admin containers via bind-mount volumes. Docker Compose `secrets:` syntax SHALL NOT be used — its `uid`, `gid`, `mode` directives are silently ignored under rootless Docker. A top-level `secrets:` block SHALL NOT exist in the compose template.
 
-#### Scenario: Core receives host private key as Docker secret
+#### Scenario: Core receives host private key as bind-mount
 - **WHEN** the rendered `compose.yml` is inspected for the core service
-- **THEN** it includes a `secrets` entry mounting `ipc_host_key` at `/run/secrets/ipc_host_key` with `uid: '0'`, `gid: '0'`, `mode: 0600`
+- **THEN** it includes a volume mount `{{ instance_dir }}/secrets/ipc_host_key:/run/secrets/ipc_host_key:ro`
+
+#### Scenario: Core does not use Docker secrets for host key
+- **WHEN** the rendered `compose.yml` is inspected for the core service
+- **THEN** it does NOT include a `secrets:` entry for `ipc_host_key`
 
 #### Scenario: Core receives authorized_keys
 - **WHEN** the rendered `compose.yml` is inspected for the core service
 - **THEN** it includes a volume mount `{{ instance_dir }}/secrets/authorized_keys:/run/secrets/authorized_keys:ro`
 
-#### Scenario: Admin receives auth private key as Docker secret
+#### Scenario: Admin receives auth private key as bind-mount
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** it includes a `secrets` entry mounting `ipc_ssh_key` at `/run/secrets/ipc_ssh_key` with `uid: '1000'`, `gid: '1000'`, `mode: 0600`
+- **THEN** it includes a volume mount `{{ instance_dir }}/secrets/ipc_ssh_key:/run/secrets/ipc_ssh_key:ro`
+
+#### Scenario: Admin does not use Docker secrets for SSH key
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** it does NOT include a `secrets:` entry for `ipc_ssh_key`
 
 #### Scenario: Admin receives known_hosts
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
 - **THEN** it includes a volume mount `{{ instance_dir }}/secrets/ipc_known_hosts:/run/secrets/ipc_known_hosts:ro`
+
+#### Scenario: No top-level secrets block
+- **WHEN** the `compose.yml` template source is inspected
+- **THEN** it does NOT contain a top-level `secrets:` block
+
+### Requirement: Credential Ownership Matching
+The orchestrator SHALL ensure all four IPC secret files are owned by uid 1000 inside the rootless Docker namespace after generation. This SHALL be accomplished via a disposable helper container that runs `chown` within the Docker namespace boundary.
+
+#### Scenario: Helper container chowns secrets after generation
+- **WHEN** `_phase_credentials()` completes SSH keypair generation
+- **THEN** a disposable `docker run --rm busybox chown 1000:1000` command is executed via `machinectl shell` as the `host_unprivileged_user`, targeting all four secret files
+
+#### Scenario: Helper container uses runc runtime
+- **WHEN** the helper container ownership command is inspected
+- **THEN** it includes `--runtime=runc` (gVisor is unnecessary for a `chown` operation)
+
+#### Scenario: Ownership convergence
+- **WHEN** the helper container completes and the secrets are inspected inside the core or admin container
+- **THEN** all four files (`ipc_host_key`, `authorized_keys`, `ipc_ssh_key`, `ipc_known_hosts`) appear as owned by uid 1000 (the container user)
+
+#### Scenario: Helper container failure is sentinel-gated
+- **WHEN** the helper container `docker run` command fails
+- **THEN** `_phase_credentials()` raises `SandboxExecutionError` with the failure context
 
 ### Requirement: Admin SSH Client Configuration
 The admin container SHALL connect to core via SSH with host key pinning and public key authentication. The admin container SHALL have `openssh-client` installed.
@@ -138,24 +173,43 @@ The admin container's warmup flow SHALL use SSH `SendEnv` to transport the warmu
 - **WHEN** the warmup SSH session completes
 - **THEN** `unset SANDBOX_WARMUP_PROMPT` is executed in the admin shell
 
-### Requirement: Core Dockerfile USER root
-The core container Dockerfile SHALL set `USER root` for the final stage entrypoint. sshd requires root to perform L1 UID separation (`setuid(agent)` per session).
+### Requirement: Core Dockerfile USER for Non-Root sshd
+The core container Dockerfile SHALL set `USER ${USERNAME}` for the final stage entrypoint. Non-root sshd (euid ≠ 0) skips privilege separation entirely — no `chroot()`, no `setuid()`, no `setgid()`. This eliminates the need for `CAP_SYS_CHROOT`, `CAP_SETUID`, and `CAP_SETGID`.
 
-#### Scenario: Dockerfile final USER is root
+#### Scenario: Dockerfile final USER is agent
 - **WHEN** the core Dockerfile's final stage is inspected
-- **THEN** the last `USER` directive before `ENTRYPOINT` is `USER root`
+- **THEN** the last `USER` directive before `ENTRYPOINT` is `USER ${USERNAME}`
+
+#### Scenario: Dockerfile does not end with USER root
+- **WHEN** the core Dockerfile's final stage is inspected
+- **THEN** it does NOT contain `USER root` as the last `USER` directive
 
 #### Scenario: Agent-owned files retain correct ownership
-- **WHEN** the core container starts as root
+- **WHEN** the core container starts as agent
 - **THEN** files created in earlier Dockerfile layers as `USER agent` retain `agent:agent` ownership
 
+### Requirement: sshd-session File Capability for PTY Allocation
+The core Dockerfile SHALL grant `cap_chown+ep` (effective + permitted) on `/usr/lib/ssh/sshd-session` via `setcap`. This enables `pty_setowner()` to call `chown(2)` on allocated PTY devices without running sshd as root.
+
+#### Scenario: setcap layer in Dockerfile
+- **WHEN** the core Dockerfile is inspected
+- **THEN** it contains a `RUN` directive that executes `setcap cap_chown+ep /usr/lib/ssh/sshd-session`
+
+#### Scenario: libcap-utils installed and purged
+- **WHEN** the core Dockerfile is inspected
+- **THEN** the `setcap` RUN layer installs `libcap-utils` (or equivalent), runs `setcap`, and removes the package in the same layer to minimize image size
+
+#### Scenario: File capability targets sshd-session not sshd
+- **WHEN** the core Dockerfile is inspected
+- **THEN** the `setcap` command targets `/usr/lib/ssh/sshd-session` (not `/usr/sbin/sshd`)
+
 ### Requirement: Core Container sshd Runtime Directory
-The core container SHALL have a tmpfs mount at `/run` for the sshd PID file. The entrypoint SHALL create `/run/sshd` before executing sshd.
+The core container SHALL have a tmpfs mount at `/run` with mode `0755`. The entrypoint SHALL NOT create `/run/sshd` — with `PidFile none`, no PID file directory is needed.
 
-#### Scenario: /run tmpfs mount present
+#### Scenario: /run tmpfs mount present with mode
 - **WHEN** the rendered `compose.yml` is inspected for the core service
-- **THEN** the `tmpfs` block includes `/run`
+- **THEN** the `tmpfs` block includes `/run` with `mode=0755`
 
-#### Scenario: Entrypoint creates sshd directory
+#### Scenario: Entrypoint does not create sshd directory
 - **WHEN** `entrypoint.sh` is inspected
-- **THEN** it includes `mkdir -p /run/sshd` before `exec /usr/sbin/sshd -D -e`
+- **THEN** it does NOT contain `mkdir -p /run/sshd`

@@ -60,7 +60,7 @@ The system SHALL hand over the terminal to the admin container via `machinectl s
 - **THEN** `sudo machinectl shell <host_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed and the user's terminal is now owned by that session
 
 ### Requirement: Instance Pre-Flight Checks
-The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. SSH keypair generation SHALL occur during `_phase_credentials()`.
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. SSH keypair generation and credential ownership matching SHALL occur during `_phase_credentials()`.
 
 #### Scenario: Secret completeness gate
 - **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
@@ -77,6 +77,10 @@ The system SHALL validate instance readiness before beginning provisioning. Pre-
 #### Scenario: SSH keypairs generated during credentials phase
 - **WHEN** `_phase_credentials()` runs
 - **THEN** SSH auth and host keypairs are generated (idempotent — skips if files exist)
+
+#### Scenario: Credential ownership matching after generation
+- **WHEN** `_phase_credentials()` completes SSH keypair generation
+- **THEN** a disposable helper container runs `chown 1000:1000` on all four IPC secret files via `machinectl shell` as the `host_unprivileged_user`, ensuring files are owned by uid 1000 inside the rootless Docker namespace
 
 ### Requirement: ACL Cleanup on Start Failure
 The system SHALL revoke ACL grants if Phase 6 (compose up) fails after Phase 5 (ACL grants) has begun. Cleanup scope SHALL be limited to ACLs — earlier phases are idempotent and do not require rollback.

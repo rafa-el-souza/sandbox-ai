@@ -20,7 +20,7 @@ The `compose.yml` template SHALL declare an `x-security-baseline` YAML extension
 - **THEN** each service block contains `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`, `ipc: private`, `init: true`, and `read_only: true`
 
 ### Requirement: Baseline Excludes List-Valued Properties
-The security baseline anchor SHALL contain only scalar properties. List-valued properties (`cap_add`, `sysctls`, `tmpfs`) SHALL remain per-service because YAML anchor merge (`<<:`) replaces list values rather than appending.
+The security baseline anchor SHALL contain only scalar properties. List-valued properties (`cap_add`, `sysctls`, `tmpfs`) SHALL remain per-service because YAML anchor merge (`<<:`) replaces list values rather than appending. Per-service `security_opt:` overrides SHALL be used when a service requires a deviation from the baseline scalar value (e.g., `no-new-privileges:false`).
 
 #### Scenario: Baseline does not contain cap_add
 - **WHEN** the `x-security-baseline` block is inspected
@@ -28,7 +28,15 @@ The security baseline anchor SHALL contain only scalar properties. List-valued p
 
 #### Scenario: Per-service cap_add preserved
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** coredns has `cap_add: [NET_BIND_SERVICE]`, proxy has `cap_add: [SETUID, SETGID]`, core has `cap_add: [SETUID, SETGID]`, and these values are defined per-service, not inherited from the baseline
+- **THEN** coredns has `cap_add: [NET_BIND_SERVICE]`, proxy has `cap_add: [SETUID, SETGID]`, core has `cap_add: [CHOWN]`, and these values are defined per-service, not inherited from the baseline
+
+#### Scenario: Core security_opt overrides baseline
+- **WHEN** the rendered `compose.yml` is inspected for the core service
+- **THEN** the core service contains `security_opt: [no-new-privileges:false]` as a per-service override, and this value replaces the baseline's `no-new-privileges:true`
+
+#### Scenario: Non-core services retain baseline security_opt
+- **WHEN** the rendered `compose.yml` is inspected for coredns, proxy, admin, and dnsdist services
+- **THEN** each service contains `security_opt: [no-new-privileges:true]` (inherited from baseline, not overridden)
 
 ### Requirement: Core and Admin read_only Override
 Core and admin services SHALL inherit the baseline's `read_only: true` without override. The `read_only: false` overrides SHALL be removed.
@@ -112,4 +120,34 @@ The system SHALL provide `.docker/coredns/Dockerfile.coredns` as a static (non-J
 #### Scenario: No Jinja2 syntax in Dockerfile
 - **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
 - **THEN** it contains zero `{{ }}` or `{% %}` markers (values come via compose build.args, not Jinja2)
+
+### Requirement: Extras Services Zero-Capability Posture
+Extras services that run as non-root users SHALL have zero capabilities — no `cap_add` entries. Services that require root-mode entrypoints SHALL declare the minimum capability set.
+
+#### Scenario: db-postgres runs as postgres user
+- **WHEN** the rendered `db-postgres.yml` is inspected
+- **THEN** the db-postgres service contains `user: "70:70"` (postgres uid:gid in Alpine)
+
+#### Scenario: db-postgres has zero capabilities
+- **WHEN** the rendered `db-postgres.yml` is inspected
+- **THEN** the db-postgres service does NOT contain a `cap_add` block and contains `cap_drop: [ALL]`
+
+#### Scenario: db-postgres cap_add is absent
+- **WHEN** the rendered `db-postgres.yml` is inspected
+- **THEN** the db-postgres service does NOT contain any of `CHOWN`, `FOWNER`, `SETGID`, `SETUID` in a `cap_add` block
+
+### Requirement: tmpfs Mode for sshd StrictModes Compliance
+Services with sshd auth paths through `/run` SHALL mount the `/run` tmpfs with `mode=0755`. The kernel default `1777` is rejected by sshd's `safe_path()` directory walk.
+
+#### Scenario: Core /run tmpfs has mode 0755
+- **WHEN** the `compose.yml` template source is inspected for the core service
+- **THEN** the `/run` tmpfs entry includes `mode=0755`
+
+#### Scenario: Proxy /run tmpfs has mode 0755
+- **WHEN** the `compose.yml` template source is inspected for the proxy service
+- **THEN** the `/run` tmpfs entry includes `mode=0755`
+
+#### Scenario: Admin has no /run tmpfs
+- **WHEN** the `compose.yml` template source is inspected for the admin service
+- **THEN** the admin service's `tmpfs` block does NOT include a `/run` entry
 

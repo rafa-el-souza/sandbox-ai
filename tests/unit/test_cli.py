@@ -1000,6 +1000,167 @@ class TestPhaseCredentialsDirect:
             assert line.startswith("proxyuser:$2b$")
 
 
+class TestCredentialOwnershipMatching:
+    """10.T RED: _phase_credentials invokes helper container for credential ownership.
+
+    Implements: cli-start/spec.md §Instance Pre-Flight Checks,
+                ssh-ipc-transport/spec.md §Credential Ownership Matching
+    """
+
+    def test_phase_credentials_invokes_chown_via_machinectl(self, tmp_path: Path) -> None:
+        """After keypair generation, _phase_credentials runs docker chown via machinectl."""
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+        ):
+            _phase_credentials(
+                str(tmp_path),
+                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+            # Executor.run must be called once for the chown operation
+            mock_executor_instance.run.assert_called_once()
+
+    def test_chown_command_targets_all_four_secret_files(self, tmp_path: Path) -> None:
+        """Helper container chowns all four IPC secret files."""
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+        ):
+            _phase_credentials(
+                str(tmp_path),
+                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+            call_args = mock_executor_instance.run.call_args[0][0]
+            cmd_str = " ".join(call_args)
+            # Must reference all four secret files
+            for secret in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"):
+                assert secret in cmd_str, (
+                    f"chown command must target {secret}, got: {cmd_str}"
+                )
+
+    def test_chown_uses_docker_run_with_runc_runtime(self, tmp_path: Path) -> None:
+        """Helper container uses docker run --rm --runtime=runc busybox."""
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+        ):
+            _phase_credentials(
+                str(tmp_path),
+                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+            call_args = mock_executor_instance.run.call_args[0][0]
+            cmd_str = " ".join(call_args)
+            assert "docker run" in cmd_str, f"Must use docker run, got: {cmd_str}"
+            assert "--rm" in cmd_str, f"Must use --rm, got: {cmd_str}"
+            assert "--runtime=runc" in cmd_str, f"Must use --runtime=runc, got: {cmd_str}"
+            assert "busybox" in cmd_str, f"Must use busybox image, got: {cmd_str}"
+            assert "chown 1000:1000" in cmd_str, f"Must chown to 1000:1000, got: {cmd_str}"
+
+    def test_chown_executed_via_machinectl_shell(self, tmp_path: Path) -> None:
+        """Chown command is executed via machinectl shell as host_unprivileged_user."""
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+        ):
+            _phase_credentials(
+                str(tmp_path),
+                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+            call_args = mock_executor_instance.run.call_args[0][0]
+            assert "sudo" in call_args, "Must use sudo"
+            assert "machinectl" in call_args, "Must use machinectl"
+            assert "shell" in call_args, "Must use shell subcommand"
+            assert "claude-sandbox@.host" in call_args, (
+                "Must execute as host_unprivileged_user"
+            )
+
+    def test_chown_failure_raises_execution_error(self, tmp_path: Path) -> None:
+        """Helper container failure wraps and re-raises SandboxExecutionError."""
+        from cli.main import _phase_credentials
+        from core.exceptions import SandboxExecutionError
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.side_effect = SandboxExecutionError("chown failed")
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+            pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"),
+        ):
+            _phase_credentials(
+                str(tmp_path),
+                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+
+
 class TestPhaseHydrateDirect:
     """Direct test for _phase_hydrate."""
 

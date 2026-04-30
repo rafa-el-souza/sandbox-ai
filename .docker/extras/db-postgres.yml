@@ -6,6 +6,7 @@ services:
     image: {{ db_postgres_image }}
     init: true
     pids_limit: {{ core_pids_limit }}
+    user: "70:70"
     logging:
       driver: "json-file"
       options:
@@ -15,11 +16,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - CHOWN
-      - FOWNER
-      - SETGID
-      - SETUID
     runtime: {{ runtime }}
     read_only: true
     ipc: private

@@ -29,3 +29,22 @@ The admin container's `.tmux.conf` template SHALL disable `monitor-activity` and
 #### Scenario: tmux activity monitoring is not enabled
 - **WHEN** the source `.config/admin/.tmux.conf` template is inspected
 - **THEN** it does NOT contain `monitor-activity on` or `visual-activity on`
+
+### Requirement: Admin Service runc Runtime Override
+The admin service in `compose.yml` SHALL use `runtime: "runc"` (hardcoded), not `runtime: "{{ runtime }}"`. gVisor's PTY subsystem implements an intrinsic tight `poll(2)` loop when the PTY master has no attached physical terminal client. Under gVisor, this consumes ~2 CPU cores regardless of tmux configuration. The only resolution is runtime substitution — runc eliminates the overhead entirely.
+
+#### Scenario: Admin uses runc runtime
+- **WHEN** the `compose.yml` template source is inspected for the admin service
+- **THEN** it contains `runtime: "runc"` (not `runtime: "{{ runtime }}"`)
+
+#### Scenario: Admin runtime is not templated
+- **WHEN** the `compose.yml` template source is inspected for the admin service
+- **THEN** the `runtime:` value does NOT contain `{{ runtime }}` or any Jinja2 variable
+
+#### Scenario: Core retains gVisor runtime
+- **WHEN** the `compose.yml` template source is inspected for the core service
+- **THEN** it contains `runtime: "{{ runtime }}"` (resolves to gVisor `runsc` at render time)
+
+#### Scenario: Admin retains full security baseline
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** it contains `cap_drop: [ALL]`, `no-new-privileges:true`, `read_only: true`, and `ipc: private` (security posture unchanged by runtime switch)

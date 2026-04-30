@@ -28,3 +28,6 @@ AcceptEnv SANDBOX_WARMUP_PROMPT
 MaxSessions 10
 ClientAliveInterval 300
 ClientAliveCountMax 2
+
+# ── PID File ─────────────────────────────────────────────────────────────────
+PidFile none

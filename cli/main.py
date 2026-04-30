@@ -206,8 +206,19 @@ def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
     return ledger.allocate(instance_id)
 
 
-def _phase_credentials(instance_dir: str, core_ipc_ip: str) -> str:
-    """Phase 3: Generate proxy credentials and SSH keypairs. Returns proxy password."""
+def _phase_credentials(
+    instance_dir: str,
+    core_ipc_ip: str,
+    *,
+    host_user: str | None = None,
+    secrets_dir: str | None = None,
+) -> str:
+    """Phase 3: Generate proxy credentials, SSH keypairs, and ownership convergence.
+
+    Returns proxy password. When host_user is provided, a disposable helper
+    container runs chown(2) on all four IPC secret files to converge
+    ownership to uid 1000 inside the rootless Docker namespace.
+    """
     password = generate_credential()
     hashed = hash_proxy_password(password)
     htpasswd_line = f"proxyuser:{hashed}"
@@ -217,6 +228,38 @@ def _phase_credentials(instance_dir: str, core_ipc_ip: str) -> str:
     # SSH keypairs for IPC transport
     generate_ssh_keypair(instance_dir, "auth")
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
+
+    # Credential ownership matching via disposable helper container
+    if host_user is not None:
+        resolved_secrets_dir = secrets_dir or os.path.join(instance_dir, "secrets")
+        secret_files = [
+            os.path.join(resolved_secrets_dir, f)
+            for f in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
+        ]
+        volume_args = " ".join(f"-v {f}:{f}" for f in secret_files)
+        chown_targets = " ".join(secret_files)
+        docker_cmd = (
+            f"docker run --rm --runtime=runc "
+            f"{volume_args} busybox chown 1000:1000 {chown_targets}"
+        )
+        executor = Executor()
+        try:
+            executor.run(
+                [
+                    "sudo",
+                    "machinectl",
+                    "shell",
+                    f"{host_user}@.host",
+                    "/bin/bash",
+                    "-c",
+                    docker_cmd,
+                ],
+                sentinel=True,
+            )
+        except SandboxExecutionError as e:
+            raise SandboxExecutionError(
+                f"Credential ownership matching failed: {e}"
+            ) from e
 
     return password
 
@@ -958,6 +1001,7 @@ def start(
         proxy_password = _phase_credentials(
             instance_dir,
             core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
+            host_user=host_user,
         )
         console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 

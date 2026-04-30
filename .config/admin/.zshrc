@@ -52,8 +52,8 @@ alias ....="cd ../../.."
 alias .....="cd ../../../.."
 alias ......="cd ../../../../.."
 
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 export OPENSPEC_TELEMETRY=0
 
 # NVM
@@ -77,7 +77,7 @@ export PATH="~/.install/gitmux:$PATH"
 #   1. Shell setup (completion, history, plugins, aliases, env)
 #   2. Starship init (prompt framework)
 #   3. User override hook (custom/config/admin/.zshrc — can customize starship, aliases, env)
-#   4. Warmup prompt (launches claude -p; must fire last so user env is fully configured)
+#   4. Warmup prompt (launches claude; must fire last so user env is fully configured)
 ######################################################################################################################################
 
 eval "$(starship init zsh)"
