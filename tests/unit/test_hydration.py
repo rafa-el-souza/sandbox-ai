@@ -3257,3 +3257,49 @@ class TestSshdPidFileEntrypoint:
         assert "mkdir -p /run/sshd" not in content, (
             "Entrypoint must NOT contain 'mkdir -p /run/sshd' — PidFile none eliminates need"
         )
+
+
+def _render_squid_conf(tmp_path: Path) -> str:
+    """Render squid.conf template through Jinja2 with StrictUndefined."""
+    import jinja2
+
+    ctx = _build_test_context(str(tmp_path / "inst"))
+    template_content = (
+        Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf"
+    ).read_text()
+    env = jinja2.Environment(
+        loader=jinja2.BaseLoader(),
+        undefined=jinja2.StrictUndefined,
+    )
+    return env.from_string(template_content).render(ctx)
+
+
+class TestSquidDnsNameservers:
+    """6.T RED: Squid dns_nameservers points at CoreDNS egress IP.
+
+    Implements: proxy-dns-resolution/spec.md §Squid Explicit DNS Nameserver
+    """
+
+    def test_squid_dns_nameservers_present(self, tmp_path: Path) -> None:
+        """Rendered squid.conf contains dns_nameservers followed by the coredns egress IP."""
+        rendered = _render_squid_conf(tmp_path)
+        assert "dns_nameservers" in rendered, (
+            "squid.conf must contain a dns_nameservers directive"
+        )
+
+    def test_squid_dns_nameservers_uses_coredns_egress_ip(self, tmp_path: Path) -> None:
+        """Rendered squid.conf dns_nameservers resolves to the coredns egress IP."""
+        rendered = _render_squid_conf(tmp_path)
+        # coredns_egress_ip for slot 0 = 10.100.5.53
+        lines = [line.strip() for line in rendered.splitlines() if line.strip().startswith("dns_nameservers")]
+        assert len(lines) == 1, f"Expected exactly one dns_nameservers line, got: {lines}"
+        assert "10.100.5.53" in lines[0], (
+            f"dns_nameservers must resolve to coredns egress IP (10.100.5.53), got: {lines[0]}"
+        )
+
+    def test_squid_dns_nameservers_no_docker_dns(self, tmp_path: Path) -> None:
+        """Rendered squid.conf does NOT contain 127.0.0.11 as DNS nameserver."""
+        rendered = _render_squid_conf(tmp_path)
+        assert "127.0.0.11" not in rendered, (
+            "squid.conf must NOT contain Docker internal DNS proxy 127.0.0.11"
+        )
