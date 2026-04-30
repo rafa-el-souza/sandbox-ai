@@ -2974,3 +2974,51 @@ class TestTmuxGvisorPollingConfig:
         assert "visual-activity on" not in tmux_text, (
             "visual-activity on must not remain in template"
         )
+
+
+class TestDbPostgresZeroCap:
+    """1.T RED: db-postgres runs as user 70:70 with zero capabilities.
+
+    Implements: compose-security-baseline/spec.md §Extras Services Zero-Capability Posture
+    """
+
+    def test_db_postgres_user_directive(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output contains user: "70:70"."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert 'user: "70:70"' in rendered, (
+            "db-postgres service must declare user: \"70:70\" (postgres uid:gid in Alpine)"
+        )
+
+    def test_db_postgres_no_cap_add(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output has no cap_add block."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        assert "cap_add:" not in rendered, (
+            "db-postgres service must NOT contain a cap_add block"
+        )
+
+    def test_db_postgres_cap_drop_all(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output contains cap_drop: [ALL]."""
+        from ruamel.yaml import YAML
+
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        ry = YAML(typ="safe")
+        data = ry.load(rendered)
+        svc = data["services"]["db-postgres"]
+        assert svc.get("cap_drop") == ["ALL"], (
+            "db-postgres service must have cap_drop: [ALL]"
+        )
+
+    def test_db_postgres_no_privilege_caps_in_cap_add(self, tmp_path: Path) -> None:
+        """db-postgres.yml rendered output has no CHOWN/FOWNER/SETGID/SETUID in cap_add."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        from ruamel.yaml import YAML
+
+        ry = YAML(typ="safe")
+        data = ry.load(rendered)
+        svc = data["services"]["db-postgres"]
+        cap_add = svc.get("cap_add", [])
+        forbidden = {"CHOWN", "FOWNER", "SETGID", "SETUID"}
+        present = forbidden & set(cap_add)
+        assert present == set(), (
+            f"db-postgres cap_add must not contain {forbidden}, found: {present}"
+        )
