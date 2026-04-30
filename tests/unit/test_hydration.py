@@ -3400,3 +3400,51 @@ class TestTmuxPluginPaths:
         )
 
 
+class TestLocaleTermExport:
+    """9.T RED: C.UTF-8 locale and TERM default for admin shell.
+
+    Implements: admin-shell-config/spec.md §C.UTF-8 Locale Configuration,
+                §TERM Environment Variable Default
+    """
+
+    def test_zshrc_lang_c_utf8(self) -> None:
+        """.zshrc contains LANG=C.UTF-8."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc"
+        ).read_text()
+        assert "LANG=C.UTF-8" in content, (
+            ".zshrc must set LANG=C.UTF-8"
+        )
+
+    def test_zshrc_lc_all_c_utf8(self) -> None:
+        """.zshrc contains LC_ALL=C.UTF-8."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc"
+        ).read_text()
+        assert "LC_ALL=C.UTF-8" in content, (
+            ".zshrc must set LC_ALL=C.UTF-8"
+        )
+
+    def test_zshrc_no_en_us_utf8(self) -> None:
+        """.zshrc does NOT contain en_US.UTF-8."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc"
+        ).read_text()
+        assert "en_US.UTF-8" not in content, (
+            ".zshrc must NOT contain en_US.UTF-8 — locale is not installed in image"
+        )
+
+    def test_entrypoint_term_export_before_tmux(self) -> None:
+        """Admin entrypoint.sh contains TERM export before tmux new-session."""
+        content = (
+            Path(__file__).parent.parent.parent / ".docker" / "admin" / "entrypoint.sh"
+        ).read_text()
+        assert 'export TERM="${TERM:-xterm-256color}"' in content, (
+            "Admin entrypoint must export TERM with xterm-256color default"
+        )
+        # Verify ordering: TERM export before tmux
+        term_pos = content.index('export TERM="${TERM:-xterm-256color}"')
+        tmux_pos = content.index("tmux new-session")
+        assert term_pos < tmux_pos, (
+            "TERM export must appear before tmux new-session"
+        )
