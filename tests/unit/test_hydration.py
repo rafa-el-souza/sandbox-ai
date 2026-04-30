@@ -3448,3 +3448,126 @@ class TestLocaleTermExport:
         assert term_pos < tmux_pos, (
             "TERM export must appear before tmux new-session"
         )
+
+
+class TestRootlessHardeningPosture:
+    """11.T: Integration verification of the complete rootless hardening posture.
+
+    Renders the full compose template + db-postgres extra and validates every
+    security invariant from the 10-group hardening cycle in a single assertion
+    group.  This is the capstone integration test — if this passes, the entire
+    rootless migration is structurally correct at the template level.
+    """
+
+    def test_complete_rootless_security_posture(self, tmp_path: Path) -> None:
+        """Full compose + db-postgres render validates the hardened security posture."""
+        from ruamel.yaml import YAML
+
+        compose_rendered = _render_compose(tmp_path)
+        postgres_rendered = _render_extras(tmp_path, "db-postgres.yml")
+
+        ry = YAML(typ="safe")
+        compose = ry.load(compose_rendered)
+        postgres = ry.load(postgres_rendered)
+
+        errors: list[str] = []
+
+        # ── Core: cap_add = [CHOWN] ───────────────────────────────────────
+        core_svc = compose["services"]["core"]
+        if core_svc.get("cap_add") != ["CHOWN"]:
+            errors.append(
+                f"Core cap_add must be ['CHOWN'], got: {core_svc.get('cap_add')}"
+            )
+
+        # ── Core: no-new-privileges:false ─────────────────────────────────
+        core_block = compose_rendered[
+            compose_rendered.index("\n  core:"):compose_rendered.index("\n  admin:")
+        ]
+        if "no-new-privileges:false" not in core_block:
+            errors.append(
+                "Core must have security_opt containing no-new-privileges:false"
+            )
+
+        # ── Core: /run tmpfs mode=0755 ────────────────────────────────────
+        if "mode=0755" not in core_block:
+            errors.append("Core /run tmpfs must include mode=0755")
+
+        # ── Proxy: /run tmpfs mode=0755 ───────────────────────────────────
+        proxy_block = compose_rendered[
+            compose_rendered.index("\n  proxy:"):compose_rendered.index("\n  core:")
+        ]
+        if "mode=0755" not in proxy_block:
+            errors.append("Proxy /run tmpfs must include mode=0755")
+
+        # ── Admin: runtime = runc ─────────────────────────────────────────
+        admin_block = compose_rendered[compose_rendered.index("\n  admin:"):]
+        admin_runtime_lines = [
+            line.strip() for line in admin_block.splitlines()
+            if line.strip().startswith("runtime:")
+        ]
+        if not admin_runtime_lines or admin_runtime_lines[0] != 'runtime: "runc"':
+            errors.append(
+                f"Admin runtime must be 'runc', got: {admin_runtime_lines}"
+            )
+
+        # ── No secrets: blocks ────────────────────────────────────────────
+        raw_template = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        top_level_secrets = [
+            line for line in raw_template.splitlines()
+            if line.rstrip() == "secrets:" or line.startswith("secrets:")
+        ]
+        if top_level_secrets:
+            errors.append(
+                f"compose.yml must NOT contain a top-level secrets: block, found: {top_level_secrets}"
+            )
+
+        if "secrets:" in core_block:
+            errors.append("Core service must NOT contain a secrets: entry")
+
+        if "secrets:" in admin_block:
+            errors.append("Admin service must NOT contain a secrets: entry")
+
+        # ── Bind-mounts present ───────────────────────────────────────────
+        bind_mount_checks = {
+            "core: ipc_host_key": (
+                core_block,
+                "ipc_host_key:/run/secrets/ipc_host_key:ro",
+            ),
+            "core: authorized_keys": (
+                core_block,
+                "authorized_keys:/run/secrets/authorized_keys:ro",
+            ),
+            "admin: ipc_ssh_key": (
+                admin_block,
+                "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro",
+            ),
+            "admin: ipc_known_hosts": (
+                admin_block,
+                "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro",
+            ),
+        }
+        for label, (block, expected) in bind_mount_checks.items():
+            if expected not in block:
+                errors.append(f"Missing bind-mount in {label}: {expected}")
+
+        # ── db-postgres: user=70:70, zero caps ───────────────────────────
+        pg_svc = postgres["services"]["db-postgres"]
+        if pg_svc.get("user") != "70:70":
+            errors.append(
+                f"db-postgres user must be '70:70', got: {pg_svc.get('user')}"
+            )
+        if "cap_add" in pg_svc:
+            errors.append(
+                f"db-postgres must NOT have cap_add, found: {pg_svc['cap_add']}"
+            )
+        if pg_svc.get("cap_drop") != ["ALL"]:
+            errors.append(
+                f"db-postgres cap_drop must be ['ALL'], got: {pg_svc.get('cap_drop')}"
+            )
+
+        # ── Final verdict ─────────────────────────────────────────────────
+        assert errors == [], (
+            "Rootless hardening posture violations:\n  - " + "\n  - ".join(errors)
+        )
