@@ -3231,3 +3231,29 @@ class TestCoreCapAddSecurityOptTmpfs:
         assert "no-new-privileges:true" in block, (
             "Security baseline must retain no-new-privileges:true"
         )
+
+
+class TestSshdPidFileEntrypoint:
+    """5.T RED: sshd_config PidFile none + entrypoint cleanup.
+
+    Implements: ssh-ipc-transport/spec.md §Hardened sshd_config Template,
+                §Core Container sshd Runtime Directory
+    """
+
+    def test_sshd_config_pidfile_none(self) -> None:
+        """sshd_config template contains PidFile none."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "core" / "sshd_config"
+        ).read_text()
+        assert "PidFile none" in content, (
+            "sshd_config must contain 'PidFile none' for non-root operation"
+        )
+
+    def test_entrypoint_no_mkdir_run_sshd(self) -> None:
+        """Core entrypoint.sh does NOT contain mkdir -p /run/sshd."""
+        content = (
+            Path(__file__).parent.parent.parent / ".docker" / "core" / "entrypoint.sh"
+        ).read_text()
+        assert "mkdir -p /run/sshd" not in content, (
+            "Entrypoint must NOT contain 'mkdir -p /run/sshd' — PidFile none eliminates need"
+        )
