@@ -3356,3 +3356,47 @@ class TestAdminRuntimeRunc:
             "Core service must retain templated runtime: \"{{ runtime }}\""
         )
 
+
+class TestTmuxPluginPaths:
+    """8.T RED: tmux plugin paths match Dockerfile install location.
+
+    Implements: admin-shell-config/spec.md §tmux Plugin Path Resolution
+    """
+
+    def test_tmux_plugin_manager_path_set(self) -> None:
+        """.tmux.conf contains TMUX_PLUGIN_MANAGER_PATH set to /usr/local/tmux-plugins."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "set-environment -g TMUX_PLUGIN_MANAGER_PATH '/usr/local/tmux-plugins'" in content, (
+            ".tmux.conf must set TMUX_PLUGIN_MANAGER_PATH to /usr/local/tmux-plugins"
+        )
+
+    def test_catppuccin_run_path_correct(self) -> None:
+        """Catppuccin run path is /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "run /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux" in content, (
+            "Catppuccin run directive must reference /usr/local/tmux-plugins/"
+        )
+
+    def test_tpm_run_path_correct(self) -> None:
+        """TPM run path is /usr/local/tmux-plugins/tpm/tpm."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "run /usr/local/tmux-plugins/tpm/tpm" in content, (
+            "TPM run directive must reference /usr/local/tmux-plugins/"
+        )
+
+    def test_no_stale_home_config_plugin_paths(self) -> None:
+        """.tmux.conf does NOT contain any ~/.config/tmux/plugins/ paths."""
+        content = (
+            Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf"
+        ).read_text()
+        assert "~/.config/tmux/plugins/" not in content, (
+            ".tmux.conf must NOT contain stale ~/.config/tmux/plugins/ paths"
+        )
+
+
