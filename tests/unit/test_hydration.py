@@ -1965,26 +1965,22 @@ class TestComposeIpcNetAndW4Hardening:
         assert "SETUID" in core_block
         assert "SETGID" in core_block
 
-    # --- (j) core ipc_host_key secret ---
+    # --- (j) core ipc_host_key bind-mount ---
     def test_compose_core_ipc_host_key_secret(self, tmp_path: Path) -> None:
-        """Core service secrets contain ipc_host_key with uid '0' and mode 0600."""
+        """Core service volumes contain ipc_host_key as bind-mount (not Docker secrets)."""
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
-        assert "ipc_host_key" in core_block
-        assert "uid: '0'" in core_block
-        assert "0600" in core_block
+        assert "ipc_host_key:/run/secrets/ipc_host_key:ro" in core_block
 
-    # --- (k) admin ipc_ssh_key secret ---
+    # --- (k) admin ipc_ssh_key bind-mount ---
     def test_compose_admin_ipc_ssh_key_secret(self, tmp_path: Path) -> None:
-        """Admin service secrets contain ipc_ssh_key with uid '1000' and mode 0600."""
+        """Admin service volumes contain ipc_ssh_key as bind-mount (not Docker secrets)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "ipc_ssh_key" in admin_block
-        assert "uid: '1000'" in admin_block
-        assert "0600" in admin_block
+        assert "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro" in admin_block
 
     # --- (l) core tmpfs /run ---
     def test_compose_core_tmpfs_run(self, tmp_path: Path) -> None:
@@ -3022,3 +3018,78 @@ class TestDbPostgresZeroCap:
         assert present == set(), (
             f"db-postgres cap_add must not contain {forbidden}, found: {present}"
         )
+
+
+class TestSecretsRemovalBindMounts:
+    """2.T RED: Replace Docker Compose secrets: with bind-mounts.
+
+    Implements: ssh-ipc-transport/spec.md §SSH Credential Mounts
+    """
+
+    def test_compose_no_top_level_secrets(self, tmp_path: Path) -> None:
+        """compose.yml template source has no top-level secrets: block."""
+        raw = (
+            Path(__file__).parent.parent.parent / ".docker" / "compose.yml"
+        ).read_text()
+        # top-level secrets: is at column 0 (not indented)
+        lines = raw.splitlines()
+        top_level_secrets = [
+            i for i, line in enumerate(lines, 1)
+            if line.rstrip() == "secrets:" or line.startswith("secrets:")
+        ]
+        assert top_level_secrets == [], (
+            f"compose.yml must NOT contain a top-level secrets: block, found at lines: {top_level_secrets}"
+        )
+
+    def test_compose_core_no_service_secrets(self, tmp_path: Path) -> None:
+        """Core service block does NOT contain a secrets: entry."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "secrets:" not in core_block, (
+            "Core service must NOT contain a secrets: entry"
+        )
+
+    def test_compose_admin_no_service_secrets(self, tmp_path: Path) -> None:
+        """Admin service block does NOT contain a secrets: entry."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "secrets:" not in admin_block, (
+            "Admin service must NOT contain a secrets: entry"
+        )
+
+    def test_compose_core_ipc_host_key_bind_mount(self, tmp_path: Path) -> None:
+        """Core volumes include ipc_host_key:/run/secrets/ipc_host_key:ro bind-mount."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "ipc_host_key:/run/secrets/ipc_host_key:ro" in core_block, (
+            "Core volumes must include ipc_host_key bind-mount"
+        )
+
+    def test_compose_admin_ipc_ssh_key_bind_mount(self, tmp_path: Path) -> None:
+        """Admin volumes include ipc_ssh_key:/run/secrets/ipc_ssh_key:ro bind-mount."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro" in admin_block, (
+            "Admin volumes must include ipc_ssh_key bind-mount"
+        )
+
+    def test_compose_core_authorized_keys_unchanged(self, tmp_path: Path) -> None:
+        """Core authorized_keys bind-mount unchanged."""
+        rendered = _render_compose(tmp_path)
+        core_start = rendered.index("\n  core:")
+        admin_start = rendered.index("\n  admin:")
+        core_block = rendered[core_start:admin_start]
+        assert "authorized_keys:/run/secrets/authorized_keys:ro" in core_block
+
+    def test_compose_admin_known_hosts_unchanged(self, tmp_path: Path) -> None:
+        """Admin ipc_known_hosts bind-mount unchanged."""
+        rendered = _render_compose(tmp_path)
+        admin_start = rendered.index("\n  admin:")
+        admin_block = rendered[admin_start:]
+        assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block

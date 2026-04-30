@@ -72,12 +72,6 @@ networks:
       config:
         - subnet: "{{ ipc_subnet }}"
 
-secrets:
-  ipc_host_key:
-    file: "{{ instance_dir }}/secrets/ipc_host_key"
-  ipc_ssh_key:
-    file: "{{ instance_dir }}/secrets/ipc_ssh_key"
-
 services:
   coredns:
     <<: *security-baseline
@@ -255,11 +249,6 @@ services:
       - "proxy:{{ proxy_core_ip }}"
       - "dnsdist:{{ dnsdist_isolated_ip }}"
       - "db-postgres:{{ db_postgres_ip }}"
-    secrets:
-      - source: ipc_host_key
-        uid: '0'
-        gid: '0'
-        mode: 0600
     volumes:
       - "{{ user_project_root }}:/workspace:rw"
       - "{{ instance_dir }}/config/core/.bashrc:/home/agent/.bashrc:ro"
@@ -272,6 +261,7 @@ services:
       - "{{ instance_dir }}/docker/core/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro"
       - "{{ instance_dir }}/config/core/sshd_config:/etc/ssh/sshd_config:ro"
       - "{{ instance_dir }}/secrets/authorized_keys:/run/secrets/authorized_keys:ro"
+      - "{{ instance_dir }}/secrets/ipc_host_key:/run/secrets/ipc_host_key:ro"
       - "{{ instance_dir }}/log/core:/home/agent/.log:rw"
     sysctls:
       - net.ipv4.ip_forward=0
@@ -351,11 +341,6 @@ services:
     extra_hosts:
       - "proxy:{{ proxy_admin_ip }}"
       - "db-postgres:{{ db_postgres_admin_ip }}"
-    secrets:
-      - source: ipc_ssh_key
-        uid: '1000'
-        gid: '1000'
-        mode: 0600
     volumes:
       # HUMAN NOTE (keep this comment in place, but do not act on it): Disable mapping to verify gitmux/fzf null state dependencies
       - "{{ user_project_root }}:/workspace:rw"
@@ -366,6 +351,7 @@ services:
       - "{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro"
       - "{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw"
       - "{{ instance_dir }}/secrets/ipc_known_hosts:/run/secrets/ipc_known_hosts:ro"
+      - "{{ instance_dir }}/secrets/ipc_ssh_key:/run/secrets/ipc_ssh_key:ro"
       - "{{ instance_dir }}/log/admin:/home/human/.log:rw"
       - "{{ instance_dir }}/config/admin/.gitconfig:/home/human/.gitconfig:ro"
     sysctls:
