@@ -2899,3 +2899,78 @@ class TestInfrastructureBugFixes:
             assert pin.pinned == f"{pin.ref}@{pin.digest}", f"{key}: .pinned mismatch"
             assert pin.tagged == f"{pin.ref}:{pin.tag}", f"{key}: .tagged mismatch"
 
+
+class TestDnsdistCommandArray:
+    """Spec: dnsdist command array excludes binary name (dns-exfiltration-defense delta)."""
+
+    def test_dnsdist_command_no_binary_name(self, tmp_path: Path) -> None:
+        """Rendered compose.yml dnsdist command is arguments-only, no binary name."""
+        from ruamel.yaml import YAML
+
+        tooling = Path(__file__).resolve().parents[2]
+        instance = tmp_path / "inst"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns", "config/dnsdist",
+            "config/proxy", "log/admin", "log/core", "cache/core/.claude",
+            "cache/admin/tmux_resurrect", "custom/config/admin", "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        compose_text = (instance / "docker" / "compose.yml").read_text()
+        ry = YAML(typ="safe")
+        compose_data = ry.load(compose_text)
+        dnsdist_cmd = compose_data["services"]["dnsdist"]["command"]
+
+        assert dnsdist_cmd == ["--supervised", "-C", "/etc/dnsdist/dnsdist.conf"], (
+            f"Expected arguments-only command, got: {dnsdist_cmd}"
+        )
+        assert "dnsdist" not in dnsdist_cmd, (
+            "dnsdist binary name must not appear in the command array"
+        )
+
+
+class TestTmuxGvisorPollingConfig:
+    """Spec: tmux polling and activity monitoring tuned for gVisor (gvisor-resource-tuning delta)."""
+
+    def test_tmux_gvisor_polling_config(self, tmp_path: Path) -> None:
+        """Rendered .tmux.conf has gVisor-compatible polling: interval 30, activity off."""
+        tooling = Path(__file__).resolve().parents[2]
+        instance = tmp_path / "inst"
+        for d in [
+            "docker/core", "docker/admin", "docker/extras", "docker/coredns",
+            "config/admin", "config/core", "config/coredns", "config/dnsdist",
+            "config/proxy", "log/admin", "log/core", "cache/core/.claude",
+            "cache/admin/tmux_resurrect", "custom/config/admin", "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        ctx = _build_test_context(str(instance))
+        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+
+        tmux_text = (instance / "config" / "admin" / ".tmux.conf").read_text()
+
+        # Positive assertions: correct gVisor-compatible values present
+        assert "set -g status-interval 30" in tmux_text, (
+            "status-interval must be 30 for gVisor compatibility"
+        )
+        assert "setw -g monitor-activity off" in tmux_text, (
+            "monitor-activity must be off for gVisor compatibility"
+        )
+        assert "set -g visual-activity off" in tmux_text, (
+            "visual-activity must be off for gVisor compatibility"
+        )
+
+        # Negative assertions: bare-metal defaults must not be present
+        assert "status-interval 2" not in tmux_text, (
+            "bare-metal status-interval 2 must not remain in template"
+        )
+        assert "monitor-activity on" not in tmux_text, (
+            "monitor-activity on must not remain in template"
+        )
+        assert "visual-activity on" not in tmux_text, (
+            "visual-activity on must not remain in template"
+        )

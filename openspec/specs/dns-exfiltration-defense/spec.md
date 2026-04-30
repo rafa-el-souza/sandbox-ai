@@ -116,3 +116,14 @@ The dnsdist container SHALL depend on coredns being healthy. Containers that con
 #### Scenario: Firecrawl depends on dnsdist
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
 - **THEN** the firecrawl service has `depends_on` including `dnsdist: condition: service_healthy`
+
+### Requirement: dnsdist Command Array Content
+The compose template's dnsdist `command:` array SHALL contain only CLI arguments — it SHALL NOT include the binary name as the first element. The `powerdns/dnsdist-19` entrypoint wrapper (`dnsdist-startup`) prepends the binary via `os.execv(program, [program] + args + sys.argv[1:])`, so compose's `command:` becomes `sys.argv[1:]`. Including the binary name causes it to be parsed as a positional listen address, resulting in a `ComboAddress` parse failure.
+
+#### Scenario: dnsdist command array excludes binary name
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** the dnsdist service's `command` field is `["--supervised", "-C", "/etc/dnsdist/dnsdist.conf"]`
+
+#### Scenario: dnsdist command array does not contain bare binary name
+- **WHEN** the rendered `compose.yml` is inspected
+- **THEN** the dnsdist service's `command` array does not contain `"dnsdist"` as any element
