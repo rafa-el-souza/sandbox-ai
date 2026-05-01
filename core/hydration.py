@@ -101,9 +101,6 @@ class SandboxProjectSection(BaseModel):
     user_project_root: str
     host_uid: str
     warmup_prompt: str = ""
-    # DEPRECATED: migrating to ProjectConfig.host.docker_unprivileged_user.
-    # Retained as optional during CLI migration (Section 4). Remove after migration.
-    host_unprivileged_user: str = ""
 
 
 class CoreConfig(BaseModel):

@@ -818,16 +818,22 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
 
 
 def _resolve_host_config(project_dir: str, config: SandboxConfig) -> tuple[str, MachinectlAuth]:
-    """Resolve host_user and auth from ProjectConfig, falling back to instance config.
+    """Resolve host_user and auth from project-wide ``sandbox-ai.toml``.
 
-    Returns (docker_unprivileged_user, machinectl_authentication).
+    Post-init commands SHALL fail when project config is absent — the field
+    no longer exists on the per-instance ``SandboxProjectSection``.
     """
+    del config  # accepted for signature stability with callers; project config is authoritative
     try:
         project_config = ProjectConfig.from_toml(project_dir)
-        return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
     except FileNotFoundError:
-        # Backward compatibility: fall back to deprecated instance config field
-        return config.project.host_unprivileged_user, MachinectlAuth.SUDO
+        console.print(
+            f"No sandbox-ai.toml found at {project_dir}. "
+            "Create one with [host].docker_unprivileged_user before running this command.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+    return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:

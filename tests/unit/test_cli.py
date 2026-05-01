@@ -82,6 +82,25 @@ RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name 
 WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"')
 
 
+@pytest.fixture(autouse=True)
+def _default_project_config() -> typing.Iterator[None]:
+    """Auto-supply a default sandbox-ai.toml so post-init commands don't exit early.
+
+    `_resolve_host_config` now requires `sandbox-ai.toml` (no fallback). Tests
+    that are not specifically about the missing-config path get a default
+    `ProjectConfig` injected here. Tests that need a different value or want to
+    exercise the FileNotFoundError path can re-patch in their own `with patch(...)`
+    block — pytest's mock stacks override this autouse fixture.
+    """
+    from core.project_config import ProjectConfig
+
+    default = ProjectConfig.model_validate(
+        {"host": {"docker_unprivileged_user": HOST_USER, "machinectl_authentication": "sudo"}}
+    )
+    with patch("cli.main.ProjectConfig.from_toml", return_value=default):
+        yield
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -3708,3 +3727,37 @@ class TestPolkitEndToEnd:
         assert result.exit_code == 0
         assert captured["host_user"] == "sandbox"
         assert captured["auth"] == MachinectlAuth.POLKIT
+
+
+# ── Post-init commands fail loudly without sandbox-ai.toml ───────────────────
+
+
+class TestPostInitMissingProjectConfig:
+    """Verify the 'Post-init command fails without project config' scenario.
+
+    Spec: openspec/changes/project-config-machinectl-auth/specs/orchestrator-cli/spec.md
+    """
+
+    @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])
+    def test_post_init_command_exits_when_sandbox_ai_toml_missing(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, command: str
+    ) -> None:
+        from cli.main import app
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+        ):
+            args = [command]
+            if command == "destroy":
+                args.append("--force")
+            result = runner.invoke(app, args)
+
+        assert result.exit_code == 1, f"{command} should exit 1 without sandbox-ai.toml"
+        assert "sandbox-ai.toml" in result.output
