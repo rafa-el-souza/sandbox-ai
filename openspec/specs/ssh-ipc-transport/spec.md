@@ -121,10 +121,10 @@ The rendered `compose.yml` SHALL mount SSH credentials into core and admin conta
 - **THEN** it does NOT contain a top-level `secrets:` block
 
 ### Requirement: Credential Ownership Matching
-The orchestrator SHALL ensure all four IPC secret files are owned by uid 1000 inside the rootless Docker namespace after generation. This SHALL be accomplished via a disposable helper container that runs `chown` within the Docker namespace boundary.
+The orchestrator SHALL ensure all four IPC secret files are owned by uid 1000 inside the rootless Docker namespace after generation. This SHALL be accomplished via a disposable helper container that runs `chown` within the Docker namespace boundary. The ownership matching SHALL execute after ACL grants (Phase 5), not during credential generation (Phase 3), to ensure the rootless Docker daemon has filesystem access to the bind-mount source paths.
 
-#### Scenario: Helper container chowns secrets after generation
-- **WHEN** `_phase_credentials()` completes SSH keypair generation
+#### Scenario: Helper container chowns secrets after ACL grants
+- **WHEN** `_phase_credential_ownership()` runs after Phase 5 (ACL grants)
 - **THEN** a disposable `docker run --rm busybox chown 1000:1000` command is executed via `machinectl shell` as the `host_unprivileged_user`, targeting all four secret files
 
 #### Scenario: Helper container uses runc runtime
@@ -137,7 +137,11 @@ The orchestrator SHALL ensure all four IPC secret files are owned by uid 1000 in
 
 #### Scenario: Helper container failure is sentinel-gated
 - **WHEN** the helper container `docker run` command fails
-- **THEN** `_phase_credentials()` raises `SandboxExecutionError` with the failure context
+- **THEN** `_phase_credential_ownership()` raises `SandboxExecutionError` with a message prefixed "Credential ownership matching failed:" followed by the failure context
+
+#### Scenario: Ownership matching does not run during credential generation
+- **WHEN** `_phase_credentials()` is inspected
+- **THEN** it does NOT contain any `docker run` invocation or `machinectl shell` command — ownership matching is exclusively in `_phase_credential_ownership()`
 
 ### Requirement: Admin SSH Client Configuration
 The admin container SHALL connect to core via SSH with host key pinning and public key authentication. The admin container SHALL have `openssh-client` installed.
