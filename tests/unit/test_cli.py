@@ -9,10 +9,14 @@ import os
 import subprocess
 import typing
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 from typer.testing import CliRunner
+
+if TYPE_CHECKING:
+    from tests.unit.conftest import ProjectConfigFactory
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -3610,7 +3614,7 @@ class TestDryRunAuthModePreview:
     """Task 7.7: --dry-run preview reflects machinectl_authentication mode."""
 
     def test_dry_run_preview_shows_polkit_command_without_sudo(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: typing.Any
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: ProjectConfigFactory
     ) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -3639,7 +3643,7 @@ class TestDryRunAuthModePreview:
                 raise AssertionError(f"polkit dry-run leaked sudo prefix: {line!r}")
 
     def test_dry_run_preview_shows_sudo_prefix_in_sudo_mode(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: typing.Any
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: ProjectConfigFactory
     ) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -3665,7 +3669,7 @@ class TestPolkitEndToEnd:
     """Task 7.8: polkit-mode commands construct subprocess calls without sudo."""
 
     def test_status_polkit_mode_container_status_call_omits_sudo(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: typing.Any
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: ProjectConfigFactory
     ) -> None:
         """`status` under polkit mode invokes `_container_status` with auth=POLKIT.
 

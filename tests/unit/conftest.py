@@ -5,10 +5,17 @@ Centralizes Rich Console construction for deterministic, ANSI-free output captur
 
 import re
 from io import StringIO
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import pytest
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from core.project_config import ProjectConfig
+
+
+class ProjectConfigFactory(Protocol):
+    def __call__(self, *, user: str = ..., auth: str = ...) -> ProjectConfig: ...
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -31,12 +38,12 @@ class CapturedConsole(NamedTuple):
 
 
 @pytest.fixture()
-def project_config_factory():  # type: ignore[no-untyped-def]
+def project_config_factory() -> ProjectConfigFactory:
     """Build ``ProjectConfig`` instances for the project-config-machinectl-auth flow.
 
     Usage::
 
-        def test_x(project_config_factory):
+        def test_x(project_config_factory: ProjectConfigFactory) -> None:
             pc = project_config_factory(user="sandbox", auth="polkit")
     """
     from core.project_config import ProjectConfig
