@@ -7,6 +7,7 @@ Tests validate the full phase sequencing per the orchestrator design spec.
 import json
 import os
 import subprocess
+import typing
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -1023,7 +1024,10 @@ class TestCredentialOwnershipMatching:
 
         mock_executor_instance = MagicMock()
         mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
         )
 
         with patch("cli.main.Executor", return_value=mock_executor_instance):
@@ -1044,7 +1048,10 @@ class TestCredentialOwnershipMatching:
 
         mock_executor_instance = MagicMock()
         mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
         )
 
         with patch("cli.main.Executor", return_value=mock_executor_instance):
@@ -1057,9 +1064,7 @@ class TestCredentialOwnershipMatching:
             cmd_str = " ".join(call_args)
             # Must reference all four secret files
             for secret in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"):
-                assert secret in cmd_str, (
-                    f"chown command must target {secret}, got: {cmd_str}"
-                )
+                assert secret in cmd_str, f"chown command must target {secret}, got: {cmd_str}"
 
     def test_chown_uses_docker_run_with_runc_runtime(self, tmp_path: Path) -> None:
         """Helper container uses docker run --rm --runtime=runc busybox."""
@@ -1070,7 +1075,10 @@ class TestCredentialOwnershipMatching:
 
         mock_executor_instance = MagicMock()
         mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
         )
 
         with patch("cli.main.Executor", return_value=mock_executor_instance):
@@ -1096,7 +1104,10 @@ class TestCredentialOwnershipMatching:
 
         mock_executor_instance = MagicMock()
         mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
         )
 
         with patch("cli.main.Executor", return_value=mock_executor_instance):
@@ -1109,9 +1120,7 @@ class TestCredentialOwnershipMatching:
             assert "sudo" in call_args, "Must use sudo"
             assert "machinectl" in call_args, "Must use machinectl"
             assert "shell" in call_args, "Must use shell subcommand"
-            assert "claude-sandbox@.host" in call_args, (
-                "Must execute as host_unprivileged_user"
-            )
+            assert "claude-sandbox@.host" in call_args, "Must execute as host_unprivileged_user"
 
     def test_chown_failure_raises_execution_error(self, tmp_path: Path) -> None:
         """Helper container failure wraps and re-raises SandboxExecutionError."""
@@ -1151,15 +1160,28 @@ class TestPhaseCredentialOwnership:
 
         mock_executor_instance = MagicMock()
         mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
         )
 
-        with patch("cli.main.Executor", return_value=mock_executor_instance):
+        with (
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+            patch("subprocess.run") as mock_run,
+        ):
             _phase_credential_ownership(
                 str(tmp_path),
                 host_user="claude-sandbox",
                 secrets_dir=str(secrets_dir),
             )
+
+            assert mock_run.call_count == 2
+            escalation_call = mock_run.call_args_list[0]
+            downgrade_call = mock_run.call_args_list[1]
+            assert escalation_call[0][0] == ["setfacl", "-m", "u:claude-sandbox:rwX", str(secrets_dir)]
+            assert downgrade_call[0][0] == ["setfacl", "-m", "u:claude-sandbox:rX", str(secrets_dir)]
+
             mock_executor_instance.run.assert_called_once()
             call_args = mock_executor_instance.run.call_args[0][0]
             cmd_str = " ".join(call_args)
@@ -1168,20 +1190,18 @@ class TestPhaseCredentialOwnership:
             assert "sudo" in call_args, "Must use sudo"
             assert "machinectl" in call_args, "Must use machinectl"
             assert "shell" in call_args, "Must use shell subcommand"
-            assert "claude-sandbox@.host" in call_args, (
-                "Must execute as host_unprivileged_user"
-            )
+            assert "claude-sandbox@.host" in call_args, "Must execute as host_unprivileged_user"
             # docker run structure
             assert "docker run" in cmd_str, f"Must use docker run, got: {cmd_str}"
             assert "--rm" in cmd_str, f"Must use --rm, got: {cmd_str}"
             assert "--runtime=runc" in cmd_str, f"Must use --runtime=runc, got: {cmd_str}"
             assert "busybox" in cmd_str, f"Must use busybox image, got: {cmd_str}"
+            assert f"-v {secrets_dir}:/secrets" in cmd_str, f"Must bind-mount secrets directory, got: {cmd_str}"
+            assert "cp /secrets/" in cmd_str, f"Must use copy-replace mutator, got: {cmd_str}"
             assert "chown 1000:1000" in cmd_str, f"Must chown to 1000:1000, got: {cmd_str}"
             # All four secret files
             for secret in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"):
-                assert secret in cmd_str, (
-                    f"chown command must target {secret}, got: {cmd_str}"
-                )
+                assert secret in cmd_str, f"chown command must target {secret}, got: {cmd_str}"
 
     def test_failure_raises_execution_error_with_prefix(self, tmp_path: Path) -> None:
         """Helper container failure raises SandboxExecutionError with
@@ -1197,7 +1217,53 @@ class TestPhaseCredentialOwnership:
 
         with (
             patch("cli.main.Executor", return_value=mock_executor_instance),
-            pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"),
+            patch("subprocess.run") as mock_run,
+        ):
+            with pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"):
+                _phase_credential_ownership(
+                    str(tmp_path),
+                    host_user="claude-sandbox",
+                    secrets_dir=str(secrets_dir),
+                )
+            assert mock_run.call_count == 2
+
+    def test_acl_escalation_failure_raises_error(self, tmp_path: Path) -> None:
+        from cli.main import _phase_credential_ownership
+        from core.exceptions import SandboxExecutionError
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        with (
+            patch("cli.main.Executor"),
+            patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "setfacl")),
+            pytest.raises(SandboxExecutionError, match="Failed to escalate ACLs for secrets directory"),
+        ):
+            _phase_credential_ownership(
+                str(tmp_path),
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+
+    def test_acl_downgrade_failure_raises_fix_diagnostic(self, tmp_path: Path) -> None:
+        import re
+
+        from cli.main import _phase_credential_ownership
+        from core.exceptions import SandboxExecutionError
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        def mock_run(cmd: list[str], *args: typing.Any, **kwargs: typing.Any) -> MagicMock:
+            if cmd[2] == "u:claude-sandbox:rX":
+                raise subprocess.CalledProcessError(1, cmd)
+            return MagicMock()
+
+        expected_match = re.escape(f"Fix: sudo setfacl -m u:claude-sandbox:rX {secrets_dir}")
+        with (
+            patch("cli.main.Executor"),
+            patch("subprocess.run", side_effect=mock_run),
+            pytest.raises(SandboxExecutionError, match=expected_match),
         ):
             _phase_credential_ownership(
                 str(tmp_path),
@@ -1475,6 +1541,7 @@ class TestInitScaffoldDirect:
             mock_env.assert_called_once()
             mock_acls.assert_called_once()
             from unittest.mock import ANY
+
             mock_secrets.assert_called_once_with(
                 ANY,
                 [

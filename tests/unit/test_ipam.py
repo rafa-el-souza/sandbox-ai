@@ -292,8 +292,13 @@ class TestIpamEndToEnd:
 
         subnets = derive_subnets(0)
         (
-            isolated, core_proxy, dns,
-            admin, admin_proxy, egress, ipc,
+            isolated,
+            core_proxy,
+            dns,
+            admin,
+            admin_proxy,
+            egress,
+            ipc,
         ) = subnets
         ips = derive_static_ips(0)
 
@@ -323,9 +328,7 @@ class TestIpamEndToEnd:
         for ip_key, subnet_cidr in ip_subnet_map.items():
             net = ipaddress.ip_network(subnet_cidr, strict=False)
             addr = ipaddress.ip_address(ips[ip_key])
-            assert addr in net, (
-                f"{ip_key}={ips[ip_key]} not in {subnet_cidr}"
-            )
+            assert addr in net, f"{ip_key}={ips[ip_key]} not in {subnet_cidr}"
 
 
 class TestIpam7Tuple:

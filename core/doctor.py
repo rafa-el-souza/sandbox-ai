@@ -518,8 +518,12 @@ def check_image_digests(user: str, distro: str | None) -> CheckResult:
         try:
             result = subprocess.run(
                 [
-                    "sudo", "machinectl", "shell", f"{user}@.host",
-                    "/bin/bash", "-c",
+                    "sudo",
+                    "machinectl",
+                    "shell",
+                    f"{user}@.host",
+                    "/bin/bash",
+                    "-c",
                     f"docker manifest inspect {pin.pinned}",
                 ],
                 capture_output=True,
@@ -542,8 +546,12 @@ def check_image_digests(user: str, distro: str | None) -> CheckResult:
         try:
             tag_result = subprocess.run(
                 [
-                    "sudo", "machinectl", "shell", f"{user}@.host",
-                    "/bin/bash", "-c",
+                    "sudo",
+                    "machinectl",
+                    "shell",
+                    f"{user}@.host",
+                    "/bin/bash",
+                    "-c",
                     f"docker manifest inspect {pin.tagged}",
                 ],
                 capture_output=True,
@@ -627,7 +635,7 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
             name="ACL support",
             detail="Filesystem supports POSIX ACLs",
         )
-    except (subprocess.CalledProcessError, OSError):
+    except subprocess.CalledProcessError, OSError:
         return CheckResult(
             status="fail",
             name="ACL support",
@@ -661,7 +669,7 @@ def _has_acl_exec(directory: str, user: str) -> bool:
                 perms = line[len(prefix) :]
                 if "x" in perms:
                     return True
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired, OSError:
         pass
     return False
 

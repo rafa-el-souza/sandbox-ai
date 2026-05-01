@@ -23,12 +23,12 @@ from core.hydration import IMAGE_REGISTRY
 # Values: "cosign-keyless", "docker-content-trust", or "none".
 
 SIGNER_REGISTRY: dict[str, str] = {
-    "wolfi_base": "cosign-keyless",       # Chainguard images are cosign-keyless signed
-    "debian_trixie": "none",              # Debian images do not publish cosign/DCT signatures
-    "squid": "none",                      # Ubuntu/squid OCI images — no cosign/DCT
-    "coredns": "none",                    # CoreDNS does not publish cosign/DCT signatures
-    "dnsdist": "none",                    # PowerDNS does not publish cosign/DCT signatures
-    "postgres": "none",                   # Official postgres — no cosign/DCT
+    "wolfi_base": "cosign-keyless",  # Chainguard images are cosign-keyless signed
+    "debian_trixie": "none",  # Debian images do not publish cosign/DCT signatures
+    "squid": "none",  # Ubuntu/squid OCI images — no cosign/DCT
+    "coredns": "none",  # CoreDNS does not publish cosign/DCT signatures
+    "dnsdist": "none",  # PowerDNS does not publish cosign/DCT signatures
+    "postgres": "none",  # Official postgres — no cosign/DCT
     "busybox_musl": "docker-content-trust",  # Docker official images use DCT
 }
 
@@ -72,11 +72,13 @@ def resolve_digests() -> list[dict[str, str]]:
             continue
 
         if current_digest and current_digest != pin.digest:
-            drift.append({
-                "key": key,
-                "old_digest": pin.digest,
-                "new_digest": current_digest,
-            })
+            drift.append(
+                {
+                    "key": key,
+                    "old_digest": pin.digest,
+                    "new_digest": current_digest,
+                }
+            )
 
     return drift
 
@@ -98,8 +100,7 @@ def check_dirty_tree() -> None:
     )
     if result.stdout.strip():
         print(
-            "Error: working tree has uncommitted changes. "
-            "Commit or stash changes before rotating digests.",
+            "Error: working tree has uncommitted changes. Commit or stash changes before rotating digests.",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -129,7 +130,7 @@ def _verify_signature(key: str, ref: str, digest: str) -> bool:
                 check=False,
             )
             return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except subprocess.TimeoutExpired, FileNotFoundError:
             return False
 
     # DCT verification is handled via DOCKER_CONTENT_TRUST env var.
@@ -194,8 +195,7 @@ def main(args: list[str] | None = None) -> int:
             pin = IMAGE_REGISTRY[entry["key"]]
             if not _verify_signature(entry["key"], pin.ref, entry["new_digest"]):
                 print(
-                    f"Error: signature verification failed for {entry['key']}. "
-                    "Refusing to auto-commit.",
+                    f"Error: signature verification failed for {entry['key']}. Refusing to auto-commit.",
                     file=sys.stderr,
                 )
                 return 1

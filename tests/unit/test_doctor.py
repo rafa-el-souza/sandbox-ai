@@ -1464,12 +1464,16 @@ class TestCheckImageDigests:
             # All digest probes pass
             if "@sha256:" in cmd_str:
                 return subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout="{}", stderr="",
+                    args=[],
+                    returncode=0,
+                    stdout="{}",
+                    stderr="",
                 )
             # Tag probe returns a different digest for first key
             if f":{IMAGE_REGISTRY[keys[0]].tag}" in cmd_str:
                 return subprocess.CompletedProcess(
-                    args=[], returncode=0,
+                    args=[],
+                    returncode=0,
                     stdout='{"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}',
                     stderr="",
                 )
@@ -1478,7 +1482,8 @@ class TestCheckImageDigests:
                 pin = IMAGE_REGISTRY[key]
                 if f":{pin.tag}" in cmd_str:
                     return subprocess.CompletedProcess(
-                        args=[], returncode=0,
+                        args=[],
+                        returncode=0,
                         stdout=f'{{"digest": "{pin.digest}"}}',
                         stderr="",
                     )
