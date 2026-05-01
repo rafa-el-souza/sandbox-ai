@@ -142,9 +142,7 @@ def derive_subnets(base_index: int) -> tuple[str, str, str, str, str, str, str]:
     if base_index >= MAX_SLOTS:
         raise ValueError(f"base_index {base_index} exceeds MAX_SLOTS ({MAX_SLOTS})")
     g = base_index * 7
-    subnets = tuple(
-        f"10.{100 + (g + i) // 256}.{(g + i) % 256}.0/24" for i in range(7)
-    )
+    subnets = tuple(f"10.{100 + (g + i) // 256}.{(g + i) % 256}.0/24" for i in range(7))
     return subnets  # type: ignore[return-value]
 
 
@@ -200,4 +198,3 @@ def derive_static_ips(base_index: int) -> dict[str, str]:
         "firecrawl_dns_ip": f"{dns_base}.55",
         "firecrawl_isolated_ip": f"{isolated_base}.55",
     }
-

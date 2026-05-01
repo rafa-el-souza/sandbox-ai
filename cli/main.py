@@ -241,16 +241,21 @@ def _phase_credential_ownership(
     instance directory tree.
     """
     resolved_secrets_dir = secrets_dir or os.path.join(instance_dir, "secrets")
-    secret_files = [
-        os.path.join(resolved_secrets_dir, f)
-        for f in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
-    ]
-    volume_args = " ".join(f"-v {f}:{f}" for f in secret_files)
-    chown_targets = " ".join(secret_files)
+    secret_files = ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
+    filenames = " ".join(secret_files)
+    volume_args = f"-v {resolved_secrets_dir}:/secrets"
     docker_cmd = (
-        f"docker run --rm --runtime=runc "
-        f"{volume_args} busybox chown 1000:1000 {chown_targets}"
+        f"docker run --rm --runtime=runc {volume_args} busybox sh -c '"
+        f"for f in {filenames}; do "
+        f"cp /secrets/$f /tmp/$f && chown 1000:1000 /tmp/$f && mv /tmp/$f /secrets/$f; "
+        f"done'"
     )
+
+    try:
+        subprocess.run(["setfacl", "-m", f"u:{host_user}:rwX", resolved_secrets_dir], check=True)
+    except subprocess.CalledProcessError as e:
+        raise SandboxExecutionError(f"Failed to escalate ACLs for secrets directory: {e}") from e
+
     executor = Executor()
     try:
         executor.run(
@@ -266,9 +271,15 @@ def _phase_credential_ownership(
             sentinel=True,
         )
     except SandboxExecutionError as e:
-        raise SandboxExecutionError(
-            f"Credential ownership matching failed: {e}"
-        ) from e
+        raise SandboxExecutionError(f"Credential ownership matching failed: {e}") from e
+    finally:
+        try:
+            subprocess.run(["setfacl", "-m", f"u:{host_user}:rX", resolved_secrets_dir], check=True)
+        except subprocess.CalledProcessError as e:
+            raise SandboxExecutionError(
+                f"Failed to downgrade ACLs for secrets directory. "
+                f"Fix: sudo setfacl -m u:{host_user}:rX {resolved_secrets_dir}"
+            ) from e
 
 
 def _phase_hydrate(
@@ -573,8 +584,6 @@ def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
         extras = os.path.join(instance_dir, "docker", "extras", "mcp-firecrawl.yml")
         files.extend(["-f", extras])
     return files
-
-
 
 
 def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: SandboxConfig) -> None:

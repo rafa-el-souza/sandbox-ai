@@ -111,7 +111,10 @@ class TestCheckDirtyTree:
         from scripts.rotate_digests import check_dirty_tree
 
         mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=" M core/hydration.py\n", stderr="",
+            args=[],
+            returncode=0,
+            stdout=" M core/hydration.py\n",
+            stderr="",
         )
         with pytest.raises(SystemExit), patch("subprocess.run", return_value=mock_result):
             check_dirty_tree()
@@ -121,7 +124,10 @@ class TestCheckDirtyTree:
         from scripts.rotate_digests import check_dirty_tree
 
         mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="",
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
         )
         with patch("subprocess.run", return_value=mock_result):
             check_dirty_tree()  # should not raise
