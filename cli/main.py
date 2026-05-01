@@ -247,7 +247,7 @@ def _phase_credential_ownership(
     docker_cmd = (
         f"docker run --rm --runtime=runc {volume_args} busybox sh -c '"
         f"for f in {filenames}; do "
-        f"cp /secrets/$f /tmp/$f && chown 1000:1000 /tmp/$f && mv /tmp/$f /secrets/$f; "
+        f"cp /secrets/$f /tmp/$f && chown 1000:1000 /tmp/$f && chmod 0600 /tmp/$f && mv /tmp/$f /secrets/$f; "
         f"done'"
     )
 
