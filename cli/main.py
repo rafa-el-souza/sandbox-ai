@@ -209,15 +209,11 @@ def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
 def _phase_credentials(
     instance_dir: str,
     core_ipc_ip: str,
-    *,
-    host_user: str | None = None,
-    secrets_dir: str | None = None,
 ) -> str:
-    """Phase 3: Generate proxy credentials, SSH keypairs, and ownership convergence.
+    """Phase 3: Generate proxy credentials and SSH keypairs.
 
-    Returns proxy password. When host_user is provided, a disposable helper
-    container runs chown(2) on all four IPC secret files to converge
-    ownership to uid 1000 inside the rootless Docker namespace.
+    Returns proxy password. Credential ownership matching is handled
+    separately by _phase_credential_ownership() after ACL grants.
     """
     password = generate_credential()
     hashed = hash_proxy_password(password)
@@ -229,39 +225,50 @@ def _phase_credentials(
     generate_ssh_keypair(instance_dir, "auth")
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
 
-    # Credential ownership matching via disposable helper container
-    if host_user is not None:
-        resolved_secrets_dir = secrets_dir or os.path.join(instance_dir, "secrets")
-        secret_files = [
-            os.path.join(resolved_secrets_dir, f)
-            for f in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
-        ]
-        volume_args = " ".join(f"-v {f}:{f}" for f in secret_files)
-        chown_targets = " ".join(secret_files)
-        docker_cmd = (
-            f"docker run --rm --runtime=runc "
-            f"{volume_args} busybox chown 1000:1000 {chown_targets}"
-        )
-        executor = Executor()
-        try:
-            executor.run(
-                [
-                    "sudo",
-                    "machinectl",
-                    "shell",
-                    f"{host_user}@.host",
-                    "/bin/bash",
-                    "-c",
-                    docker_cmd,
-                ],
-                sentinel=True,
-            )
-        except SandboxExecutionError as e:
-            raise SandboxExecutionError(
-                f"Credential ownership matching failed: {e}"
-            ) from e
-
     return password
+
+
+def _phase_credential_ownership(
+    instance_dir: str,
+    host_user: str,
+    secrets_dir: str | None = None,
+) -> None:
+    """Phase 5b: Credential ownership matching via disposable helper container.
+
+    Runs chown(2) on all four IPC secret files to converge ownership to
+    uid 1000 inside the rootless Docker namespace. Must execute after ACL
+    grants (Phase 5) so the rootless Docker daemon can traverse the
+    instance directory tree.
+    """
+    resolved_secrets_dir = secrets_dir or os.path.join(instance_dir, "secrets")
+    secret_files = [
+        os.path.join(resolved_secrets_dir, f)
+        for f in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
+    ]
+    volume_args = " ".join(f"-v {f}:{f}" for f in secret_files)
+    chown_targets = " ".join(secret_files)
+    docker_cmd = (
+        f"docker run --rm --runtime=runc "
+        f"{volume_args} busybox chown 1000:1000 {chown_targets}"
+    )
+    executor = Executor()
+    try:
+        executor.run(
+            [
+                "sudo",
+                "machinectl",
+                "shell",
+                f"{host_user}@.host",
+                "/bin/bash",
+                "-c",
+                docker_cmd,
+            ],
+            sentinel=True,
+        )
+    except SandboxExecutionError as e:
+        raise SandboxExecutionError(
+            f"Credential ownership matching failed: {e}"
+        ) from e
 
 
 def _phase_hydrate(
@@ -997,11 +1004,10 @@ def start(
         base_index = _phase_ipam(sandbox_ai_home, instance_id)
         console.print("✓ IPAM — network allocation complete")
 
-        # Phase 3: Credentials
+        # Phase 3: Credentials (generation only)
         proxy_password = _phase_credentials(
             instance_dir,
             core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
-            host_user=host_user,
         )
         console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 
@@ -1013,6 +1019,10 @@ def start(
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user)
         console.print("✓ ACL — filesystem permissions granted")
+
+        # Phase 5b: Credential ownership matching (after ACL grants)
+        _phase_credential_ownership(instance_dir, host_user)
+        console.print("✓ Ownership — credential files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
