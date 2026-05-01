@@ -60,7 +60,7 @@ The system SHALL hand over the terminal to the admin container via `machinectl s
 - **THEN** `sudo machinectl shell <host_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed and the user's terminal is now owned by that session
 
 ### Requirement: Instance Pre-Flight Checks
-The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. SSH keypair generation SHALL occur during `_phase_credentials()`. Credential ownership matching SHALL occur during `_phase_credential_ownership()`, which executes after ACL grants (Phase 5).
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. SSH keypair generation SHALL occur during `_phase_credentials()`. Credential ownership matching SHALL occur during `_phase_credential_ownership()`, which executes after ACL grants (Phase 5). To bypass user namespace unmapped UID restrictions, the ownership matching phase SHALL temporarily escalate directory ACLs and mutate the files.
 
 #### Scenario: Secret completeness gate
 - **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
@@ -80,7 +80,19 @@ The system SHALL validate instance readiness before beginning provisioning. Pre-
 
 #### Scenario: Credential ownership matching after ACL grants
 - **WHEN** `_phase_credential_ownership()` runs after Phase 5 (ACL grants)
-- **THEN** a disposable helper container runs `chown 1000:1000` on all four IPC secret files via `machinectl shell` as the `host_unprivileged_user`, ensuring files are owned by uid 1000 inside the rootless Docker namespace
+- **THEN** the orchestrator temporarily escalates the `secrets/` ACL to `rwX` for the `host_unprivileged_user`
+
+#### Scenario: Copy-replace mutator for ownership alignment
+- **WHEN** the `secrets/` ACL is escalated
+- **THEN** a disposable helper container bind-mounts the `secrets/` directory and executes a `cp -> chown 1000:1000 -> mv` loop on all four IPC secret files via `machinectl shell` as the `host_unprivileged_user`, bypassing unmapped UID restrictions
+
+#### Scenario: Privilege downgrade guard
+- **WHEN** the helper container execution concludes (success or failure)
+- **THEN** a `finally` block strictly downgrades the `secrets/` ACL back to `rX`
+
+#### Scenario: Hard failure on downgrade fault
+- **WHEN** the `finally` block fails to downgrade the `secrets/` ACL
+- **THEN** the orchestrator crashes with a `[FATAL]` `SandboxExecutionError` containing a deterministic recovery command (`setfacl -m u:<user>:rX ...`)
 
 #### Scenario: Credential ownership matching does not run during credential generation
 - **WHEN** `_phase_credentials()` runs
