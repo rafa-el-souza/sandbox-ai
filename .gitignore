@@ -14,6 +14,7 @@ temp/
 .antigravityignore
 .agent/
 .venv/
+.claude/
 
 # Python
 __pycache__/
