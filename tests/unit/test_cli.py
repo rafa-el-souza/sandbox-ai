@@ -154,6 +154,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate") as mock_hydrate,
             patch("cli.main._phase_acl_grant") as mock_acl,
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -220,6 +221,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -252,6 +254,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -346,6 +349,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -456,6 +460,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -526,6 +531,7 @@ class TestStartProjectNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -556,6 +562,7 @@ class TestStartProjectNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -1001,18 +1008,16 @@ class TestPhaseCredentialsDirect:
 
 
 class TestCredentialOwnershipMatching:
-    """10.T RED: _phase_credentials invokes helper container for credential ownership.
+    """10.T: _phase_credential_ownership invokes helper container for credential ownership.
 
     Implements: cli-start/spec.md §Instance Pre-Flight Checks,
                 ssh-ipc-transport/spec.md §Credential Ownership Matching
     """
 
-    def test_phase_credentials_invokes_chown_via_machinectl(self, tmp_path: Path) -> None:
-        """After keypair generation, _phase_credentials runs docker chown via machinectl."""
-        from cli.main import _phase_credentials
+    def test_phase_credential_ownership_invokes_chown_via_machinectl(self, tmp_path: Path) -> None:
+        """_phase_credential_ownership runs docker chown via machinectl."""
+        from cli.main import _phase_credential_ownership
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
 
@@ -1021,14 +1026,9 @@ class TestCredentialOwnershipMatching:
             args=[], returncode=0, stdout="", stderr="",
         )
 
-        with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-        ):
-            _phase_credentials(
+        with patch("cli.main.Executor", return_value=mock_executor_instance):
+            _phase_credential_ownership(
                 str(tmp_path),
-                core_ipc_ip="10.100.6.3",
                 host_user="claude-sandbox",
                 secrets_dir=str(secrets_dir),
             )
@@ -1037,10 +1037,8 @@ class TestCredentialOwnershipMatching:
 
     def test_chown_command_targets_all_four_secret_files(self, tmp_path: Path) -> None:
         """Helper container chowns all four IPC secret files."""
-        from cli.main import _phase_credentials
+        from cli.main import _phase_credential_ownership
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
 
@@ -1049,14 +1047,9 @@ class TestCredentialOwnershipMatching:
             args=[], returncode=0, stdout="", stderr="",
         )
 
-        with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-        ):
-            _phase_credentials(
+        with patch("cli.main.Executor", return_value=mock_executor_instance):
+            _phase_credential_ownership(
                 str(tmp_path),
-                core_ipc_ip="10.100.6.3",
                 host_user="claude-sandbox",
                 secrets_dir=str(secrets_dir),
             )
@@ -1070,10 +1063,8 @@ class TestCredentialOwnershipMatching:
 
     def test_chown_uses_docker_run_with_runc_runtime(self, tmp_path: Path) -> None:
         """Helper container uses docker run --rm --runtime=runc busybox."""
-        from cli.main import _phase_credentials
+        from cli.main import _phase_credential_ownership
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
 
@@ -1082,14 +1073,9 @@ class TestCredentialOwnershipMatching:
             args=[], returncode=0, stdout="", stderr="",
         )
 
-        with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-        ):
-            _phase_credentials(
+        with patch("cli.main.Executor", return_value=mock_executor_instance):
+            _phase_credential_ownership(
                 str(tmp_path),
-                core_ipc_ip="10.100.6.3",
                 host_user="claude-sandbox",
                 secrets_dir=str(secrets_dir),
             )
@@ -1103,10 +1089,8 @@ class TestCredentialOwnershipMatching:
 
     def test_chown_executed_via_machinectl_shell(self, tmp_path: Path) -> None:
         """Chown command is executed via machinectl shell as host_unprivileged_user."""
-        from cli.main import _phase_credentials
+        from cli.main import _phase_credential_ownership
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
 
@@ -1115,14 +1099,9 @@ class TestCredentialOwnershipMatching:
             args=[], returncode=0, stdout="", stderr="",
         )
 
-        with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-        ):
-            _phase_credentials(
+        with patch("cli.main.Executor", return_value=mock_executor_instance):
+            _phase_credential_ownership(
                 str(tmp_path),
-                core_ipc_ip="10.100.6.3",
                 host_user="claude-sandbox",
                 secrets_dir=str(secrets_dir),
             )
@@ -1136,11 +1115,9 @@ class TestCredentialOwnershipMatching:
 
     def test_chown_failure_raises_execution_error(self, tmp_path: Path) -> None:
         """Helper container failure wraps and re-raises SandboxExecutionError."""
-        from cli.main import _phase_credentials
+        from cli.main import _phase_credential_ownership
         from core.exceptions import SandboxExecutionError
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
 
@@ -1148,14 +1125,82 @@ class TestCredentialOwnershipMatching:
         mock_executor_instance.run.side_effect = SandboxExecutionError("chown failed")
 
         with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
             patch("cli.main.Executor", return_value=mock_executor_instance),
             pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"),
         ):
-            _phase_credentials(
+            _phase_credential_ownership(
                 str(tmp_path),
-                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+
+
+class TestPhaseCredentialOwnership:
+    """Tasks 1.1, 1.2 RED: _phase_credential_ownership() unit tests.
+
+    Implements: ssh-ipc-transport/spec.md §Credential Ownership Matching
+    """
+
+    def test_invokes_chown_via_machinectl_with_runc(self, tmp_path: Path) -> None:
+        """_phase_credential_ownership calls Executor.run with machinectl shell + docker run
+        --rm --runtime=runc busybox chown 1000:1000 targeting all four secret files."""
+        from cli.main import _phase_credential_ownership
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+
+        with patch("cli.main.Executor", return_value=mock_executor_instance):
+            _phase_credential_ownership(
+                str(tmp_path),
+                host_user="claude-sandbox",
+                secrets_dir=str(secrets_dir),
+            )
+            mock_executor_instance.run.assert_called_once()
+            call_args = mock_executor_instance.run.call_args[0][0]
+            cmd_str = " ".join(call_args)
+
+            # machinectl shell envelope
+            assert "sudo" in call_args, "Must use sudo"
+            assert "machinectl" in call_args, "Must use machinectl"
+            assert "shell" in call_args, "Must use shell subcommand"
+            assert "claude-sandbox@.host" in call_args, (
+                "Must execute as host_unprivileged_user"
+            )
+            # docker run structure
+            assert "docker run" in cmd_str, f"Must use docker run, got: {cmd_str}"
+            assert "--rm" in cmd_str, f"Must use --rm, got: {cmd_str}"
+            assert "--runtime=runc" in cmd_str, f"Must use --runtime=runc, got: {cmd_str}"
+            assert "busybox" in cmd_str, f"Must use busybox image, got: {cmd_str}"
+            assert "chown 1000:1000" in cmd_str, f"Must chown to 1000:1000, got: {cmd_str}"
+            # All four secret files
+            for secret in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"):
+                assert secret in cmd_str, (
+                    f"chown command must target {secret}, got: {cmd_str}"
+                )
+
+    def test_failure_raises_execution_error_with_prefix(self, tmp_path: Path) -> None:
+        """Helper container failure raises SandboxExecutionError with
+        'Credential ownership matching failed:' prefix."""
+        from cli.main import _phase_credential_ownership
+        from core.exceptions import SandboxExecutionError
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        mock_executor_instance = MagicMock()
+        mock_executor_instance.run.side_effect = SandboxExecutionError("chown failed")
+
+        with (
+            patch("cli.main.Executor", return_value=mock_executor_instance),
+            pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"),
+        ):
+            _phase_credential_ownership(
+                str(tmp_path),
                 host_user="claude-sandbox",
                 secrets_dir=str(secrets_dir),
             )
@@ -2617,6 +2662,53 @@ class TestDiagnoseTraverseFailure:
             assert "/synthetic" in result
 
 
+class TestStartPipelineOrdering:
+    """Task 2.1 RED: _phase_credential_ownership called after ACL grants, before compose up."""
+
+    def test_ownership_after_acl_before_compose(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """Integration: phase ordering is ACL → ownership → compose."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+        _write_ipam(home, instance_id, 0)
+
+        from cli.main import app
+
+        call_order: list[str] = []
+
+        def track_acl(*a: object, **kw: object) -> None:
+            call_order.append("acl_grant")
+
+        def track_ownership(*a: object, **kw: object) -> None:
+            call_order.append("credential_ownership")
+
+        def track_compose(*a: object, **kw: object) -> None:
+            call_order.append("compose_up")
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant", side_effect=track_acl),
+            patch("cli.main._phase_credential_ownership", side_effect=track_ownership),
+            patch("cli.main._phase_compose_up", side_effect=track_compose),
+            patch("cli.main._phase_handover"),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 0
+            assert call_order == ["acl_grant", "credential_ownership", "compose_up"], (
+                f"Expected ACL → ownership → compose, got: {call_order}"
+            )
+
+
 class TestStartErrorHandlerACLCleanup:
     """Task 5.7: start error handler — ACL cleanup conditional on acl_granted."""
 
@@ -2641,7 +2733,37 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
+            patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_called_once()
+
+    def test_phase_5b_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """WHEN Phase 5b (_phase_credential_ownership) fails, THEN _revoke_acls is called."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        instance_id = "myproject-abc123"
+        _register_instance(home, project_dir, instance_id)
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_credential_ownership", side_effect=SandboxExecutionError("chown failed")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
