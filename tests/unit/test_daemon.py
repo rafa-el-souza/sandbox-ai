@@ -1,10 +1,24 @@
 from core.daemon import DaemonIPC
+from core.project_config import MachinectlAuth
 
 
-def test_machinectl_binding() -> None:
+def test_machinectl_binding_default_sudo() -> None:
     ipc = DaemonIPC()
     binding = ipc.get_machinectl_binding()
-    assert "sudo machinectl shell sandbox@" in binding
+    assert binding == "sudo machinectl shell sandbox@"
+
+
+def test_machinectl_binding_sudo_explicit() -> None:
+    ipc = DaemonIPC()
+    binding = ipc.get_machinectl_binding(MachinectlAuth.SUDO)
+    assert binding == "sudo machinectl shell sandbox@"
+
+
+def test_machinectl_binding_polkit_omits_sudo() -> None:
+    ipc = DaemonIPC()
+    binding = ipc.get_machinectl_binding(MachinectlAuth.POLKIT)
+    assert binding == "machinectl shell sandbox@"
+    assert "sudo" not in binding
 
 
 def test_docker_wait_sequence() -> None:

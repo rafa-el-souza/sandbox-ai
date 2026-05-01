@@ -1,7 +1,15 @@
+from core.project_config import MachinectlAuth
+
+
 class DaemonIPC:
-    def get_machinectl_binding(self) -> str:
-        """Verify exact string bindings for sudo machinectl shell sandbox@"""
-        return "sudo machinectl shell sandbox@"
+    def get_machinectl_binding(self, auth: MachinectlAuth = MachinectlAuth.SUDO) -> str:
+        """Verify exact string bindings for ``[sudo] machinectl shell sandbox@``.
+
+        When ``auth`` is :data:`MachinectlAuth.SUDO` the prefix includes ``sudo``;
+        when ``auth`` is :data:`MachinectlAuth.POLKIT` the prefix is omitted.
+        """
+        prefix = "sudo " if auth == MachinectlAuth.SUDO else ""
+        return f"{prefix}machinectl shell sandbox@"
 
     def get_docker_wait_sequence(self) -> str:
         """Assert positive validation of the docker compose wait blocking sequence natively"""
