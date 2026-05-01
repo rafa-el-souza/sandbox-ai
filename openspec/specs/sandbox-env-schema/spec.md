@@ -27,18 +27,18 @@ The system SHALL write only the secret variable blocks for components that are e
 - **THEN** `FIRECRAWL_API_KEY` is written with an empty value (`FIRECRAWL_API_KEY=""`) for the user to populate
 
 ### Requirement: Interactive Secret Prompting
-The system SHALL collect required secret values interactively using `getpass()` when a TTY is attached, with no echo to the terminal. Auto-generated secrets SHALL NOT be included in the interactive prompt list.
+The system SHALL collect required secret values interactively using a caller-injected, TTY-safe prompt function when a TTY is attached, with no echo to the terminal. Auto-generated secrets SHALL NOT be included in the interactive prompt list.
 
-#### Scenario: Required secret collected via getpass
+#### Scenario: Required secret collected via injected prompt
 - **WHEN** scaffold runs in an interactive TTY context and `CORE_ANTHROPIC_API_KEY` is empty in `.sandbox.env`
-- **THEN** the CLI prompts via `getpass.getpass("CORE_ANTHROPIC_API_KEY (Anthropic API key for the agent): ")` and writes the returned value to `.sandbox.env`
+- **THEN** the CLI prompts via the injected `prompt_func` (e.g., `typer.prompt(..., hide_input=True)`) and writes the returned value to `.sandbox.env`
 
 #### Scenario: Auto-generated secret not prompted
 - **WHEN** scaffold runs in an interactive TTY context and `PG_PASSWORD` was auto-generated
 - **THEN** the CLI does NOT prompt for `PG_PASSWORD` — the pre-populated value is used as-is
 
 #### Scenario: Collected secrets not echoed
-- **WHEN** the user types their secret at the `getpass()` prompt
+- **WHEN** the user types their secret at the injected prompt
 - **THEN** the entered characters are NOT displayed on the terminal and NOT written to shell history
 
 ### Requirement: Credential Generation Function
