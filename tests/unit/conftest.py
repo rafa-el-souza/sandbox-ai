@@ -31,6 +31,25 @@ class CapturedConsole(NamedTuple):
 
 
 @pytest.fixture()
+def project_config_factory():  # type: ignore[no-untyped-def]
+    """Build ``ProjectConfig`` instances for the project-config-machinectl-auth flow.
+
+    Usage::
+
+        def test_x(project_config_factory):
+            pc = project_config_factory(user="sandbox", auth="polkit")
+    """
+    from core.project_config import ProjectConfig
+
+    def _make(*, user: str = "sandbox", auth: str = "sudo") -> ProjectConfig:
+        return ProjectConfig.model_validate(
+            {"host": {"docker_unprivileged_user": user, "machinectl_authentication": auth}}
+        )
+
+    return _make
+
+
+@pytest.fixture()
 def captured_console() -> CapturedConsole:
     """Provide a Rich Console that captures output to an in-memory buffer.
 

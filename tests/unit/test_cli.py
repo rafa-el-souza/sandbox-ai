@@ -3601,3 +3601,106 @@ class TestStatusIPAMExhausted:
             assert result.exit_code == 0
             # Status renders despite IPAM exhaustion
             assert "running" in result.output.lower() or "core" in result.output.lower()
+
+
+# ── Section 7 (project-config-machinectl-auth): auth-mode-aware preview ──────
+
+
+class TestDryRunAuthModePreview:
+    """Task 7.7: --dry-run preview reflects machinectl_authentication mode."""
+
+    def test_dry_run_preview_shows_polkit_command_without_sudo(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: typing.Any
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main.ProjectConfig.from_toml", return_value=polkit_cfg),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+
+        assert result.exit_code == 0
+        # The previewed compose/handover commands must NOT include sudo
+        # but must still invoke machinectl shell.
+        assert "machinectl shell sandbox@.host" in result.output
+        # Command-preview lines should not start with `sudo machinectl`
+        for line in result.output.splitlines():
+            stripped = line.strip().lstrip("$").strip()
+            if stripped.startswith("sudo machinectl"):
+                raise AssertionError(f"polkit dry-run leaked sudo prefix: {line!r}")
+
+    def test_dry_run_preview_shows_sudo_prefix_in_sudo_mode(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: typing.Any
+    ) -> None:
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        from cli.main import app
+
+        sudo_cfg = project_config_factory(user="sandbox", auth="sudo")
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main.ProjectConfig.from_toml", return_value=sudo_cfg),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "sudo machinectl shell sandbox@.host" in result.output
+
+
+class TestPolkitEndToEnd:
+    """Task 7.8: polkit-mode commands construct subprocess calls without sudo."""
+
+    def test_status_polkit_mode_container_status_call_omits_sudo(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: typing.Any
+    ) -> None:
+        """`status` under polkit mode invokes `_container_status` with auth=POLKIT.
+
+        The call list does not include `sudo` as the first argv element.
+        """
+        from cli.main import app
+        from core.project_config import MachinectlAuth
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam(home, "myproject-abc123", 0)
+
+        polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
+        captured: dict[str, object] = {}
+
+        def fake_container_status(
+            instance_dir: str,
+            name: str,
+            host_user: str,
+            config: object,
+            auth: MachinectlAuth,
+        ) -> list[object]:
+            captured["host_user"] = host_user
+            captured["auth"] = auth
+            return []
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main.ProjectConfig.from_toml", return_value=polkit_cfg),
+            patch("cli.main._container_status", side_effect=fake_container_status),
+        ):
+            result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0
+        assert captured["host_user"] == "sandbox"
+        assert captured["auth"] == MachinectlAuth.POLKIT
