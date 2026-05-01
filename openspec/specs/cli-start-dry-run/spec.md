@@ -20,7 +20,7 @@ The system SHALL accept a `--dry-run` flag on `sandbox start` that simulates the
 - **THEN** the process exits with code 1 with the failure reason displayed
 
 ### Requirement: Instance Resolution in Dry-Run
-The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init`.
+The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init`. The `docker_unprivileged_user` SHALL be sourced from project config (`sandbox-ai.toml`), not from instance config.
 
 #### Scenario: Existing instance resolved
 - **WHEN** dry-run is invoked and the project directory has a registered instance
@@ -32,7 +32,7 @@ The system SHALL resolve the instance from the registry in dry-run mode using th
 
 #### Scenario: No instance found — error with guidance
 - **WHEN** dry-run is invoked and no instance exists for the project directory
-- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init --user <user>` first." and exit code 1
+- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init` first." and exit code 1
 
 ### Requirement: IPAM Slot Preview
 The system SHALL compute the IPAM slot that would be allocated without writing to the ledger.
@@ -72,15 +72,19 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 - **THEN** dry-run reports the missing file path and exits with code 1
 
 ### Requirement: Command Preview
-The system SHALL display the exact subprocess commands that would be executed during a real start.
+The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`.
 
 #### Scenario: Compose command displayed
 - **WHEN** dry-run completes validation
 - **THEN** the full `docker compose` command is displayed, including all `-f` flags for component-conditional extras
 
-#### Scenario: Handover command displayed
-- **WHEN** dry-run completes validation
-- **THEN** the `sudo machinectl shell ... docker exec -it` command is displayed
+#### Scenario: Handover command displayed (sudo mode)
+- **WHEN** dry-run completes validation and `machinectl_authentication` is `"sudo"`
+- **THEN** the preview shows `sudo machinectl shell ... docker exec -it`
+
+#### Scenario: Handover command displayed (polkit mode)
+- **WHEN** dry-run completes validation and `machinectl_authentication` is `"polkit"`
+- **THEN** the preview shows `machinectl shell ... docker exec -it` without `sudo` prefix
 
 #### Scenario: ACL commands displayed
 - **WHEN** dry-run completes validation

@@ -20,7 +20,7 @@ The system SHALL provide a `sandbox status` command that displays the current st
 - **THEN** the system prints "No sandbox instance found for this directory." and exits with code 1
 
 ### Requirement: Container Health Display
-The system SHALL query per-container health via `docker compose ps --format json` through machinectl and display results in a Rich Table.
+The system SHALL query per-container health via `docker compose ps --format json` through machinectl using the configured authentication mode and display results in a Rich Table.
 
 #### Scenario: All containers healthy
 - **WHEN** all containers with healthchecks report "healthy" and all containers are in "running" state
@@ -30,9 +30,13 @@ The system SHALL query per-container health via `docker compose ps --format json
 - **WHEN** one or more containers report "unhealthy" or are not running
 - **THEN** the Panel header includes "⚠ degraded" and the Panel border is yellow, and unhealthy containers are highlighted with `✗` in the Table
 
-#### Scenario: Container health query via machinectl
-- **WHEN** the status command queries container state
-- **THEN** it invokes `docker compose ps --format json` via `sudo machinectl shell <user>@.host /bin/bash -c "<command>"` and parses the NDJSON output (one JSON object per line)
+#### Scenario: Container health query via machinectl (sudo mode)
+- **WHEN** the status command queries container state and `machinectl_authentication` is `"sudo"`
+- **THEN** it invokes `docker compose ps --format json` via `sudo machinectl shell <user>@.host /bin/bash -c "<command>"`
+
+#### Scenario: Container health query via machinectl (polkit mode)
+- **WHEN** the status command queries container state and `machinectl_authentication` is `"polkit"`
+- **THEN** it invokes `docker compose ps --format json` via `machinectl shell <user>@.host /bin/bash -c "<command>"` without `sudo` prefix
 
 ### Requirement: IPAM Display
 The system SHALL display the instance's IPAM allocation including slot index and derived subnets.

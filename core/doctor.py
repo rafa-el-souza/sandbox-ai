@@ -10,6 +10,7 @@ Provides 16 diagnostic checks across 4 independent chains:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -18,6 +19,8 @@ import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+
+from core.project_config import MachinectlAuth, machinectl_cmd
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -214,36 +217,39 @@ def check_systemd_machined(user: str, distro: str | None) -> CheckResult:
 # ─── Section 5: machinectl Reachability ──────────────────────────────────────
 
 
-def check_machinectl_reachable(user: str, distro: str | None) -> CheckResult:
+def check_machinectl_reachable(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that machinectl shell can reach the unprivileged user.
 
-    Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang).
+    Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang)
+    in sudo mode, or polkit dialog/timeout in polkit mode.
     """
+    cmd = [*machinectl_cmd(user, auth_mode), "/bin/bash", "-c", "echo ok"]
     try:
         result = subprocess.run(
-            [
-                "sudo",
-                "machinectl",
-                "shell",
-                f"{user}@.host",
-                "/bin/bash",
-                "-c",
-                "echo ok",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
         )
     except subprocess.TimeoutExpired:
+        if auth_mode == MachinectlAuth.SUDO:
+            timeout_remediation = (
+                "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
+                f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
+            )
+        else:
+            timeout_remediation = (
+                "Configure a passwordless polkit rule for org.freedesktop.machine1.shell "
+                f"granting your user access to '{user}@.host', or switch to sudo mode."
+            )
         return CheckResult(
             status="fail",
             name="machinectl reachable",
-            detail="Probe timed out after 10 seconds (likely sudoers password prompt)",
-            remediation=(
-                "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
-                f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
-            ),
+            detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
+            remediation=timeout_remediation,
         )
 
     if result.returncode == 0:
@@ -263,14 +269,13 @@ def check_machinectl_reachable(user: str, distro: str | None) -> CheckResult:
 # ─── Section 6: Docker Checks ───────────────────────────────────────────────
 
 
-def check_docker_available(user: str, distro: str | None) -> CheckResult:
+def check_docker_available(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
     result = subprocess.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{user}@.host",
+            *machinectl_cmd(user, auth_mode),
             "/bin/bash",
             "-c",
             "docker version --format '{{.Server.Version}}'",
@@ -295,14 +300,13 @@ def check_docker_available(user: str, distro: str | None) -> CheckResult:
     )
 
 
-def check_docker_rootless(user: str, distro: str | None) -> CheckResult:
+def check_docker_rootless(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that Docker is running in rootless mode."""
     result = subprocess.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{user}@.host",
+            *machinectl_cmd(user, auth_mode),
             "/bin/bash",
             "-c",
             "docker info --format '{{.SecurityOptions}}'",
@@ -329,14 +333,13 @@ def check_docker_rootless(user: str, distro: str | None) -> CheckResult:
     )
 
 
-def check_runsc_registered(user: str, distro: str | None) -> CheckResult:
+def check_runsc_registered(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
     result = subprocess.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{user}@.host",
+            *machinectl_cmd(user, auth_mode),
             "/bin/bash",
             "-c",
             "docker info --format '{{json .Runtimes}}'",
@@ -367,7 +370,9 @@ def check_runsc_registered(user: str, distro: str | None) -> CheckResult:
     )
 
 
-def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
+def check_runsc_runtimeargs(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that runsc runtimeArgs include --oci-seccomp and --debug-log.
 
     Validates defense-in-depth configuration for the gVisor runtime.
@@ -375,10 +380,7 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
     """
     result = subprocess.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{user}@.host",
+            *machinectl_cmd(user, auth_mode),
             "/bin/bash",
             "-c",
             "docker info --format '{{json .Runtimes}}'",
@@ -433,7 +435,9 @@ def check_runsc_runtimeargs(user: str, distro: str | None) -> CheckResult:
     )
 
 
-def check_host_uds(user: str, distro: str | None) -> CheckResult:
+def check_host_uds(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that runsc runtimeArgs do NOT include --host-uds=all.
 
     The default (--host-uds=none) is the correct security posture.
@@ -441,10 +445,7 @@ def check_host_uds(user: str, distro: str | None) -> CheckResult:
     """
     result = subprocess.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{user}@.host",
+            *machinectl_cmd(user, auth_mode),
             "/bin/bash",
             "-c",
             "docker info --format '{{json .Runtimes}}'",
@@ -498,7 +499,9 @@ def check_host_uds(user: str, distro: str | None) -> CheckResult:
 # ─── Section 6b: Supply Chain Checks ────────────────────────────────────────
 
 
-def check_image_digests(user: str, distro: str | None) -> CheckResult:
+def check_image_digests(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
 
     Iterates IMAGE_REGISTRY and runs ``docker manifest inspect <ref>@<digest>``
@@ -513,15 +516,13 @@ def check_image_digests(user: str, distro: str | None) -> CheckResult:
     stale: list[str] = []
     drift: list[str] = []
 
+    mc_prefix = machinectl_cmd(user, auth_mode)
     for key, pin in IMAGE_REGISTRY.items():
         # Phase 1: verify pinned digest is resolvable
         try:
             result = subprocess.run(
                 [
-                    "sudo",
-                    "machinectl",
-                    "shell",
-                    f"{user}@.host",
+                    *mc_prefix,
                     "/bin/bash",
                     "-c",
                     f"docker manifest inspect {pin.pinned}",
@@ -546,10 +547,7 @@ def check_image_digests(user: str, distro: str | None) -> CheckResult:
         try:
             tag_result = subprocess.run(
                 [
-                    "sudo",
-                    "machinectl",
-                    "shell",
-                    f"{user}@.host",
+                    *mc_prefix,
                     "/bin/bash",
                     "-c",
                     f"docker manifest inspect {pin.tagged}",
@@ -817,90 +815,112 @@ def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
 # ─── Section 8: Check Runner ────────────────────────────────────────────────
 
 
-def build_check_registry() -> list[Check]:
-    """Build the full 15-check registry with dependency declarations."""
+def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> list[Check]:
+    """Build the doctor check registry with auth-mode-aware machinectl checks.
+
+    When ``auth_mode == MachinectlAuth.POLKIT``, the `sudo` binary check is
+    omitted from the registry and the `machinectl_reachable` check no longer
+    depends on `sudo`. The 7 machinectl-invoking checks are partial-bound with
+    ``auth_mode`` so they construct command prefixes via ``machinectl_cmd()``.
+    """
+    is_sudo = auth_mode == MachinectlAuth.SUDO
+    machinectl_reachable_deps = (
+        ["sudo", "machinectl", "user_exists", "systemd_machined"]
+        if is_sudo
+        else ["machinectl", "user_exists", "systemd_machined"]
+    )
+
+    chain1: list[Check] = []
+    if is_sudo:
+        chain1.append(
+            Check(
+                id="sudo",
+                name="sudo binary",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=check_sudo,
+                remediation="",
+            )
+        )
+    chain1.extend(
+        [
+            Check(
+                id="machinectl",
+                name="machinectl binary",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=check_machinectl,
+                remediation="",
+            ),
+            Check(
+                id="user_exists",
+                name="unprivileged user",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=check_user_exists,
+                remediation="",
+            ),
+            Check(
+                id="systemd_machined",
+                name="systemd-machined",
+                category="Privilege Boundary",
+                depends_on=["machinectl"],
+                run=check_systemd_machined,
+                remediation="",
+            ),
+            Check(
+                id="machinectl_reachable",
+                name="machinectl reachable",
+                category="Privilege Boundary",
+                depends_on=machinectl_reachable_deps,
+                run=functools.partial(check_machinectl_reachable, auth_mode=auth_mode),
+                remediation="",
+            ),
+            Check(
+                id="docker_available",
+                name="Docker available",
+                category="Privilege Boundary",
+                depends_on=["machinectl_reachable"],
+                run=functools.partial(check_docker_available, auth_mode=auth_mode),
+                remediation="",
+            ),
+            Check(
+                id="docker_rootless",
+                name="Docker rootless",
+                category="Privilege Boundary",
+                depends_on=["docker_available"],
+                run=functools.partial(check_docker_rootless, auth_mode=auth_mode),
+                remediation="",
+            ),
+            Check(
+                id="runsc",
+                name="gVisor runsc",
+                category="Privilege Boundary",
+                depends_on=["docker_available"],
+                run=functools.partial(check_runsc_registered, auth_mode=auth_mode),
+                remediation="",
+            ),
+            Check(
+                id="runsc_runtimeargs",
+                name="runsc runtimeArgs",
+                category="Privilege Boundary",
+                depends_on=["runsc"],
+                run=functools.partial(check_runsc_runtimeargs, auth_mode=auth_mode),
+                remediation="",
+            ),
+            Check(
+                id="host_uds",
+                name="--host-uds=none",
+                category="Privilege Boundary",
+                depends_on=["runsc"],
+                run=functools.partial(check_host_uds, auth_mode=auth_mode),
+                remediation="",
+            ),
+        ]
+    )
+
     return [
-        # Chain 1: privilege boundary
-        Check(
-            id="sudo",
-            name="sudo binary",
-            category="Privilege Boundary",
-            depends_on=[],
-            run=check_sudo,
-            remediation="",
-        ),
-        Check(
-            id="machinectl",
-            name="machinectl binary",
-            category="Privilege Boundary",
-            depends_on=[],
-            run=check_machinectl,
-            remediation="",
-        ),
-        Check(
-            id="user_exists",
-            name="unprivileged user",
-            category="Privilege Boundary",
-            depends_on=[],
-            run=check_user_exists,
-            remediation="",
-        ),
-        Check(
-            id="systemd_machined",
-            name="systemd-machined",
-            category="Privilege Boundary",
-            depends_on=["machinectl"],
-            run=check_systemd_machined,
-            remediation="",
-        ),
-        Check(
-            id="machinectl_reachable",
-            name="machinectl reachable",
-            category="Privilege Boundary",
-            depends_on=["sudo", "machinectl", "user_exists", "systemd_machined"],
-            run=check_machinectl_reachable,
-            remediation="",
-        ),
-        Check(
-            id="docker_available",
-            name="Docker available",
-            category="Privilege Boundary",
-            depends_on=["machinectl_reachable"],
-            run=check_docker_available,
-            remediation="",
-        ),
-        Check(
-            id="docker_rootless",
-            name="Docker rootless",
-            category="Privilege Boundary",
-            depends_on=["docker_available"],
-            run=check_docker_rootless,
-            remediation="",
-        ),
-        Check(
-            id="runsc",
-            name="gVisor runsc",
-            category="Privilege Boundary",
-            depends_on=["docker_available"],
-            run=check_runsc_registered,
-            remediation="",
-        ),
-        Check(
-            id="runsc_runtimeargs",
-            name="runsc runtimeArgs",
-            category="Privilege Boundary",
-            depends_on=["runsc"],
-            run=check_runsc_runtimeargs,
-            remediation="",
-        ),
-        Check(
-            id="host_uds",
-            name="--host-uds=none",
-            category="Privilege Boundary",
-            depends_on=["runsc"],
-            run=check_host_uds,
-            remediation="",
-        ),
+        *chain1,
         # Chain 2: filesystem
         Check(
             id="setfacl",
@@ -949,7 +969,7 @@ def build_check_registry() -> list[Check]:
             name="image digests",
             category="Supply Chain",
             depends_on=["docker_available"],
-            run=check_image_digests,
+            run=functools.partial(check_image_digests, auth_mode=auth_mode),
             remediation="",
         ),
     ]
@@ -1017,6 +1037,7 @@ def run_check_subset(
     distro: str | None,
     *,
     exclude_ids: set[str] | None = None,
+    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> list[CheckResult]:
     """Execute a filtered subset of doctor checks by category.
 
@@ -1040,7 +1061,7 @@ def run_check_subset(
     if not categories:
         return []
 
-    registry = build_check_registry()
+    registry = build_check_registry(auth_mode)
     category_set = set(categories)
     excluded = exclude_ids or set()
     subset = [c for c in registry if c.category in category_set and c.id not in excluded]

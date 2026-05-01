@@ -24,7 +24,6 @@ VALID_TOML = """\
 [project]
 name = "testproject"
 user_project_root = "/home/dev/testproject"
-host_unprivileged_user = "sandbox"
 host_uid = "1000"
 warmup_prompt = ""
 
@@ -355,7 +354,6 @@ class TestScaffoldTemplateResourceLimits:
             str(instance),
             "testproject",
             "/home/dev/test",
-            "sandbox",
         )
         content = (instance / "sandbox.toml").read_text()
 

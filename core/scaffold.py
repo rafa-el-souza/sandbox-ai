@@ -55,7 +55,6 @@ _SANDBOX_TOML_TEMPLATE = """\
 [project]
 name = "{name}"
 user_project_root = "{user_project_root}"
-host_unprivileged_user = "{host_unprivileged_user}"
 host_uid = "{host_uid}"
 warmup_prompt = ""
 
@@ -136,7 +135,6 @@ def write_sandbox_toml(
     instance_dir: str,
     project_name: str,
     project_dir: str,
-    host_unprivileged_user: str,
     git_user: str = "",
     git_email: str = "",
 ) -> None:
@@ -144,7 +142,6 @@ def write_sandbox_toml(
     content = _SANDBOX_TOML_TEMPLATE.format(
         name=project_name,
         user_project_root=os.path.abspath(project_dir),
-        host_unprivileged_user=host_unprivileged_user,
         host_uid=str(os.getuid()),
         git_user=git_user,
         git_email=git_email,

@@ -5,10 +5,17 @@ Centralizes Rich Console construction for deterministic, ANSI-free output captur
 
 import re
 from io import StringIO
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import pytest
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from core.project_config import ProjectConfig
+
+
+class ProjectConfigFactory(Protocol):
+    def __call__(self, *, user: str = ..., auth: str = ...) -> ProjectConfig: ...
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -28,6 +35,25 @@ class CapturedConsole(NamedTuple):
     def raw_output(self) -> str:
         """Return captured output with ANSI escapes intact (for escape-aware assertions)."""
         return self.buffer.getvalue()
+
+
+@pytest.fixture()
+def project_config_factory() -> ProjectConfigFactory:
+    """Build ``ProjectConfig`` instances for the project-config-machinectl-auth flow.
+
+    Usage::
+
+        def test_x(project_config_factory: ProjectConfigFactory) -> None:
+            pc = project_config_factory(user="sandbox", auth="polkit")
+    """
+    from core.project_config import ProjectConfig
+
+    def _make(*, user: str = "sandbox", auth: str = "sudo") -> ProjectConfig:
+        return ProjectConfig.model_validate(
+            {"host": {"docker_unprivileged_user": user, "machinectl_authentication": auth}}
+        )
+
+    return _make
 
 
 @pytest.fixture()

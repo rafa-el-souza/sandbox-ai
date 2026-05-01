@@ -29,6 +29,7 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
+from core.project_config import MachinectlAuth, ProjectConfig, machinectl_cmd
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
     _detect_git_config,
@@ -99,6 +100,7 @@ def _container_status(
     name: str,
     host_user: str,
     config: SandboxConfig,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
 
@@ -116,10 +118,7 @@ def _container_status(
     try:
         result = executor.run(
             [
-                "sudo",
-                "machinectl",
-                "shell",
-                f"{host_user}@.host",
+                *machinectl_cmd(host_user, auth),
                 "/bin/bash",
                 "-c",
                 (
@@ -156,7 +155,7 @@ def _container_status(
     return containers
 
 
-def _warm_check(instance_dir: str, name: str, host_user: str) -> bool:
+def _warm_check(instance_dir: str, name: str, host_user: str, auth: MachinectlAuth = MachinectlAuth.SUDO) -> bool:
     """Check if containers are already running. Returns True if warm.
 
     Delegates to _container_status (D-3) — returns True if any containers exist.
@@ -166,7 +165,7 @@ def _warm_check(instance_dir: str, name: str, host_user: str) -> bool:
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, name, host_user, config))
+    return bool(_container_status(instance_dir, name, host_user, config, auth))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -232,6 +231,7 @@ def _phase_credential_ownership(
     instance_dir: str,
     host_user: str,
     secrets_dir: str | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5b: Credential ownership matching via disposable helper container.
 
@@ -260,10 +260,7 @@ def _phase_credential_ownership(
     try:
         executor.run(
             [
-                "sudo",
-                "machinectl",
-                "shell",
-                f"{host_user}@.host",
+                *machinectl_cmd(host_user, auth),
                 "/bin/bash",
                 "-c",
                 docker_cmd,
@@ -586,7 +583,13 @@ def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
     return files
 
 
-def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: SandboxConfig) -> None:
+def _phase_compose_up(
+    instance_dir: str,
+    name: str,
+    host_user: str,
+    config: SandboxConfig,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> None:
     """Phase 6: docker compose up -d --build --wait via machinectl.
 
     - Source suppression env prefix: TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain (D2 Layer 1)
@@ -605,10 +608,7 @@ def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: Sand
     executor = Executor()
     executor.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
+            *machinectl_cmd(host_user, auth),
             "/bin/bash",
             "-c",
             cmd,
@@ -617,7 +617,12 @@ def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: Sand
     )
 
 
-def _phase_handover(name: str, host_user: str, warmup_prompt: str = "") -> None:
+def _phase_handover(
+    name: str,
+    host_user: str,
+    warmup_prompt: str = "",
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> None:
     """Phase 7: PTY handover — docker exec -it via machinectl."""
     executor = Executor()
     exec_args = ["exec"]
@@ -627,10 +632,7 @@ def _phase_handover(name: str, host_user: str, warmup_prompt: str = "") -> None:
 
     executor.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
+            *machinectl_cmd(host_user, auth),
             "/usr/bin/docker",
             *exec_args,
         ],
@@ -648,6 +650,7 @@ def _compose_down(
     config: SandboxConfig,
     *,
     volumes: bool = False,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Run docker compose down via machinectl. Pass volumes=True for -v."""
     compose_files = _build_compose_files(instance_dir, config)
@@ -662,10 +665,7 @@ def _compose_down(
     executor = Executor()
     executor.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
+            *machinectl_cmd(host_user, auth),
             "/bin/bash",
             "-c",
             cmd,
@@ -715,7 +715,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     name = config.project.name
 
@@ -775,8 +775,9 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # Compose up — match actual _phase_compose_up command
     env_file = os.path.join(instance_dir, ".sandbox.env")
+    machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
     compose_cmd = (
-        f"sudo machinectl shell {host_user}@.host -- /bin/bash -c "
+        f"{machinectl_prefix} /bin/bash -c "
         f"'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
         f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
         f"--ansi never --env-file {env_file} up -d --build --wait'"
@@ -784,7 +785,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
-    handover_cmd = f"sudo machinectl shell {host_user}@.host -- /usr/bin/docker exec -it {name}-admin-1 zsh"
+    handover_cmd = f"{machinectl_prefix} /usr/bin/docker exec -it {name}-admin-1 zsh"
     console.print(f"    $ {handover_cmd}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
@@ -816,12 +817,51 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
     return missing
 
 
+def _resolve_host_config(project_dir: str, config: SandboxConfig) -> tuple[str, MachinectlAuth]:
+    """Resolve host_user and auth from project-wide ``sandbox-ai.toml``.
+
+    Post-init commands SHALL fail when project config is absent — the field
+    no longer exists on the per-instance ``SandboxProjectSection``.
+    """
+    del config  # accepted for signature stability with callers; project config is authoritative
+    try:
+        project_config = ProjectConfig.from_toml(project_dir)
+    except FileNotFoundError:
+        console.print(
+            f"No sandbox-ai.toml found at {project_dir}. "
+            "Create one with [host].docker_unprivileged_user before running this command.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+    return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
+
+
+def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
+    """Print mode-specific remediation guidance when the init-time auth probe fails."""
+    console.print(f"machinectl auth probe failed for user '{user}': {detail}", style="red")
+    if auth == MachinectlAuth.SUDO:
+        console.print(
+            "Remediation: Verify 'sudo machinectl shell' works for this user. "
+            "Ensure the user exists and sudo is configured.",
+            style="yellow",
+        )
+    else:
+        console.print(
+            "Remediation: Verify polkit rules allow 'machinectl shell' without sudo. "
+            "Ensure org.freedesktop.machine1.shell policy is configured for this user.",
+            style="yellow",
+        )
+
+
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 
 @app.command()
 def init(
-    user: str = typer.Option(..., "--user", help="Unprivileged user for the sandbox"),
+    user: str | None = typer.Option(None, "--user", help="Unprivileged user for the sandbox"),
+    machinectl_auth: str | None = typer.Option(
+        None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
+    ),
     git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
@@ -839,6 +879,64 @@ def init(
         )
         raise typer.Exit(code=1)
 
+    # Resolution: docker_unprivileged_user (D5)
+    # Priority: --user flag → sandbox-ai.toml → error
+    project_config: ProjectConfig | None = None
+    try:
+        project_config = ProjectConfig.from_toml(project_dir)
+    except FileNotFoundError:
+        pass
+
+    resolved_user: str
+    if user is not None:
+        resolved_user = user
+    elif project_config is not None:
+        resolved_user = project_config.host.docker_unprivileged_user
+    else:
+        console.print(
+            "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Resolution: machinectl_authentication (D5)
+    # Priority: --machinectl-auth flag → sandbox-ai.toml → default "sudo"
+    resolved_auth: MachinectlAuth
+    if machinectl_auth is not None:
+        try:
+            resolved_auth = MachinectlAuth(machinectl_auth)
+        except ValueError:
+            console.print(
+                f"Invalid --machinectl-auth value: '{machinectl_auth}'. Must be 'sudo' or 'polkit'.",
+                style="red",
+            )
+            raise typer.Exit(code=1) from None
+    elif project_config is not None:
+        resolved_auth = project_config.host.machinectl_authentication
+    else:
+        resolved_auth = MachinectlAuth.SUDO
+
+    # Init-time auth mode probe (D5)
+    if not dry_run:
+        probe_cmd = machinectl_cmd(resolved_user, resolved_auth)
+        probe_cmd_full = [*probe_cmd, "/bin/bash", "-c", "echo ok"]
+        try:
+            result = subprocess.run(
+                probe_cmd_full,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                _emit_auth_probe_failure(resolved_auth, resolved_user, result.stderr)
+                raise typer.Exit(code=1)
+        except subprocess.TimeoutExpired:
+            _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
+            raise typer.Exit(code=1) from None
+        except FileNotFoundError:
+            _emit_auth_probe_failure(resolved_auth, resolved_user, "command not found on PATH")
+            raise typer.Exit(code=1) from None
+
     # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
     # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
     # so the ancestor check would always fail on first init (D10).
@@ -846,9 +944,10 @@ def init(
         distro = detect_distro()
         preflight_results = run_check_subset(
             ["Filesystem", "Repo Integrity"],
-            user,
+            resolved_user,
             distro,
             exclude_ids={"ancestor_traverse"},
+            auth_mode=resolved_auth,
         )
         has_failures = any(r.status == "fail" for r in preflight_results)
         if has_failures:
@@ -872,7 +971,7 @@ def init(
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
         console.print(f"  Instance ID: {instance_id}")
         console.print(f"  Directory: {instance_dir}")
-        console.print(f"  User: {user}")
+        console.print(f"  User: {resolved_user}")
         console.print(f"  Git: {git_user} <{git_email}>")
         console.print(f"  Project: {project_name}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
@@ -886,7 +985,6 @@ def init(
         instance_dir,
         project_name,
         project_dir,
-        user,
         git_user=git_user,
         git_email=git_email,
     )
@@ -962,7 +1060,7 @@ def start(
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Project name immutability check (sandbox-toml-schema spec)
     # instance_id format: <project_name>-<md5[:6]> — strip last 7 chars to recover original name
@@ -989,14 +1087,14 @@ def start(
 
     # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
     distro = detect_distro()
-    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro)
+    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro, auth_mode=auth)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, name, host_user):
+    if _warm_check(instance_dir, name, host_user, auth):
         console.print(f"Sandbox '{name}' is already running. Use 'sandbox attach' to reconnect.")
         return
 
@@ -1034,12 +1132,12 @@ def start(
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 5b: Credential ownership matching (after ACL grants)
-        _phase_credential_ownership(instance_dir, host_user)
+        _phase_credential_ownership(instance_dir, host_user, auth=auth)
         console.print("✓ Ownership — credential files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
-            _phase_compose_up(instance_dir, name, host_user, config)
+            _phase_compose_up(instance_dir, name, host_user, config, auth)
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
@@ -1058,7 +1156,7 @@ def start(
         _release_lock(lock_fd)
 
     console.print("→ Handing over to admin shell")
-    _phase_handover(name, host_user, config.project.warmup_prompt)
+    _phase_handover(name, host_user, config.project.warmup_prompt, auth)
 
 
 @app.command()
@@ -1074,10 +1172,10 @@ def stop(clean: bool = False) -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Warm check
-    if not _warm_check(instance_dir, name, host_user):
+    if not _warm_check(instance_dir, name, host_user, auth):
         console.print(f"Sandbox '{name}' is not running. Nothing to stop.")
         return
 
@@ -1092,7 +1190,7 @@ def stop(clean: bool = False) -> None:
         raise typer.Exit(code=1) from None
 
     # Compose down
-    _compose_down(instance_dir, name, host_user, config, volumes=clean)
+    _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
 
     # ACL revocation (Pattern A) — fault-isolated (D5)
     acl_warnings = _revoke_acls(instance_dir, host_user)
@@ -1120,15 +1218,15 @@ def attach() -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, name, host_user):
+    if not _warm_check(instance_dir, name, host_user, auth):
         console.print(f"Sandbox '{name}' is not running. Use 'sandbox start' to launch.")
         raise typer.Exit(code=1)
 
     # Direct handover — no hydration, no credentials, no locking
-    _phase_handover(name, host_user)
+    _phase_handover(name, host_user, auth=auth)
 
 
 @app.command()
@@ -1153,7 +1251,7 @@ def destroy(force: bool = False) -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Phase 0: Confirmation
     if not force:
@@ -1170,7 +1268,7 @@ def destroy(force: bool = False) -> None:
     try:
         # Phase 2: Container and volume teardown — fault-isolated (D12)
         try:
-            _compose_down(instance_dir, name, host_user, config, volumes=True)
+            _compose_down(instance_dir, name, host_user, config, volumes=True, auth=auth)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
@@ -1211,12 +1309,47 @@ def destroy(force: bool = False) -> None:
 
 @app.command()
 def doctor(
-    user: str = typer.Option(..., "--user", help="Unprivileged user to validate"),
+    user: str | None = typer.Option(None, "--user", help="Unprivileged user to validate"),
+    machinectl_auth: str | None = typer.Option(
+        None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
+    ),
 ) -> None:
     """Run host readiness diagnostics."""
+    project_dir = _resolve_project_dir()
+    project_config: ProjectConfig | None = None
+    try:
+        project_config = ProjectConfig.from_toml(project_dir)
+    except FileNotFoundError:
+        pass
+
+    if user is None:
+        if project_config is None:
+            console.print(
+                "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+        resolved_user = project_config.host.docker_unprivileged_user
+    else:
+        resolved_user = user
+
+    if machinectl_auth is not None:
+        try:
+            resolved_auth = MachinectlAuth(machinectl_auth)
+        except ValueError:
+            console.print(
+                f"Invalid --machinectl-auth value '{machinectl_auth}'. Expected 'sudo' or 'polkit'.",
+                style="red",
+            )
+            raise typer.Exit(code=1) from None
+    elif project_config is not None:
+        resolved_auth = project_config.host.machinectl_authentication
+    else:
+        resolved_auth = MachinectlAuth.SUDO
+
     distro = detect_distro()
-    checks = build_check_registry()
-    results = run_checks(checks, user, distro)
+    checks = build_check_registry(resolved_auth)
+    results = run_checks(checks, resolved_user, distro)
     render_results(results, console=console)
 
     has_failures = any(r.status == "fail" for r in results)
@@ -1238,10 +1371,10 @@ def status() -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Container status
-    containers = _container_status(instance_dir, name, host_user, config)
+    containers = _container_status(instance_dir, name, host_user, config, auth)
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 

@@ -1,0 +1,19 @@
+# sandbox-ai.toml — project-wide configuration for sandbox-ai.
+#
+# Copy this file to `sandbox-ai.toml` at the project root. It is committable
+# (no secrets) and is read by every CLI command (init, start, stop, attach,
+# destroy, status, doctor) to determine how to cross the dev/sandbox privilege
+# boundary.
+
+[host]
+# Unprivileged systemd user that owns the rootless Docker daemon. Created on
+# the host with: `sudo useradd -r -m -s /bin/bash sandbox`
+docker_unprivileged_user = "sandbox"
+
+# How orchestrator processes obtain authorization to invoke `machinectl shell`:
+#   "sudo"   — prepends `sudo` to every machinectl invocation. Requires a
+#              passwordless rule in /etc/sudoers.d/. Default.
+#   "polkit" — invokes machinectl directly. Requires a passwordless polkit
+#              rule for org.freedesktop.machine1.shell granting your user
+#              access to the unprivileged user above.
+machinectl_authentication = "sudo"

@@ -37,15 +37,34 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 
 ### Requirement: Sub-Process Privilege Bounding
-The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `sudo machinectl shell <host_unprivileged_user>@.host`.
+The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host`. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from project config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. All call sites SHALL use the centralized `machinectl_cmd()` builder from `core.project_config`.
 
-#### Scenario: Non-Interactive Daemon Interaction
-- **WHEN** the Python orchestrator needs to execute a non-interactive Docker command (e.g., `docker compose up`)
+#### Scenario: Non-Interactive Daemon Interaction (sudo mode)
+- **WHEN** the Python orchestrator needs to execute a non-interactive Docker command and `machinectl_authentication` is `"sudo"`
 - **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "/bin/bash", "-c", "<command>"])` with `capture_output=True`
 
-#### Scenario: Interactive PTY Execution
-- **WHEN** the orchestrator hands the terminal to the admin container
-- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited (no `-c` wrapper, PTY allocated through machinectl directly)
+#### Scenario: Non-Interactive Daemon Interaction (polkit mode)
+- **WHEN** the Python orchestrator needs to execute a non-interactive Docker command and `machinectl_authentication` is `"polkit"`
+- **THEN** it invokes: `subprocess.run(["machinectl", "shell", "<user>@.host", "/bin/bash", "-c", "<command>"])` with `capture_output=True`
+
+#### Scenario: Interactive PTY Execution (sudo mode)
+- **WHEN** the orchestrator hands the terminal to the admin container and `machinectl_authentication` is `"sudo"`
+- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited
+
+#### Scenario: Interactive PTY Execution (polkit mode)
+- **WHEN** the orchestrator hands the terminal to the admin container and `machinectl_authentication` is `"polkit"`
+- **THEN** it invokes: `subprocess.run(["machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited
+
+### Requirement: Project Config Loading in CLI Commands
+All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`) SHALL load project-wide config from `sandbox-ai.toml` via `ProjectConfig.from_toml(project_dir)` and read `docker_unprivileged_user` and `machinectl_authentication` from it. The `project_dir` SHALL be resolved from CWD via `_resolve_project_dir()`.
+
+#### Scenario: Post-init command reads project config
+- **WHEN** any post-init command runs and `sandbox-ai.toml` exists in the project directory
+- **THEN** `docker_unprivileged_user` and `machinectl_authentication` are sourced from the `[host]` section
+
+#### Scenario: Post-init command fails without project config
+- **WHEN** any post-init command runs and `sandbox-ai.toml` does not exist in the project directory
+- **THEN** the CLI exits with an error directing the user to create `sandbox-ai.toml`
 
 ### Requirement: Automated AI Handover
 The system SHALL deliver an interactive shell session in the admin container to the operator after containers are confirmed healthy, optionally auto-starting the agent if a warmup prompt is configured.

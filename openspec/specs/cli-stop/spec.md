@@ -5,11 +5,15 @@ This specification defines the `sandbox stop` command lifecycle, governing conta
 ## Requirements
 
 ### Requirement: Container Shutdown via machinectl
-The system SHALL shut down the sandbox's containers by running `docker compose down` as the `host_unprivileged_user` via `machinectl shell`.
+The system SHALL shut down the sandbox's containers by running `docker compose down` as the `docker_unprivileged_user` via `machinectl shell`, using the configured machinectl authentication mode from project config.
 
-#### Scenario: Warm sandbox stopped cleanly
-- **WHEN** `sandbox stop` is invoked and containers are running
-- **THEN** `docker compose down` is executed via machinectl, blocking until all containers confirm exit, and named volumes are preserved
+#### Scenario: Warm sandbox stopped cleanly (sudo mode)
+- **WHEN** `sandbox stop` is invoked, containers are running, and `machinectl_authentication` is `"sudo"`
+- **THEN** `sudo machinectl shell <user>@.host /bin/bash -c "docker compose down"` is executed
+
+#### Scenario: Warm sandbox stopped cleanly (polkit mode)
+- **WHEN** `sandbox stop` is invoked, containers are running, and `machinectl_authentication` is `"polkit"`
+- **THEN** `machinectl shell <user>@.host /bin/bash -c "docker compose down"` is executed without `sudo` prefix
 
 #### Scenario: Cold sandbox reports warning and exits
 - **WHEN** `sandbox stop` is invoked and `docker compose ps -q` returns no output
