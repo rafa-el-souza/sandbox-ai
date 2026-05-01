@@ -1714,6 +1714,85 @@ class TestDoctorMissingUser:
         assert result.exit_code != 0
 
 
+class TestDoctorProjectConfig:
+    """Section 5 (project-config-machinectl-auth): doctor reads sandbox-ai.toml."""
+
+    def test_doctor_resolves_user_from_project_config(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.project_config import MachinectlAuth, ProjectConfig
+
+        mock_pc = ProjectConfig.model_validate(
+            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
+        )
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.ProjectConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT)
+            mock_run.assert_called_once_with([], "fromtoml", None)
+
+    def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.project_config import MachinectlAuth, ProjectConfig
+
+        mock_pc = ProjectConfig.model_validate(
+            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
+        )
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.ProjectConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "cliuser", "--machinectl-auth", "polkit"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT)
+            mock_run.assert_called_once_with([], "cliuser", None)
+
+    def test_doctor_no_config_no_flag_errors(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        with patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError):
+            r = runner.invoke(app, ["doctor"])
+        assert r.exit_code == 1
+        assert "no user specified" in r.output.lower()
+
+    def test_doctor_invalid_auth_mode_errors(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        with patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError):
+            r = runner.invoke(app, ["doctor", "--user", "sandbox", "--machinectl-auth", "bogus"])
+        assert r.exit_code == 1
+        assert "invalid" in r.output.lower()
+
+    def test_doctor_defaults_auth_to_sudo_when_no_config(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.project_config import MachinectlAuth
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results),
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(MachinectlAuth.SUDO)
+
+
 class TestDoctorRunnerInvoked:
     """Task 10.1: verify runner is invoked with correct arguments."""
 

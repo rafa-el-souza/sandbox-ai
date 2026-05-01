@@ -1544,3 +1544,162 @@ class TestCheckImageDigests:
         with patch("subprocess.run", side_effect=timeout_on_tag):
             result = check_image_digests("sandbox", None)
             assert result.status == "pass"  # Tag drift timeout is best-effort
+
+
+# ── Section 13: Auth-Mode-Aware Registry (Section 5 of project-config-machinectl-auth) ──
+
+
+class TestPolkitRegistry:
+    """Tasks 5.12-5.13: build_check_registry honors MachinectlAuth.POLKIT.
+
+    In polkit mode the `sudo` binary check is dropped and `machinectl_reachable`
+    no longer depends on it. All machinectl-invoking checks construct command
+    lines without a `sudo` prefix via `machinectl_cmd()`.
+    """
+
+    def test_sudo_check_omitted_in_polkit_mode(self) -> None:
+        from core.doctor import build_check_registry
+        from core.project_config import MachinectlAuth
+
+        checks = build_check_registry(MachinectlAuth.POLKIT)
+        ids = [c.id for c in checks]
+        assert "sudo" not in ids
+        assert len(checks) == 15  # one fewer than sudo mode
+
+    def test_sudo_check_present_in_sudo_mode(self) -> None:
+        from core.doctor import build_check_registry
+        from core.project_config import MachinectlAuth
+
+        checks = build_check_registry(MachinectlAuth.SUDO)
+        ids = [c.id for c in checks]
+        assert "sudo" in ids
+        assert len(checks) == 16
+
+    def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
+        from core.doctor import build_check_registry
+        from core.project_config import MachinectlAuth
+
+        checks = build_check_registry(MachinectlAuth.POLKIT)
+        reach = next(c for c in checks if c.id == "machinectl_reachable")
+        assert "sudo" not in reach.depends_on
+        assert set(reach.depends_on) == {"machinectl", "user_exists", "systemd_machined"}
+
+    def test_machinectl_reachable_dependency_includes_sudo_in_sudo(self) -> None:
+        from core.doctor import build_check_registry
+        from core.project_config import MachinectlAuth
+
+        checks = build_check_registry(MachinectlAuth.SUDO)
+        reach = next(c for c in checks if c.id == "machinectl_reachable")
+        assert "sudo" in reach.depends_on
+
+    def test_default_auth_mode_is_sudo(self) -> None:
+        """build_check_registry() with no args matches sudo-mode shape."""
+        from core.doctor import build_check_registry
+        from core.project_config import MachinectlAuth
+
+        default_ids = [c.id for c in build_check_registry()]
+        sudo_ids = [c.id for c in build_check_registry(MachinectlAuth.SUDO)]
+        assert default_ids == sudo_ids
+
+    def test_polkit_machinectl_reachable_command_has_no_sudo(self) -> None:
+        from core.doctor import check_machinectl_reachable
+        from core.project_config import MachinectlAuth
+
+        captured: dict[str, Any] = {}
+
+        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok\n", stderr="")
+
+        with patch("subprocess.run", side_effect=capture):
+            result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+
+        assert result.status == "pass"
+        assert captured["cmd"][0] == "machinectl"
+        assert "sudo" not in captured["cmd"]
+
+    def test_sudo_machinectl_reachable_command_has_sudo_prefix(self) -> None:
+        from core.doctor import check_machinectl_reachable
+        from core.project_config import MachinectlAuth
+
+        captured: dict[str, Any] = {}
+
+        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok\n", stderr="")
+
+        with patch("subprocess.run", side_effect=capture):
+            check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
+
+        assert captured["cmd"][:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
+
+    def test_polkit_timeout_remediation_mentions_polkit(self) -> None:
+        from core.doctor import check_machinectl_reachable
+        from core.project_config import MachinectlAuth
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="machinectl", timeout=10),
+        ):
+            result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+
+        assert result.status == "fail"
+        assert "polkit" in (result.remediation or "").lower()
+        assert "sudoers" not in (result.remediation or "").lower()
+
+    def test_polkit_docker_available_command_has_no_sudo(self) -> None:
+        from core.doctor import check_docker_available
+        from core.project_config import MachinectlAuth
+
+        captured: dict[str, Any] = {}
+
+        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="24.0.7\n", stderr="")
+
+        with patch("subprocess.run", side_effect=capture):
+            check_docker_available("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+
+        assert captured["cmd"][0] == "machinectl"
+        assert "sudo" not in captured["cmd"]
+
+    def test_polkit_image_digests_command_has_no_sudo(self) -> None:
+        from core.doctor import check_image_digests
+        from core.project_config import MachinectlAuth
+
+        captured: list[list[str]] = []
+
+        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="{}", stderr="")
+
+        with patch("subprocess.run", side_effect=capture):
+            check_image_digests("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+
+        assert captured  # at least one invocation
+        for cmd in captured:
+            assert cmd[0] == "machinectl"
+            assert "sudo" not in cmd
+
+    def test_run_check_subset_forwards_auth_mode(self) -> None:
+        """run_check_subset(auth_mode=POLKIT) should yield a polkit-shaped registry.
+
+        Privilege Boundary subset under polkit excludes the `sudo` binary check.
+        """
+        from core.doctor import run_check_subset
+        from core.project_config import MachinectlAuth
+
+        # Stub all subprocess calls to keep the test hermetic.
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            results = run_check_subset(
+                ["Privilege Boundary"],
+                "sandbox",
+                None,
+                auth_mode=MachinectlAuth.POLKIT,
+            )
+
+        names = {r.name for r in results}
+        assert "sudo" not in names

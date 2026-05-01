@@ -941,6 +941,7 @@ def init(
             resolved_user,
             distro,
             exclude_ids={"ancestor_traverse"},
+            auth_mode=resolved_auth,
         )
         has_failures = any(r.status == "fail" for r in preflight_results)
         if has_failures:
@@ -1080,7 +1081,7 @@ def start(
 
     # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
     distro = detect_distro()
-    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro)
+    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro, auth_mode=auth)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)
@@ -1302,12 +1303,47 @@ def destroy(force: bool = False) -> None:
 
 @app.command()
 def doctor(
-    user: str = typer.Option(..., "--user", help="Unprivileged user to validate"),
+    user: str | None = typer.Option(None, "--user", help="Unprivileged user to validate"),
+    machinectl_auth: str | None = typer.Option(
+        None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
+    ),
 ) -> None:
     """Run host readiness diagnostics."""
+    project_dir = _resolve_project_dir()
+    project_config: ProjectConfig | None = None
+    try:
+        project_config = ProjectConfig.from_toml(project_dir)
+    except FileNotFoundError:
+        pass
+
+    if user is None:
+        if project_config is None:
+            console.print(
+                "No user specified. Pass --user or create sandbox-ai.toml with [host].docker_unprivileged_user.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+        resolved_user = project_config.host.docker_unprivileged_user
+    else:
+        resolved_user = user
+
+    if machinectl_auth is not None:
+        try:
+            resolved_auth = MachinectlAuth(machinectl_auth)
+        except ValueError:
+            console.print(
+                f"Invalid --machinectl-auth value '{machinectl_auth}'. Expected 'sudo' or 'polkit'.",
+                style="red",
+            )
+            raise typer.Exit(code=1) from None
+    elif project_config is not None:
+        resolved_auth = project_config.host.machinectl_authentication
+    else:
+        resolved_auth = MachinectlAuth.SUDO
+
     distro = detect_distro()
-    checks = build_check_registry()
-    results = run_checks(checks, user, distro)
+    checks = build_check_registry(resolved_auth)
+    results = run_checks(checks, resolved_user, distro)
     render_results(results, console=console)
 
     has_failures = any(r.status == "fail" for r in results)
