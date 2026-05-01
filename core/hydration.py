@@ -94,14 +94,16 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
 
 
-class ProjectConfig(BaseModel):
+class SandboxProjectSection(BaseModel):
     """[project] section of sandbox.toml."""
 
     name: str
     user_project_root: str
-    host_unprivileged_user: str
     host_uid: str
     warmup_prompt: str = ""
+    # DEPRECATED: migrating to ProjectConfig.host.docker_unprivileged_user.
+    # Retained as optional during CLI migration (Section 4). Remove after migration.
+    host_unprivileged_user: str = ""
 
 
 class CoreConfig(BaseModel):
@@ -177,7 +179,7 @@ class ProxyWhitelistConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """Top-level Pydantic model for sandbox.toml."""
 
-    project: ProjectConfig
+    project: SandboxProjectSection
     core: CoreConfig = CoreConfig()
     admin: AdminConfig = AdminConfig()
     runtimes: RuntimesConfig = RuntimesConfig()

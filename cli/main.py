@@ -886,7 +886,6 @@ def init(
         instance_dir,
         project_name,
         project_dir,
-        user,
         git_user=git_user,
         git_email=git_email,
     )

@@ -31,7 +31,6 @@ VALID_TOML_CONTENT = b"""
 [project]
 name = "myproject"
 user_project_root = "/home/dev/myproject"
-host_unprivileged_user = "sandbox"
 host_uid = "1000"
 warmup_prompt = ""
 
@@ -1096,7 +1095,7 @@ class TestCredentialOwnershipMatching:
             assert "chown 1000:1000" in cmd_str, f"Must chown to 1000:1000, got: {cmd_str}"
 
     def test_chown_executed_via_machinectl_shell(self, tmp_path: Path) -> None:
-        """Chown command is executed via machinectl shell as host_unprivileged_user."""
+        """Chown command is executed via machinectl shell as docker_unprivileged_user."""
         from cli.main import _phase_credential_ownership
 
         secrets_dir = tmp_path / "secrets"
@@ -1120,7 +1119,7 @@ class TestCredentialOwnershipMatching:
             assert "sudo" in call_args, "Must use sudo"
             assert "machinectl" in call_args, "Must use machinectl"
             assert "shell" in call_args, "Must use shell subcommand"
-            assert "claude-sandbox@.host" in call_args, "Must execute as host_unprivileged_user"
+            assert "claude-sandbox@.host" in call_args, "Must execute as docker_unprivileged_user"
 
     def test_chown_failure_raises_execution_error(self, tmp_path: Path) -> None:
         """Helper container failure wraps and re-raises SandboxExecutionError."""
@@ -1190,7 +1189,7 @@ class TestPhaseCredentialOwnership:
             assert "sudo" in call_args, "Must use sudo"
             assert "machinectl" in call_args, "Must use machinectl"
             assert "shell" in call_args, "Must use shell subcommand"
-            assert "claude-sandbox@.host" in call_args, "Must execute as host_unprivileged_user"
+            assert "claude-sandbox@.host" in call_args, "Must execute as docker_unprivileged_user"
             # docker run structure
             assert "docker run" in cmd_str, f"Must use docker run, got: {cmd_str}"
             assert "--rm" in cmd_str, f"Must use --rm, got: {cmd_str}"
@@ -1284,7 +1283,6 @@ class TestPhaseHydrateDirect:
                 "project": {
                     "name": "test",
                     "user_project_root": "/home/dev/test",
-                    "host_unprivileged_user": "sandbox",
                     "host_uid": "1000",
                 }
             }
@@ -1333,7 +1331,6 @@ class TestBuildComposeFiles:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
@@ -1352,7 +1349,6 @@ class TestBuildComposeFiles:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
                 "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
@@ -1375,7 +1371,6 @@ class TestPhaseComposeUpDirect:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
             }
@@ -1423,7 +1418,6 @@ class TestComposeDownDirect:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
             }
@@ -1444,7 +1438,6 @@ class TestComposeDownDirect:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
             }
@@ -1515,7 +1508,6 @@ class TestInitScaffoldDirect:
                 "project": {
                     "name": "newproject",
                     "user_project_root": project_dir,
-                    "host_unprivileged_user": "sandbox",
                     "host_uid": "1000",
                 },
             }
@@ -1636,7 +1628,6 @@ class TestInitFirecrawl:
                 "project": {
                     "name": "fc-project",
                     "user_project_root": project_dir,
-                    "host_unprivileged_user": "sandbox",
                     "host_uid": "1000",
                 },
                 "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
@@ -1759,7 +1750,6 @@ class TestInitHappyPath:
                 "project": {
                     "name": "newproject",
                     "user_project_root": project_dir,
-                    "host_unprivileged_user": "sandbox",
                     "host_uid": "1000",
                 },
             }
@@ -1864,7 +1854,6 @@ class TestInitNonTTY:
                 "project": {
                     "name": "newproject",
                     "user_project_root": project_dir,
-                    "host_unprivileged_user": "sandbox",
                     "host_uid": "1000",
                 },
             }
@@ -2150,7 +2139,6 @@ class TestContainerStatus:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
             }
@@ -2189,7 +2177,6 @@ class TestContainerStatus:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
             }
@@ -2217,7 +2204,6 @@ class TestContainerStatus:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
             }
@@ -2986,7 +2972,6 @@ class TestContainerStatusEdgeCases:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
@@ -3012,7 +2997,6 @@ class TestContainerStatusEdgeCases:
                 "project": {
                     "name": "t",
                     "user_project_root": "/x",
-                    "host_unprivileged_user": "s",
                     "host_uid": "1000",
                 },
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
