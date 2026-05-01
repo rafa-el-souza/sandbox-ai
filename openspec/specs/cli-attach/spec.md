@@ -16,12 +16,16 @@ The system SHALL verify that the sandbox's containers are running before attempt
 - **THEN** the CLI exits with: "Sandbox '<name>' is not running. Use 'sandbox start' to launch."
 
 ### Requirement: PTY Handover Without Re-Hydration
-The system SHALL drop the user into the admin container via machinectl and `docker exec -it` without re-running hydration, credential generation, or IPAM allocation.
+The system SHALL drop the user into the admin container via machinectl and `docker exec -it` without re-running hydration, credential generation, or IPAM allocation. The machinectl invocation SHALL use the configured authentication mode from project config.
 
 #### Scenario: Attach bypasses hydration
 - **WHEN** `sandbox attach` completes its warm state check successfully
 - **THEN** no Jinja2 templates are rendered, no `.htpasswd` is regenerated, and no IPAM ledger is read or modified
 
-#### Scenario: Terminal handed to admin container
-- **WHEN** containers are confirmed running
-- **THEN** `sudo machinectl shell <host_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed and the user's terminal is owned by that session
+#### Scenario: Terminal handed to admin container (sudo mode)
+- **WHEN** containers are confirmed running and `machinectl_authentication` is `"sudo"`
+- **THEN** `sudo machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed
+
+#### Scenario: Terminal handed to admin container (polkit mode)
+- **WHEN** containers are confirmed running and `machinectl_authentication` is `"polkit"`
+- **THEN** `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed without `sudo` prefix

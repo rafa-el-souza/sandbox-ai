@@ -5,11 +5,11 @@ This specification defines the `sandbox start` command lifecycle, governing pre-
 ## Requirements
 
 ### Requirement: Pre-Lock Warm State Detection
-The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation. The system SHALL require a prior `sandbox init` and reject start if no instance is registered.
+The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. The container status query SHALL use the configured machinectl authentication mode. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation. The system SHALL require a prior `sandbox init` and reject start if no instance is registered.
 
 #### Scenario: No instance found — error with guidance
 - **WHEN** `sandbox start` is invoked and no instance is registered for the current project directory
-- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init --user <user>` first." and exit code 1
+- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init` first." and exit code 1
 
 #### Scenario: Partial init detected
 - **WHEN** `sandbox start` is invoked and the registry contains an entry but `.initialized` sentinel is missing
@@ -53,22 +53,26 @@ The system SHALL block launch until all services with defined healthchecks repor
 - **THEN** the CLI emits a service health summary, releases `state.lock`, and exits with a non-zero code
 
 ### Requirement: PTY Handover via machinectl
-The system SHALL hand over the terminal to the admin container via `machinectl shell` + `docker exec -it`, releasing `state.lock` before the exec call.
+The system SHALL hand over the terminal to the admin container via `machinectl shell` + `docker exec -it`, releasing `state.lock` before the exec call. The machinectl invocation SHALL use the configured authentication mode from project config.
 
-#### Scenario: Terminal handed to admin container
-- **WHEN** containers are healthy and `state.lock` is released
-- **THEN** `sudo machinectl shell <host_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed and the user's terminal is now owned by that session
+#### Scenario: Terminal handed to admin container (sudo mode)
+- **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"sudo"`
+- **THEN** `sudo machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed
+
+#### Scenario: Terminal handed to admin container (polkit mode)
+- **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"polkit"`
+- **THEN** `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed
 
 ### Requirement: Instance Pre-Flight Checks
-The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. SSH keypair generation SHALL occur during `_phase_credentials()`. Credential ownership matching SHALL occur during `_phase_credential_ownership()`, which executes after ACL grants (Phase 5). To bypass user namespace unmapped UID restrictions, the ownership matching phase SHALL temporarily escalate directory ACLs and mutate the files.
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `machinectl_authentication` mode from project config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Credential ownership matching SHALL occur during `_phase_credential_ownership()`, which executes after ACL grants (Phase 5). To bypass user namespace unmapped UID restrictions, the ownership matching phase SHALL temporarily escalate directory ACLs and mutate the files.
+
+#### Scenario: Doctor Chain 1 pre-flight with auth mode
+- **WHEN** `sandbox start` is invoked
+- **THEN** the system loads `machinectl_authentication` from project config and passes it to `build_check_registry()`. In polkit mode, the sudo binary check is omitted. All other Chain 1 checks execute normally.
 
 #### Scenario: Secret completeness gate
 - **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
 - **THEN** the CLI lists the missing secrets, prints the path to `.sandbox.env`, and exits with code 1 before acquiring any locks
-
-#### Scenario: Doctor Chain 1 pre-flight
-- **WHEN** `sandbox start` is invoked
-- **THEN** the system executes doctor Chain 1 checks (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc) and aborts with diagnostic output if any check fails
 
 #### Scenario: Pre-flight passes
 - **WHEN** sentinel exists, all required secrets are populated, and all Chain 1 checks pass
@@ -80,11 +84,11 @@ The system SHALL validate instance readiness before beginning provisioning. Pre-
 
 #### Scenario: Credential ownership matching after ACL grants
 - **WHEN** `_phase_credential_ownership()` runs after Phase 5 (ACL grants)
-- **THEN** the orchestrator temporarily escalates the `secrets/` ACL to `rwX` for the `host_unprivileged_user`
+- **THEN** the orchestrator temporarily escalates the `secrets/` ACL to `rwX` for the `docker_unprivileged_user`
 
 #### Scenario: Copy-replace mutator for ownership alignment
 - **WHEN** the `secrets/` ACL is escalated
-- **THEN** a disposable helper container bind-mounts the `secrets/` directory and executes a `cp -> chown 1000:1000 -> mv` loop on all four IPC secret files via `machinectl shell` as the `host_unprivileged_user`, bypassing unmapped UID restrictions
+- **THEN** a disposable helper container bind-mounts the `secrets/` directory and executes a `cp -> chown 1000:1000 -> mv` loop on all four IPC secret files via `machinectl shell` as the `docker_unprivileged_user`, using the configured machinectl authentication mode
 
 #### Scenario: Privilege downgrade guard
 - **WHEN** the helper container execution concludes (success or failure)

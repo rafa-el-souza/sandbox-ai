@@ -5,15 +5,57 @@ This specification defines the `sandbox init` command, which scaffolds a new san
 ## Requirements
 
 ### Requirement: Init Command Interface
-The system SHALL provide a `sandbox init` command that scaffolds a new sandbox instance for the current project directory. The `--user` flag SHALL be mandatory with no default value.
+The system SHALL provide a `sandbox init` command that scaffolds a new sandbox instance for the current project directory. The `--user` flag SHALL be optional — when omitted, the system SHALL read `docker_unprivileged_user` from `sandbox-ai.toml` in the project root. If neither `--user` nor `sandbox-ai.toml` provides a user, init SHALL exit with an error. A new `--machinectl-auth` flag SHALL accept `"sudo"` or `"polkit"` to override the `machinectl_authentication` value from project config, defaulting to `"sudo"` when neither flag nor config is present.
 
 #### Scenario: Init invoked with user parameter
 - **WHEN** the operator runs `sandbox init --user sandbox` from a project directory
-- **THEN** the system executes the full scaffold sub-sequence (S1-S7), creating the instance directory tree, sandbox.toml, .sandbox.env, default ACLs, registry entry, secret prompts, and .initialized sentinel
+- **THEN** the system uses `"sandbox"` as the docker unprivileged user regardless of `sandbox-ai.toml` content
 
-#### Scenario: Init invoked without user parameter
-- **WHEN** the operator runs `sandbox init` without `--user`
-- **THEN** the CLI exits with an error indicating that `--user` is required
+#### Scenario: Init invoked without user parameter, project config exists
+- **WHEN** the operator runs `sandbox init` and `sandbox-ai.toml` contains `docker_unprivileged_user = "sandbox"`
+- **THEN** the system uses `"sandbox"` as the docker unprivileged user sourced from project config
+
+#### Scenario: Init invoked without user parameter, no project config
+- **WHEN** the operator runs `sandbox init` without `--user` and `sandbox-ai.toml` does not exist
+- **THEN** the CLI exits with an error: "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user."
+
+#### Scenario: machinectl-auth flag overrides config
+- **WHEN** the operator runs `sandbox init --machinectl-auth polkit` and `sandbox-ai.toml` contains `machinectl_authentication = "sudo"`
+- **THEN** the system uses `"polkit"` as the authentication mode
+
+#### Scenario: machinectl-auth defaults to sudo
+- **WHEN** the operator runs `sandbox init` without `--machinectl-auth` and `sandbox-ai.toml` does not specify `machinectl_authentication`
+- **THEN** the system uses `"sudo"` as the authentication mode
+
+### Requirement: Init-Time Auth Mode Probe
+The system SHALL validate that the resolved machinectl authentication mode works at init time by executing a probe command against the resolved docker unprivileged user. The probe SHALL use a 5-second timeout.
+
+#### Scenario: Sudo mode probe succeeds
+- **WHEN** init resolves `machinectl_authentication = "sudo"` and `sudo machinectl shell <user>@.host /bin/bash -c "echo ok"` returns exit code 0 within 5 seconds
+- **THEN** init proceeds normally
+
+#### Scenario: Polkit mode probe succeeds
+- **WHEN** init resolves `machinectl_authentication = "polkit"` and `machinectl shell <user>@.host /bin/bash -c "echo ok"` returns exit code 0 within 5 seconds
+- **THEN** init proceeds normally
+
+#### Scenario: Sudo mode probe fails with timeout
+- **WHEN** the sudo probe times out after 5 seconds
+- **THEN** init exits with an error including remediation: "Configure passwordless machinectl access in /etc/sudoers.d/"
+
+#### Scenario: Polkit mode probe fails
+- **WHEN** the polkit probe returns a non-zero exit code or times out
+- **THEN** init exits with an error including remediation: "Configure polkit rules for org.freedesktop.machine1.shell"
+
+### Requirement: Init Doctor Pre-Flight Auth Mode Awareness
+The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Repo Integrity` chains (excluding `ancestor_traverse`, since ACLs are granted during `start`, not `init`). Privilege Boundary verification at init time is delegated to the dedicated init-time auth probe (see "Init-Time Auth Mode Probe" requirement). The pre-flight SHALL forward the resolved `machinectl_authentication` mode to `run_check_subset()` / `build_check_registry()` so that, if and when machinectl-dependent checks enter the pre-flight scope, the `sudo` binary check is conditionally omitted under polkit mode.
+
+#### Scenario: Pre-flight forwards auth mode to the check registry
+- **WHEN** init resolves `machinectl_authentication = "polkit"` and runs the Filesystem + Repo Integrity pre-flight
+- **THEN** `run_check_subset(..., auth_mode=POLKIT)` is invoked so the registry it builds reflects polkit semantics (sudo check omitted, `machinectl_reachable` depends_on without `sudo`)
+
+#### Scenario: Privilege Boundary verification is performed by the init-time probe, not the pre-flight
+- **WHEN** init runs in either auth mode
+- **THEN** Chain 1 (Privilege Boundary) checks are NOT executed by the pre-flight; the init-time auth probe (5-second timeout) is the single source of truth for machinectl reachability at init time
 
 ### Requirement: Init Git Config Auto-Detection
 The system SHALL auto-detect `git_user` and `git_email` from the host's `git config --global` during scaffold and write them into `sandbox.toml`. The `--git-user` and `--git-email` flags SHALL override auto-detected values.

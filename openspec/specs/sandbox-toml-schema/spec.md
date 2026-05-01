@@ -5,7 +5,7 @@ This specification defines the `sandbox.toml` configuration file schema, governi
 ## Requirements
 
 ### Requirement: Schema Generation on Scaffold
-The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
+The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[project]` section SHALL NOT include `host_unprivileged_user` — this field is sourced from project-wide config (`sandbox-ai.toml`). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
 
 #### Scenario: Auto-derived project name
 - **WHEN** no `project_name` override is present in an existing `sandbox.toml`
@@ -14,6 +14,10 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 #### Scenario: Auto-detected host UID
 - **WHEN** scaffold writes a new `sandbox.toml`
 - **THEN** the `project.host_uid` field is set to the UID of the invoking user (obtained via `os.getuid()`)
+
+#### Scenario: host_unprivileged_user absent from scaffold output
+- **WHEN** scaffold writes a new `sandbox.toml`
+- **THEN** the `[project]` section does NOT contain a `host_unprivileged_user` field
 
 #### Scenario: Database config defaults include pg_user, pg_db, and image
 - **WHEN** scaffold writes a new `sandbox.toml` with `components.db_postgres.enabled = true`
@@ -36,7 +40,7 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 - **THEN** Pydantic applies defaults without validation errors — the fields are optional with defaults
 
 ### Requirement: Pydantic Schema Validation
-The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
+The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[project]` section's Pydantic model class SHALL be named `SandboxProjectSection` to disambiguate from the project-wide `ProjectConfig` model. The `SandboxProjectSection` model SHALL NOT contain `host_unprivileged_user`. The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
 
 #### Scenario: Missing required field
 - **WHEN** `sandbox.toml` is missing a required field (e.g., `project.user_project_root`)
