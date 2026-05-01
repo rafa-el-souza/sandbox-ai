@@ -2120,6 +2120,28 @@ class TestInitAuthProbe:
             assert "command not found" in result.output.lower()
 
 
+class TestResolveHostConfig:
+    """Coverage: _resolve_host_config with ProjectConfig present."""
+
+    def test_resolve_host_config_from_project_config(self) -> None:
+        """_resolve_host_config returns values from ProjectConfig when present."""
+        from cli.main import _resolve_host_config
+        from core.hydration import SandboxConfig
+        from core.project_config import MachinectlAuth, ProjectConfig
+
+        mock_project_config = ProjectConfig.model_validate(
+            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
+        )
+        mock_config = SandboxConfig.model_validate(
+            {"project": {"name": "test", "user_project_root": "/tmp/test", "host_uid": "1000"}}
+        )
+
+        with patch("cli.main.ProjectConfig.from_toml", return_value=mock_project_config):
+            user, auth = _resolve_host_config("/tmp/test", mock_config)
+            assert user == "fromtoml"
+            assert auth == MachinectlAuth.POLKIT
+
+
 class TestDryRunExistingInstance:
     """Task 12.1: --dry-run with existing instance."""
 

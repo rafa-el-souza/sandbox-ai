@@ -100,6 +100,7 @@ def _container_status(
     name: str,
     host_user: str,
     config: SandboxConfig,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
 
@@ -117,10 +118,7 @@ def _container_status(
     try:
         result = executor.run(
             [
-                "sudo",
-                "machinectl",
-                "shell",
-                f"{host_user}@.host",
+                *machinectl_cmd(host_user, auth),
                 "/bin/bash",
                 "-c",
                 (
@@ -157,7 +155,7 @@ def _container_status(
     return containers
 
 
-def _warm_check(instance_dir: str, name: str, host_user: str) -> bool:
+def _warm_check(instance_dir: str, name: str, host_user: str, auth: MachinectlAuth = MachinectlAuth.SUDO) -> bool:
     """Check if containers are already running. Returns True if warm.
 
     Delegates to _container_status (D-3) — returns True if any containers exist.
@@ -167,7 +165,7 @@ def _warm_check(instance_dir: str, name: str, host_user: str) -> bool:
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, name, host_user, config))
+    return bool(_container_status(instance_dir, name, host_user, config, auth))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -233,6 +231,7 @@ def _phase_credential_ownership(
     instance_dir: str,
     host_user: str,
     secrets_dir: str | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5b: Credential ownership matching via disposable helper container.
 
@@ -261,10 +260,7 @@ def _phase_credential_ownership(
     try:
         executor.run(
             [
-                "sudo",
-                "machinectl",
-                "shell",
-                f"{host_user}@.host",
+                *machinectl_cmd(host_user, auth),
                 "/bin/bash",
                 "-c",
                 docker_cmd,
@@ -587,7 +583,13 @@ def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
     return files
 
 
-def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: SandboxConfig) -> None:
+def _phase_compose_up(
+    instance_dir: str,
+    name: str,
+    host_user: str,
+    config: SandboxConfig,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> None:
     """Phase 6: docker compose up -d --build --wait via machinectl.
 
     - Source suppression env prefix: TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain (D2 Layer 1)
@@ -606,10 +608,7 @@ def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: Sand
     executor = Executor()
     executor.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
+            *machinectl_cmd(host_user, auth),
             "/bin/bash",
             "-c",
             cmd,
@@ -618,7 +617,12 @@ def _phase_compose_up(instance_dir: str, name: str, host_user: str, config: Sand
     )
 
 
-def _phase_handover(name: str, host_user: str, warmup_prompt: str = "") -> None:
+def _phase_handover(
+    name: str,
+    host_user: str,
+    warmup_prompt: str = "",
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> None:
     """Phase 7: PTY handover — docker exec -it via machinectl."""
     executor = Executor()
     exec_args = ["exec"]
@@ -628,10 +632,7 @@ def _phase_handover(name: str, host_user: str, warmup_prompt: str = "") -> None:
 
     executor.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
+            *machinectl_cmd(host_user, auth),
             "/usr/bin/docker",
             *exec_args,
         ],
@@ -649,6 +650,7 @@ def _compose_down(
     config: SandboxConfig,
     *,
     volumes: bool = False,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Run docker compose down via machinectl. Pass volumes=True for -v."""
     compose_files = _build_compose_files(instance_dir, config)
@@ -663,10 +665,7 @@ def _compose_down(
     executor = Executor()
     executor.run(
         [
-            "sudo",
-            "machinectl",
-            "shell",
-            f"{host_user}@.host",
+            *machinectl_cmd(host_user, auth),
             "/bin/bash",
             "-c",
             cmd,
@@ -716,7 +715,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     name = config.project.name
 
@@ -776,8 +775,9 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # Compose up — match actual _phase_compose_up command
     env_file = os.path.join(instance_dir, ".sandbox.env")
+    machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
     compose_cmd = (
-        f"sudo machinectl shell {host_user}@.host -- /bin/bash -c "
+        f"{machinectl_prefix} /bin/bash -c "
         f"'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
         f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
         f"--ansi never --env-file {env_file} up -d --build --wait'"
@@ -785,7 +785,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
-    handover_cmd = f"sudo machinectl shell {host_user}@.host -- /usr/bin/docker exec -it {name}-admin-1 zsh"
+    handover_cmd = f"{machinectl_prefix} /usr/bin/docker exec -it {name}-admin-1 zsh"
     console.print(f"    $ {handover_cmd}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
@@ -815,6 +815,19 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
             missing.append(key)
 
     return missing
+
+
+def _resolve_host_config(project_dir: str, config: SandboxConfig) -> tuple[str, MachinectlAuth]:
+    """Resolve host_user and auth from ProjectConfig, falling back to instance config.
+
+    Returns (docker_unprivileged_user, machinectl_authentication).
+    """
+    try:
+        project_config = ProjectConfig.from_toml(project_dir)
+        return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
+    except FileNotFoundError:
+        # Backward compatibility: fall back to deprecated instance config field
+        return config.project.host_unprivileged_user, MachinectlAuth.SUDO
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
@@ -1040,7 +1053,7 @@ def start(
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Project name immutability check (sandbox-toml-schema spec)
     # instance_id format: <project_name>-<md5[:6]> — strip last 7 chars to recover original name
@@ -1074,7 +1087,7 @@ def start(
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, name, host_user):
+    if _warm_check(instance_dir, name, host_user, auth):
         console.print(f"Sandbox '{name}' is already running. Use 'sandbox attach' to reconnect.")
         return
 
@@ -1112,12 +1125,12 @@ def start(
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 5b: Credential ownership matching (after ACL grants)
-        _phase_credential_ownership(instance_dir, host_user)
+        _phase_credential_ownership(instance_dir, host_user, auth=auth)
         console.print("✓ Ownership — credential files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
-            _phase_compose_up(instance_dir, name, host_user, config)
+            _phase_compose_up(instance_dir, name, host_user, config, auth)
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
@@ -1136,7 +1149,7 @@ def start(
         _release_lock(lock_fd)
 
     console.print("→ Handing over to admin shell")
-    _phase_handover(name, host_user, config.project.warmup_prompt)
+    _phase_handover(name, host_user, config.project.warmup_prompt, auth)
 
 
 @app.command()
@@ -1152,10 +1165,10 @@ def stop(clean: bool = False) -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Warm check
-    if not _warm_check(instance_dir, name, host_user):
+    if not _warm_check(instance_dir, name, host_user, auth):
         console.print(f"Sandbox '{name}' is not running. Nothing to stop.")
         return
 
@@ -1170,7 +1183,7 @@ def stop(clean: bool = False) -> None:
         raise typer.Exit(code=1) from None
 
     # Compose down
-    _compose_down(instance_dir, name, host_user, config, volumes=clean)
+    _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
 
     # ACL revocation (Pattern A) — fault-isolated (D5)
     acl_warnings = _revoke_acls(instance_dir, host_user)
@@ -1198,15 +1211,15 @@ def attach() -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, name, host_user):
+    if not _warm_check(instance_dir, name, host_user, auth):
         console.print(f"Sandbox '{name}' is not running. Use 'sandbox start' to launch.")
         raise typer.Exit(code=1)
 
     # Direct handover — no hydration, no credentials, no locking
-    _phase_handover(name, host_user)
+    _phase_handover(name, host_user, auth=auth)
 
 
 @app.command()
@@ -1231,7 +1244,7 @@ def destroy(force: bool = False) -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Phase 0: Confirmation
     if not force:
@@ -1248,7 +1261,7 @@ def destroy(force: bool = False) -> None:
     try:
         # Phase 2: Container and volume teardown — fault-isolated (D12)
         try:
-            _compose_down(instance_dir, name, host_user, config, volumes=True)
+            _compose_down(instance_dir, name, host_user, config, volumes=True, auth=auth)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
@@ -1316,10 +1329,10 @@ def status() -> None:
 
     config = _load_config(instance_dir)
     name = config.project.name
-    host_user = config.project.host_unprivileged_user
+    host_user, auth = _resolve_host_config(project_dir, config)
 
     # Container status
-    containers = _container_status(instance_dir, name, host_user, config)
+    containers = _container_status(instance_dir, name, host_user, config, auth)
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
