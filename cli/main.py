@@ -29,6 +29,7 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
+from core.project_config import MachinectlAuth, ProjectConfig, machinectl_cmd
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
     _detect_git_config,
@@ -816,12 +817,32 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
     return missing
 
 
+def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
+    """Print mode-specific remediation guidance when the init-time auth probe fails."""
+    console.print(f"machinectl auth probe failed for user '{user}': {detail}", style="red")
+    if auth == MachinectlAuth.SUDO:
+        console.print(
+            "Remediation: Verify 'sudo machinectl shell' works for this user. "
+            "Ensure the user exists and sudo is configured.",
+            style="yellow",
+        )
+    else:
+        console.print(
+            "Remediation: Verify polkit rules allow 'machinectl shell' without sudo. "
+            "Ensure org.freedesktop.machine1.shell policy is configured for this user.",
+            style="yellow",
+        )
+
+
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 
 @app.command()
 def init(
-    user: str = typer.Option(..., "--user", help="Unprivileged user for the sandbox"),
+    user: str | None = typer.Option(None, "--user", help="Unprivileged user for the sandbox"),
+    machinectl_auth: str | None = typer.Option(
+        None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
+    ),
     git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
@@ -839,6 +860,64 @@ def init(
         )
         raise typer.Exit(code=1)
 
+    # Resolution: docker_unprivileged_user (D5)
+    # Priority: --user flag → sandbox-ai.toml → error
+    project_config: ProjectConfig | None = None
+    try:
+        project_config = ProjectConfig.from_toml(project_dir)
+    except FileNotFoundError:
+        pass
+
+    resolved_user: str
+    if user is not None:
+        resolved_user = user
+    elif project_config is not None:
+        resolved_user = project_config.host.docker_unprivileged_user
+    else:
+        console.print(
+            "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Resolution: machinectl_authentication (D5)
+    # Priority: --machinectl-auth flag → sandbox-ai.toml → default "sudo"
+    resolved_auth: MachinectlAuth
+    if machinectl_auth is not None:
+        try:
+            resolved_auth = MachinectlAuth(machinectl_auth)
+        except ValueError:
+            console.print(
+                f"Invalid --machinectl-auth value: '{machinectl_auth}'. Must be 'sudo' or 'polkit'.",
+                style="red",
+            )
+            raise typer.Exit(code=1) from None
+    elif project_config is not None:
+        resolved_auth = project_config.host.machinectl_authentication
+    else:
+        resolved_auth = MachinectlAuth.SUDO
+
+    # Init-time auth mode probe (D5)
+    if not dry_run:
+        probe_cmd = machinectl_cmd(resolved_user, resolved_auth)
+        probe_cmd_full = [*probe_cmd, "/bin/bash", "-c", "echo ok"]
+        try:
+            result = subprocess.run(
+                probe_cmd_full,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                _emit_auth_probe_failure(resolved_auth, resolved_user, result.stderr)
+                raise typer.Exit(code=1)
+        except subprocess.TimeoutExpired:
+            _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
+            raise typer.Exit(code=1) from None
+        except FileNotFoundError:
+            _emit_auth_probe_failure(resolved_auth, resolved_user, "command not found on PATH")
+            raise typer.Exit(code=1) from None
+
     # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
     # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
     # so the ancestor check would always fail on first init (D10).
@@ -846,7 +925,7 @@ def init(
         distro = detect_distro()
         preflight_results = run_check_subset(
             ["Filesystem", "Repo Integrity"],
-            user,
+            resolved_user,
             distro,
             exclude_ids={"ancestor_traverse"},
         )
@@ -872,7 +951,7 @@ def init(
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
         console.print(f"  Instance ID: {instance_id}")
         console.print(f"  Directory: {instance_dir}")
-        console.print(f"  User: {user}")
+        console.print(f"  User: {resolved_user}")
         console.print(f"  Git: {git_user} <{git_email}>")
         console.print(f"  Project: {project_name}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
