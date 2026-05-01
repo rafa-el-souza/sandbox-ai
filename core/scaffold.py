@@ -4,7 +4,6 @@ Implements the SCAFFOLD SUB-SEQUENCE (S1-S7) from the orchestrator design.
 Called on first `sandbox start` for a project directory.
 """
 
-import getpass
 import os
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from core.crypto import generate_credential
 from core.hydration import IMAGE_REGISTRY
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 # ─── S1: Directory Tree ──────────────────────────────────────────────────────
 
@@ -255,8 +254,9 @@ def apply_default_acls(instance_dir: str, user_project_root: str, dev_user: str)
 def prompt_secrets(
     env_path: str,
     required_secrets: Sequence[tuple[str, str]],
+    prompt_func: Callable[[str], str],
 ) -> None:
-    """Prompt for secrets interactively via getpass().
+    """Prompt for secrets interactively using the provided prompt_func.
 
     In non-TTY mode (e.g. CI), skips prompting and prints guidance
     directing the operator to populate the env file manually.
@@ -271,7 +271,7 @@ def prompt_secrets(
 
     # Prompt for each secret and replace empty values
     for secret_name, description in required_secrets:
-        value = getpass.getpass(f"{secret_name} ({description}): ")
+        value = prompt_func(f"{secret_name} ({description}): ")
         content = content.replace(
             f'{secret_name}=""',
             f'{secret_name}="{value}"',

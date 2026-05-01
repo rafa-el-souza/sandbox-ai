@@ -1474,7 +1474,15 @@ class TestInitScaffoldDirect:
             mock_toml.assert_called_once()
             mock_env.assert_called_once()
             mock_acls.assert_called_once()
-            mock_secrets.assert_called_once()
+            from unittest.mock import ANY
+            mock_secrets.assert_called_once_with(
+                ANY,
+                [
+                    ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+                    ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
+                ],
+                prompt_func=ANY,
+            )
             mock_sentinel.assert_called_once()
 
 

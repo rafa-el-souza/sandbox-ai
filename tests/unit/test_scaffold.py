@@ -203,11 +203,10 @@ class TestApplyDefaultAcls:
 
 class TestPromptSecrets:
     @patch("sys.stdin")
-    @patch("getpass.getpass")
-    def test_interactive_tty_prompts(self, mock_getpass: MagicMock, mock_stdin: MagicMock, tmp_path: Path) -> None:
+    def test_interactive_tty_prompts(self, mock_stdin: MagicMock, tmp_path: Path) -> None:
         """In TTY mode, prompts for each required secret and writes to env file."""
         mock_stdin.isatty.return_value = True
-        mock_getpass.side_effect = ["sk-ant-xxx", "ghp_yyy"]
+        mock_prompt = MagicMock(side_effect=["sk-ant-xxx", "ghp_yyy"])
 
         env_path = tmp_path / ".sandbox.env"
         env_path.write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""\n')
@@ -216,7 +215,7 @@ class TestPromptSecrets:
             ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
             ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
         ]
-        prompt_secrets(str(env_path), required_secrets)
+        prompt_secrets(str(env_path), required_secrets, mock_prompt)
 
         content = env_path.read_text()
         assert 'CORE_ANTHROPIC_API_KEY="sk-ant-xxx"' in content
@@ -231,7 +230,7 @@ class TestPromptSecrets:
         env_path.write_text('CORE_ANTHROPIC_API_KEY=""\n')
 
         # Should not raise — prints guidance instead
-        prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])
+        prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")], MagicMock())
 
 
 class TestWriteInitializedSentinel:
@@ -366,7 +365,7 @@ class TestPromptSecretsNonTTY:
         with patch("sys.stdin", mock_stdin):
             # Should not raise — the current code raises RuntimeError,
             # the new implementation should skip and print guidance
-            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])
+            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")], MagicMock())
 
     def test_non_tty_prints_guidance(self, tmp_path: Path, capsys: object) -> None:
         """Non-TTY mode prints guidance message with env path."""
@@ -379,4 +378,4 @@ class TestPromptSecretsNonTTY:
         mock_stdin.isatty.return_value = False
 
         with patch("sys.stdin", mock_stdin):
-            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")])
+            prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")], MagicMock())
