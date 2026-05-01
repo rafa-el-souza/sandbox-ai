@@ -908,7 +908,11 @@ def init(
     # PG_PASSWORD is auto-generated at scaffold time — not prompted
     if config.components.mcp_firecrawl:
         required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
-    prompt_secrets(env_path, required_secrets)
+    prompt_secrets(
+        env_path,
+        required_secrets,
+        prompt_func=lambda msg: typer.prompt(msg, hide_input=True),
+    )
 
     # S7: Sentinel
     write_initialized_sentinel(instance_dir)
