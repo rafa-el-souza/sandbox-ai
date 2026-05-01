@@ -1325,7 +1325,7 @@ def doctor(
     if user is None:
         if project_config is None:
             console.print(
-                "No user specified. Pass --user or create sandbox-ai.toml with [host].docker_unprivileged_user.",
+                "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
                 style="red",
             )
             raise typer.Exit(code=1)
