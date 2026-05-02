@@ -1,0 +1,10 @@
+.sandbox.env
+.deprecated/
+config/proxy/.htpasswd
+temp/abandoned/
+temp/analysis/
+temp/done/
+temp/later/
+temp/scratchpad/
+.venv/
+sandbox-ai.toml

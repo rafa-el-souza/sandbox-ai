@@ -5,6 +5,7 @@ sandboxes/*/
 # Secrets — never commit
 .sandbox.env
 *.htpasswd
+sandbox-ai.toml
 
 # Legacy / deprecated
 .deprecated/
