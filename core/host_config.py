@@ -23,6 +23,11 @@ def sandbox_ai_user_home() -> Path:
     return Path(os.environ.get("SANDBOX_AI_USER_HOME") or os.path.expanduser("~/.sandbox-ai"))
 
 
+def state_lock_path() -> Path:
+    """Canonical fcntl lock target serializing all per-user state mutations."""
+    return sandbox_ai_user_home() / "state" / "state.lock"
+
+
 class MachinectlAuth(StrEnum):
     """Machinectl privilege escalation mode."""
 

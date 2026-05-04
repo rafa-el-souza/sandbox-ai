@@ -986,17 +986,19 @@ class TestLockingDirect:
         assert isinstance(fd, int)
         _release_lock(fd)
 
-    def test_acquire_contention(self, tmp_path: Path) -> None:
+    def test_acquire_contention(self, isolated_sandbox_ai_user_home: Path) -> None:
         import fcntl as _fcntl
 
         from cli.main import _acquire_state_lock
+        from core.host_config import state_lock_path
 
-        lock_path = tmp_path / "state.lock"
+        lock_path = state_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
         _fcntl.flock(held_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         try:
             with pytest.raises(BlockingIOError):
-                _acquire_state_lock(str(tmp_path))
+                _acquire_state_lock(str(isolated_sandbox_ai_user_home))
         finally:
             _fcntl.flock(held_fd, _fcntl.LOCK_UN)
             os.close(held_fd)

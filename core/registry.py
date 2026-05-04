@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 
-from core.host_config import sandbox_ai_user_home
+from core.host_config import sandbox_ai_user_home, state_lock_path
 
 
 def generate_instance_id(project_dir: str) -> str:
@@ -48,7 +48,8 @@ class InstanceRegistry:
     def _save(self, data: dict[str, str]) -> None:
         """Atomically write the registry under an exclusive fcntl lock."""
         os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
-        lock_path = self._path + ".lock"
+        lock_path = str(state_lock_path())
+        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -73,7 +74,8 @@ class InstanceRegistry:
     def remove(self, project_dir: str) -> None:
         """Remove a project directory entry from the registry."""
         os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
-        lock_path = self._path + ".lock"
+        lock_path = str(state_lock_path())
+        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)

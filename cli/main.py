@@ -22,7 +22,7 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd
+from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd, state_lock_path
 from core.hydration import (
     InstanceConfig,
     build_jinja_context,
@@ -171,8 +171,10 @@ def _warm_check(instance_dir: str, name: str, host_user: str, auth: MachinectlAu
 
 
 def _acquire_state_lock(instance_dir: str) -> int:
-    """Acquire per-instance state.lock. Returns fd. Raises BlockingIOError on contention."""
-    lock_path = os.path.join(instance_dir, "state.lock")
+    """Acquire the per-user state lock. Returns fd. Raises BlockingIOError on contention."""
+    del instance_dir
+    lock_path = str(state_lock_path())
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

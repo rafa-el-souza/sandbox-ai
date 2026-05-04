@@ -11,7 +11,7 @@ import fcntl
 import json
 import os
 
-from core.host_config import sandbox_ai_user_home
+from core.host_config import sandbox_ai_user_home, state_lock_path
 
 MAX_SLOTS = 5705
 
@@ -57,8 +57,8 @@ class IPAMLedger:
             json.dump(data, f, indent=2)
 
     def _acquire_lock(self) -> int:
-        """Acquire the IPAM lock file. Returns the lock fd."""
-        lock_path = self._path + ".lock"
+        """Acquire the per-user state lock. Returns the lock fd."""
+        lock_path = str(state_lock_path())
         os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:
