@@ -22,7 +22,7 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd, state_lock_path
+from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd, sandbox_ai_user_home, state_lock_path
 from core.hydration import (
     InstanceConfig,
     build_jinja_context,
@@ -36,6 +36,8 @@ from core.scaffold import (
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
+    ensure_per_user_tree,
+    ensure_registry_seed,
     prompt_secrets,
     write_initialized_sentinel,
     write_sandbox_toml,
@@ -866,6 +868,10 @@ def init(
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
+    # Per-user tree creation (idempotent, mode 0700)
+    user_home = sandbox_ai_user_home()
+    ensure_per_user_tree(user_home)
+
     # Re-init guard (D-6)
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
     if instance_dir is not None:
@@ -998,7 +1004,8 @@ def init(
     dev_user = os.environ.get("USER", "dev")
     apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
 
-    # S5: Register
+    # S5: Register — ensure registry seed exists, then register
+    ensure_registry_seed(user_home)
     registry = InstanceRegistry()
     registry.register(project_dir, instance_id)
 

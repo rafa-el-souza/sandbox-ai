@@ -4,8 +4,10 @@ All subprocess interactions are mocked at the core.executor.Executor.run boundar
 Tests validate the full phase sequencing per the orchestrator design spec.
 """
 
+import contextlib
 import json
 import os
+import stat
 import subprocess
 import typing
 from pathlib import Path
@@ -1890,6 +1892,138 @@ class TestInitHappyPath:
         ):
             result = runner.invoke(app, ["init", "--user", "sandbox"])
             assert result.exit_code == 0
+
+
+class TestInitPerUserTreeCreation:
+    """init creates `<home>/{config,state}/` with mode 0700 (idempotent)."""
+
+    def _common_patches(
+        self,
+        home: Path,
+        project_dir: str,
+        mock_config: object,
+    ) -> list[typing.Any]:
+        return [
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "ok\n", ""),
+            ),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ]
+
+    def _make_mock_config(self, project_dir: str) -> object:
+        from core.hydration import InstanceConfig
+
+        return InstanceConfig.model_validate(
+            {
+                "instance": {
+                    "name": "p",
+                    "user_project_root": project_dir,
+                    "host_uid": "1000",
+                },
+            }
+        )
+
+    def test_clean_install_creates_tree(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """init on a clean host creates <home>/, <home>/config/, <home>/state/."""
+        from cli.main import app
+
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+        assert result.exit_code == 0, result.output
+        assert isolated_sandbox_ai_user_home.is_dir()
+        assert (isolated_sandbox_ai_user_home / "config").is_dir()
+        assert (isolated_sandbox_ai_user_home / "state").is_dir()
+        assert stat.S_IMODE(isolated_sandbox_ai_user_home.stat().st_mode) == 0o700
+
+    def test_idempotent_on_existing_tree(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """Re-running init against an existing tree does not error."""
+        from cli.main import app
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+        assert result.exit_code == 0, result.output
+
+    def test_existing_registry_not_overwritten(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """A pre-populated registry is preserved; init only ensures presence."""
+        from cli.main import app
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        registry.write_text('{"/x": "x-aaa"}')
+
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+        assert result.exit_code == 0, result.output
+        # Pre-existing entry preserved
+        data = json.loads(registry.read_text())
+        assert data["/x"] == "x-aaa"
+        # New entry added too
+        assert project_dir in data
+
+    def test_sandbox_ai_user_home_redirect(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Setting SANDBOX_AI_USER_HOME redirects creation to that path."""
+        from cli.main import app
+
+        custom_home = tmp_path / "alt-home"
+        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init", "--user", "sandbox"])
+        assert result.exit_code == 0, result.output
+        assert custom_home.is_dir()
+        assert (custom_home / "config").is_dir()
+        assert (custom_home / "state").is_dir()
 
 
 class TestInitReInitRejection:
