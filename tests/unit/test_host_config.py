@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from core.host_config import HostConfig, MachinectlAuth, ProjectConfig, machinectl_cmd
+from core.host_config import HostSettings, MachinectlAuth, ProjectConfig, machinectl_cmd
 from pydantic import ValidationError
 
 # ─── Task 1.2: ProjectConfig.from_toml() ─────────────────────────────────────
@@ -81,12 +81,12 @@ class TestProjectConfigFromToml:
             ProjectConfig.from_toml(str(tmp_path))
 
 
-class TestHostConfigModel:
-    """HostConfig nested model structure."""
+class TestHostSettingsModel:
+    """HostSettings nested model structure."""
 
     def test_host_config_attributes(self) -> None:
-        """HostConfig exposes docker_unprivileged_user and machinectl_authentication."""
-        hc = HostConfig(docker_unprivileged_user="sandbox", machinectl_authentication=MachinectlAuth.POLKIT)
+        """HostSettings exposes docker_unprivileged_user and machinectl_authentication."""
+        hc = HostSettings(docker_unprivileged_user="sandbox", machinectl_authentication=MachinectlAuth.POLKIT)
         assert hc.docker_unprivileged_user == "sandbox"
         assert hc.machinectl_authentication == MachinectlAuth.POLKIT
 

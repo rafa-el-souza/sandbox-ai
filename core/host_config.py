@@ -20,7 +20,7 @@ class MachinectlAuth(StrEnum):
     POLKIT = "polkit"
 
 
-class HostConfig(BaseModel):
+class HostSettings(BaseModel):
     """[host] section of sandbox-ai.toml."""
 
     docker_unprivileged_user: str
@@ -30,7 +30,7 @@ class HostConfig(BaseModel):
 class ProjectConfig(BaseModel):
     """Top-level Pydantic model for sandbox-ai.toml."""
 
-    host: HostConfig
+    host: HostSettings
 
     @classmethod
     def from_toml(cls, project_dir: str) -> ProjectConfig:
