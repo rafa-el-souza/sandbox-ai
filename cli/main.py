@@ -77,8 +77,7 @@ def _resolve_project_dir() -> str:
 
 def _resolve_instance(sandbox_ai_home: str, project_dir: str) -> tuple[str | None, str | None]:
     """Look up instance from registry. Returns (instance_dir, instance_id) or (None, None)."""
-    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-    registry = InstanceRegistry(registry_path)
+    registry = InstanceRegistry()
     instance_id = registry.lookup(project_dir)
     if instance_id is None:
         return None, None
@@ -200,8 +199,8 @@ def _release_lock(fd: int) -> None:
 
 def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
     """Phase 2: IPAM allocation. Returns base_index."""
-    ledger_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-    ledger = IPAMLedger(ledger_path)
+    del sandbox_ai_home
+    ledger = IPAMLedger()
     return ledger.allocate(instance_id)
 
 
@@ -720,8 +719,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     name = config.instance.name
 
     # ── IPAM preview ─────────────────────────────────────────────────────
-    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-    ledger = IPAMLedger(ipam_path)
+    ledger = IPAMLedger()
     try:
         slot, is_existing = ledger.peek_next_slot(instance_id)
         isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
@@ -999,8 +997,7 @@ def init(
     apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
 
     # S5: Register
-    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-    registry = InstanceRegistry(registry_path)
+    registry = InstanceRegistry()
     registry.register(project_dir, instance_id)
 
     # S6: Secret prompting (non-TTY safe)
@@ -1282,16 +1279,14 @@ def destroy(force: bool = False) -> None:
 
         # Phase 5: State cleanup — IPAM — fault-isolated (D12)
         try:
-            ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-            ledger = IPAMLedger(ipam_path)
+            ledger = IPAMLedger()
             ledger.release(instance_id)
         except Exception as e:
             console.print(f"⚠ IPAM release warning: {e}", style="yellow")
 
         # Phase 6: State cleanup — Registry — fault-isolated (D12)
         try:
-            registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-            registry = InstanceRegistry(registry_path)
+            registry = InstanceRegistry()
             registry.remove(project_dir)
         except Exception as e:
             console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
@@ -1402,8 +1397,7 @@ def status() -> None:
     # Container grid (running only)
     if is_running:
         # Derive static IPs for network column
-        ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-        ledger = IPAMLedger(ipam_path)
+        ledger = IPAMLedger()
         ip_map: dict[str, str] = {}
         try:
             slot, _is_existing = ledger.peek_next_slot(instance_id)
@@ -1441,8 +1435,7 @@ def status() -> None:
         console.print(table)
 
     # IPAM display
-    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-    ledger = IPAMLedger(ipam_path)
+    ledger = IPAMLedger()
     try:
         slot, _is_existing = ledger.peek_next_slot(instance_id)
         if _is_existing:

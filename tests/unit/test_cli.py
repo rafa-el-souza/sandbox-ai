@@ -121,9 +121,16 @@ def mock_sandbox_ai_home(tmp_path: Path) -> Path:
     return home
 
 
+def _user_home() -> Path:
+    """Resolve the per-user home from SANDBOX_AI_USER_HOME (autouse fixture sets it)."""
+    return Path(os.environ["SANDBOX_AI_USER_HOME"])
+
+
 def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     """Helper: register an instance and create its directory structure."""
-    reg = home / ".state" / "instances.json"
+    state_dir = _user_home() / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    reg = state_dir / "instances.json"
     reg.write_text(json.dumps({project_dir: instance_id}))
     inst = home / "sandboxes" / instance_id
     (inst / "docker" / "core").mkdir(parents=True)
@@ -146,7 +153,10 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
 
 def _write_ipam(home: Path, instance_id: str, base_index: int) -> None:
     """Helper: write an IPAM entry."""
-    ipam = home / ".state" / "ipam.json"
+    del home
+    state_dir = _user_home() / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    ipam = state_dir / "ipam.json"
     ipam.write_text(json.dumps({instance_id: base_index}))
 
 

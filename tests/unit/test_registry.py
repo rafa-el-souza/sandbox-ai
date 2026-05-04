@@ -1,14 +1,18 @@
 import threading
+from pathlib import Path
 
 import pytest
 from core.registry import InstanceRegistry, generate_instance_id
 
 
 @pytest.fixture
-def registry(tmp_path: object) -> InstanceRegistry:
-    """Create a registry backed by a temporary file."""
-    registry_path = str(tmp_path) + "/instances.json"
-    return InstanceRegistry(registry_path)
+def registry(isolated_sandbox_ai_user_home: Path) -> InstanceRegistry:
+    """Create a registry rooted at the per-user home (autouse fixture)."""
+    return InstanceRegistry()
+
+
+def _registry_file(home: Path) -> Path:
+    return home / "state" / "instances.json"
 
 
 class TestGenerateInstanceId:
@@ -61,14 +65,13 @@ class TestInstanceRegistry:
         registry.register("/home/dev/myproject", "myproject-bbb222")
         assert registry.lookup("/home/dev/myproject") == "myproject-bbb222"
 
-    def test_concurrent_write_safety(self, tmp_path: object) -> None:
+    def test_concurrent_write_safety(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Two threads writing concurrently do not corrupt the registry."""
-        registry_path = str(tmp_path) + "/instances.json"
         errors: list[Exception] = []
 
         def writer(project_dir: str, instance_id: str) -> None:
             try:
-                reg = InstanceRegistry(registry_path)
+                reg = InstanceRegistry()
                 reg.register(project_dir, instance_id)
             except Exception as e:
                 errors.append(e)
@@ -81,23 +84,28 @@ class TestInstanceRegistry:
         t2.join()
 
         assert not errors, f"Concurrent write errors: {errors}"
-        reg = InstanceRegistry(registry_path)
+        reg = InstanceRegistry()
         assert reg.lookup("/home/dev/p1") == "p1-aaa111"
         assert reg.lookup("/home/dev/p2") == "p2-bbb222"
 
-    def test_persistence_across_instances(self, tmp_path: object) -> None:
+    def test_persistence_across_instances(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Data persists across InstanceRegistry instances (file-backed)."""
-        registry_path = str(tmp_path) + "/instances.json"
-        reg1 = InstanceRegistry(registry_path)
+        reg1 = InstanceRegistry()
         reg1.register("/home/dev/myproject", "myproject-abc123")
 
-        reg2 = InstanceRegistry(registry_path)
+        reg2 = InstanceRegistry()
         assert reg2.lookup("/home/dev/myproject") == "myproject-abc123"
 
-    def test_corrupt_json_recovers(self, tmp_path: object) -> None:
+    def test_corrupt_json_recovers(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Corrupt JSON file is treated as empty registry."""
-        registry_path = str(tmp_path) + "/instances.json"
-        with open(registry_path, "w") as f:
-            f.write("{ corrupt json !!!")
-        reg = InstanceRegistry(registry_path)
+        registry_path = _registry_file(isolated_sandbox_ai_user_home)
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text("{ corrupt json !!!")
+        reg = InstanceRegistry()
         assert reg.lookup("/home/dev/anything") is None
+
+    def test_default_path_uses_user_home(self, isolated_sandbox_ai_user_home: Path) -> None:
+        """No-arg constructor resolves <user_home>/state/instances.json."""
+        reg = InstanceRegistry()
+        reg.register("/home/dev/x", "x-aaa")
+        assert _registry_file(isolated_sandbox_ai_user_home).exists()
