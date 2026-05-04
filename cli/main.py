@@ -965,7 +965,7 @@ def init(
     # Derive instance identity
     instance_id = generate_instance_id(project_dir)
     instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-    project_name = os.path.basename(project_dir)
+    instance_name = os.path.basename(project_dir)
 
     if dry_run:
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
@@ -973,7 +973,7 @@ def init(
         console.print(f"  Directory: {instance_dir}")
         console.print(f"  User: {resolved_user}")
         console.print(f"  Git: {git_user} <{git_email}>")
-        console.print(f"  Project: {project_name}")
+        console.print(f"  Project: {instance_name}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
@@ -983,7 +983,7 @@ def init(
     # S2: sandbox.toml
     write_sandbox_toml(
         instance_dir,
-        project_name,
+        instance_name,
         project_dir,
         git_user=git_user,
         git_email=git_email,
@@ -1024,7 +1024,7 @@ def init(
     # S7: Sentinel
     write_initialized_sentinel(instance_dir)
 
-    console.print(f"Sandbox '{project_name}' initialized. Run `sandbox start` to launch.")
+    console.print(f"Sandbox '{instance_name}' initialized. Run `sandbox start` to launch.")
 
 
 @app.command()
@@ -1063,7 +1063,7 @@ def start(
     host_user, auth = _resolve_host_config(project_dir, config)
 
     # Project name immutability check (sandbox-toml-schema spec)
-    # instance_id format: <project_name>-<md5[:6]> — strip last 7 chars to recover original name
+    # instance_id format: <instance_name>-<md5[:6]> — strip last 7 chars to recover original name
     original_name = instance_id[:-7]
     if name != original_name:
         console.print(

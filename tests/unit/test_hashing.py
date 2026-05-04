@@ -16,8 +16,8 @@ def test_generate_project_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(os.path, "abspath", lambda p: "/home/dev/api")
 
-    project_name = generate_project_hash("api")
+    instance_name = generate_project_hash("api")
 
     # "api" + "-" + md5("/home/dev/api")[:6]
-    assert project_name.startswith("api-")
-    assert len(project_name.split("-")[1]) == 6
+    assert instance_name.startswith("api-")
+    assert len(instance_name.split("-")[1]) == 6

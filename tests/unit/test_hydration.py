@@ -378,7 +378,7 @@ class TestRenderTemplates:
         # Create a minimal compose.yml template
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text("# rendered: {{ project_name }}\nsubnet: {{ isolated_subnet }}\n")
+        (docker_dir / "compose.yml").write_text("# rendered: {{ instance_name }}\nsubnet: {{ isolated_subnet }}\n")
         # Core Dockerfile template
         core_dir = docker_dir / "core"
         core_dir.mkdir()
@@ -599,7 +599,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     ips = derive_static_ips(0)
 
     return {
-        "project_name": "testproject",
+        "instance_name": "testproject",
         "instance_dir": instance_dir,
         "user_project_root": "/home/dev/testproject",
         "isolated_subnet": isolated,
@@ -783,7 +783,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     tooling = tmp_path / "tooling"
     docker_dir = tooling / ".docker"
     docker_dir.mkdir(parents=True)
-    (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+    (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
     core_dir = docker_dir / "core"
     core_dir.mkdir()
     (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
@@ -804,7 +804,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     config_dir = tooling / ".config"
     dns_dir = config_dir / "coredns"
     dns_dir.mkdir(parents=True)
-    (dns_dir / "Corefile").write_text("# {{ project_name }}\n")
+    (dns_dir / "Corefile").write_text("# {{ instance_name }}\n")
     dnsdist_dir = config_dir / "dnsdist"
     dnsdist_dir.mkdir(parents=True)
     (dnsdist_dir / "dnsdist.conf").write_text(
@@ -960,7 +960,7 @@ class TestReadOnlyDomainsGeneration:
         # Minimal tooling plane
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+        (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
         core_dir = docker_dir / "core"
         core_dir.mkdir()
         (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
@@ -976,7 +976,7 @@ class TestReadOnlyDomainsGeneration:
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
             (config_dir / d).mkdir(parents=True, exist_ok=True)
-        (config_dir / "coredns" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "coredns" / "Corefile").write_text("# {{ instance_name }}\n")
         (config_dir / "dnsdist" / "dnsdist.conf").write_text(
             'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
         )
@@ -1018,7 +1018,7 @@ class TestReadOnlyDomainsGeneration:
 
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+        (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
         (docker_dir / "core").mkdir()
         (docker_dir / "core" / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
         (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
@@ -1031,7 +1031,7 @@ class TestReadOnlyDomainsGeneration:
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
             (config_dir / d).mkdir(parents=True, exist_ok=True)
-        (config_dir / "coredns" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "coredns" / "Corefile").write_text("# {{ instance_name }}\n")
         (config_dir / "dnsdist" / "dnsdist.conf").write_text(
             'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
         )

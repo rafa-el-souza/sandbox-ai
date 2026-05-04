@@ -257,7 +257,7 @@ def build_jinja_context(
         "custom_config_admin": "/home/human/.sandbox/custom",
         "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",
         # Project
-        "project_name": config.instance.name,
+        "instance_name": config.instance.name,
         "host_uid": config.instance.host_uid,
         "warmup_prompt": config.instance.warmup_prompt,
         # Git identity

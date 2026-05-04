@@ -61,7 +61,7 @@ class TestWriteSandboxToml:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="myproject",
+            instance_name="myproject",
             project_dir="/home/dev/myproject",
         )
 
@@ -82,7 +82,7 @@ class TestWriteSandboxToml:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="myproject",
+            instance_name="myproject",
             project_dir="/home/dev/myproject",
         )
 
@@ -265,7 +265,7 @@ class TestWriteSandboxTomlGitFields:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="test",
+            instance_name="test",
             project_dir="/dev/test",
             git_user="Jane Doe",
             git_email="jane@example.com",
@@ -282,7 +282,7 @@ class TestWriteSandboxTomlGitFields:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="test",
+            instance_name="test",
             project_dir="/dev/test",
         )
 

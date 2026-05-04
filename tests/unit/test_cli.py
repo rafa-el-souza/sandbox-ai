@@ -2366,7 +2366,7 @@ def _create_tooling_plane(home: Path) -> None:
     """Create minimal tooling plane files needed for dry-run template validation."""
     # Jinja2 templates
     docker_dir = home / ".docker"
-    (docker_dir / "compose.yml").write_text("# compose for {{ project_name }}\nversion: '3'\n")
+    (docker_dir / "compose.yml").write_text("# compose for {{ instance_name }}\nversion: '3'\n")
     (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
     (docker_dir / "core" / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
     (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/bash\n")
@@ -2378,7 +2378,7 @@ def _create_tooling_plane(home: Path) -> None:
 
     config_dir = home / ".config"
     (config_dir / "coredns").mkdir(parents=True, exist_ok=True)
-    (config_dir / "coredns" / "Corefile").write_text("# Corefile for {{ project_name }}\n")
+    (config_dir / "coredns" / "Corefile").write_text("# Corefile for {{ instance_name }}\n")
     (config_dir / "dnsdist").mkdir(parents=True, exist_ok=True)
     (config_dir / "dnsdist" / "dnsdist.conf").write_text(
         'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
