@@ -27,13 +27,13 @@ class HostSettings(BaseModel):
     machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
 
 
-class ProjectConfig(BaseModel):
+class HostConfig(BaseModel):
     """Top-level Pydantic model for sandbox-ai.toml."""
 
     host: HostSettings
 
     @classmethod
-    def from_toml(cls, project_dir: str) -> ProjectConfig:
+    def from_toml(cls, project_dir: str) -> HostConfig:
         """Parse sandbox-ai.toml from the given project directory.
 
         Args:

@@ -16,7 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
-    from tests.unit.conftest import ProjectConfigFactory
+    from tests.unit.conftest import HostConfigFactory
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -88,16 +88,16 @@ def _default_project_config() -> typing.Iterator[None]:
 
     `_resolve_host_config` now requires `sandbox-ai.toml` (no fallback). Tests
     that are not specifically about the missing-config path get a default
-    `ProjectConfig` injected here. Tests that need a different value or want to
+    `HostConfig` injected here. Tests that need a different value or want to
     exercise the FileNotFoundError path can re-patch in their own `with patch(...)`
     block — pytest's mock stacks override this autouse fixture.
     """
-    from core.host_config import ProjectConfig
+    from core.host_config import HostConfig
 
-    default = ProjectConfig.model_validate(
+    default = HostConfig.model_validate(
         {"host": {"docker_unprivileged_user": HOST_USER, "machinectl_authentication": "sudo"}}
     )
-    with patch("cli.main.ProjectConfig.from_toml", return_value=default):
+    with patch("cli.main.HostConfig.from_toml", return_value=default):
         yield
 
 
@@ -1542,7 +1542,7 @@ class TestInitScaffoldDirect:
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs") as mock_dirs,
             patch("cli.main.write_sandbox_toml") as mock_toml,
             patch("cli.main._load_config", return_value=mock_config),
@@ -1666,7 +1666,7 @@ class TestInitFirecrawl:
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -1737,20 +1737,20 @@ class TestDoctorMissingUser:
         assert result.exit_code != 0
 
 
-class TestDoctorProjectConfig:
+class TestDoctorHostConfig:
     """Section 5 (project-config-machinectl-auth): doctor reads sandbox-ai.toml."""
 
     def test_doctor_resolves_user_from_project_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import MachinectlAuth, ProjectConfig
+        from core.host_config import HostConfig, MachinectlAuth
 
-        mock_pc = ProjectConfig.model_validate(
+        mock_pc = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
         )
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
-            patch("cli.main.ProjectConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
             patch("cli.main.detect_distro", return_value=None),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
@@ -1764,14 +1764,14 @@ class TestDoctorProjectConfig:
     def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import MachinectlAuth, ProjectConfig
+        from core.host_config import HostConfig, MachinectlAuth
 
-        mock_pc = ProjectConfig.model_validate(
+        mock_pc = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
         )
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
-            patch("cli.main.ProjectConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
             patch("cli.main.detect_distro", return_value=None),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
@@ -1785,7 +1785,7 @@ class TestDoctorProjectConfig:
     def test_doctor_no_config_no_flag_errors(self, runner: CliRunner) -> None:
         from cli.main import app
 
-        with patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError):
+        with patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError):
             r = runner.invoke(app, ["doctor"])
         assert r.exit_code == 1
         assert "no user specified" in r.output.lower()
@@ -1793,7 +1793,7 @@ class TestDoctorProjectConfig:
     def test_doctor_invalid_auth_mode_errors(self, runner: CliRunner) -> None:
         from cli.main import app
 
-        with patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError):
+        with patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError):
             r = runner.invoke(app, ["doctor", "--user", "sandbox", "--machinectl-auth", "bogus"])
         assert r.exit_code == 1
         assert "invalid" in r.output.lower()
@@ -1805,7 +1805,7 @@ class TestDoctorProjectConfig:
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.detect_distro", return_value=None),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results),
@@ -1867,7 +1867,7 @@ class TestInitHappyPath:
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -1914,7 +1914,7 @@ class TestInitDryRun:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("", "")),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init", "--user", "sandbox", "--dry-run"])
             assert result.exit_code == 0
@@ -1941,7 +1941,7 @@ class TestInitDoctorPreFlightFailure:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results"),
         ):
@@ -1976,7 +1976,7 @@ class TestInitNonTTY:
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -1998,25 +1998,25 @@ class TestInitMissingUser:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/noproject"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init"])
             assert result.exit_code != 0
 
 
-class TestInitProjectConfigResolution:
+class TestInitHostConfigResolution:
     """Tasks 3.8-3.9: init user resolution via sandbox-ai.toml."""
 
     def test_init_with_project_config_no_user_flag(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init succeeds without --user when sandbox-ai.toml provides docker_unprivileged_user."""
         from cli.main import app
-        from core.host_config import ProjectConfig
+        from core.host_config import HostConfig
         from core.hydration import SandboxConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/tomlproject"
 
-        mock_project_config = ProjectConfig.model_validate(
+        mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
         )
         mock_config = SandboxConfig.model_validate(
@@ -2026,7 +2026,7 @@ class TestInitProjectConfigResolution:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", return_value=mock_project_config),
+            patch("cli.main.HostConfig.from_toml", return_value=mock_project_config),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2048,7 +2048,7 @@ class TestInitProjectConfigResolution:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/noconfig"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init"])
             assert result.exit_code == 1
@@ -2072,7 +2072,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2100,7 +2100,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/failprobe"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch(
                 "cli.main.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 1, "", "permission denied"),
@@ -2120,7 +2120,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/timeout"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="test", timeout=5)),
         ):
             result = runner.invoke(app, ["init", "--user", "sandbox"])
@@ -2141,7 +2141,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2166,7 +2166,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/polkitfail"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch(
                 "cli.main.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 1, "", "auth failed"),
@@ -2183,7 +2183,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/badauth"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init", "--user", "sandbox", "--machinectl-auth", "invalid"])
             assert result.exit_code == 1
@@ -2196,7 +2196,7 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/nobin"),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init", "--user", "sandbox"])
@@ -2205,22 +2205,22 @@ class TestInitAuthProbe:
 
 
 class TestResolveHostConfig:
-    """Coverage: _resolve_host_config with ProjectConfig present."""
+    """Coverage: _resolve_host_config with HostConfig present."""
 
     def test_resolve_host_config_from_project_config(self) -> None:
-        """_resolve_host_config returns values from ProjectConfig when present."""
+        """_resolve_host_config returns values from HostConfig when present."""
         from cli.main import _resolve_host_config
-        from core.host_config import MachinectlAuth, ProjectConfig
+        from core.host_config import HostConfig, MachinectlAuth
         from core.hydration import SandboxConfig
 
-        mock_project_config = ProjectConfig.model_validate(
+        mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
         )
         mock_config = SandboxConfig.model_validate(
             {"project": {"name": "test", "user_project_root": "/tmp/test", "host_uid": "1000"}}
         )
 
-        with patch("cli.main.ProjectConfig.from_toml", return_value=mock_project_config):
+        with patch("cli.main.HostConfig.from_toml", return_value=mock_project_config):
             user, auth = _resolve_host_config("/tmp/test", mock_config)
             assert user == "fromtoml"
             assert auth == MachinectlAuth.POLKIT
@@ -3615,7 +3615,7 @@ class TestDryRunAuthModePreview:
     """Task 7.7: --dry-run preview reflects machinectl_authentication mode."""
 
     def test_dry_run_preview_shows_polkit_command_without_sudo(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: ProjectConfigFactory
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
     ) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -3629,7 +3629,7 @@ class TestDryRunAuthModePreview:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", return_value=polkit_cfg),
+            patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
         ):
             result = runner.invoke(app, ["start", "--dry-run"])
 
@@ -3644,7 +3644,7 @@ class TestDryRunAuthModePreview:
                 raise AssertionError(f"polkit dry-run leaked sudo prefix: {line!r}")
 
     def test_dry_run_preview_shows_sudo_prefix_in_sudo_mode(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: ProjectConfigFactory
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
     ) -> None:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
@@ -3658,7 +3658,7 @@ class TestDryRunAuthModePreview:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", return_value=sudo_cfg),
+            patch("cli.main.HostConfig.from_toml", return_value=sudo_cfg),
         ):
             result = runner.invoke(app, ["start", "--dry-run"])
 
@@ -3670,7 +3670,7 @@ class TestPolkitEndToEnd:
     """Task 7.8: polkit-mode commands construct subprocess calls without sudo."""
 
     def test_status_polkit_mode_container_status_call_omits_sudo(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: ProjectConfigFactory
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
     ) -> None:
         """`status` under polkit mode invokes `_container_status` with auth=POLKIT.
 
@@ -3701,7 +3701,7 @@ class TestPolkitEndToEnd:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", return_value=polkit_cfg),
+            patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
             patch("cli.main._container_status", side_effect=fake_container_status),
         ):
             result = runner.invoke(app, ["status"])
@@ -3714,7 +3714,7 @@ class TestPolkitEndToEnd:
 # ── Post-init commands fail loudly without sandbox-ai.toml ───────────────────
 
 
-class TestPostInitMissingProjectConfig:
+class TestPostInitMissingHostConfig:
     """Verify the 'Post-init command fails without project config' scenario.
 
     Spec: openspec/changes/project-config-machinectl-auth/specs/orchestrator-cli/spec.md
@@ -3734,7 +3734,7 @@ class TestPostInitMissingProjectConfig:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             args = [command]
             if command == "destroy":

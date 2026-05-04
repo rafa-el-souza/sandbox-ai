@@ -22,7 +22,7 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import MachinectlAuth, ProjectConfig, machinectl_cmd
+from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd
 from core.hydration import (
     SandboxConfig,
     build_jinja_context,
@@ -825,7 +825,7 @@ def _resolve_host_config(project_dir: str, config: SandboxConfig) -> tuple[str, 
     """
     del config  # accepted for signature stability with callers; project config is authoritative
     try:
-        project_config = ProjectConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
         console.print(
             f"No sandbox-ai.toml found at {project_dir}. "
@@ -881,9 +881,9 @@ def init(
 
     # Resolution: docker_unprivileged_user (D5)
     # Priority: --user flag → sandbox-ai.toml → error
-    project_config: ProjectConfig | None = None
+    project_config: HostConfig | None = None
     try:
-        project_config = ProjectConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
         pass
 
@@ -1316,9 +1316,9 @@ def doctor(
 ) -> None:
     """Run host readiness diagnostics."""
     project_dir = _resolve_project_dir()
-    project_config: ProjectConfig | None = None
+    project_config: HostConfig | None = None
     try:
-        project_config = ProjectConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
         pass
 

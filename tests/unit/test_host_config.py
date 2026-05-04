@@ -1,12 +1,12 @@
-"""Tests for core/host_config.py — ProjectConfig model and machinectl_cmd builder."""
+"""Tests for core/host_config.py — HostConfig model and machinectl_cmd builder."""
 
 from pathlib import Path
 
 import pytest
-from core.host_config import HostSettings, MachinectlAuth, ProjectConfig, machinectl_cmd
+from core.host_config import HostConfig, HostSettings, MachinectlAuth, machinectl_cmd
 from pydantic import ValidationError
 
-# ─── Task 1.2: ProjectConfig.from_toml() ─────────────────────────────────────
+# ─── Task 1.2: HostConfig.from_toml() ─────────────────────────────────────
 
 VALID_PROJECT_TOML = """\
 [host]
@@ -26,44 +26,44 @@ docker_unprivileged_user = "sandbox"
 """
 
 
-class TestProjectConfigFromToml:
-    """ProjectConfig.from_toml() parsing and validation."""
+class TestHostConfigFromToml:
+    """HostConfig.from_toml() parsing and validation."""
 
     def test_valid_config_parsed(self, tmp_path: Path) -> None:
-        """Valid sandbox-ai.toml parses into ProjectConfig without errors."""
+        """Valid sandbox-ai.toml parses into HostConfig without errors."""
         (tmp_path / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML)
-        config = ProjectConfig.from_toml(str(tmp_path))
+        config = HostConfig.from_toml(str(tmp_path))
         assert config.host.docker_unprivileged_user == "sandbox"
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_polkit_mode_parsed(self, tmp_path: Path) -> None:
         """machinectl_authentication = 'polkit' parses to MachinectlAuth.POLKIT."""
         (tmp_path / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML_POLKIT)
-        config = ProjectConfig.from_toml(str(tmp_path))
+        config = HostConfig.from_toml(str(tmp_path))
         assert config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
     def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
         """Missing sandbox-ai.toml raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
-            ProjectConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml(str(tmp_path))
 
     def test_missing_required_field_raises_validation_error(self, tmp_path: Path) -> None:
         """Missing docker_unprivileged_user raises ValidationError."""
         (tmp_path / "sandbox-ai.toml").write_text('[host]\nmachinectl_authentication = "sudo"\n')
         with pytest.raises(ValidationError):
-            ProjectConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml(str(tmp_path))
 
     def test_invalid_enum_value_raises_validation_error(self, tmp_path: Path) -> None:
         """Invalid machinectl_authentication value raises ValidationError."""
         bad_toml = '[host]\ndocker_unprivileged_user = "sandbox"\nmachinectl_authentication = "pkexec"\n'
         (tmp_path / "sandbox-ai.toml").write_text(bad_toml)
         with pytest.raises(ValidationError):
-            ProjectConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml(str(tmp_path))
 
     def test_default_auth_mode_is_sudo(self, tmp_path: Path) -> None:
         """Omitted machinectl_authentication defaults to 'sudo'."""
         (tmp_path / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML_NO_AUTH)
-        config = ProjectConfig.from_toml(str(tmp_path))
+        config = HostConfig.from_toml(str(tmp_path))
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_loader_uses_provided_path(self, tmp_path: Path) -> None:
@@ -71,14 +71,14 @@ class TestProjectConfigFromToml:
         subdir = tmp_path / "nested" / "project"
         subdir.mkdir(parents=True)
         (subdir / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML)
-        config = ProjectConfig.from_toml(str(subdir))
+        config = HostConfig.from_toml(str(subdir))
         assert config.host.docker_unprivileged_user == "sandbox"
 
     def test_malformed_toml_raises(self, tmp_path: Path) -> None:
         """Malformed TOML syntax raises before any state changes."""
         (tmp_path / "sandbox-ai.toml").write_text("[host\ninvalid toml")
         with pytest.raises(Exception):  # tomllib.TOMLDecodeError
-            ProjectConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml(str(tmp_path))
 
 
 class TestHostSettingsModel:
