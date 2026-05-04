@@ -9,8 +9,18 @@ strategy for machinectl invocations.
 import os
 import tomllib
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel
+
+
+def sandbox_ai_user_home() -> Path:
+    """Resolve the per-user sandbox-ai home directory.
+
+    Honors ``SANDBOX_AI_USER_HOME`` (test-isolation override). Otherwise
+    returns ``~/.sandbox-ai`` expanded for the current user.
+    """
+    return Path(os.environ.get("SANDBOX_AI_USER_HOME") or os.path.expanduser("~/.sandbox-ai"))
 
 
 class MachinectlAuth(StrEnum):

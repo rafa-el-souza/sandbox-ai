@@ -1,10 +1,38 @@
 """Tests for core/host_config.py — HostConfig model and machinectl_cmd builder."""
 
+import os
 from pathlib import Path
 
 import pytest
-from core.host_config import HostConfig, HostSettings, MachinectlAuth, machinectl_cmd
+from core.host_config import (
+    HostConfig,
+    HostSettings,
+    MachinectlAuth,
+    machinectl_cmd,
+    sandbox_ai_user_home,
+)
 from pydantic import ValidationError
+
+
+class TestSandboxAiUserHome:
+    """sandbox_ai_user_home() canonical-path resolver."""
+
+    def test_env_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With SANDBOX_AI_USER_HOME unset, returns ~/.sandbox-ai."""
+        monkeypatch.delenv("SANDBOX_AI_USER_HOME", raising=False)
+        result = sandbox_ai_user_home()
+        assert result == Path(os.path.expanduser("~/.sandbox-ai"))
+
+    def test_env_set_returns_env_value(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """With SANDBOX_AI_USER_HOME set, returns that path."""
+        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(tmp_path / "custom"))
+        result = sandbox_ai_user_home()
+        assert result == tmp_path / "custom"
+
+    def test_idempotent(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Repeated calls return equal paths."""
+        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(tmp_path))
+        assert sandbox_ai_user_home() == sandbox_ai_user_home()
 
 # ─── Task 1.2: HostConfig.from_toml() ─────────────────────────────────────
 
