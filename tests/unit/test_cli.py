@@ -3734,7 +3734,10 @@ class TestPostInitMissingHostConfig:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch(
+                "cli.main.HostConfig.from_toml",
+                side_effect=FileNotFoundError("No sandbox-ai.toml found. Run sandbox init."),
+            ),
         ):
             args = [command]
             if command == "destroy":

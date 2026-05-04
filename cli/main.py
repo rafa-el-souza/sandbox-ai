@@ -823,15 +823,11 @@ def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str,
     Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
-    del config  # accepted for signature stability with callers; host config is authoritative
+    del project_dir, config  # accepted for signature stability; host config is authoritative
     try:
-        project_config = HostConfig.from_toml(project_dir)
-    except FileNotFoundError:
-        console.print(
-            f"No sandbox-ai.toml found at {project_dir}. "
-            "Create one with [host].docker_unprivileged_user before running this command.",
-            style="red",
-        )
+        project_config = HostConfig.from_toml()
+    except FileNotFoundError as exc:
+        console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
     return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
 
@@ -883,7 +879,7 @@ def init(
     # Priority: --user flag → sandbox-ai.toml → error
     project_config: HostConfig | None = None
     try:
-        project_config = HostConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
 
@@ -1315,10 +1311,9 @@ def doctor(
     ),
 ) -> None:
     """Run host readiness diagnostics."""
-    project_dir = _resolve_project_dir()
     project_config: HostConfig | None = None
     try:
-        project_config = HostConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
 

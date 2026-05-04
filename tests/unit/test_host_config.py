@@ -54,59 +54,70 @@ docker_unprivileged_user = "sandbox"
 """
 
 
+def _seed_host_config(home: Path, body: str) -> Path:
+    """Write `body` to ``<home>/config/sandbox-ai.toml`` and return the file path."""
+    config_dir = home / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "sandbox-ai.toml"
+    path.write_text(body)
+    return path
+
+
 class TestHostConfigFromToml:
     """HostConfig.from_toml() parsing and validation."""
 
-    def test_valid_config_parsed(self, tmp_path: Path) -> None:
+    def test_valid_config_parsed(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Valid sandbox-ai.toml parses into HostConfig without errors."""
-        (tmp_path / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML)
-        config = HostConfig.from_toml(str(tmp_path))
+        _seed_host_config(isolated_sandbox_ai_user_home, VALID_PROJECT_TOML)
+        config = HostConfig.from_toml()
         assert config.host.docker_unprivileged_user == "sandbox"
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
-    def test_polkit_mode_parsed(self, tmp_path: Path) -> None:
+    def test_polkit_mode_parsed(self, isolated_sandbox_ai_user_home: Path) -> None:
         """machinectl_authentication = 'polkit' parses to MachinectlAuth.POLKIT."""
-        (tmp_path / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML_POLKIT)
-        config = HostConfig.from_toml(str(tmp_path))
+        _seed_host_config(isolated_sandbox_ai_user_home, VALID_PROJECT_TOML_POLKIT)
+        config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
-    def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
-        """Missing sandbox-ai.toml raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
-            HostConfig.from_toml(str(tmp_path))
+    def test_missing_file_raises_file_not_found(self, isolated_sandbox_ai_user_home: Path) -> None:
+        """Missing sandbox-ai.toml raises FileNotFoundError with canonical path."""
+        with pytest.raises(FileNotFoundError, match="Run sandbox init"):
+            HostConfig.from_toml()
 
-    def test_missing_required_field_raises_validation_error(self, tmp_path: Path) -> None:
+    def test_missing_required_field_raises_validation_error(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Missing docker_unprivileged_user raises ValidationError."""
-        (tmp_path / "sandbox-ai.toml").write_text('[host]\nmachinectl_authentication = "sudo"\n')
+        _seed_host_config(isolated_sandbox_ai_user_home, '[host]\nmachinectl_authentication = "sudo"\n')
         with pytest.raises(ValidationError):
-            HostConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml()
 
-    def test_invalid_enum_value_raises_validation_error(self, tmp_path: Path) -> None:
+    def test_invalid_enum_value_raises_validation_error(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Invalid machinectl_authentication value raises ValidationError."""
         bad_toml = '[host]\ndocker_unprivileged_user = "sandbox"\nmachinectl_authentication = "pkexec"\n'
-        (tmp_path / "sandbox-ai.toml").write_text(bad_toml)
+        _seed_host_config(isolated_sandbox_ai_user_home, bad_toml)
         with pytest.raises(ValidationError):
-            HostConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml()
 
-    def test_default_auth_mode_is_sudo(self, tmp_path: Path) -> None:
+    def test_default_auth_mode_is_sudo(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Omitted machinectl_authentication defaults to 'sudo'."""
-        (tmp_path / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML_NO_AUTH)
-        config = HostConfig.from_toml(str(tmp_path))
+        _seed_host_config(isolated_sandbox_ai_user_home, VALID_PROJECT_TOML_NO_AUTH)
+        config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
-    def test_loader_uses_provided_path(self, tmp_path: Path) -> None:
-        """Loader reads from the given project_dir, not CWD."""
-        subdir = tmp_path / "nested" / "project"
-        subdir.mkdir(parents=True)
-        (subdir / "sandbox-ai.toml").write_text(VALID_PROJECT_TOML)
-        config = HostConfig.from_toml(str(subdir))
+    def test_loader_honors_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Loader reads from SANDBOX_AI_USER_HOME-resolved path."""
+        custom_home = tmp_path / "custom"
+        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))
+        _seed_host_config(custom_home, VALID_PROJECT_TOML)
+        config = HostConfig.from_toml()
         assert config.host.docker_unprivileged_user == "sandbox"
 
-    def test_malformed_toml_raises(self, tmp_path: Path) -> None:
+    def test_malformed_toml_raises(self, isolated_sandbox_ai_user_home: Path) -> None:
         """Malformed TOML syntax raises before any state changes."""
-        (tmp_path / "sandbox-ai.toml").write_text("[host\ninvalid toml")
+        _seed_host_config(isolated_sandbox_ai_user_home, "[host\ninvalid toml")
         with pytest.raises(Exception):  # tomllib.TOMLDecodeError
-            HostConfig.from_toml(str(tmp_path))
+            HostConfig.from_toml()
 
 
 class TestHostSettingsModel:
