@@ -57,7 +57,7 @@ The system SHALL free the IPAM `base_index` slot and remove the registry entry a
 
 #### Scenario: IPAM slot freed after destroy
 - **WHEN** `sandbox destroy` reaches the IPAM release phase
-- **THEN** the `project_id` entry is removed from `ipam.json` and that `base_index` is available for allocation to a new instance
+- **THEN** the `instance_id` entry is removed from `ipam.json` and that `base_index` is available for allocation to a new instance
 
 #### Scenario: Registry entry removed after destroy
 - **WHEN** `sandbox destroy` reaches the registry removal phase
@@ -80,7 +80,7 @@ The system SHALL verify the instance directory path before deletion and SHALL NO
 
 #### Scenario: user_project_root is never removed
 - **WHEN** `sandbox destroy` completes
-- **THEN** the directory referenced by `project.user_project_root` in `sandbox.toml` is unmodified
+- **THEN** the directory referenced by `instance.user_project_root` in `sandbox.toml` is unmodified
 
 #### Scenario: Already-deleted directory handled silently
 - **WHEN** `shutil.rmtree(instance_dir)` raises `FileNotFoundError`

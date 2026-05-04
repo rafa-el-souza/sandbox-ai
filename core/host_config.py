@@ -20,20 +20,20 @@ class MachinectlAuth(StrEnum):
     POLKIT = "polkit"
 
 
-class HostConfig(BaseModel):
+class HostSettings(BaseModel):
     """[host] section of sandbox-ai.toml."""
 
     docker_unprivileged_user: str
     machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
 
 
-class ProjectConfig(BaseModel):
+class HostConfig(BaseModel):
     """Top-level Pydantic model for sandbox-ai.toml."""
 
-    host: HostConfig
+    host: HostSettings
 
     @classmethod
-    def from_toml(cls, project_dir: str) -> ProjectConfig:
+    def from_toml(cls, project_dir: str) -> HostConfig:
         """Parse sandbox-ai.toml from the given project directory.
 
         Args:

@@ -5,17 +5,17 @@ This specification defines the `sandbox init` command, which scaffolds a new san
 ## Requirements
 
 ### Requirement: Init Command Interface
-The system SHALL provide a `sandbox init` command that scaffolds a new sandbox instance for the current project directory. The `--user` flag SHALL be optional — when omitted, the system SHALL read `docker_unprivileged_user` from `sandbox-ai.toml` in the project root. If neither `--user` nor `sandbox-ai.toml` provides a user, init SHALL exit with an error. A new `--machinectl-auth` flag SHALL accept `"sudo"` or `"polkit"` to override the `machinectl_authentication` value from project config, defaulting to `"sudo"` when neither flag nor config is present.
+The system SHALL provide a `sandbox init` command that scaffolds a new sandbox instance for the current project directory. The `--user` flag SHALL be optional — when omitted, the system SHALL read `docker_unprivileged_user` from `sandbox-ai.toml` in the project root. If neither `--user` nor `sandbox-ai.toml` provides a user, init SHALL exit with an error. A new `--machinectl-auth` flag SHALL accept `"sudo"` or `"polkit"` to override the `machinectl_authentication` value from host config, defaulting to `"sudo"` when neither flag nor config is present.
 
 #### Scenario: Init invoked with user parameter
 - **WHEN** the operator runs `sandbox init --user sandbox` from a project directory
 - **THEN** the system uses `"sandbox"` as the docker unprivileged user regardless of `sandbox-ai.toml` content
 
-#### Scenario: Init invoked without user parameter, project config exists
+#### Scenario: Init invoked without user parameter, host config exists
 - **WHEN** the operator runs `sandbox init` and `sandbox-ai.toml` contains `docker_unprivileged_user = "sandbox"`
-- **THEN** the system uses `"sandbox"` as the docker unprivileged user sourced from project config
+- **THEN** the system uses `"sandbox"` as the docker unprivileged user sourced from host config
 
-#### Scenario: Init invoked without user parameter, no project config
+#### Scenario: Init invoked without user parameter, no host config
 - **WHEN** the operator runs `sandbox init` without `--user` and `sandbox-ai.toml` does not exist
 - **THEN** the CLI exits with an error: "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user."
 

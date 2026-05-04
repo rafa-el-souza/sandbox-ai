@@ -1546,7 +1546,7 @@ class TestCheckImageDigests:
             assert result.status == "pass"  # Tag drift timeout is best-effort
 
 
-# ── Section 13: Auth-Mode-Aware Registry (Section 5 of project-config-machinectl-auth) ──
+# ── Section 13: Auth-Mode-Aware Registry (Section 5 of host-config-machinectl-auth) ──
 
 
 class TestPolkitRegistry:
@@ -1559,7 +1559,7 @@ class TestPolkitRegistry:
 
     def test_sudo_check_omitted_in_polkit_mode(self) -> None:
         from core.doctor import build_check_registry
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
@@ -1568,7 +1568,7 @@ class TestPolkitRegistry:
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
@@ -1577,7 +1577,7 @@ class TestPolkitRegistry:
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         checks = build_check_registry(MachinectlAuth.POLKIT)
         reach = next(c for c in checks if c.id == "machinectl_reachable")
@@ -1586,7 +1586,7 @@ class TestPolkitRegistry:
 
     def test_machinectl_reachable_dependency_includes_sudo_in_sudo(self) -> None:
         from core.doctor import build_check_registry
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         checks = build_check_registry(MachinectlAuth.SUDO)
         reach = next(c for c in checks if c.id == "machinectl_reachable")
@@ -1595,7 +1595,7 @@ class TestPolkitRegistry:
     def test_default_auth_mode_is_sudo(self) -> None:
         """build_check_registry() with no args matches sudo-mode shape."""
         from core.doctor import build_check_registry
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         default_ids = [c.id for c in build_check_registry()]
         sudo_ids = [c.id for c in build_check_registry(MachinectlAuth.SUDO)]
@@ -1603,7 +1603,7 @@ class TestPolkitRegistry:
 
     def test_polkit_machinectl_reachable_command_has_no_sudo(self) -> None:
         from core.doctor import check_machinectl_reachable
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -1620,7 +1620,7 @@ class TestPolkitRegistry:
 
     def test_sudo_machinectl_reachable_command_has_sudo_prefix(self) -> None:
         from core.doctor import check_machinectl_reachable
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -1635,7 +1635,7 @@ class TestPolkitRegistry:
 
     def test_polkit_timeout_remediation_mentions_polkit(self) -> None:
         from core.doctor import check_machinectl_reachable
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         with patch(
             "subprocess.run",
@@ -1649,7 +1649,7 @@ class TestPolkitRegistry:
 
     def test_polkit_docker_available_command_has_no_sudo(self) -> None:
         from core.doctor import check_docker_available
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -1665,7 +1665,7 @@ class TestPolkitRegistry:
 
     def test_polkit_image_digests_command_has_no_sudo(self) -> None:
         from core.doctor import check_image_digests
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         captured: list[list[str]] = []
 
@@ -1687,7 +1687,7 @@ class TestPolkitRegistry:
         Privilege Boundary subset under polkit excludes the `sudo` binary check.
         """
         from core.doctor import run_check_subset
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         # Stub all subprocess calls to keep the test hermetic.
         with patch(

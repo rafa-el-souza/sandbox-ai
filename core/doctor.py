@@ -20,7 +20,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from core.project_config import MachinectlAuth, machinectl_cmd
+from core.host_config import MachinectlAuth, machinectl_cmd
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -435,9 +435,7 @@ def check_runsc_runtimeargs(
     )
 
 
-def check_host_uds(
-    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
-) -> CheckResult:
+def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
     """Check that runsc runtimeArgs do NOT include --host-uds=all.
 
     The default (--host-uds=none) is the correct security posture.
@@ -499,9 +497,7 @@ def check_host_uds(
 # ─── Section 6b: Supply Chain Checks ────────────────────────────────────────
 
 
-def check_image_digests(
-    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
-) -> CheckResult:
+def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
     """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
 
     Iterates IMAGE_REGISTRY and runs ``docker manifest inspect <ref>@<digest>``

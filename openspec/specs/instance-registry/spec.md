@@ -9,7 +9,7 @@ The system SHALL persist a mapping from the absolute project directory path to a
 
 #### Scenario: First invocation creates registry entry
 - **WHEN** `sandbox start` is invoked for a project directory not present in `instances.json`
-- **THEN** a new entry is written mapping `abs(project_dir)` to the generated `instance_id` (`<project_name>-<project_id>`) before any containers are started
+- **THEN** a new entry is written mapping `abs(project_dir)` to the generated `instance_id` (`<instance_name>-<hash_hex>`) before any containers are started
 
 #### Scenario: Subsequent invocations reuse existing entry
 - **WHEN** `sandbox start`, `stop`, `attach`, or `destroy` is invoked for a registered project directory

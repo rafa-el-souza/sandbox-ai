@@ -61,7 +61,7 @@ class TestWriteSandboxToml:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="myproject",
+            instance_name="myproject",
             project_dir="/home/dev/myproject",
         )
 
@@ -72,7 +72,7 @@ class TestWriteSandboxToml:
         # Verify key fields present
         assert 'name = "myproject"' in content
         assert 'user_project_root = "/home/dev/myproject"' in content
-        assert 'host_unprivileged_user' not in content
+        assert "host_unprivileged_user" not in content
         assert "host_uid" in content
 
     def test_host_uid_auto_detected(self, tmp_path: Path) -> None:
@@ -82,7 +82,7 @@ class TestWriteSandboxToml:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="myproject",
+            instance_name="myproject",
             project_dir="/home/dev/myproject",
         )
 
@@ -265,7 +265,7 @@ class TestWriteSandboxTomlGitFields:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="test",
+            instance_name="test",
             project_dir="/dev/test",
             git_user="Jane Doe",
             git_email="jane@example.com",
@@ -282,7 +282,7 @@ class TestWriteSandboxTomlGitFields:
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
-            project_name="test",
+            instance_name="test",
             project_dir="/dev/test",
         )
 

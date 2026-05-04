@@ -22,14 +22,14 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
+from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd
 from core.hydration import (
-    SandboxConfig,
+    InstanceConfig,
     build_jinja_context,
     render_templates,
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
-from core.project_config import MachinectlAuth, ProjectConfig, machinectl_cmd
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
     _detect_git_config,
@@ -86,10 +86,10 @@ def _resolve_instance(sandbox_ai_home: str, project_dir: str) -> tuple[str | Non
     return instance_dir, instance_id
 
 
-def _load_config(instance_dir: str) -> SandboxConfig:
+def _load_config(instance_dir: str) -> InstanceConfig:
     """Parse sandbox.toml from instance directory."""
     toml_path = os.path.join(instance_dir, "sandbox.toml")
-    return SandboxConfig.from_toml(toml_path)
+    return InstanceConfig.from_toml(toml_path)
 
 
 # ─── Warm state check ───────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ def _container_status(
     instance_dir: str,
     name: str,
     host_user: str,
-    config: SandboxConfig,
+    config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
@@ -280,7 +280,7 @@ def _phase_credential_ownership(
 
 
 def _phase_hydrate(
-    config: SandboxConfig,
+    config: InstanceConfig,
     base_index: int,
     proxy_password: str,
     sandbox_ai_home: str,
@@ -571,7 +571,7 @@ def _phase_acl_grant(instance_dir: str, host_user: str) -> None:
             raise SandboxExecutionError(error_msg) from e
 
 
-def _build_compose_files(instance_dir: str, config: SandboxConfig) -> list[str]:
+def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]:
     """Build the compose file list including component-conditional extras."""
     files = ["-f", os.path.join(instance_dir, "docker", "compose.yml")]
     if config.components_db_postgres.enabled:
@@ -587,7 +587,7 @@ def _phase_compose_up(
     instance_dir: str,
     name: str,
     host_user: str,
-    config: SandboxConfig,
+    config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 6: docker compose up -d --build --wait via machinectl.
@@ -647,7 +647,7 @@ def _compose_down(
     instance_dir: str,
     name: str,
     host_user: str,
-    config: SandboxConfig,
+    config: InstanceConfig,
     *,
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
@@ -717,7 +717,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     config = _load_config(instance_dir)
     host_user, auth = _resolve_host_config(project_dir, config)
 
-    name = config.project.name
+    name = config.instance.name
 
     # ── IPAM preview ─────────────────────────────────────────────────────
     ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
@@ -791,7 +791,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
 
 
-def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
+def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
     """Check for missing or empty secrets in .sandbox.env."""
     required = ["CORE_ANTHROPIC_API_KEY"]
     if config.components_db_postgres.enabled:
@@ -817,15 +817,15 @@ def _check_secrets(env_path: str, config: SandboxConfig) -> list[str]:
     return missing
 
 
-def _resolve_host_config(project_dir: str, config: SandboxConfig) -> tuple[str, MachinectlAuth]:
-    """Resolve host_user and auth from project-wide ``sandbox-ai.toml``.
+def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str, MachinectlAuth]:
+    """Resolve host_user and auth from per-host ``sandbox-ai.toml``.
 
-    Post-init commands SHALL fail when project config is absent — the field
-    no longer exists on the per-instance ``SandboxProjectSection``.
+    Post-init commands SHALL fail when host config is absent — the field
+    no longer exists on the per-instance ``SandboxInstanceSection``.
     """
-    del config  # accepted for signature stability with callers; project config is authoritative
+    del config  # accepted for signature stability with callers; host config is authoritative
     try:
-        project_config = ProjectConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
         console.print(
             f"No sandbox-ai.toml found at {project_dir}. "
@@ -881,9 +881,9 @@ def init(
 
     # Resolution: docker_unprivileged_user (D5)
     # Priority: --user flag → sandbox-ai.toml → error
-    project_config: ProjectConfig | None = None
+    project_config: HostConfig | None = None
     try:
-        project_config = ProjectConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
         pass
 
@@ -965,7 +965,7 @@ def init(
     # Derive instance identity
     instance_id = generate_instance_id(project_dir)
     instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-    project_name = os.path.basename(project_dir)
+    instance_name = os.path.basename(project_dir)
 
     if dry_run:
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
@@ -973,7 +973,7 @@ def init(
         console.print(f"  Directory: {instance_dir}")
         console.print(f"  User: {resolved_user}")
         console.print(f"  Git: {git_user} <{git_email}>")
-        console.print(f"  Project: {project_name}")
+        console.print(f"  Project: {instance_name}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
@@ -983,7 +983,7 @@ def init(
     # S2: sandbox.toml
     write_sandbox_toml(
         instance_dir,
-        project_name,
+        instance_name,
         project_dir,
         git_user=git_user,
         git_email=git_email,
@@ -1000,7 +1000,7 @@ def init(
 
     # S4: Default ACLs (Pattern B)
     dev_user = os.environ.get("USER", "dev")
-    apply_default_acls(instance_dir, config.project.user_project_root, dev_user)
+    apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
 
     # S5: Register
     registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
@@ -1024,7 +1024,7 @@ def init(
     # S7: Sentinel
     write_initialized_sentinel(instance_dir)
 
-    console.print(f"Sandbox '{project_name}' initialized. Run `sandbox start` to launch.")
+    console.print(f"Sandbox '{instance_name}' initialized. Run `sandbox start` to launch.")
 
 
 @app.command()
@@ -1059,15 +1059,15 @@ def start(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.project.name
+    name = config.instance.name
     host_user, auth = _resolve_host_config(project_dir, config)
 
     # Project name immutability check (sandbox-toml-schema spec)
-    # instance_id format: <project_name>-<md5[:6]> — strip last 7 chars to recover original name
+    # instance_id format: <instance_name>-<md5[:6]> — strip last 7 chars to recover original name
     original_name = instance_id[:-7]
     if name != original_name:
         console.print(
-            "WARNING: project.name has changed since init. "
+            "WARNING: instance.name has changed since init. "
             "COMPOSE_PROJECT_NAME mismatch may orphan running containers.",
             style="yellow",
         )
@@ -1156,7 +1156,7 @@ def start(
         _release_lock(lock_fd)
 
     console.print("→ Handing over to admin shell")
-    _phase_handover(name, host_user, config.project.warmup_prompt, auth)
+    _phase_handover(name, host_user, config.instance.warmup_prompt, auth)
 
 
 @app.command()
@@ -1171,7 +1171,7 @@ def stop(clean: bool = False) -> None:
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.project.name
+    name = config.instance.name
     host_user, auth = _resolve_host_config(project_dir, config)
 
     # Warm check
@@ -1217,7 +1217,7 @@ def attach() -> None:
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.project.name
+    name = config.instance.name
     host_user, auth = _resolve_host_config(project_dir, config)
 
     # Warm check — reject if cold
@@ -1250,13 +1250,13 @@ def destroy(force: bool = False) -> None:
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.project.name
+    name = config.instance.name
     host_user, auth = _resolve_host_config(project_dir, config)
 
     # Phase 0: Confirmation
     if not force:
         console.print(f"WARNING: This permanently deletes sandbox '{name}' and all its state.")
-        console.print(f"         Your project at {config.project.user_project_root} is NOT affected.")
+        console.print(f"         Your project at {config.instance.user_project_root} is NOT affected.")
         typed_name = typer.prompt("Type the sandbox name to confirm")
         if typed_name != name:
             console.print("Aborted.")
@@ -1316,9 +1316,9 @@ def doctor(
 ) -> None:
     """Run host readiness diagnostics."""
     project_dir = _resolve_project_dir()
-    project_config: ProjectConfig | None = None
+    project_config: HostConfig | None = None
     try:
-        project_config = ProjectConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
         pass
 
@@ -1370,7 +1370,7 @@ def status() -> None:
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.project.name
+    name = config.instance.name
     host_user, auth = _resolve_host_config(project_dir, config)
 
     # Container status
@@ -1393,7 +1393,7 @@ def status() -> None:
     header_lines = [
         f"[bold]Name:[/bold]    {name}",
         f"[bold]ID:[/bold]      {instance_id}",
-        f"[bold]Path:[/bold]    {config.project.user_project_root}",
+        f"[bold]Path:[/bold]    {config.instance.user_project_root}",
         f"[bold]User:[/bold]    {host_user}",
         f"[bold]State:[/bold]   {state_label}",
     ]

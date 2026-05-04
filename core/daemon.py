@@ -1,4 +1,4 @@
-from core.project_config import MachinectlAuth
+from core.host_config import MachinectlAuth
 
 
 class DaemonIPC:

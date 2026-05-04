@@ -1,7 +1,7 @@
 """IPAM allocator: /24-septuple subnet allocation with lowest-slot scan and overflow detection.
 
 Each sandbox instance is assigned seven consecutive /24 subnets (isolated, core_proxy, dns, admin,
-admin_proxy, egress, ipc) from the 10.100.0.0-10.255.255.0 range. The ledger maps project_id -> base_index
+admin_proxy, egress, ipc) from the 10.100.0.0-10.255.255.0 range. The ledger maps instance_id -> base_index
 (integer). Subnets are derived at runtime using: 10.(100 + g//256).(g%256).0/24 where g = base_index * 7.
 
 Maximum concurrent instances: 5,705 (base_index 0-5704).
@@ -61,10 +61,10 @@ class IPAMLedger:
             os.close(lock_fd)
             raise IPAMLockException("Could not acquire IPAM lock") from exc
 
-    def allocate(self, project_id: str) -> int:
-        """Allocate the lowest available base_index for a project.
+    def allocate(self, instance_id: str) -> int:
+        """Allocate the lowest available base_index for an instance.
 
-        Returns the existing base_index if project_id is already allocated.
+        Returns the existing base_index if instance_id is already allocated.
         Raises IPAMExhaustedError if all slots are consumed.
         """
         lock_fd = self._acquire_lock()
@@ -72,14 +72,14 @@ class IPAMLedger:
             data = self._load()
 
             # Idempotent: return existing allocation
-            if project_id in data:
-                return data[project_id]
+            if instance_id in data:
+                return data[instance_id]
 
             # Find lowest available slot
             used_indices = set(data.values())
             for candidate in range(MAX_SLOTS):
                 if candidate not in used_indices:
-                    data[project_id] = candidate
+                    data[instance_id] = candidate
                     self._save(data)
                     return candidate
 
@@ -90,29 +90,29 @@ class IPAMLedger:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
-    def release(self, project_id: str) -> None:
+    def release(self, instance_id: str) -> None:
         """Release an IPAM slot, freeing it for reuse."""
         lock_fd = self._acquire_lock()
         try:
             data = self._load()
-            data.pop(project_id, None)
+            data.pop(instance_id, None)
             self._save(data)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
-    def peek_next_slot(self, project_id: str) -> tuple[int, bool]:
+    def peek_next_slot(self, instance_id: str) -> tuple[int, bool]:
         """Read-only scan: return (slot, is_existing) without lock or write.
 
-        Returns the existing base_index if project_id is already allocated (True),
+        Returns the existing base_index if instance_id is already allocated (True),
         otherwise the lowest available slot (False).
         Raises IPAMExhaustedError if all slots are consumed.
         """
         data = self._load()
 
         # Existing allocation
-        if project_id in data:
-            return data[project_id], True
+        if instance_id in data:
+            return data[instance_id], True
 
         # Find lowest available slot
         used_indices = set(data.values())

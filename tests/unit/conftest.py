@@ -11,11 +11,12 @@ import pytest
 from rich.console import Console
 
 if TYPE_CHECKING:
-    from core.project_config import ProjectConfig
+    from core.host_config import HostConfig
 
 
-class ProjectConfigFactory(Protocol):
-    def __call__(self, *, user: str = ..., auth: str = ...) -> ProjectConfig: ...
+class HostConfigFactory(Protocol):
+    def __call__(self, *, user: str = ..., auth: str = ...) -> HostConfig: ...
+
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -38,18 +39,18 @@ class CapturedConsole(NamedTuple):
 
 
 @pytest.fixture()
-def project_config_factory() -> ProjectConfigFactory:
-    """Build ``ProjectConfig`` instances for the project-config-machinectl-auth flow.
+def project_config_factory() -> HostConfigFactory:
+    """Build ``HostConfig`` instances for the host-config-machinectl-auth flow.
 
     Usage::
 
-        def test_x(project_config_factory: ProjectConfigFactory) -> None:
+        def test_x(project_config_factory: HostConfigFactory) -> None:
             pc = project_config_factory(user="sandbox", auth="polkit")
     """
-    from core.project_config import ProjectConfig
+    from core.host_config import HostConfig
 
-    def _make(*, user: str = "sandbox", auth: str = "sudo") -> ProjectConfig:
-        return ProjectConfig.model_validate(
+    def _make(*, user: str = "sandbox", auth: str = "sudo") -> HostConfig:
+        return HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": user, "machinectl_authentication": auth}}
         )
 

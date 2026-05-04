@@ -12,16 +12,16 @@ from core.hydration import (
     CoreConfig,
     DbPostgresConfig,
     ImagePin,
+    InstanceConfig,
     ProxyWhitelistConfig,
-    SandboxConfig,
     build_jinja_context,
     render_templates,
 )
 
-# ─── Minimal valid TOML for SandboxConfig ─────────────────────────────────────
+# ─── Minimal valid TOML for InstanceConfig ─────────────────────────────────────
 
 VALID_TOML = """\
-[project]
+[instance]
 name = "testproject"
 user_project_root = "/home/dev/testproject"
 host_uid = "1000"
@@ -70,14 +70,14 @@ domains = [
 """
 
 
-class TestSandboxConfig:
+class TestInstanceConfig:
     def test_parse_valid_toml(self, tmp_path: Path) -> None:
-        """SandboxConfig parses valid TOML without errors."""
+        """InstanceConfig parses valid TOML without errors."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
-        assert config.project.name == "testproject"
-        assert config.project.user_project_root == "/home/dev/testproject"
+        config = InstanceConfig.from_toml(str(toml_path))
+        assert config.instance.name == "testproject"
+        assert config.instance.user_project_root == "/home/dev/testproject"
         assert config.core.pids_limit == 400
         assert config.admin.base_distro_family == "debian"
         assert config.runtimes.python is True
@@ -92,7 +92,7 @@ class TestSandboxConfig:
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(broken)
         with pytest.raises(Exception):  # Pydantic ValidationError
-            SandboxConfig.from_toml(str(toml_path))
+            InstanceConfig.from_toml(str(toml_path))
 
 
 class TestDbPostgresConfigFields:
@@ -108,7 +108,7 @@ class TestDbPostgresConfigFields:
         """pg_user and pg_db survive from_toml() parsing with defaults."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         assert config.components_db_postgres.pg_user == "sandbox"
         assert config.components_db_postgres.pg_db == "sandbox_db"
 
@@ -121,7 +121,7 @@ class TestDbPostgresConfigFields:
         )
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(custom)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         assert config.components_db_postgres.pg_user == "custom_user"
         assert config.components_db_postgres.pg_db == "custom_db"
 
@@ -131,7 +131,7 @@ class TestBuildJinjaContext:
         """Context dict has correct IP values at base_index=0."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         ctx = build_jinja_context(
             config=config,
@@ -159,7 +159,7 @@ class TestBuildJinjaContext:
         """Runtimes dict is available in the Jinja2 context."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         ctx = build_jinja_context(
             config=config,
@@ -175,7 +175,7 @@ class TestBuildJinjaContext:
         """Proxy whitelist domains are available in the Jinja2 context."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         ctx = build_jinja_context(
             config=config,
@@ -191,7 +191,7 @@ class TestBuildJinjaContext:
         """Task 4.1: build_jinja_context includes pg_user, pg_db, and firecrawl IPs."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         ctx = build_jinja_context(
             config=config,
@@ -213,7 +213,7 @@ class TestBuildJinjaContext:
         """custom_claude_rules contains file content when custom/config/core/CLAUDE.md exists."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         instance_dir = tmp_path / "instance"
         custom_rules = instance_dir / "custom" / "config" / "core" / "CLAUDE.md"
@@ -232,7 +232,7 @@ class TestBuildJinjaContext:
         """custom_claude_rules is '' when custom/config/core/CLAUDE.md does not exist."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         ctx = build_jinja_context(
             config=config,
@@ -262,7 +262,7 @@ class TestCoreConfigResourceLimits:
         """Omitted mem_limit and cpus fields use defaults."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         assert config.core.mem_limit == "8gb"
         assert config.core.cpus == 4.0
 
@@ -286,7 +286,7 @@ class TestAdminConfigResourceLimits:
         """Omitted mem_limit and cpus fields use defaults."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         assert config.admin.mem_limit == "8gb"
         assert config.admin.cpus == 4.0
 
@@ -298,7 +298,7 @@ class TestBuildJinjaContextResourceLimits:
         """Context includes core_mem_limit, core_memswap_limit, core_cpus."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert ctx["core_mem_limit"] == "8gb"
         assert ctx["core_memswap_limit"] == "8gb"
@@ -308,7 +308,7 @@ class TestBuildJinjaContextResourceLimits:
         """Context includes admin_mem_limit, admin_memswap_limit, admin_cpus."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert ctx["admin_mem_limit"] == "8gb"
         assert ctx["admin_memswap_limit"] == "8gb"
@@ -322,7 +322,7 @@ class TestBuildJinjaContextResourceLimits:
         )
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(custom_toml)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert ctx["core_mem_limit"] == "16gb"
         assert ctx["core_memswap_limit"] == "16gb"
@@ -335,7 +335,7 @@ class TestBuildJinjaContextResourceLimits:
         )
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(custom_toml)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert ctx["admin_mem_limit"] == "4gb"
         assert ctx["admin_memswap_limit"] == "4gb"
@@ -378,7 +378,7 @@ class TestRenderTemplates:
         # Create a minimal compose.yml template
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text("# rendered: {{ project_name }}\nsubnet: {{ isolated_subnet }}\n")
+        (docker_dir / "compose.yml").write_text("# rendered: {{ instance_name }}\nsubnet: {{ isolated_subnet }}\n")
         # Core Dockerfile template
         core_dir = docker_dir / "core"
         core_dir.mkdir()
@@ -599,7 +599,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     ips = derive_static_ips(0)
 
     return {
-        "project_name": "testproject",
+        "instance_name": "testproject",
         "instance_dir": instance_dir,
         "user_project_root": "/home/dev/testproject",
         "isolated_subnet": isolated,
@@ -783,7 +783,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     tooling = tmp_path / "tooling"
     docker_dir = tooling / ".docker"
     docker_dir.mkdir(parents=True)
-    (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+    (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
     core_dir = docker_dir / "core"
     core_dir.mkdir()
     (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
@@ -804,7 +804,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     config_dir = tooling / ".config"
     dns_dir = config_dir / "coredns"
     dns_dir.mkdir(parents=True)
-    (dns_dir / "Corefile").write_text("# {{ project_name }}\n")
+    (dns_dir / "Corefile").write_text("# {{ instance_name }}\n")
     dnsdist_dir = config_dir / "dnsdist"
     dnsdist_dir.mkdir(parents=True)
     (dnsdist_dir / "dnsdist.conf").write_text(
@@ -960,7 +960,7 @@ class TestReadOnlyDomainsGeneration:
         # Minimal tooling plane
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+        (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
         core_dir = docker_dir / "core"
         core_dir.mkdir()
         (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
@@ -976,7 +976,7 @@ class TestReadOnlyDomainsGeneration:
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
             (config_dir / d).mkdir(parents=True, exist_ok=True)
-        (config_dir / "coredns" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "coredns" / "Corefile").write_text("# {{ instance_name }}\n")
         (config_dir / "dnsdist" / "dnsdist.conf").write_text(
             'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
         )
@@ -1018,7 +1018,7 @@ class TestReadOnlyDomainsGeneration:
 
         docker_dir = tooling / ".docker"
         docker_dir.mkdir(parents=True)
-        (docker_dir / "compose.yml").write_text("# {{ project_name }}\n")
+        (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
         (docker_dir / "core").mkdir()
         (docker_dir / "core" / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
         (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
@@ -1031,7 +1031,7 @@ class TestReadOnlyDomainsGeneration:
         config_dir = tooling / ".config"
         for d in ["coredns", "dnsdist", "proxy", "admin", "core"]:
             (config_dir / d).mkdir(parents=True, exist_ok=True)
-        (config_dir / "coredns" / "Corefile").write_text("# {{ project_name }}\n")
+        (config_dir / "coredns" / "Corefile").write_text("# {{ instance_name }}\n")
         (config_dir / "dnsdist" / "dnsdist.conf").write_text(
             'setLocal("0.0.0.0:53")\nnewServer({address="{{ coredns_dns_ip }}:53"})\n'
         )
@@ -1081,7 +1081,7 @@ class TestProxyWhitelistReadOnlyDomains:
         """Existing sandbox.toml without read_only_domains still parses correctly."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         assert config.proxy_whitelist.read_only_domains == []
 
 
@@ -1092,7 +1092,7 @@ class TestImageDigestContextValues:
         """dns_image uses @sha256: digest format."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "@sha256:" in ctx["dns_image"]
 
@@ -1100,7 +1100,7 @@ class TestImageDigestContextValues:
         """proxy_image uses @sha256: digest format."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "@sha256:" in ctx["proxy_image"]
 
@@ -1108,7 +1108,7 @@ class TestImageDigestContextValues:
         """db_postgres_image is present in context."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "db_postgres_image" in ctx
         assert "@sha256:" in ctx["db_postgres_image"]
@@ -1121,7 +1121,7 @@ class TestValidTomlBackwardCompatibility:
         """VALID_TOML with mutable tags parses without errors."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         # User-supplied mutable tags are accepted — defaults would be digests
         assert config.core.base_image == "cgr.dev/chainguard/wolfi-base:latest"
         assert config.admin.base_image == "debian:trixie-slim"
@@ -1162,7 +1162,7 @@ class TestSixSubnetContextKeys:
         """Context contains all 6 subnet CIDR keys."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         subnet_keys = [
             "isolated_subnet",
@@ -1179,7 +1179,7 @@ class TestSixSubnetContextKeys:
         """Context includes proxy_core_ip and proxy_admin_ip."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "proxy_core_ip" in ctx
         assert "proxy_admin_ip" in ctx
@@ -1188,7 +1188,7 @@ class TestSixSubnetContextKeys:
         """Context includes all 3 dnsdist IP keys."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         for key in ["dnsdist_isolated_ip", "dnsdist_dns_ip", "dnsdist_admin_ip"]:
             assert key in ctx, f"Missing context key: {key}"
@@ -1197,7 +1197,7 @@ class TestSixSubnetContextKeys:
         """Context includes all 3 coredns IP keys."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         for key in ["coredns_dns_ip", "coredns_admin_ip", "coredns_egress_ip"]:
             assert key in ctx, f"Missing context key: {key}"
@@ -1206,7 +1206,7 @@ class TestSixSubnetContextKeys:
         """Context includes db_postgres_admin_ip."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "db_postgres_admin_ip" in ctx
 
@@ -1214,7 +1214,7 @@ class TestSixSubnetContextKeys:
         """Context includes firecrawl_dns_ip."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "firecrawl_dns_ip" in ctx
 
@@ -1222,7 +1222,7 @@ class TestSixSubnetContextKeys:
         """Context includes dnsdist_image from IMAGE_REGISTRY."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "dnsdist_image" in ctx
         assert ctx["dnsdist_image"] == IMAGE_REGISTRY["dnsdist"].pinned
@@ -1231,7 +1231,7 @@ class TestSixSubnetContextKeys:
         """Legacy 3-subnet keys not in context."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "dns_sidecar_ip" not in ctx
         assert "proxy_ip" not in ctx
@@ -1739,7 +1739,7 @@ class TestHydrationIpcContext:
         """build_jinja_context returns ipc_subnet key."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(
             config=config,
             base_index=0,
@@ -1753,7 +1753,7 @@ class TestHydrationIpcContext:
         """build_jinja_context contains core_ipc_ip and admin_ipc_ip."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(
             config=config,
             base_index=0,
@@ -1767,7 +1767,7 @@ class TestHydrationIpcContext:
         """build_jinja_context contains firecrawl_isolated_ip."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(
             config=config,
             base_index=0,
@@ -2186,11 +2186,11 @@ class TestW4IntegrationVerification:
 
     def test_full_w4_template_validation(self, tmp_path: Path) -> None:
         """Build a complete Jinja2 context with all 7-tuple fields, validate all templates."""
-        from core.hydration import SandboxConfig, build_jinja_context, validate_templates
+        from core.hydration import InstanceConfig, build_jinja_context, validate_templates
 
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         # Use base_index=0 for deterministic IPs
         context = build_jinja_context(config, base_index=0, proxy_password="testpass", instance_dir=str(tmp_path))
@@ -2208,12 +2208,12 @@ class TestW4IntegrationVerification:
 
     def test_e2e_ipam_to_hydration_pipeline(self, tmp_path: Path) -> None:
         """Full pipeline: IPAM allocate → derive subnets/IPs → build context → validate templates."""
-        from core.hydration import SandboxConfig, build_jinja_context, validate_templates
+        from core.hydration import InstanceConfig, build_jinja_context, validate_templates
         from core.ipam import derive_static_ips, derive_subnets
 
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
-        config = SandboxConfig.from_toml(str(toml_path))
+        config = InstanceConfig.from_toml(str(toml_path))
 
         # Simulate IPAM allocation at slot 0
         base_index = 0
@@ -2381,10 +2381,10 @@ class TestDownstreamConsumerMigration:
 
 
 def _build_default_context(tmp_path: Path) -> dict[str, object]:
-    """Build context via build_jinja_context with default SandboxConfig."""
+    """Build context via build_jinja_context with default InstanceConfig."""
     toml_path = tmp_path / "sandbox.toml"
     toml_path.write_text(VALID_TOML)
-    config = SandboxConfig.from_toml(str(toml_path))
+    config = InstanceConfig.from_toml(str(toml_path))
     return build_jinja_context(
         config=config,
         base_index=0,
