@@ -72,7 +72,7 @@ class TestWriteSandboxToml:
         # Verify key fields present
         assert 'name = "myproject"' in content
         assert 'user_project_root = "/home/dev/myproject"' in content
-        assert 'host_unprivileged_user' not in content
+        assert "host_unprivileged_user" not in content
         assert "host_uid" in content
 
     def test_host_uid_auto_detected(self, tmp_path: Path) -> None:

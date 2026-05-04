@@ -92,7 +92,7 @@ def _default_project_config() -> typing.Iterator[None]:
     exercise the FileNotFoundError path can re-patch in their own `with patch(...)`
     block — pytest's mock stacks override this autouse fixture.
     """
-    from core.project_config import ProjectConfig
+    from core.host_config import ProjectConfig
 
     default = ProjectConfig.model_validate(
         {"host": {"docker_unprivileged_user": HOST_USER, "machinectl_authentication": "sudo"}}
@@ -1743,7 +1743,7 @@ class TestDoctorProjectConfig:
     def test_doctor_resolves_user_from_project_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.project_config import MachinectlAuth, ProjectConfig
+        from core.host_config import MachinectlAuth, ProjectConfig
 
         mock_pc = ProjectConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
@@ -1764,7 +1764,7 @@ class TestDoctorProjectConfig:
     def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.project_config import MachinectlAuth, ProjectConfig
+        from core.host_config import MachinectlAuth, ProjectConfig
 
         mock_pc = ProjectConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
@@ -1801,7 +1801,7 @@ class TestDoctorProjectConfig:
     def test_doctor_defaults_auth_to_sudo_when_no_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
@@ -2007,13 +2007,11 @@ class TestInitMissingUser:
 class TestInitProjectConfigResolution:
     """Tasks 3.8-3.9: init user resolution via sandbox-ai.toml."""
 
-    def test_init_with_project_config_no_user_flag(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_with_project_config_no_user_flag(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init succeeds without --user when sandbox-ai.toml provides docker_unprivileged_user."""
         from cli.main import app
+        from core.host_config import ProjectConfig
         from core.hydration import SandboxConfig
-        from core.project_config import ProjectConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/tomlproject"
@@ -2043,9 +2041,7 @@ class TestInitProjectConfigResolution:
             result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
 
-    def test_init_without_config_and_without_user_errors(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_init_without_config_and_without_user_errors(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """init errors when no --user flag and no sandbox-ai.toml."""
         from cli.main import app
 
@@ -2077,9 +2073,7 @@ class TestInitAuthProbe:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
-            patch(
-                "cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")
-            ) as mock_run,
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -2097,9 +2091,7 @@ class TestInitAuthProbe:
             assert "sudo" in probe_call
             assert "machinectl" in probe_call
 
-    def test_probe_failure_exits_with_remediation(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_probe_failure_exits_with_remediation(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Probe failure exits with error and remediation guidance."""
         from cli.main import app
 
@@ -2119,9 +2111,7 @@ class TestInitAuthProbe:
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
 
-    def test_probe_timeout_exits_with_error(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_probe_timeout_exits_with_error(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Probe timeout exits with error."""
         from cli.main import app
 
@@ -2152,9 +2142,7 @@ class TestInitAuthProbe:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.ProjectConfig.from_toml", side_effect=FileNotFoundError),
-            patch(
-                "cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")
-            ) as mock_run,
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -2171,9 +2159,7 @@ class TestInitAuthProbe:
             assert "sudo" not in probe_call
             assert "machinectl" in probe_call
 
-    def test_probe_polkit_failure_shows_polkit_remediation(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Polkit probe failure shows polkit-specific remediation."""
         from cli.main import app
 
@@ -2190,9 +2176,7 @@ class TestInitAuthProbe:
             assert result.exit_code == 1
             assert "polkit" in result.output.lower()
 
-    def test_invalid_machinectl_auth_value(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_invalid_machinectl_auth_value(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Invalid --machinectl-auth value exits with error."""
         from cli.main import app
 
@@ -2205,9 +2189,7 @@ class TestInitAuthProbe:
             assert result.exit_code == 1
             assert "invalid" in result.output.lower()
 
-    def test_probe_file_not_found_exits_with_error(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_probe_file_not_found_exits_with_error(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Probe FileNotFoundError (command not on PATH) exits with error."""
         from cli.main import app
 
@@ -2228,8 +2210,8 @@ class TestResolveHostConfig:
     def test_resolve_host_config_from_project_config(self) -> None:
         """_resolve_host_config returns values from ProjectConfig when present."""
         from cli.main import _resolve_host_config
+        from core.host_config import MachinectlAuth, ProjectConfig
         from core.hydration import SandboxConfig
-        from core.project_config import MachinectlAuth, ProjectConfig
 
         mock_project_config = ProjectConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
@@ -3695,7 +3677,7 @@ class TestPolkitEndToEnd:
         The call list does not include `sudo` as the first argv element.
         """
         from cli.main import app
-        from core.project_config import MachinectlAuth
+        from core.host_config import MachinectlAuth
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"

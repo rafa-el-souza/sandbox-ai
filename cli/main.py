@@ -22,6 +22,7 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
+from core.host_config import MachinectlAuth, ProjectConfig, machinectl_cmd
 from core.hydration import (
     SandboxConfig,
     build_jinja_context,
@@ -29,7 +30,6 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
-from core.project_config import MachinectlAuth, ProjectConfig, machinectl_cmd
 from core.registry import InstanceRegistry, generate_instance_id
 from core.scaffold import (
     _detect_git_config,

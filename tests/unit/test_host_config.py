@@ -1,9 +1,9 @@
-"""Tests for core/project_config.py — ProjectConfig model and machinectl_cmd builder."""
+"""Tests for core/host_config.py — ProjectConfig model and machinectl_cmd builder."""
 
 from pathlib import Path
 
 import pytest
-from core.project_config import HostConfig, MachinectlAuth, ProjectConfig, machinectl_cmd
+from core.host_config import HostConfig, MachinectlAuth, ProjectConfig, machinectl_cmd
 from pydantic import ValidationError
 
 # ─── Task 1.2: ProjectConfig.from_toml() ─────────────────────────────────────
@@ -49,7 +49,7 @@ class TestProjectConfigFromToml:
 
     def test_missing_required_field_raises_validation_error(self, tmp_path: Path) -> None:
         """Missing docker_unprivileged_user raises ValidationError."""
-        (tmp_path / "sandbox-ai.toml").write_text("[host]\nmachinectl_authentication = \"sudo\"\n")
+        (tmp_path / "sandbox-ai.toml").write_text('[host]\nmachinectl_authentication = "sudo"\n')
         with pytest.raises(ValidationError):
             ProjectConfig.from_toml(str(tmp_path))
 

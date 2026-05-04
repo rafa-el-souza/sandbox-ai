@@ -1,5 +1,5 @@
 from core.daemon import DaemonIPC
-from core.project_config import MachinectlAuth
+from core.host_config import MachinectlAuth
 
 
 def test_machinectl_binding_default_sudo() -> None:

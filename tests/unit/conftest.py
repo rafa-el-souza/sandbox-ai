@@ -11,11 +11,12 @@ import pytest
 from rich.console import Console
 
 if TYPE_CHECKING:
-    from core.project_config import ProjectConfig
+    from core.host_config import ProjectConfig
 
 
 class ProjectConfigFactory(Protocol):
     def __call__(self, *, user: str = ..., auth: str = ...) -> ProjectConfig: ...
+
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -46,7 +47,7 @@ def project_config_factory() -> ProjectConfigFactory:
         def test_x(project_config_factory: ProjectConfigFactory) -> None:
             pc = project_config_factory(user="sandbox", auth="polkit")
     """
-    from core.project_config import ProjectConfig
+    from core.host_config import ProjectConfig
 
     def _make(*, user: str = "sandbox", auth: str = "sudo") -> ProjectConfig:
         return ProjectConfig.model_validate(
