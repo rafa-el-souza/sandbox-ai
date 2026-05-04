@@ -62,7 +62,7 @@ class IPAMLedger:
             raise IPAMLockException("Could not acquire IPAM lock") from exc
 
     def allocate(self, instance_id: str) -> int:
-        """Allocate the lowest available base_index for a project.
+        """Allocate the lowest available base_index for an instance.
 
         Returns the existing base_index if instance_id is already allocated.
         Raises IPAMExhaustedError if all slots are consumed.

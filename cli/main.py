@@ -818,12 +818,12 @@ def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
 
 
 def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str, MachinectlAuth]:
-    """Resolve host_user and auth from project-wide ``sandbox-ai.toml``.
+    """Resolve host_user and auth from per-host ``sandbox-ai.toml``.
 
-    Post-init commands SHALL fail when project config is absent — the field
+    Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
-    del config  # accepted for signature stability with callers; project config is authoritative
+    del config  # accepted for signature stability with callers; host config is authoritative
     try:
         project_config = HostConfig.from_toml(project_dir)
     except FileNotFoundError:
@@ -1067,7 +1067,7 @@ def start(
     original_name = instance_id[:-7]
     if name != original_name:
         console.print(
-            "WARNING: project.name has changed since init. "
+            "WARNING: instance.name has changed since init. "
             "COMPOSE_PROJECT_NAME mismatch may orphan running containers.",
             style="yellow",
         )

@@ -1546,7 +1546,7 @@ class TestCheckImageDigests:
             assert result.status == "pass"  # Tag drift timeout is best-effort
 
 
-# ── Section 13: Auth-Mode-Aware Registry (Section 5 of project-config-machinectl-auth) ──
+# ── Section 13: Auth-Mode-Aware Registry (Section 5 of host-config-machinectl-auth) ──
 
 
 class TestPolkitRegistry:

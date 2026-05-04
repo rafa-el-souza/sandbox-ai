@@ -77,7 +77,7 @@ web_ports = [3000, 8080]
 domains = [".github.com"]
 """
 
-RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-project"')
+RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-instance"')
 
 WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"')
 
@@ -529,16 +529,16 @@ class TestStartSshKeypairGeneration:
         assert len(secrets_entries) >= 1
 
 
-class TestStartProjectNameImmutabilityWarning:
-    """Spec: sandbox-toml-schema — project.name immutability warning."""
+class TestStartInstanceNameImmutabilityWarning:
+    """Spec: sandbox-toml-schema — instance.name immutability warning."""
 
     def test_divergent_name_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        """WHEN project.name differs from instance_id name component, THEN warning is emitted."""
+        """WHEN instance.name differs from instance_id name component, THEN warning is emitted."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         inst = _register_instance(home, project_dir, instance_id)
-        # Overwrite sandbox.toml with renamed project.name
+        # Overwrite sandbox.toml with renamed instance.name
         (inst / "sandbox.toml").write_bytes(RENAMED_TOML_CONTENT)
 
         from cli.main import app
@@ -561,11 +561,11 @@ class TestStartProjectNameImmutabilityWarning:
         ):
             result = runner.invoke(app, ["start"])
             assert result.exit_code == 0
-            assert "project.name has changed" in result.output
+            assert "instance.name has changed" in result.output
             assert "COMPOSE_PROJECT_NAME" in result.output
 
     def test_matching_name_no_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        """WHEN project.name matches instance_id name component, THEN no warning."""
+        """WHEN instance.name matches instance_id name component, THEN no warning."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
@@ -592,7 +592,7 @@ class TestStartProjectNameImmutabilityWarning:
         ):
             result = runner.invoke(app, ["start"])
             assert result.exit_code == 0
-            assert "project.name has changed" not in result.output
+            assert "instance.name has changed" not in result.output
 
 
 # ── sandbox stop ─────────────────────────────────────────────────────────────
@@ -1738,9 +1738,9 @@ class TestDoctorMissingUser:
 
 
 class TestDoctorHostConfig:
-    """Section 5 (project-config-machinectl-auth): doctor reads sandbox-ai.toml."""
+    """Section 5 (host-config-machinectl-auth): doctor reads sandbox-ai.toml."""
 
-    def test_doctor_resolves_user_from_project_config(self, runner: CliRunner) -> None:
+    def test_doctor_resolves_user_from_host_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
         from core.host_config import HostConfig, MachinectlAuth
@@ -3608,7 +3608,7 @@ class TestStatusIPAMExhausted:
             assert "running" in result.output.lower() or "core" in result.output.lower()
 
 
-# ── Section 7 (project-config-machinectl-auth): auth-mode-aware preview ──────
+# ── Section 7 (host-config-machinectl-auth): auth-mode-aware preview ──────
 
 
 class TestDryRunAuthModePreview:
@@ -3715,9 +3715,9 @@ class TestPolkitEndToEnd:
 
 
 class TestPostInitMissingHostConfig:
-    """Verify the 'Post-init command fails without project config' scenario.
+    """Verify the 'Post-init command fails without host config' scenario.
 
-    Spec: openspec/changes/project-config-machinectl-auth/specs/orchestrator-cli/spec.md
+    Spec: openspec/changes/host-config-machinectl-auth/specs/orchestrator-cli/spec.md
     """
 
     @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])

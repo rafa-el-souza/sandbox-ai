@@ -95,7 +95,7 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
 
 
 class SandboxInstanceSection(BaseModel):
-    """[project] section of sandbox.toml."""
+    """[instance] section of sandbox.toml."""
 
     name: str
     user_project_root: str

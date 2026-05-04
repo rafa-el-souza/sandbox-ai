@@ -22,7 +22,7 @@ def ledger(tmp_path: object) -> IPAMLedger:
 class TestIPAMLedger:
     def test_allocate_lowest_slot(self, ledger: IPAMLedger) -> None:
         """First allocation gets base_index 0."""
-        idx = ledger.allocate("project-aaa")
+        idx = ledger.allocate("instance-aaa")
         assert idx == 0
 
     def test_sequential_allocation(self, ledger: IPAMLedger) -> None:
@@ -36,8 +36,8 @@ class TestIPAMLedger:
 
     def test_idempotent_reallocation(self, ledger: IPAMLedger) -> None:
         """Re-allocating the same instance_id returns the same base_index."""
-        idx1 = ledger.allocate("project-aaa")
-        idx2 = ledger.allocate("project-aaa")
+        idx1 = ledger.allocate("instance-aaa")
+        idx2 = ledger.allocate("instance-aaa")
         assert idx1 == idx2
 
     def test_slot_freed_after_release(self, ledger: IPAMLedger) -> None:
@@ -65,7 +65,7 @@ class TestIPAMLedger:
 
         ledger = IPAMLedger(ledger_path)
         with pytest.raises(IPAMExhaustedError, match="sandbox destroy"):
-            ledger.allocate("one-more-project")
+            ledger.allocate("one-more-instance")
 
     def test_corrupt_json_recovers(self, tmp_path: object) -> None:
         """Corrupt JSON ledger is treated as empty."""
@@ -73,7 +73,7 @@ class TestIPAMLedger:
         with open(ledger_path, "w") as f:
             f.write("{ bad json }")
         ledger = IPAMLedger(ledger_path)
-        idx = ledger.allocate("project-aaa")
+        idx = ledger.allocate("instance-aaa")
         assert idx == 0
 
     def test_lock_contention_raises(self, tmp_path: object) -> None:
@@ -89,7 +89,7 @@ class TestIPAMLedger:
             patch("fcntl.flock", side_effect=BlockingIOError(11, "Resource temporarily unavailable")),
             pytest.raises(IPAMLockException, match="Could not acquire IPAM lock"),
         ):
-            ledger.allocate("project-aaa")
+            ledger.allocate("instance-aaa")
 
 
 class TestMaxSlots:
@@ -232,23 +232,23 @@ class TestPeekNextSlot:
     """Task 11.1: peek_next_slot read-only slot preview."""
 
     def test_peek_new_project_returns_lowest_slot(self, ledger: IPAMLedger) -> None:
-        """New project: returns (0, False) — lowest available, not existing."""
-        slot, is_existing = ledger.peek_next_slot("new-project")
+        """New instance: returns (0, False) — lowest available, not existing."""
+        slot, is_existing = ledger.peek_next_slot("new-instance")
         assert slot == 0
         assert is_existing is False
 
     def test_peek_existing_project_returns_existing(self, ledger: IPAMLedger) -> None:
-        """Existing project: returns (allocated_slot, True)."""
-        ledger.allocate("existing-project")  # slot 0
-        slot, is_existing = ledger.peek_next_slot("existing-project")
+        """Existing instance: returns (allocated_slot, True)."""
+        ledger.allocate("existing-instance")  # slot 0
+        slot, is_existing = ledger.peek_next_slot("existing-instance")
         assert slot == 0
         assert is_existing is True
 
     def test_peek_does_not_write(self, ledger: IPAMLedger) -> None:
         """Peek is read-only — no mutations to ledger file."""
-        ledger.peek_next_slot("ghost-project")
+        ledger.peek_next_slot("ghost-instance")
         # A subsequent allocate should still get slot 0
-        idx = ledger.allocate("ghost-project")
+        idx = ledger.allocate("ghost-instance")
         assert idx == 0
 
     def test_peek_with_gaps(self, ledger: IPAMLedger) -> None:
@@ -257,7 +257,7 @@ class TestPeekNextSlot:
         ledger.allocate("p2")  # 1
         ledger.allocate("p3")  # 2
         ledger.release("p2")  # free slot 1
-        slot, is_existing = ledger.peek_next_slot("new-project")
+        slot, is_existing = ledger.peek_next_slot("new-instance")
         assert slot == 1
         assert is_existing is False
 
@@ -381,4 +381,4 @@ class TestIpam7Tuple:
 
         ledger = IPAMLedger(ledger_path)
         with pytest.raises(IPAMExhaustedError, match="sandbox destroy"):
-            ledger.allocate("one-more-project")
+            ledger.allocate("one-more-instance")

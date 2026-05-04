@@ -40,7 +40,7 @@ class CapturedConsole(NamedTuple):
 
 @pytest.fixture()
 def project_config_factory() -> HostConfigFactory:
-    """Build ``HostConfig`` instances for the project-config-machinectl-auth flow.
+    """Build ``HostConfig`` instances for the host-config-machinectl-auth flow.
 
     Usage::
 
