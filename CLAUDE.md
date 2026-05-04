@@ -28,11 +28,11 @@ The CLI entrypoint is `sandbox = "cli.main:app"` (typer). Run as `uv run sandbox
 
 ### Privilege boundary (load-bearing)
 
-Everything Docker-related crosses from the dev user into an unprivileged `sandbox` systemd user via `machinectl shell <user>@.host`. The prefix is built by `core.project_config.machinectl_cmd(user, auth)` and is either `["sudo", "machinectl", ...]` (SUDO mode) or `["machinectl", ...]` (POLKIT mode). **Never hardcode `sudo machinectl`** — always go through `machinectl_cmd()` so the auth mode from `sandbox-ai.toml` is respected. Recent commits (`f7ac8da`, `1648323`) refactored the codebase to enforce this; preserve it.
+Everything Docker-related crosses from the dev user into an unprivileged `sandbox` systemd user via `machinectl shell <user>@.host`. The prefix is built by `core.host_config.machinectl_cmd(user, auth)` and is either `["sudo", "machinectl", ...]` (SUDO mode) or `["machinectl", ...]` (POLKIT mode). **Never hardcode `sudo machinectl`** — always go through `machinectl_cmd()` so the auth mode from `sandbox-ai.toml` is respected. Recent commits (`f7ac8da`, `1648323`) refactored the codebase to enforce this; preserve it.
 
 ### Two configuration scopes
 
-- **Project-wide** (`sandbox-ai.toml` at project root): parsed by `core.project_config.ProjectConfig`. Holds `[host].docker_unprivileged_user` and `[host].machinectl_authentication` (`sudo` | `polkit`).
+- **Per-host** (`sandbox-ai.toml` at project root): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user` and `[host].machinectl_authentication` (`sudo` | `polkit`).
 - **Per-instance** (`sandboxes/<id>/sandbox.toml`): generated during `sandbox init` and **re-hydrated on every `sandbox start`** via the Pydantic→Jinja2 pipeline in `core.hydration`. Drift is eliminated by regenerating compose/sidecar configs from the model on each start.
 
 ### Core modules (`core/`)
@@ -40,10 +40,10 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 - `executor.py` — sterile POSIX subprocess execution (the only sanctioned way to shell out).
 - `registry.py` — instance registry as fcntl-locked JSON at `.state/instances.json`.
 - `ipam.py` — `/24` subnet septuple allocator (isolated, core_proxy, dns, admin, admin_proxy, egress, ipc) over 10.100.0.0–10.255.255.0 with lowest-slot scan and slot reuse (`MAX_SLOTS = 5705`).
-- `hydration.py` — `SandboxConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `.config/` and `.docker/` (immutable tooling/config plane).
+- `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `.config/` and `.docker/` (immutable tooling/config plane).
 - `scaffold.py` — bootstraps `sandboxes/<id>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel).
 - `crypto.py` — bcrypt htpasswd, SSH keypair, credential generation for the proxy sidecar.
-- `project_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder.
+- `host_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder.
 - `doctor.py` — host readiness check registry used by `sandbox doctor`.
 
 ### State and locking
