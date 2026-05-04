@@ -5,19 +5,19 @@ This specification defines the `sandbox.toml` configuration file schema, governi
 ## Requirements
 
 ### Requirement: Schema Generation on Scaffold
-The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[project]` section SHALL NOT include `host_unprivileged_user` — this field is sourced from project-wide config (`sandbox-ai.toml`). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
+The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[instance]` section SHALL NOT include `host_unprivileged_user` — this field is sourced from per-host config (`sandbox-ai.toml`). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
 
-#### Scenario: Auto-derived project name
-- **WHEN** no `project_name` override is present in an existing `sandbox.toml`
-- **THEN** the `project.name` field is set to `basename(abs(project_dir))`
+#### Scenario: Auto-derived instance name
+- **WHEN** no `instance_name` override is present in an existing `sandbox.toml`
+- **THEN** the `instance.name` field is set to `basename(abs(instance_dir))`
 
 #### Scenario: Auto-detected host UID
 - **WHEN** scaffold writes a new `sandbox.toml`
-- **THEN** the `project.host_uid` field is set to the UID of the invoking user (obtained via `os.getuid()`)
+- **THEN** the `instance.host_uid` field is set to the UID of the invoking user (obtained via `os.getuid()`)
 
 #### Scenario: host_unprivileged_user absent from scaffold output
 - **WHEN** scaffold writes a new `sandbox.toml`
-- **THEN** the `[project]` section does NOT contain a `host_unprivileged_user` field
+- **THEN** the `[instance]` section does NOT contain a `host_unprivileged_user` field
 
 #### Scenario: Database config defaults include pg_user, pg_db, and image
 - **WHEN** scaffold writes a new `sandbox.toml` with `components.db_postgres.enabled = true`
@@ -40,10 +40,10 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 - **THEN** Pydantic applies defaults without validation errors — the fields are optional with defaults
 
 ### Requirement: Pydantic Schema Validation
-The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[project]` section's Pydantic model class SHALL be named `SandboxProjectSection` to disambiguate from the project-wide `ProjectConfig` model. The `SandboxProjectSection` model SHALL NOT contain `host_unprivileged_user`. The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
+The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[instance]` section's Pydantic model class SHALL be named `SandboxInstanceSection` to disambiguate from the per-host `HostConfig` model. The `SandboxInstanceSection` model SHALL NOT contain `host_unprivileged_user`. The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
 
 #### Scenario: Missing required field
-- **WHEN** `sandbox.toml` is missing a required field (e.g., `project.user_project_root`)
+- **WHEN** `sandbox.toml` is missing a required field (e.g., `instance.user_project_root`)
 - **THEN** the CLI exits with a Pydantic `ValidationError` identifying the field and the reason before any state changes occur
 
 #### Scenario: Unknown field rejection
@@ -103,9 +103,9 @@ The system SHALL apply sub-table validation only for components that are enabled
 - **WHEN** `components.db_postgres = true` and `[components.db_postgres]` sub-table is absent
 - **THEN** the Pydantic model applies defaults (the sub-table is not required to be explicitly present; defaults are sufficient)
 
-### Requirement: Project Name Immutability Warning
-The system SHALL emit a warning if `project.name` in `sandbox.toml` differs from the `project_name` component of the instance directory name.
+### Requirement: Instance Name Immutability Warning
+The system SHALL emit a warning if `instance.name` in `sandbox.toml` differs from the `instance_name` component of the instance directory name.
 
-#### Scenario: Renamed project.name detected
-- **WHEN** `sandbox.toml` is read and `project.name` does not match the name portion of the instance directory
-- **THEN** CLI emits: "WARNING: project.name has changed since init. COMPOSE_PROJECT_NAME mismatch may orphan running containers."
+#### Scenario: Renamed instance.name detected
+- **WHEN** `sandbox.toml` is read and `instance.name` does not match the name portion of the instance directory
+- **THEN** CLI emits: "WARNING: instance.name has changed since init. COMPOSE_PROJECT_NAME mismatch may orphan running containers."
