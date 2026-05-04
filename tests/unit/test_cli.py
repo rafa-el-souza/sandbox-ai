@@ -32,7 +32,7 @@ HOST_USER = "sandbox"
 
 
 VALID_TOML_CONTENT = b"""
-[project]
+[instance]
 name = "myproject"
 user_project_root = "/home/dev/myproject"
 host_uid = "1000"
@@ -911,7 +911,7 @@ class TestResolveHelpers:
         home = mock_sandbox_ai_home
         inst = _register_instance(home, "/some/dir", "inst-abc")
         config = _load_config(str(inst))
-        assert config.project.name == "myproject"
+        assert config.instance.name == "myproject"
 
 
 class TestWarmCheckDirect:
@@ -1299,11 +1299,11 @@ class TestPhaseHydrateDirect:
 
     def test_phase_hydrate_calls_render(self) -> None:
         from cli.main import _phase_hydrate
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        mock_config = SandboxConfig.model_validate(
+        mock_config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "test",
                     "user_project_root": "/home/dev/test",
                     "host_uid": "1000",
@@ -1347,11 +1347,11 @@ class TestBuildComposeFiles:
 
     def test_base_only(self) -> None:
         from cli.main import _build_compose_files
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -1365,11 +1365,11 @@ class TestBuildComposeFiles:
 
     def test_with_extras(self) -> None:
         from cli.main import _build_compose_files
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -1387,11 +1387,11 @@ class TestPhaseComposeUpDirect:
 
     def test_compose_up_calls_executor(self) -> None:
         from cli.main import _phase_compose_up
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -1434,11 +1434,11 @@ class TestComposeDownDirect:
 
     def test_compose_down_plain(self) -> None:
         from cli.main import _compose_down
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -1454,11 +1454,11 @@ class TestComposeDownDirect:
 
     def test_compose_down_volumes(self) -> None:
         from cli.main import _compose_down
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -1521,14 +1521,14 @@ class TestInitScaffoldDirect:
 
     def test_init_creates_full_instance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
-        mock_config = SandboxConfig.model_validate(
+        mock_config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "newproject",
                     "user_project_root": project_dir,
                     "host_uid": "1000",
@@ -1643,14 +1643,14 @@ class TestInitFirecrawl:
 
     def test_init_with_firecrawl_includes_secret(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/fc-project"
 
-        mock_config = SandboxConfig.model_validate(
+        mock_config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "fc-project",
                     "user_project_root": project_dir,
                     "host_uid": "1000",
@@ -1849,11 +1849,11 @@ class TestInitHappyPath:
         project_dir = "/home/dev/newproject"
 
         from cli.main import app
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        mock_config = SandboxConfig.model_validate(
+        mock_config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "newproject",
                     "user_project_root": project_dir,
                     "host_uid": "1000",
@@ -1958,11 +1958,11 @@ class TestInitNonTTY:
         project_dir = "/home/dev/newproject"
 
         from cli.main import app
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        mock_config = SandboxConfig.model_validate(
+        mock_config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "newproject",
                     "user_project_root": project_dir,
                     "host_uid": "1000",
@@ -2011,7 +2011,7 @@ class TestInitHostConfigResolution:
         """init succeeds without --user when sandbox-ai.toml provides docker_unprivileged_user."""
         from cli.main import app
         from core.host_config import HostConfig
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/tomlproject"
@@ -2019,8 +2019,8 @@ class TestInitHostConfigResolution:
         mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
         )
-        mock_config = SandboxConfig.model_validate(
-            {"project": {"name": "tomlproject", "user_project_root": project_dir, "host_uid": "1000"}}
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "tomlproject", "user_project_root": project_dir, "host_uid": "1000"}}
         )
 
         with (
@@ -2061,12 +2061,12 @@ class TestInitAuthProbe:
     def test_probe_success_sudo(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Probe succeeds with sudo mode — init proceeds."""
         from cli.main import app
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/probeproject"
-        mock_config = SandboxConfig.model_validate(
-            {"project": {"name": "probeproject", "user_project_root": project_dir, "host_uid": "1000"}}
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "probeproject", "user_project_root": project_dir, "host_uid": "1000"}}
         )
 
         with (
@@ -2130,12 +2130,12 @@ class TestInitAuthProbe:
     def test_probe_polkit_mode_no_sudo(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Polkit mode probe does not include sudo in command."""
         from cli.main import app
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/polkit"
-        mock_config = SandboxConfig.model_validate(
-            {"project": {"name": "polkit", "user_project_root": project_dir, "host_uid": "1000"}}
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "polkit", "user_project_root": project_dir, "host_uid": "1000"}}
         )
 
         with (
@@ -2211,13 +2211,13 @@ class TestResolveHostConfig:
         """_resolve_host_config returns values from HostConfig when present."""
         from cli.main import _resolve_host_config
         from core.host_config import HostConfig, MachinectlAuth
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
         )
-        mock_config = SandboxConfig.model_validate(
-            {"project": {"name": "test", "user_project_root": "/tmp/test", "host_uid": "1000"}}
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "test", "user_project_root": "/tmp/test", "host_uid": "1000"}}
         )
 
         with patch("cli.main.HostConfig.from_toml", return_value=mock_project_config):
@@ -2469,11 +2469,11 @@ class TestContainerStatus:
         import subprocess as sp
 
         from cli.main import ContainerInfo, _container_status
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -2507,11 +2507,11 @@ class TestContainerStatus:
         import subprocess as sp
 
         from cli.main import _container_status
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -2534,11 +2534,11 @@ class TestContainerStatus:
         """Executor error returns empty list instead of raising."""
         from cli.main import _container_status
         from core.exceptions import SandboxExecutionError
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -3302,11 +3302,11 @@ class TestContainerStatusEdgeCases:
     def test_missing_compose_file_returns_empty(self) -> None:
         """L110: compose.yml absent → empty list immediately."""
         from cli.main import _container_status
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",
@@ -3321,7 +3321,7 @@ class TestContainerStatusEdgeCases:
     def test_blank_and_malformed_ndjson_skipped(self, tmp_path: Path) -> None:
         """L142, L154-155: blank lines and bad JSON are silently skipped."""
         from cli.main import _container_status
-        from core.hydration import SandboxConfig
+        from core.hydration import InstanceConfig
 
         # Create compose.yml so the early return is bypassed
         docker_dir = tmp_path / "docker"
@@ -3329,9 +3329,9 @@ class TestContainerStatusEdgeCases:
         (docker_dir / "compose.yml").write_text("")
         (tmp_path / ".sandbox.env").write_text("")
 
-        config = SandboxConfig.model_validate(
+        config = InstanceConfig.model_validate(
             {
-                "project": {
+                "instance": {
                     "name": "t",
                     "user_project_root": "/x",
                     "host_uid": "1000",

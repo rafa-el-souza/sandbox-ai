@@ -1,7 +1,7 @@
 """Hydration pipeline: Pydantic config parsing + Jinja2 template rendering.
 
 Implements the PHASE 4 (HYDRATION) from the orchestrator design:
-1. Parse sandbox.toml → SandboxConfig (Pydantic v2 model)
+1. Parse sandbox.toml → InstanceConfig (Pydantic v2 model)
 2. Build Jinja2 context from config + IPAM values + proxy credentials
 3. Render templates from tooling plane → instance directory
 """
@@ -94,7 +94,7 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
 
 
-class SandboxProjectSection(BaseModel):
+class SandboxInstanceSection(BaseModel):
     """[project] section of sandbox.toml."""
 
     name: str
@@ -173,10 +173,10 @@ class ProxyWhitelistConfig(BaseModel):
     read_only_domains: list[str] = []
 
 
-class SandboxConfig(BaseModel):
+class InstanceConfig(BaseModel):
     """Top-level Pydantic model for sandbox.toml."""
 
-    project: SandboxProjectSection
+    instance: SandboxInstanceSection
     core: CoreConfig = CoreConfig()
     admin: AdminConfig = AdminConfig()
     runtimes: RuntimesConfig = RuntimesConfig()
@@ -187,15 +187,15 @@ class SandboxConfig(BaseModel):
     proxy_whitelist: ProxyWhitelistConfig = ProxyWhitelistConfig()
 
     @classmethod
-    def from_toml(cls, toml_path: str) -> SandboxConfig:
-        """Parse sandbox.toml into a validated SandboxConfig."""
+    def from_toml(cls, toml_path: str) -> InstanceConfig:
+        """Parse sandbox.toml into a validated InstanceConfig."""
         with open(toml_path, "rb") as f:
             raw = tomllib.load(f)
 
         # Flatten nested TOML tables into the model's expected structure
         components_raw = raw.get("components", {})
         flat: dict[str, Any] = {
-            "project": raw.get("project", {}),
+            "instance": raw.get("instance", {}),
             "core": raw.get("core", {}),
             "admin": raw.get("admin", {}),
             "runtimes": {k: v for k, v in raw.get("runtimes", {}).items() if k != "node"},
@@ -220,7 +220,7 @@ def _read_optional_file(path: str) -> str:
 
 
 def build_jinja_context(
-    config: SandboxConfig,
+    config: InstanceConfig,
     base_index: int,
     proxy_password: str,
     instance_dir: str,
@@ -252,14 +252,14 @@ def build_jinja_context(
         "proxy_url_core": f"http://proxyuser:{proxy_password}@proxy:3128",
         # Paths
         "instance_dir": instance_dir,
-        "user_project_root": config.project.user_project_root,
+        "user_project_root": config.instance.user_project_root,
         "custom_config_core": "/home/agent/.sandbox/custom",
         "custom_config_admin": "/home/human/.sandbox/custom",
         "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",
         # Project
-        "project_name": config.project.name,
-        "host_uid": config.project.host_uid,
-        "warmup_prompt": config.project.warmup_prompt,
+        "project_name": config.instance.name,
+        "host_uid": config.instance.host_uid,
+        "warmup_prompt": config.instance.warmup_prompt,
         # Git identity
         "git_user": config.core.git_user or "Agent",
         "git_email": config.core.git_email or "agent@sandbox.local",
