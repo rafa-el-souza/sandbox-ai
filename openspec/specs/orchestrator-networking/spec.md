@@ -5,7 +5,7 @@ This specification governs the zero-trust IPAM bridging logic isolating internal
 ## Requirements
 
 ### Requirement: Global IPv4 and Port Demilitarization
-The system SHALL allocate seven consecutive `/24` subnets per sandbox instance from the `10.100.0.0–10.255.255.0` address space, with the allocation ledger mapping `project_id` to a reusable `base_index` integer.
+The system SHALL allocate seven consecutive `/24` subnets per sandbox instance from the `10.100.0.0–10.255.255.0` address space, with the allocation ledger mapping `instance_id` to a reusable `base_index` integer.
 
 #### Scenario: Seven /24 Subnet Allocation
 - **WHEN** a new sandbox instance requires IPAM allocation
@@ -23,7 +23,7 @@ The system SHALL allocate seven consecutive `/24` subnets per sandbox instance f
 The system SHALL support reuse of previously allocated `base_index` slots once their owning instance is destroyed.
 
 #### Scenario: Freed slot available for new allocation
-- **WHEN** `sandbox destroy` removes a `project_id` entry from `ipam.json`
+- **WHEN** `sandbox destroy` removes an `instance_id` entry from `ipam.json`
 - **THEN** that `base_index` is eligible for allocation by the next new instance that invokes `sandbox start`
 
 ### Requirement: IPAM Overflow Detection

@@ -144,10 +144,10 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     return inst
 
 
-def _write_ipam(home: Path, project_id: str, base_index: int) -> None:
+def _write_ipam(home: Path, instance_id: str, base_index: int) -> None:
     """Helper: write an IPAM entry."""
     ipam = home / ".state" / "ipam.json"
-    ipam.write_text(json.dumps({project_id: base_index}))
+    ipam.write_text(json.dumps({instance_id: base_index}))
 
 
 # ── sandbox start ────────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Tooling Plane Bootstrapping
 - **WHEN** the orchestrator initiates execution on a fresh host machine
-- **THEN** the operator runs `sandbox init --user <user>` which resolves `SANDBOX_AI_HOME` from the location of the orchestrator source, scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<project_name>-<project_id>/`, and writes the `.initialized` sentinel
+- **THEN** the operator runs `sandbox init --user <user>` which resolves `SANDBOX_AI_HOME` from the location of the orchestrator source, scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<instance_name>-<hash_hex>/`, and writes the `.initialized` sentinel
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start`
@@ -37,7 +37,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 
 ### Requirement: Sub-Process Privilege Bounding
-The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host`. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from project config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. All call sites SHALL use the centralized `machinectl_cmd()` builder from `core.project_config`.
+The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host`. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from host config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. All call sites SHALL use the centralized `machinectl_cmd()` builder from `core.host_config`.
 
 #### Scenario: Non-Interactive Daemon Interaction (sudo mode)
 - **WHEN** the Python orchestrator needs to execute a non-interactive Docker command and `machinectl_authentication` is `"sudo"`
@@ -55,14 +55,14 @@ The system SHALL isolate all Docker command execution across the `dev`/`sandbox`
 - **WHEN** the orchestrator hands the terminal to the admin container and `machinectl_authentication` is `"polkit"`
 - **THEN** it invokes: `subprocess.run(["machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited
 
-### Requirement: Project Config Loading in CLI Commands
-All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`) SHALL load project-wide config from `sandbox-ai.toml` via `ProjectConfig.from_toml(project_dir)` and read `docker_unprivileged_user` and `machinectl_authentication` from it. The `project_dir` SHALL be resolved from CWD via `_resolve_project_dir()`.
+### Requirement: Host Config Loading in CLI Commands
+All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`) SHALL load per-host config from `sandbox-ai.toml` via `HostConfig.from_toml(project_dir)` and read `docker_unprivileged_user` and `machinectl_authentication` from it. The `project_dir` SHALL be resolved from CWD via `_resolve_project_dir()`.
 
-#### Scenario: Post-init command reads project config
+#### Scenario: Post-init command reads host config
 - **WHEN** any post-init command runs and `sandbox-ai.toml` exists in the project directory
 - **THEN** `docker_unprivileged_user` and `machinectl_authentication` are sourced from the `[host]` section
 
-#### Scenario: Post-init command fails without project config
+#### Scenario: Post-init command fails without host config
 - **WHEN** any post-init command runs and `sandbox-ai.toml` does not exist in the project directory
 - **THEN** the CLI exits with an error directing the user to create `sandbox-ai.toml`
 
@@ -74,5 +74,5 @@ The system SHALL deliver an interactive shell session in the admin container to 
 - **THEN** `state.lock` is released and the CLI executes `docker exec -it <name>-admin-1 zsh` via machinectl, transferring terminal ownership to the admin container shell session
 
 #### Scenario: Warmup Prompt Injection
-- **WHEN** `sandbox.toml` declares a non-empty `project.warmup_prompt`
+- **WHEN** `sandbox.toml` declares a non-empty `instance.warmup_prompt`
 - **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this env var on init to invoke `claude -p "<value>" --dangerously-skip-permissions` before dropping to an interactive prompt

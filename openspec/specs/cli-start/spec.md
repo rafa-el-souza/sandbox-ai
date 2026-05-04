@@ -53,7 +53,7 @@ The system SHALL block launch until all services with defined healthchecks repor
 - **THEN** the CLI emits a service health summary, releases `state.lock`, and exits with a non-zero code
 
 ### Requirement: PTY Handover via machinectl
-The system SHALL hand over the terminal to the admin container via `machinectl shell` + `docker exec -it`, releasing `state.lock` before the exec call. The machinectl invocation SHALL use the configured authentication mode from project config.
+The system SHALL hand over the terminal to the admin container via `machinectl shell` + `docker exec -it`, releasing `state.lock` before the exec call. The machinectl invocation SHALL use the configured authentication mode from host config.
 
 #### Scenario: Terminal handed to admin container (sudo mode)
 - **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"sudo"`
@@ -64,11 +64,11 @@ The system SHALL hand over the terminal to the admin container via `machinectl s
 - **THEN** `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed
 
 ### Requirement: Instance Pre-Flight Checks
-The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `machinectl_authentication` mode from project config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Credential ownership matching SHALL occur during `_phase_credential_ownership()`, which executes after ACL grants (Phase 5). To bypass user namespace unmapped UID restrictions, the ownership matching phase SHALL temporarily escalate directory ACLs and mutate the files.
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `machinectl_authentication` mode from host config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Credential ownership matching SHALL occur during `_phase_credential_ownership()`, which executes after ACL grants (Phase 5). To bypass user namespace unmapped UID restrictions, the ownership matching phase SHALL temporarily escalate directory ACLs and mutate the files.
 
 #### Scenario: Doctor Chain 1 pre-flight with auth mode
 - **WHEN** `sandbox start` is invoked
-- **THEN** the system loads `machinectl_authentication` from project config and passes it to `build_check_registry()`. In polkit mode, the sudo binary check is omitted. All other Chain 1 checks execute normally.
+- **THEN** the system loads `machinectl_authentication` from host config and passes it to `build_check_registry()`. In polkit mode, the sudo binary check is omitted. All other Chain 1 checks execute normally.
 
 #### Scenario: Secret completeness gate
 - **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
@@ -170,7 +170,7 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 - **THEN** a `→ Handing over to admin shell` line is printed before the PTY exec
 
 #### Scenario: Warmup prompt injected at exec time
-- **WHEN** `sandbox.toml` declares a non-empty `project.warmup_prompt`
+- **WHEN** `sandbox.toml` declares a non-empty `instance.warmup_prompt`
 - **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this variable on shell init to auto-invoke claude via SSH
 
 #### Scenario: IPC setup phase absent

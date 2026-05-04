@@ -35,7 +35,7 @@ class TestIPAMLedger:
         assert idx2 == 2
 
     def test_idempotent_reallocation(self, ledger: IPAMLedger) -> None:
-        """Re-allocating the same project_id returns the same base_index."""
+        """Re-allocating the same instance_id returns the same base_index."""
         idx1 = ledger.allocate("project-aaa")
         idx2 = ledger.allocate("project-aaa")
         assert idx1 == idx2
@@ -52,7 +52,7 @@ class TestIPAMLedger:
         assert idx == 1  # lowest available
 
     def test_release_nonexistent_noop(self, ledger: IPAMLedger) -> None:
-        """Releasing a non-existent project_id does not raise."""
+        """Releasing a non-existent instance_id does not raise."""
         ledger.release("nonexistent")
 
     def test_overflow_detection(self, tmp_path: object) -> None:

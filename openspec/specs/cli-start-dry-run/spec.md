@@ -20,7 +20,7 @@ The system SHALL accept a `--dry-run` flag on `sandbox start` that simulates the
 - **THEN** the process exits with code 1 with the failure reason displayed
 
 ### Requirement: Instance Resolution in Dry-Run
-The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init`. The `docker_unprivileged_user` SHALL be sourced from project config (`sandbox-ai.toml`), not from instance config.
+The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init`. The `docker_unprivileged_user` SHALL be sourced from host config (`sandbox-ai.toml`), not from instance config.
 
 #### Scenario: Existing instance resolved
 - **WHEN** dry-run is invoked and the project directory has a registered instance
@@ -38,11 +38,11 @@ The system SHALL resolve the instance from the registry in dry-run mode using th
 The system SHALL compute the IPAM slot that would be allocated without writing to the ledger.
 
 #### Scenario: Preview slot for new instance
-- **WHEN** dry-run computes IPAM for a project not in the ledger
+- **WHEN** dry-run computes IPAM for an instance not in the ledger
 - **THEN** the lowest available slot is displayed along with six derived subnets (isolated, core_proxy, dns, admin, admin_proxy, egress), with a note that the slot is subject to concurrent changes
 
 #### Scenario: Preview slot for existing instance
-- **WHEN** dry-run computes IPAM for a project already in the ledger
+- **WHEN** dry-run computes IPAM for an instance already in the ledger
 - **THEN** the existing allocation is displayed
 
 ### Requirement: Template Validation
@@ -91,16 +91,16 @@ The system SHALL display the exact subprocess commands that would be executed du
 - **THEN** the `setfacl` commands that would be executed for Pattern A grants are displayed
 
 ### Requirement: IPAMLedger Read-Only Peek
-The `IPAMLedger` class SHALL provide a `peek_next_slot(project_id)` method that returns `tuple[int, bool]` — the slot index and whether the project already has an existing allocation — without acquiring a lock or modifying the ledger.
+The `IPAMLedger` class SHALL provide a `peek_next_slot(instance_id)` method that returns `tuple[int, bool]` — the slot index and whether the instance already has an existing allocation — without acquiring a lock or modifying the ledger.
 
-#### Scenario: Peek returns next available slot for new project
-- **WHEN** `peek_next_slot` is called for a project not in the ledger
+#### Scenario: Peek returns next available slot for new instance
+- **WHEN** `peek_next_slot` is called for an instance not in the ledger
 - **THEN** it returns `(lowest_available_base_index, False)` without writing to the ledger file
 
 #### Scenario: Peek returns existing allocation
-- **WHEN** `peek_next_slot` is called for a project already in the ledger
+- **WHEN** `peek_next_slot` is called for an instance already in the ledger
 - **THEN** it returns `(existing_base_index, True)`
 
 #### Scenario: Peek on exhausted ledger
-- **WHEN** `peek_next_slot` is called for a new project and all 5,705 slots are consumed
+- **WHEN** `peek_next_slot` is called for a new instance and all 5,705 slots are consumed
 - **THEN** it raises `IPAMExhaustedError`
