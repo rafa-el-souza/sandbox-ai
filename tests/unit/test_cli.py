@@ -1754,9 +1754,7 @@ class TestDoctorAllPass:
 class TestDoctorPerUserHomeDisplay:
     """Doctor output displays the resolved per-user home (env var visibility)."""
 
-    def test_displays_resolved_home(
-        self, runner: CliRunner, isolated_sandbox_ai_user_home: Path
-    ) -> None:
+    def test_displays_resolved_home(self, runner: CliRunner, isolated_sandbox_ai_user_home: Path) -> None:
         from cli.main import app
         from core.doctor import CheckResult
 
@@ -2731,15 +2729,28 @@ class TestDryRunExistingInstance:
             result = runner.invoke(app, ["start", "--dry-run"])
             assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
 
-    def test_dry_run_template_error_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_dry_run_template_error_exits_1(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Template error causes exit code 1."""
+        import core.hydration as hydration
+        import jinja2
+
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
         _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
-        # Break the compose template
-        (home / ".docker" / "compose.yml").write_text("{{ undefined_var }}")
+        # Build a broken templates root and redirect the packaged loader to it
+        templates_root = home / "broken_templates"
+        (templates_root / "docker").mkdir(parents=True)
+        (templates_root / "docker" / "compose.yml").write_text("{{ undefined_var }}")
+        monkeypatch.setattr(hydration, "_resource_files", lambda _name: templates_root)
+        monkeypatch.setattr(
+            jinja2,
+            "PackageLoader",
+            lambda *_a, **_k: jinja2.FileSystemLoader(str(templates_root)),
+        )
 
         from cli.main import app
 

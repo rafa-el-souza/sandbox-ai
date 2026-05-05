@@ -300,7 +300,6 @@ def _phase_hydrate(
     context = build_jinja_context(config, base_index, proxy_password, instance_dir)
     render_templates(
         context,
-        sandbox_ai_home,
         instance_dir,
         db_postgres=config.components_db_postgres.enabled,
         mcp_firecrawl=config.components.mcp_firecrawl,
@@ -751,7 +750,6 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     context = build_jinja_context(config, slot, "DRY_RUN_PASSWORD", instance_dir)
     validated, errors = validate_templates(
         context,
-        sandbox_ai_home,
         db_postgres=config.components_db_postgres.enabled,
         mcp_firecrawl=config.components.mcp_firecrawl,
     )

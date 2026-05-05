@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from importlib.resources import files as _resource_files
 from typing import TYPE_CHECKING, Literal
 
 from core.host_config import MachinectlAuth, machinectl_cmd, sandbox_ai_user_home
@@ -586,25 +587,25 @@ def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth
 
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
-# 17 unconditional source files in the tooling plane
+# 17 unconditional source files in the packaged templates module
 _UNCONDITIONAL_FILES: list[str] = [
-    ".docker/compose.yml",
-    ".docker/core/entrypoint.sh",
-    ".docker/admin/entrypoint.sh",
-    ".docker/coredns/Dockerfile.coredns",
-    ".config/coredns/Corefile",
-    ".config/dnsdist/dnsdist.conf",
-    ".config/proxy/squid.conf",
-    ".config/proxy/ERR_SANDBOX_403",
-    ".config/admin/.zshrc",
-    ".config/admin/.tmux.conf",
-    ".config/admin/gitmux.conf",
-    ".config/admin/starship.toml",
-    ".config/core/.bashrc",
-    ".config/core/.npmrc",
-    ".config/core/.gitconfig",
-    ".config/core/sshd_config",
-    ".config/core/CLAUDE.md",
+    "docker/compose.yml",
+    "docker/core/entrypoint.sh",
+    "docker/admin/entrypoint.sh",
+    "docker/coredns/Dockerfile.coredns",
+    "config/coredns/Corefile",
+    "config/dnsdist/dnsdist.conf",
+    "config/proxy/squid.conf",
+    "config/proxy/ERR_SANDBOX_403",
+    "config/admin/.zshrc",
+    "config/admin/.tmux.conf",
+    "config/admin/gitmux.conf",
+    "config/admin/starship.toml",
+    "config/core/.bashrc",
+    "config/core/.npmrc",
+    "config/core/.gitconfig",
+    "config/core/sshd_config",
+    "config/core/CLAUDE.md",
 ]
 
 
@@ -766,11 +767,10 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
 
 def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
     """Check that all 17 unconditional tooling plane files exist."""
-    sandbox_home = _get_sandbox_ai_home()
+    templates_root = _resource_files("templates")
     missing: list[str] = []
     for rel_path in _UNCONDITIONAL_FILES:
-        abs_path = os.path.join(sandbox_home, rel_path)
-        if not os.path.exists(abs_path):
+        if not templates_root.joinpath(rel_path).is_file():
             missing.append(rel_path)
 
     if not missing:

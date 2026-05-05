@@ -31,7 +31,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cli", "src/core"]
+packages = ["src/cli", "src/core", "src/templates"]
 
 [tool.ruff]
 target-version = "py314"

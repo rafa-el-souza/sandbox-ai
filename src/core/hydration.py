@@ -9,9 +9,9 @@ Implements the PHASE 4 (HYDRATION) from the orchestrator design:
 import json
 import logging
 import os
-import shutil
 import tomllib
 from dataclasses import dataclass as _dataclass
+from importlib.resources import files as _resource_files
 from typing import Any
 
 import jinja2
@@ -342,19 +342,19 @@ _STATIC_CONFIG_PROXY = ["ERR_SANDBOX_403"]
 
 def render_templates(
     context: dict[str, Any],
-    tooling_plane: str,
     instance_dir: str,
     *,
     db_postgres: bool,
     mcp_firecrawl: bool,
 ) -> None:
-    """Render all templates from tooling plane into instance directory.
+    """Render all templates from the packaged `templates` module into instance directory.
 
-    Renders: .docker/ → instance/docker/, .config/ → instance/config/
+    Templates are loaded via Jinja2 PackageLoader anchored at the `templates`
+    package; static files are read via importlib.resources.
     Skips: precious state (sandbox.toml, .sandbox.env, custom/, cache/, log/)
     """
     env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(tooling_plane),
+        loader=jinja2.PackageLoader("templates", package_path=""),
         undefined=jinja2.StrictUndefined,
         keep_trailing_newline=True,
     )
@@ -364,17 +364,17 @@ def render_templates(
     # file registries. All standard templates are iterated here.
 
     for src_rel, dst_rel in _JINJA_RENDERED_DOCKER:
-        _render_file(env, f".docker/{src_rel}", instance_dir, dst_rel, context)
+        _render_file(env, f"docker/{src_rel}", instance_dir, dst_rel, context)
 
     for src_rel, dst_rel in _JINJA_RENDERED_CONFIG:
-        _render_file(env, f".config/{src_rel}", instance_dir, dst_rel, context)
+        _render_file(env, f"config/{src_rel}", instance_dir, dst_rel, context)
 
     # ── Distro-selected Dockerfiles (dynamic template path) ───────────────
 
     core_family = context["core_distro_family"]
     _render_file(
         env,
-        f".docker/core/Dockerfile.core.{core_family}",
+        f"docker/core/Dockerfile.core.{core_family}",
         instance_dir,
         "docker/core/Dockerfile.core",
         context,
@@ -383,7 +383,7 @@ def render_templates(
     admin_family = context["admin_distro_family"]
     _render_file(
         env,
-        f".docker/admin/Dockerfile.admin.{admin_family}",
+        f"docker/admin/Dockerfile.admin.{admin_family}",
         instance_dir,
         "docker/admin/Dockerfile.admin",
         context,
@@ -391,19 +391,18 @@ def render_templates(
 
     # ── Static copies (no Jinja2 rendering) ───────────────────────────────
 
-    _copy_file(tooling_plane, ".docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
-    _copy_file(tooling_plane, ".docker/admin/entrypoint.sh", instance_dir, "docker/admin/entrypoint.sh")
-    _copy_file(tooling_plane, ".docker/coredns/Dockerfile.coredns", instance_dir, "docker/coredns/Dockerfile.coredns")
+    _copy_file("docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
+    _copy_file("docker/admin/entrypoint.sh", instance_dir, "docker/admin/entrypoint.sh")
+    _copy_file("docker/coredns/Dockerfile.coredns", instance_dir, "docker/coredns/Dockerfile.coredns")
 
     # ── Feature-gated extras ──────────────────────────────────────────────
 
     if db_postgres:
-        _render_file(env, ".docker/extras/db-postgres.yml", instance_dir, "docker/extras/db-postgres.yml", context)
+        _render_file(env, "docker/extras/db-postgres.yml", instance_dir, "docker/extras/db-postgres.yml", context)
     if mcp_firecrawl:
-        _render_file(env, ".docker/extras/mcp-firecrawl.yml", instance_dir, "docker/extras/mcp-firecrawl.yml", context)
+        _render_file(env, "docker/extras/mcp-firecrawl.yml", instance_dir, "docker/extras/mcp-firecrawl.yml", context)
         _copy_file(
-            tooling_plane,
-            ".docker/extras/Dockerfile.mcp-firecrawl",
+            "docker/extras/Dockerfile.mcp-firecrawl",
             instance_dir,
             "docker/extras/Dockerfile.mcp-firecrawl",
         )
@@ -437,10 +436,10 @@ def render_templates(
     # ── Static config copies ──────────────────────────────────────────────
 
     for filename in _STATIC_CONFIG_PROXY:
-        _copy_file(tooling_plane, f".config/proxy/{filename}", instance_dir, f"config/proxy/{filename}")
+        _copy_file(f"config/proxy/{filename}", instance_dir, f"config/proxy/{filename}")
 
     for filename in _STATIC_CONFIG_ADMIN:
-        _copy_file(tooling_plane, f".config/admin/{filename}", instance_dir, f"config/admin/{filename}")
+        _copy_file(f"config/admin/{filename}", instance_dir, f"config/admin/{filename}")
 
     # ── Programmatic .claude.json ─────────────────────────────────────────
     # Generated (not copied) so firecrawl MCP endpoint can be injected
@@ -482,16 +481,16 @@ def _render_file(
 
 
 def _copy_file(
-    tooling_plane: str,
     src_rel: str,
     instance_dir: str,
     dst_rel: str,
 ) -> None:
-    """Copy a static file from tooling plane to instance directory."""
-    src = os.path.join(tooling_plane, src_rel)
+    """Copy a static file from the templates package to the instance directory."""
+    resource = _resource_files("templates").joinpath(src_rel)
     dst = os.path.join(instance_dir, dst_rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copy2(src, dst)
+    with open(dst, "wb") as f:
+        f.write(resource.read_bytes())
 
 
 # ─── Dry-Run Validation ─────────────────────────────────────────────────────
@@ -499,7 +498,6 @@ def _copy_file(
 
 def validate_templates(
     context: dict[str, Any],
-    tooling_plane: str,
     *,
     db_postgres: bool,
     mcp_firecrawl: bool,
@@ -510,7 +508,7 @@ def validate_templates(
     Empty errors list means all templates are valid.
     """
     env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(tooling_plane),
+        loader=jinja2.PackageLoader("templates", package_path=""),
         undefined=jinja2.StrictUndefined,
         keep_trailing_newline=True,
     )
@@ -520,18 +518,18 @@ def validate_templates(
 
     # Build the full list of templates from the authoritative registries
     templates: list[str] = (
-        [f".docker/{src_rel}" for src_rel, _ in _JINJA_RENDERED_DOCKER]
-        + [f".config/{src_rel}" for src_rel, _ in _JINJA_RENDERED_CONFIG]
+        [f"docker/{src_rel}" for src_rel, _ in _JINJA_RENDERED_DOCKER]
+        + [f"config/{src_rel}" for src_rel, _ in _JINJA_RENDERED_CONFIG]
         + [
-            f".docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
-            f".docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
+            f"docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
+            f"docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
         ]
     )
 
     if db_postgres:
-        templates.append(".docker/extras/db-postgres.yml")
+        templates.append("docker/extras/db-postgres.yml")
     if mcp_firecrawl:
-        templates.append(".docker/extras/mcp-firecrawl.yml")
+        templates.append("docker/extras/mcp-firecrawl.yml")
 
     for template_rel in templates:
         try:
@@ -545,20 +543,20 @@ def validate_templates(
         except jinja2.UndefinedError as e:
             errors.append(f"Undefined variable in {template_rel}: {e}")
 
-    # Verify static files exist
+    # Verify static files exist in the templates package
     static_files = (
-        [f".config/proxy/{f}" for f in _STATIC_CONFIG_PROXY]
-        + [f".config/admin/{f}" for f in _STATIC_CONFIG_ADMIN]
-        + [f".config/core/{f}" for f in _STATIC_CONFIG_CORE]
-        + [".docker/core/entrypoint.sh", ".docker/admin/entrypoint.sh"]
-        + [".docker/coredns/Dockerfile.coredns"]
+        [f"config/proxy/{f}" for f in _STATIC_CONFIG_PROXY]
+        + [f"config/admin/{f}" for f in _STATIC_CONFIG_ADMIN]
+        + [f"config/core/{f}" for f in _STATIC_CONFIG_CORE]
+        + ["docker/core/entrypoint.sh", "docker/admin/entrypoint.sh"]
+        + ["docker/coredns/Dockerfile.coredns"]
     )
     if mcp_firecrawl:
-        static_files.append(".docker/extras/Dockerfile.mcp-firecrawl")
+        static_files.append("docker/extras/Dockerfile.mcp-firecrawl")
 
+    templates_root = _resource_files("templates")
     for rel_path in static_files:
-        abs_path = os.path.join(tooling_plane, rel_path)
-        if os.path.exists(abs_path):
+        if templates_root.joinpath(rel_path).is_file():
             validated += 1
         else:
             errors.append(f"Static file missing: {rel_path}")
