@@ -1792,16 +1792,12 @@ class TestCheckWorkspaceBridgeGroupExists:
         result = check_workspace_bridge_group_exists("u", None)
         assert result.status == "skip"
 
-    def test_pass_when_group_resolves(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_pass_when_group_resolves(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "pass"
@@ -1816,8 +1812,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-            'workspace_bridge_group = "sb-ws"\n'
+            '[host]\ndocker_unprivileged_user = "claude-sandbox"\nworkspace_bridge_group = "sb-ws"\n'
         )
 
         def _raise(host: Any) -> int:
@@ -1841,9 +1836,7 @@ class TestCheckWorkspaceBridgeGroupExists:
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
 
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
@@ -1852,24 +1845,18 @@ class TestCheckWorkspaceBridgeGroupExists:
             raise NoSubgidRangeError("no subgid")
 
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
-        monkeypatch.setattr(
-            "core.doctor.autodetect_workspace_bridge_gid_recommendation", _raise_no_range
-        )
+        monkeypatch.setattr("core.doctor.autodetect_workspace_bridge_gid_recommendation", _raise_no_range)
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "fail"
         assert "<pick-a-gid" in (result.remediation or "")
 
-    def test_fail_when_gid_out_of_range(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_fail_when_gid_out_of_range(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import SubgidOutOfRangeError
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
 
         def _raise(host: Any) -> int:
             raise SubgidOutOfRangeError("gid 99 not in any range")
@@ -1887,31 +1874,23 @@ class TestCheckDevInWorkspaceBridgeGroup:
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "skip"
 
-    def test_pass_when_in_supplementary_groups(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_pass_when_in_supplementary_groups(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
         monkeypatch.setattr("core.doctor.os.getgroups", lambda: [200500, 1000])
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "pass"
 
-    def test_fail_relogin_path(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_fail_relogin_path(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
         monkeypatch.setattr("core.doctor.os.getgroups", lambda: [1000])
         monkeypatch.setattr("core.doctor.os.getuid", lambda: 1000)
@@ -1928,22 +1907,19 @@ class TestCheckDevInWorkspaceBridgeGroup:
 
         import grp
         import pwd
+
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: _Pw())
         monkeypatch.setattr(grp, "getgrall", lambda: [_Gr()])
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "fail"
         assert "Log out" in (result.remediation or "")
 
-    def test_fail_usermod_path(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_fail_usermod_path(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
         monkeypatch.setattr("core.doctor.os.getgroups", lambda: [1000])
         monkeypatch.setattr("core.doctor.os.getuid", lambda: 1000)
@@ -1953,23 +1929,20 @@ class TestCheckDevInWorkspaceBridgeGroup:
 
         import grp
         import pwd
+
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: _Pw())
         monkeypatch.setattr(grp, "getgrall", lambda: [])
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "fail"
         assert "usermod -aG" in (result.remediation or "")
 
-    def test_fail_when_bridge_lookup_raises(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_fail_when_bridge_lookup_raises(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
         from core.host_config import WorkspaceBridgeGroupMissingError
 
         config_dir = isolated_sandbox_ai_user_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\n'
-        )
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
 
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
@@ -2039,18 +2012,14 @@ class TestCheckHelperImagePulled:
 
 
 class TestCheckSecretsHydratedRestrictively:
-    def test_pass_when_no_instances(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_pass_when_no_instances(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_secrets_hydrated_restrictively
 
         monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
-    def test_warn_on_world_readable_secret(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_warn_on_world_readable_secret(self, tmp_path: Any, monkeypatch: Any) -> None:
         import os
 
         from core.doctor import check_secrets_hydrated_restrictively
@@ -2111,16 +2080,12 @@ class TestCheckPreExistingInstanceLayout:
 
 
 class TestScanInstanceDirs:
-    def test_returns_empty_when_state_missing(
-        self, isolated_sandbox_ai_user_home: Any
-    ) -> None:
+    def test_returns_empty_when_state_missing(self, isolated_sandbox_ai_user_home: Any) -> None:
         from core.doctor import _scan_instance_dirs
 
         assert _scan_instance_dirs() == []
 
-    def test_returns_empty_on_corrupt_json(
-        self, isolated_sandbox_ai_user_home: Any
-    ) -> None:
+    def test_returns_empty_on_corrupt_json(self, isolated_sandbox_ai_user_home: Any) -> None:
         from core.doctor import _scan_instance_dirs
 
         state = isolated_sandbox_ai_user_home / "state"
@@ -2128,9 +2093,7 @@ class TestScanInstanceDirs:
         (state / "instances.json").write_text("{not json")
         assert _scan_instance_dirs() == []
 
-    def test_returns_empty_when_instances_field_wrong_shape(
-        self, isolated_sandbox_ai_user_home: Any
-    ) -> None:
+    def test_returns_empty_when_instances_field_wrong_shape(self, isolated_sandbox_ai_user_home: Any) -> None:
         import json as _json
 
         from core.doctor import _scan_instance_dirs
@@ -2182,9 +2145,7 @@ class TestScanInstanceDirs:
 class TestCheckSecretsHydratedRestrictivelyEdges:
     """Coverage for secrets-scan branches that bypass _scan_instance_dirs mocking."""
 
-    def test_skip_when_secrets_dir_absent(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_skip_when_secrets_dir_absent(self, tmp_path: Any, monkeypatch: Any) -> None:
         from core.doctor import check_secrets_hydrated_restrictively
 
         # Instance dir exists but has no secrets/ subdir.
@@ -2194,9 +2155,7 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
-    def test_unstattable_file_skipped(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_unstattable_file_skipped(self, tmp_path: Any, monkeypatch: Any) -> None:
         """os.stat raising on a secret file is silently skipped (rare race)."""
         import os
 

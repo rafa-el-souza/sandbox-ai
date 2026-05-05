@@ -640,9 +640,7 @@ class TestWriteRestricted:
 class TestBridgeGidContextKey:
     """build_jinja_context populates in_container_workspace_bridge_gid when host is provided."""
 
-    def test_key_present_when_host_provided(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_key_present_when_host_provided(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from core.host_config import HostSettings
 
         toml_path = tmp_path / "sandbox.toml"
@@ -650,9 +648,7 @@ class TestBridgeGidContextKey:
         config = InstanceConfig.from_toml(str(toml_path))
 
         monkeypatch.setattr("core.hydration.workspace_bridge_gid", lambda h: 201665)
-        monkeypatch.setattr(
-            "core.hydration.in_container_gid_for_host_gid", lambda gid, u: 1665
-        )
+        monkeypatch.setattr("core.hydration.in_container_gid_for_host_gid", lambda gid, u: 1665)
 
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
         ctx = build_jinja_context(config, 0, "p", str(tmp_path), host=host)
@@ -665,9 +661,7 @@ class TestBridgeGidContextKey:
         ctx = build_jinja_context(config, 0, "p", str(tmp_path))
         assert "in_container_workspace_bridge_gid" not in ctx
 
-    def test_missing_group_aborts_hydration(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_group_aborts_hydration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
 
         toml_path = tmp_path / "sandbox.toml"
@@ -697,9 +691,7 @@ class TestComposeGroupAdd:
 class TestRenderTemplatesRestrictiveModes:
     """Hydration writes files at restrictive modes regardless of umask (Decision 6)."""
 
-    def test_rendered_files_mode_640_under_022_umask(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rendered_files_mode_640_under_022_umask(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tooling = _build_minimal_tooling(tmp_path)
         instance = tmp_path / "instance"
         instance.mkdir()

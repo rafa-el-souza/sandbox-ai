@@ -3,33 +3,39 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from core.exceptions import SandboxExecutionError
+from core.executor import Executor
 from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
 from core.host_config import MachinectlAuth
 from core.hydration import IMAGE_REGISTRY
 
 
-def _capture_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+@pytest.fixture
+def captured_executor() -> Iterator[list[dict[str, Any]]]:
+    """Patch ``Executor.run`` with autospec — signature drift fails the test loudly.
+
+    Yields a list that accumulates ``{"cmd": ..., **kwargs}`` per invocation.
+    """
     captured: list[dict[str, Any]] = []
 
-    def _fake_run(self: object, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def _capture(self: Executor, cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured.append({"cmd": cmd, **kwargs})
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("core.helper_container.Executor.run", _fake_run)
-    return captured
+    with patch.object(Executor, "run", autospec=True, side_effect=_capture):
+        yield captured
 
 
 # ─── helper_chown_files ────────────────────────────────────────────────────
 
 
 class TestHelperChownFiles:
-    def test_command_construction_includes_hardening(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_command_construction_includes_hardening(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_chown_files(
             "claude-sandbox",
             "/inst/secrets",
@@ -39,8 +45,8 @@ class TestHelperChownFiles:
             mode=0o600,
             machinectl_auth=MachinectlAuth.SUDO,
         )
-        assert len(captured) == 1
-        cmd = captured[0]["cmd"]
+        assert len(captured_executor) == 1
+        cmd = captured_executor[0]["cmd"]
         assert isinstance(cmd, list)
         # machinectl prefix
         assert cmd[0] == "sudo"
@@ -71,11 +77,10 @@ class TestHelperChownFiles:
         assert "chown 1000:0" in payload
         assert "chmod 0600" in payload
         # sentinel + timeout passthrough
-        assert captured[0]["sentinel"] is True
-        assert captured[0]["timeout"] == 30
+        assert captured_executor[0]["sentinel"] is True
+        assert captured_executor[0]["timeout"] == 30
 
-    def test_polkit_drops_sudo_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_polkit_drops_sudo_prefix(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_chown_files(
             "claude-sandbox",
             "/p",
@@ -85,10 +90,9 @@ class TestHelperChownFiles:
             mode=0o640,
             machinectl_auth=MachinectlAuth.POLKIT,
         )
-        assert captured[0]["cmd"][0] == "machinectl"
+        assert captured_executor[0]["cmd"][0] == "machinectl"
 
-    def test_empty_files_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_empty_files_is_noop(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_chown_files(
             "claude-sandbox",
             "/p",
@@ -98,10 +102,9 @@ class TestHelperChownFiles:
             mode=0o640,
             machinectl_auth=MachinectlAuth.SUDO,
         )
-        assert captured == []
+        assert captured_executor == []
 
-    def test_batched_single_invocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_batched_single_invocation(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_chown_files(
             "u",
             "/p",
@@ -111,13 +114,12 @@ class TestHelperChownFiles:
             mode=0o640,
             machinectl_auth=MachinectlAuth.SUDO,
         )
-        assert len(captured) == 1
-        payload = captured[0]["cmd"][-1]
+        assert len(captured_executor) == 1
+        payload = captured_executor[0]["cmd"][-1]
         for f in ["a", "b", "c", "d"]:
             assert f in payload
 
-    def test_idempotent_re_invocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_idempotent_re_invocation(self, captured_executor: list[dict[str, Any]]) -> None:
         for _ in range(3):
             helper_chown_files(
                 "u",
@@ -128,10 +130,9 @@ class TestHelperChownFiles:
                 mode=0o640,
                 machinectl_auth=MachinectlAuth.SUDO,
             )
-        assert len(captured) == 3
+        assert len(captured_executor) == 3
 
-    def test_custom_mode_octal(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_custom_mode_octal(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_chown_files(
             "u",
             "/p",
@@ -141,15 +142,19 @@ class TestHelperChownFiles:
             mode=0o755,
             machinectl_auth=MachinectlAuth.SUDO,
         )
-        payload = captured[0]["cmd"][-1]
+        payload = captured_executor[0]["cmd"][-1]
         assert "chmod 0755" in payload
 
-    def test_timeout_raises_diagnostic(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _raise(*a: object, **kw: object) -> None:
+    def test_timeout_raises_diagnostic(self) -> None:
+        """Executor.run raising SandboxExecutionError ('timed out …') propagates."""
+
+        def _raise(self: Executor, cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
             raise SandboxExecutionError("timed out after 30s")
 
-        monkeypatch.setattr("core.helper_container.Executor.run", _raise)
-        with pytest.raises(SandboxExecutionError, match="timed out"):
+        with (
+            patch.object(Executor, "run", autospec=True, side_effect=_raise),
+            pytest.raises(SandboxExecutionError, match="timed out"),
+        ):
             helper_chown_files(
                 "u",
                 "/p",
@@ -160,8 +165,7 @@ class TestHelperChownFiles:
                 machinectl_auth=MachinectlAuth.SUDO,
             )
 
-    def test_custom_timeout_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_custom_timeout_passes_through(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_chown_files(
             "u",
             "/p",
@@ -172,15 +176,14 @@ class TestHelperChownFiles:
             machinectl_auth=MachinectlAuth.SUDO,
             timeout=5,
         )
-        assert captured[0]["timeout"] == 5
+        assert captured_executor[0]["timeout"] == 5
 
 
 # ─── helper_mkdir_chown_dirs ──────────────────────────────────────────────
 
 
 class TestHelperMkdirChownDirs:
-    def test_command_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_command_construction(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_mkdir_chown_dirs(
             "claude-sandbox",
             "/inst/cache/core",
@@ -189,7 +192,7 @@ class TestHelperMkdirChownDirs:
             owner_gid=200999,
             machinectl_auth=MachinectlAuth.SUDO,
         )
-        payload = captured[0]["cmd"][-1]
+        payload = captured_executor[0]["cmd"][-1]
         for flag in [
             "--runtime=runc",
             "--network=none",
@@ -208,15 +211,11 @@ class TestHelperMkdirChownDirs:
         # No chmod per Decision 14
         assert "chmod" not in payload
 
-    def test_empty_leaves_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
-        helper_mkdir_chown_dirs(
-            "u", "/p", [], owner_uid=1, owner_gid=2, machinectl_auth=MachinectlAuth.SUDO
-        )
-        assert captured == []
+    def test_empty_leaves_is_noop(self, captured_executor: list[dict[str, Any]]) -> None:
+        helper_mkdir_chown_dirs("u", "/p", [], owner_uid=1, owner_gid=2, machinectl_auth=MachinectlAuth.SUDO)
+        assert captured_executor == []
 
-    def test_batched(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_batched(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_mkdir_chown_dirs(
             "u",
             "/p",
@@ -225,13 +224,12 @@ class TestHelperMkdirChownDirs:
             owner_gid=2,
             machinectl_auth=MachinectlAuth.SUDO,
         )
-        assert len(captured) == 1
-        payload = captured[0]["cmd"][-1]
+        assert len(captured_executor) == 1
+        payload = captured_executor[0]["cmd"][-1]
         assert ".claude" in payload
         assert "tmux_resurrect" in payload
 
-    def test_machinectl_wrapper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured = _capture_run(monkeypatch)
+    def test_machinectl_wrapper(self, captured_executor: list[dict[str, Any]]) -> None:
         helper_mkdir_chown_dirs(
             "claude-sandbox",
             "/p",
@@ -240,7 +238,7 @@ class TestHelperMkdirChownDirs:
             owner_gid=2,
             machinectl_auth=MachinectlAuth.POLKIT,
         )
-        cmd = captured[0]["cmd"]
+        cmd = captured_executor[0]["cmd"]
         assert cmd[:3] == ["machinectl", "shell", "claude-sandbox@.host"]
 
 
@@ -251,8 +249,6 @@ class TestExecutorTimeout:
     """Executor.run accepts a timeout and converts TimeoutExpired to SandboxExecutionError."""
 
     def test_timeout_converted(self) -> None:
-        from core.executor import Executor
-
         with patch("core.executor.subprocess.run") as run_mock:
             run_mock.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=1)
             with pytest.raises(SandboxExecutionError, match="timed out"):

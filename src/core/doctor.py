@@ -946,7 +946,7 @@ def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> C
         try:
             recommended = autodetect_workspace_bridge_gid_recommendation(host_user)
             rec_str = str(recommended)
-        except (NoSubgidRangeError, NoFreeGidInSubgidRangeError):
+        except NoSubgidRangeError, NoFreeGidInSubgidRangeError:
             rec_str = "<pick-a-gid-in-claude-sandbox-subgid-range>"
         remediation = (
             f"sudo groupadd -g {rec_str} {host.workspace_bridge_group} && "
@@ -965,10 +965,7 @@ def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> C
             status="fail",
             name=name,
             detail=str(exc),
-            remediation=(
-                "Recreate the bridge group at a gid within "
-                f"{host_user}'s /etc/subgid range"
-            ),
+            remediation=(f"Recreate the bridge group at a gid within {host_user}'s /etc/subgid range"),
             category="Workspace Bridge",
         )
     return CheckResult(
@@ -1009,9 +1006,7 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
         )
 
     current_user = pwd.getpwuid(os.getuid()).pw_name
-    in_etc_group = bridge_gid in {
-        g.gr_gid for g in grp.getgrall() if current_user in g.gr_mem
-    }
+    in_etc_group = bridge_gid in {g.gr_gid for g in grp.getgrall() if current_user in g.gr_mem}
     if in_etc_group:
         return CheckResult(
             status="fail",
@@ -1070,7 +1065,7 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
             text=True,
             timeout=5,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError, subprocess.TimeoutExpired:
         return CheckResult(
             status="warn",
             name="helper image cached",
@@ -1103,14 +1098,12 @@ def _scan_instance_dirs() -> list[str]:
     try:
         with open(state_path) as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError, json.JSONDecodeError:
         return []
     instances = data.get("instances", {})
     if not isinstance(instances, dict):
         return []
-    sandbox_ai_home = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    sandbox_ai_home = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     candidates: list[str] = []
     for instance_id in instances.values():
         if not isinstance(instance_id, str):

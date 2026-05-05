@@ -93,8 +93,7 @@ class Executor:
             raise SandboxExecutionError(error_msg) from e
         except subprocess.TimeoutExpired as e:
             raise SandboxExecutionError(
-                f"[FATAL] Sandbox Execution Fault: Command '{' '.join(cmd)}' "
-                f"timed out after {e.timeout}s."
+                f"[FATAL] Sandbox Execution Fault: Command '{' '.join(cmd)}' timed out after {e.timeout}s."
             ) from e
         except OSError as e:
             # Handle cases where binary doesn't exist

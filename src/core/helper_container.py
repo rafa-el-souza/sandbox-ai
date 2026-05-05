@@ -122,12 +122,7 @@ def helper_mkdir_chown_dirs(
         return
     image = IMAGE_REGISTRY["busybox_musl"].pinned
     quoted_leaves = " ".join(shlex.quote(leaf) for leaf in leaf_list)
-    inner = (
-        f"set -e; for d in {quoted_leaves}; do "
-        f'mkdir -p /p/"$d" && '
-        f'chown {owner_uid}:{owner_gid} /p/"$d"; '
-        "done"
-    )
+    inner = f'set -e; for d in {quoted_leaves}; do mkdir -p /p/"$d" && chown {owner_uid}:{owner_gid} /p/"$d"; done'
     cmd = _hardened_docker_run(image, parent, inner)
     Executor().run(
         [*machinectl_cmd(host_user, machinectl_auth), "/bin/bash", "-c", cmd],

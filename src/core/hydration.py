@@ -433,9 +433,7 @@ def render_templates(
     # Generate read_only_domains.txt from whitelist (N4)
     read_only_domains = context.get("proxy_whitelist_read_only_domains", [])
     read_only_path = os.path.join(instance_dir, "config/proxy/read_only_domains.txt")
-    write_restricted(
-        read_only_path, "".join(f"{d}\n" for d in read_only_domains), RESTRICTIVE_RO_MODE
-    )
+    write_restricted(read_only_path, "".join(f"{d}\n" for d in read_only_domains), RESTRICTIVE_RO_MODE)
 
     # Validation warning: orphaned read_only_domains entries not in domains
     allowed_domains = set(context.get("proxy_whitelist_domains", []))

@@ -307,9 +307,7 @@ class TestHostIdForInContainer:
         with pytest.raises(SubuidOutOfRangeError):
             host_id_for_in_container(-1, "claude-sandbox")
 
-    def test_multi_range_spans_correctly(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_multi_range_spans_correctly(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:1000:5\nclaude-sandbox:9000:5\n")
         # range 1: 1..5 → 1000..1004
         # range 2: 6..10 → 9000..9004
@@ -377,9 +375,7 @@ class TestInContainerGidForHostGid:
         with pytest.raises(NoSubgidRangeError):
             in_container_gid_for_host_gid(200000, "claude-sandbox")
 
-    def test_multi_range_inverse(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_multi_range_inverse(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _patch_subgid(monkeypatch, tmp_path, "u:1000:5\nu:9000:5\n")
         # 1000 → 1, 1004 → 5, 9000 → 6, 9004 → 10
         assert in_container_gid_for_host_gid(1000, "u") == 1
@@ -439,9 +435,7 @@ class TestAutodetectRecommendation:
             def __init__(self, gid: int) -> None:
                 self.gr_gid = gid
 
-        monkeypatch.setattr(
-            "core.host_config.grp.getgrall", lambda: [_Gr(200999), _Gr(201000)]
-        )
+        monkeypatch.setattr("core.host_config.grp.getgrall", lambda: [_Gr(200999), _Gr(201000)])
         gid = autodetect_workspace_bridge_gid_recommendation("claude-sandbox", in_container_min=1000)
         assert gid == 201001
 

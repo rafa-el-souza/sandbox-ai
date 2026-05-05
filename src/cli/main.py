@@ -610,9 +610,7 @@ and dry-run preview (_helper_mkdir_chown_plan).
 """
 
 
-def _helper_mkdir_chown_plan(
-    instance_dir: str, host_user: str
-) -> list[tuple[str, tuple[str, ...], int, int]]:
+def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int]]:
     """Return ``[(parent_abs, leaves, owner_uid, owner_gid), ...]`` for cache/log.
 
     ``owner_uid``/``owner_gid`` map in-container uid/gid 1000 (agent / human)
@@ -626,9 +624,7 @@ def _helper_mkdir_chown_plan(
     ]
 
 
-def _helper_cp_chown_plan(
-    instance_dir: str, host_user: str
-) -> list[tuple[str, tuple[str, ...], int, int, int]]:
+def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int, int]]:
     """Return ``[(parent_abs, files, owner_uid, owner_gid, mode), ...]`` for ro files.
 
     Owner uid is mapped via :func:`core.host_config.host_id_for_in_container`;
@@ -662,9 +658,7 @@ def _workspace_needs_recursive_setup(workspace: str, bridge_gid: int) -> bool:
     return not (has_setgid and has_correct_group)
 
 
-def _workspace_shared_group_recursive(
-    workspace: str, bridge_gid: int
-) -> tuple[int, list[str]]:
+def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[int, list[str]]:
     """Apply chgrp + chmod recursively, best-effort.
 
     Returns (failure_count, sample_failure_paths). Per-file failures (typically
@@ -701,9 +695,7 @@ def _workspace_shared_group_plan(
 
     Used by both execution and dry-run preview.
     """
-    default_entry = (
-        f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
-    )
+    default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     return [
@@ -733,14 +725,11 @@ def _phase_workspace_shared_group(
     host_user = host.docker_unprivileged_user
 
     if _workspace_needs_recursive_setup(user_project_root, bridge_gid):
-        failure_count, sample_paths = _workspace_shared_group_recursive(
-            user_project_root, bridge_gid
-        )
+        failure_count, sample_paths = _workspace_shared_group_recursive(user_project_root, bridge_gid)
         if failure_count:
             sample = ", ".join(sample_paths)
             console.print(
-                f"⚠ Workspace shared-group: {failure_count} file(s) skipped "
-                f"(non-dev-owned). Sample: {sample}",
+                f"⚠ Workspace shared-group: {failure_count} file(s) skipped (non-dev-owned). Sample: {sample}",
                 style="yellow",
             )
 
@@ -749,9 +738,7 @@ def _phase_workspace_shared_group(
         os.chown(user_project_root, -1, bridge_gid, follow_symlinks=False)
         os.chmod(user_project_root, 0o2770)
     except OSError as exc:
-        raise SandboxExecutionError(
-            f"Workspace root chgrp/chmod failed for {user_project_root}: {exc}"
-        ) from exc
+        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {user_project_root}: {exc}") from exc
 
     default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
     if dev_user:
@@ -811,9 +798,7 @@ def _phase_helper_mkdir_chown_cache_log(
             )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
-            raise SandboxExecutionError(
-                f"Default ACL setup failed for {parent_abs}: {stderr}"
-            ) from exc
+            raise SandboxExecutionError(f"Default ACL setup failed for {parent_abs}: {stderr}") from exc
         helper_mkdir_chown_dirs(host_user, parent_abs, leaves, owner_uid, owner_gid, auth)
 
 
@@ -945,9 +930,7 @@ def _compose_down(
     )
 
 
-def _revoke_acls(
-    instance_dir: str, host_user: str, user_project_root: str | None = None
-) -> list[str]:
+def _revoke_acls(instance_dir: str, host_user: str, user_project_root: str | None = None) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
     Iterates _acl_revoke_plan(). Uses check=False; failures are collected
@@ -1014,9 +997,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # ── Template validation ──────────────────────────────────────────────
     try:
-        context = build_jinja_context(
-            config, slot, "DRY_RUN_PASSWORD", instance_dir, host=host_settings
-        )
+        context = build_jinja_context(config, slot, "DRY_RUN_PASSWORD", instance_dir, host=host_settings)
     except WorkspaceBridgeGroupMissingError as exc:
         console.print(f"\n  [red]{exc}[/red]")
         console.print("  [red]Run `sandbox doctor` for setup commands.[/red]")
@@ -1051,9 +1032,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     dev_user = os.environ.get("USER")
-    for acl_cmd, description in _acl_grant_plan(
-        instance_dir, host_user, config.instance.user_project_root, dev_user
-    ):
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, config.instance.user_project_root, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
@@ -1064,13 +1043,10 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
                 f"    helper-mkdir+chown {parent_abs}/{{{leaves_str}}} → {owner_uid}:{owner_gid}",
                 style="dim",
             )
-        for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(
-            instance_dir, host_user
-        ):
+        for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
             files_str = ", ".join(files)
             console.print(
-                f"    helper-cp+chown {parent_abs}/{{{files_str}}} → "
-                f"{owner_uid}:{owner_gid} {mode:o}",
+                f"    helper-cp+chown {parent_abs}/{{{files_str}}} → {owner_uid}:{owner_gid} {mode:o}",
                 style="dim",
             )
     except SandboxExecutionError as exc:
@@ -1556,9 +1532,7 @@ def start(
 
         # Phase 4: Hydration
         try:
-            _phase_hydrate(
-                config, base_index, proxy_password, sandbox_ai_home, instance_dir, host_settings
-            )
+            _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir, host_settings)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",

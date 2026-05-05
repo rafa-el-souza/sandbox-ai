@@ -171,17 +171,13 @@ def host_id_for_in_container(N: int, host_user: str) -> int:
         raise SubuidOutOfRangeError(f"In-container uid must be non-negative, got {N}")
     ranges = parse_subuid_for_user(host_user)
     if not ranges:
-        raise NoSubuidRangeError(
-            f"User {host_user!r} has no /etc/subuid entry; rootless docker may not be configured"
-        )
+        raise NoSubuidRangeError(f"User {host_user!r} has no /etc/subuid entry; rootless docker may not be configured")
     remaining = N
     for first, count in ranges:
         if remaining <= count:
             return first + remaining - 1
         remaining -= count
-    raise SubuidOutOfRangeError(
-        f"In-container uid {N} exceeds the subuid range allocated to {host_user!r}"
-    )
+    raise SubuidOutOfRangeError(f"In-container uid {N} exceeds the subuid range allocated to {host_user!r}")
 
 
 def host_gid_for_in_container(N: int, host_user: str) -> int:
@@ -195,17 +191,13 @@ def host_gid_for_in_container(N: int, host_user: str) -> int:
         raise SubgidOutOfRangeError(f"In-container gid must be non-negative, got {N}")
     ranges = parse_subgid_for_user(host_user)
     if not ranges:
-        raise NoSubgidRangeError(
-            f"User {host_user!r} has no /etc/subgid entry; rootless docker may not be configured"
-        )
+        raise NoSubgidRangeError(f"User {host_user!r} has no /etc/subgid entry; rootless docker may not be configured")
     remaining = N
     for first, count in ranges:
         if remaining <= count:
             return first + remaining - 1
         remaining -= count
-    raise SubgidOutOfRangeError(
-        f"In-container gid {N} exceeds the subgid range allocated to {host_user!r}"
-    )
+    raise SubgidOutOfRangeError(f"In-container gid {N} exceeds the subgid range allocated to {host_user!r}")
 
 
 def in_container_gid_for_host_gid(host_gid: int, host_user: str) -> int:
@@ -217,17 +209,13 @@ def in_container_gid_for_host_gid(host_gid: int, host_user: str) -> int:
     """
     ranges = parse_subgid_for_user(host_user)
     if not ranges:
-        raise NoSubgidRangeError(
-            f"User {host_user!r} has no /etc/subgid entry; cannot map host gid {host_gid}"
-        )
+        raise NoSubgidRangeError(f"User {host_user!r} has no /etc/subgid entry; cannot map host gid {host_gid}")
     accumulated = 0
     for first, count in ranges:
         if first <= host_gid < first + count:
             return accumulated + (host_gid - first) + 1
         accumulated += count
-    raise SubgidOutOfRangeError(
-        f"Host gid {host_gid} is not within any /etc/subgid range allocated to {host_user!r}"
-    )
+    raise SubgidOutOfRangeError(f"Host gid {host_gid} is not within any /etc/subgid range allocated to {host_user!r}")
 
 
 def workspace_bridge_gid(host: HostSettings) -> int:
@@ -253,9 +241,7 @@ def workspace_bridge_gid(host: HostSettings) -> int:
     return gid
 
 
-def autodetect_workspace_bridge_gid_recommendation(
-    host_user: str, in_container_min: int = 1000
-) -> int:
+def autodetect_workspace_bridge_gid_recommendation(host_user: str, in_container_min: int = 1000) -> int:
     """Pick the lowest available host gid suitable for the workspace bridge group.
 
     Iterates the user's /etc/subgid ranges; selects the first host gid whose
@@ -272,9 +258,7 @@ def autodetect_workspace_bridge_gid_recommendation(
     """
     ranges = parse_subgid_for_user(host_user)
     if not ranges:
-        raise NoSubgidRangeError(
-            f"User {host_user!r} has no /etc/subgid entry; cannot recommend a bridge gid"
-        )
+        raise NoSubgidRangeError(f"User {host_user!r} has no /etc/subgid entry; cannot recommend a bridge gid")
     used_gids = {g.gr_gid for g in grp.getgrall()}
     accumulated = 0
     for first, count in ranges:

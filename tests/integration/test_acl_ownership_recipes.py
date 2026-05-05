@@ -51,7 +51,7 @@ def _docker_unprivileged_user_configured() -> bool:
     try:
         with open(real_toml, "rb") as f:
             raw = tomllib.load(f)
-    except (FileNotFoundError, tomllib.TOMLDecodeError):
+    except FileNotFoundError, tomllib.TOMLDecodeError:
         return False
     user = raw.get("host", {}).get("docker_unprivileged_user")
     if not isinstance(user, str):

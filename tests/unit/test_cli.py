@@ -527,9 +527,7 @@ class TestStartIPAMExhausted:
 class TestStartWorkspaceBridgeMissing:
     """Task 5.2: hydration aborts when workspace bridge group is missing."""
 
-    def test_start_aborts_with_remediation_hint(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_start_aborts_with_remediation_hint(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.host_config import WorkspaceBridgeGroupMissingError
 
@@ -558,9 +556,7 @@ class TestStartWorkspaceBridgeMissing:
             assert "sandbox doctor" in result.output
             mock_release.assert_called_once()
 
-    def test_dry_run_aborts_with_remediation_hint(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_aborts_with_remediation_hint(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.host_config import WorkspaceBridgeGroupMissingError
 
@@ -3278,9 +3274,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
 
         # Workspace under a nonexistent path → os.stat on the parent raises OSError.
-        plan = _acl_grant_plan(
-            str(instance_dir), "sandbox", "/nonexistent-root/myproj", dev_user="dev"
-        )
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", "/nonexistent-root/myproj", dev_user="dev")
         # Should not have crashed; the workspace named-ACL is still queued.
         assert any("workspace named-ACL" in d for _, d in plan)
 
@@ -3298,12 +3292,11 @@ class TestACLPlanAsymmetry:
         descriptions = [d for _, d in plan]
         assert any("secrets dir traverse" in d for d in descriptions)
 
+
 class TestDryRunHelperMkdirPlanFallback:
     """Dry-run preview reports gracefully when subuid resolver fails."""
 
-    def test_dry_run_handles_no_subuid_range(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_handles_no_subuid_range(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.host_config import NoSubuidRangeError
 
@@ -3358,9 +3351,7 @@ class TestWorkspaceSharedGroup:
         _phase_workspace_shared_group(str(ws), host, "dev")
         assert recursive_calls == [(str(ws), os.stat(ws).st_gid)]
 
-    def test_steady_state_skips_recursive(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_steady_state_skips_recursive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_workspace_shared_group
         from core.host_config import HostSettings
 
@@ -3369,6 +3360,7 @@ class TestWorkspaceSharedGroup:
         monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
         monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
         called: list[bool] = []
+
         def _track(*a: object, **k: object) -> tuple[int, list[str]]:
             called.append(True)
             return 0, []
@@ -3381,8 +3373,13 @@ class TestWorkspaceSharedGroup:
         assert called == []
 
     def test_recursive_failure_aggregated_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        captured_console: typing.Any,
     ) -> None:
+        """Per-file failures from the recursive helper are aggregated into a warning."""
+        from cli import main as main_mod
         from cli.main import _phase_workspace_shared_group
         from core.host_config import HostSettings
 
@@ -3395,15 +3392,18 @@ class TestWorkspaceSharedGroup:
             lambda *a, **k: (3, ["/ws/root.bin", "/ws/x", "/ws/y"]),
         )
         monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+        # Redirect the module-level Rich Console to the test buffer so we can
+        # actually inspect the warning text.
+        monkeypatch.setattr(main_mod, "console", captured_console.console)
 
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
         _phase_workspace_shared_group(str(ws), host, "dev")
-        # Aggregate warning printed (rich console; just verify the function returns)
-        # via capsys we can't inspect rich console, so just assert no raise.
+        out = captured_console.plain_output
+        assert "3 file(s) skipped" in out
+        # Sample paths surface in the warning.
+        assert "/ws/root.bin" in out
 
-    def test_setfacl_failure_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_setfacl_failure_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_workspace_shared_group
         from core.exceptions import SandboxExecutionError
         from core.host_config import HostSettings
@@ -3422,9 +3422,7 @@ class TestWorkspaceSharedGroup:
         with pytest.raises(SandboxExecutionError, match="permission denied"):
             _phase_workspace_shared_group(str(ws), host, "dev")
 
-    def test_missing_bridge_group_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_bridge_group_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_workspace_shared_group
         from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
 
@@ -3439,9 +3437,7 @@ class TestWorkspaceSharedGroup:
         with pytest.raises(WorkspaceBridgeGroupMissingError):
             _phase_workspace_shared_group(str(ws), host, "dev")
 
-    def test_recursive_chmod_failure_collected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_recursive_chmod_failure_collected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """chown succeeds but chmod fails → failure counted, not raised."""
         from cli.main import _workspace_shared_group_recursive
 
@@ -3458,9 +3454,7 @@ class TestWorkspaceSharedGroup:
         assert count >= 1
         assert any("f.txt" in s for s in sample)
 
-    def test_recursive_helper_collects_per_file_failures(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_recursive_helper_collects_per_file_failures(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _workspace_shared_group_recursive
 
         ws = tmp_path / "ws"
@@ -3491,9 +3485,7 @@ class TestWorkspaceSharedGroup:
         assert "u:claude-sandbox:rwx" in default_op
         assert "u:dev:rwx" in default_op
 
-    def test_drift_helper_treats_unstattable_workspace_as_drift(
-        self, tmp_path: Path
-    ) -> None:
+    def test_drift_helper_treats_unstattable_workspace_as_drift(self, tmp_path: Path) -> None:
         from cli.main import _workspace_needs_recursive_setup
 
         # Nonexistent path → os.stat raises → treat as drift.
@@ -3532,9 +3524,7 @@ class TestWorkspaceSharedGroup:
         assert (ws / "a.txt").stat().st_mode & 0o0777 == 0o0660
         assert stat.S_ISLNK((ws / "link").lstat().st_mode)
 
-    def test_root_chmod_failure_wrapped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_root_chmod_failure_wrapped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_workspace_shared_group
         from core.exceptions import SandboxExecutionError
         from core.host_config import HostSettings
@@ -3555,9 +3545,7 @@ class TestWorkspaceSharedGroup:
 class TestDryRunWorkspaceSharedGroupFallback:
     """Dry-run preview reports gracefully when the bridge gid lookup fails late."""
 
-    def test_dry_run_reports_workspace_plan_unavailable(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_dry_run_reports_workspace_plan_unavailable(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """If build_jinja_context succeeds but bridge gid lookup fails on the
         dry-run preview path, the preview reports the issue and exits 0."""
         from cli.main import app
@@ -3600,9 +3588,7 @@ class TestHelperMkdirChownPlan:
             ("/inst/log", ("core", "admin"), 100999, 200999),
         ]
 
-    def test_phase_sets_default_acl_then_invokes_helper(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_phase_sets_default_acl_then_invokes_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
         from core.host_config import MachinectlAuth
 
@@ -3631,9 +3617,7 @@ class TestHelperMkdirChownPlan:
         assert "u:dev:rwx" in cmd[3]
         assert cmd[4] == "/inst/cache/core"
 
-    def test_phase_idempotent_re_invocation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_phase_idempotent_re_invocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
         from core.host_config import MachinectlAuth
 
@@ -3655,9 +3639,7 @@ class TestHelperMkdirChownPlan:
             _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
         assert calls == {"setfacl": 6, "helper": 6}
 
-    def test_phase_setfacl_failure_wrapped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_phase_setfacl_failure_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
         from core.exceptions import SandboxExecutionError
         from core.host_config import MachinectlAuth
@@ -3918,9 +3900,7 @@ class TestStartErrorHandlerACLCleanup:
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
-    def test_helper_mkdir_chown_failure_triggers_revoke(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
-    ) -> None:
+    def test_helper_mkdir_chown_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Section 10: cache/log helper-mkdir+chown failure → ACL cleanup runs."""
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
