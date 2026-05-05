@@ -40,6 +40,7 @@ def ensure_registry_seed(home: Path) -> None:
     if not registry_path.exists():
         registry_path.write_text(json.dumps({}))
 
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 

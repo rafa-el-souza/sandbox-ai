@@ -4,14 +4,21 @@ Commands: init, start, stop, attach, destroy, doctor, status.
 All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
+from __future__ import annotations
+
 import fcntl
 import json as _json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
@@ -711,7 +718,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     if instance_dir is None or instance_id is None:
         console.print(
-            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            "No sandbox instance found. Run `sandbox init` first.",
             style="red",
         )
         raise typer.Exit(code=1)
@@ -854,9 +861,84 @@ def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> No
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 
+def _stdin_is_tty() -> bool:
+    """Boolean wrapper around ``sys.stdin.isatty()`` for ergonomic test patching."""
+    return sys.stdin.isatty()
+
+
+def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
+    """Seed ``<user_home>/config/sandbox-ai.toml`` when missing.
+
+    TTY mode prompts for ``docker_unprivileged_user`` (required, non-empty)
+    and ``machinectl_authentication`` (default ``sudo``). Non-TTY mode exits
+    with explicit guidance. Existing files are never overwritten. Dry-run
+    skips seeding entirely.
+    """
+    config_path = user_home / "config" / "sandbox-ai.toml"
+    if config_path.exists() or dry_run:
+        return
+
+    if not _stdin_is_tty():
+        console.print(
+            f"Cannot prompt for docker_unprivileged_user in non-interactive mode. "
+            f"Create {config_path} with a [host] section containing docker_unprivileged_user "
+            f"before running sandbox init.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    while True:
+        docker_user = typer.prompt("docker_unprivileged_user (e.g., sandbox)").strip()
+        if docker_user:
+            break
+        console.print("docker_unprivileged_user must not be empty.", style="yellow")
+
+    auth_input = (
+        typer.prompt(
+            "machinectl_authentication [sudo/polkit, default sudo]",
+            default="sudo",
+            show_default=False,
+        ).strip()
+        or "sudo"
+    )
+    try:
+        resolved_auth_for_seed = MachinectlAuth(auth_input)
+    except ValueError as exc:
+        console.print(
+            f"Invalid machinectl_authentication value: '{auth_input}'. Must be 'sudo' or 'polkit'.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from exc
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[host]\n"
+        f'docker_unprivileged_user = "{docker_user}"\n'
+        f'machinectl_authentication = "{resolved_auth_for_seed.value}"\n'
+    )
+
+
+def _warn_legacy_cwd_files(project_dir: str, user_home: Path) -> None:
+    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exists."""
+    legacy_toml = os.path.join(project_dir, "sandbox-ai.toml")
+    if os.path.exists(legacy_toml):
+        console.print(
+            f"Found legacy {legacy_toml}. Per-host config now lives at "
+            f"{user_home / 'config' / 'sandbox-ai.toml'}. "
+            "Migrate manually or delete the legacy file.",
+            style="yellow",
+        )
+    legacy_state = os.path.join(project_dir, ".state")
+    if os.path.isdir(legacy_state):
+        console.print(
+            f"Found legacy {legacy_state}. Orchestrator state now lives at "
+            f"{user_home / 'state'}. Migrate manually or delete the legacy directory.",
+            style="yellow",
+        )
+
+
 @app.command()
 def init(
-    user: str | None = typer.Option(None, "--user", help="Unprivileged user for the sandbox"),
     machinectl_auth: str | None = typer.Option(
         None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
     ),
@@ -872,6 +954,9 @@ def init(
     user_home = sandbox_ai_user_home()
     ensure_per_user_tree(user_home)
 
+    # Legacy CWD-local file detection (advisory)
+    _warn_legacy_cwd_files(project_dir, user_home)
+
     # Re-init guard (D-6)
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
     if instance_dir is not None:
@@ -881,8 +966,10 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    # Resolution: docker_unprivileged_user (D5)
-    # Priority: --user flag → sandbox-ai.toml → error
+    # Seed canonical host config (TTY prompt or non-TTY fail) when absent
+    _seed_host_config_if_absent(user_home, dry_run=dry_run)
+
+    # Resolution: docker_unprivileged_user — canonical host config is authoritative
     project_config: HostConfig | None = None
     try:
         project_config = HostConfig.from_toml()
@@ -890,19 +977,20 @@ def init(
         pass
 
     resolved_user: str
-    if user is not None:
-        resolved_user = user
-    elif project_config is not None:
+    if project_config is not None:
         resolved_user = project_config.host.docker_unprivileged_user
+    elif dry_run:
+        resolved_user = "<dry-run>"
     else:
+        # Should not happen post-seed in interactive mode; non-TTY already exited above.
         console.print(
-            "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
+            f"No host config at {user_home / 'config' / 'sandbox-ai.toml'}. "
+            "Run sandbox init in an interactive shell or create the file manually.",
             style="red",
         )
         raise typer.Exit(code=1)
 
-    # Resolution: machinectl_authentication (D5)
-    # Priority: --machinectl-auth flag → sandbox-ai.toml → default "sudo"
+    # Resolution: machinectl_authentication (--machinectl-auth flag → host config → default sudo)
     resolved_auth: MachinectlAuth
     if machinectl_auth is not None:
         try:
@@ -1046,7 +1134,7 @@ def start(
 
     if instance_dir is None or instance_id is None:
         console.print(
-            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            "No sandbox instance found. Run `sandbox init` first.",
             style="red",
         )
         raise typer.Exit(code=1)

@@ -34,6 +34,7 @@ class TestSandboxAiUserHome:
         monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(tmp_path))
         assert sandbox_ai_user_home() == sandbox_ai_user_home()
 
+
 # ─── Task 1.2: HostConfig.from_toml() ─────────────────────────────────────
 
 VALID_PROJECT_TOML = """\
@@ -103,9 +104,7 @@ class TestHostConfigFromToml:
         config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
-    def test_loader_honors_env_override(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_loader_honors_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Loader reads from SANDBOX_AI_USER_HOME-resolved path."""
         custom_home = tmp_path / "custom"
         monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))

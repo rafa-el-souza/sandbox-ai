@@ -63,9 +63,7 @@ class HostConfig(BaseModel):
             with open(path, "rb") as f:
                 raw = tomllib.load(f)
         except FileNotFoundError as exc:
-            raise FileNotFoundError(
-                f"No sandbox-ai.toml found at {path}. Run sandbox init to create one."
-            ) from exc
+            raise FileNotFoundError(f"No sandbox-ai.toml found at {path}. Run sandbox init to create one.") from exc
         return cls.model_validate(raw)
 
 
