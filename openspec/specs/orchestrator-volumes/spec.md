@@ -109,11 +109,11 @@ The system SHALL execute each ACL revocation independently with `check=False`. F
 - **THEN** each failure is reported with the target description and stderr content
 
 ### Requirement: Topographical File Isolation Boundaries
-The system SHALL enforce separation between the immutable tooling plane (`.docker/` and `.config/` hidden directories under `SANDBOX_AI_HOME`) and the mutable per-instance plane (`sandboxes/<id>/`).
+The system SHALL enforce separation between the immutable tooling plane (the packaged `templates` Python module containing `templates/docker/` and `templates/config/`) and the mutable per-instance plane (`sandboxes/<id>/`).
 
-#### Scenario: The Immutable Tooling Plane (`.docker/` and `.config/`)
+#### Scenario: The Immutable Tooling Plane (`templates/docker/` and `templates/config/`)
 - **WHEN** the orchestrator configures infrastructure for an instance
-- **THEN** template sources under `SANDBOX_AI_HOME/.docker/` and `SANDBOX_AI_HOME/.config/` are read-only inputs to the hydration pipeline; they are never written to at runtime
+- **THEN** template sources under `templates/docker/` and `templates/config/` (read via `importlib.resources.files("templates")`) are read-only inputs to the hydration pipeline; they are never written to at runtime
 
 #### Scenario: The Mutable Instance Plane (`sandboxes/<id>/`)
 - **WHEN** the hydration pipeline runs
@@ -184,8 +184,8 @@ The `cache/` subtree SHALL follow a container-namespaced convention. The Claude 
 - **THEN** the `.claude` directory mount references `{{ instance_dir }}/cache/core/.claude` (not `{{ instance_dir }}/cache/.claude`)
 
 ### Requirement: Stale Proxy Seed File Removal
-The following files in `.config/proxy/` SHALL be deleted from the tooling plane: `allowed_domains.txt`, `trusted_clients.acl`, `.htpasswd`. These files are overridden by programmatic generation in `render_templates()` or by `core/crypto.py` during scaffold. Their presence in the tooling plane is misleading — edits to them have no effect.
+The following files in `templates/config/proxy/` SHALL be absent from the tooling plane: `allowed_domains.txt`, `trusted_clients.acl`, `.htpasswd`. These files are overridden by programmatic generation in `render_templates()` or by `core/crypto.py` during scaffold. Their presence in the tooling plane is misleading — edits to them have no effect.
 
 #### Scenario: No stale proxy seed files in tooling plane
-- **WHEN** the `.config/proxy/` directory in the tooling plane is inspected
+- **WHEN** the `templates/config/proxy/` directory in the tooling plane is inspected
 - **THEN** it contains only `squid.conf` and `ERR_SANDBOX_403` (the Jinja2 template and the static error page)

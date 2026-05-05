@@ -107,18 +107,18 @@ The proxy service in `compose.yml` SHALL use a `CMD` (exec-form) healthcheck wit
 - **THEN** the healthcheck uses `CMD` exec form (not `CMD-SHELL`), because the default `/bin/sh` (`dash`) does not support `/dev/tcp`
 
 ### Requirement: CoreDNS Dockerfile Multi-Stage Build
-The system SHALL provide `.docker/coredns/Dockerfile.coredns` as a static (non-Jinja2) Dockerfile that uses a multi-stage build to copy a statically-linked `wget` binary from a busybox image into the coredns image.
+The system SHALL provide `templates/docker/coredns/Dockerfile.coredns` as a static (non-Jinja2) Dockerfile that uses a multi-stage build to copy a statically-linked `wget` binary from a busybox image into the coredns image.
 
 #### Scenario: Dockerfile uses multi-stage build
-- **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
+- **WHEN** `templates/docker/coredns/Dockerfile.coredns` is inspected
 - **THEN** it contains a `FROM ${BUSYBOX_BASE} AS probe` stage and a `FROM ${CORE_BASE}` stage with `COPY --from=probe /bin/wget /wget`
 
 #### Scenario: Dockerfile accepts build args
-- **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
+- **WHEN** `templates/docker/coredns/Dockerfile.coredns` is inspected
 - **THEN** it declares `ARG CORE_BASE` and `ARG BUSYBOX_BASE` at the top
 
 #### Scenario: No Jinja2 syntax in Dockerfile
-- **WHEN** `.docker/coredns/Dockerfile.coredns` is inspected
+- **WHEN** `templates/docker/coredns/Dockerfile.coredns` is inspected
 - **THEN** it contains zero `{{ }}` or `{% %}` markers (values come via compose build.args, not Jinja2)
 
 ### Requirement: Extras Services Zero-Capability Posture

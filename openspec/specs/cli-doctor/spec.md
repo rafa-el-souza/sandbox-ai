@@ -248,12 +248,12 @@ The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) th
 - **THEN** the check still executes successfully using the provided user parameter (no cross-chain `depends_on` required)
 
 ### Requirement: Tooling Plane Integrity
-The system SHALL verify that the unconditional template and static files exist in `.docker/` and `.config/`. The unconditional file count SHALL be 17 (16 original + `.docker/coredns/Dockerfile.coredns`).
+The system SHALL verify that the unconditional template and static files exist in `templates/docker/` and `templates/config/`. The unconditional file count SHALL be 17 (16 original + `templates/docker/coredns/Dockerfile.coredns`).
 
 **Dependencies:** None (root check)
 
 #### Scenario: All files present
-- **WHEN** all 17 required files exist at their expected paths (including `.docker/coredns/Dockerfile.coredns`)
+- **WHEN** all 17 required files exist at their expected paths (including `templates/docker/coredns/Dockerfile.coredns`)
 - **THEN** the check reports PASS with the file count
 
 #### Scenario: Files missing

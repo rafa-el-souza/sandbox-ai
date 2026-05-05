@@ -61,11 +61,11 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 
 #### Scenario: All files present including config-dependent variants
 - **WHEN** the config specifies `base_distro_family = "wolfi"` for core and `base_distro_family = "debian"` for admin
-- **THEN** dry-run verifies `.docker/core/Dockerfile.core.wolfi` and `.docker/admin/Dockerfile.admin.debian` exist, along with all unconditional files
+- **THEN** dry-run verifies `templates/docker/core/Dockerfile.core.wolfi` and `templates/docker/admin/Dockerfile.admin.debian` exist, along with all unconditional files
 
 #### Scenario: Conditional extras verified when enabled
 - **WHEN** the config has `components.db_postgres.enabled = true` and `components.mcp_firecrawl = true`
-- **THEN** dry-run additionally verifies `.docker/extras/db-postgres.yml`, `.docker/extras/mcp-firecrawl.yml`, and `.docker/extras/Dockerfile.mcp-firecrawl`
+- **THEN** dry-run additionally verifies `templates/docker/extras/db-postgres.yml`, `templates/docker/extras/mcp-firecrawl.yml`, and `templates/docker/extras/Dockerfile.mcp-firecrawl`
 
 #### Scenario: Missing file detected
 - **WHEN** a required file is missing from the tooling plane
