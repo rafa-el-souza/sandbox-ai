@@ -32,13 +32,13 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 ### Two configuration scopes
 
-- **Per-host** (`sandbox-ai.toml` at project root): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user` and `[host].machinectl_authentication` (`sudo` | `polkit`).
+- **Per-host** (`<sandbox_ai_user_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user` and `[host].machinectl_authentication` (`sudo` | `polkit`). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_USER_HOME` env var redirects this path for test isolation only.
 - **Per-instance** (`sandboxes/<id>/sandbox.toml`): generated during `sandbox init` and **re-hydrated on every `sandbox start`** via the Pydantic→Jinja2 pipeline in `core.hydration`. Drift is eliminated by regenerating compose/sidecar configs from the model on each start.
 
 ### Core modules (`core/`)
 
 - `executor.py` — sterile POSIX subprocess execution (the only sanctioned way to shell out).
-- `registry.py` — instance registry as fcntl-locked JSON at `.state/instances.json`.
+- `registry.py` — instance registry as fcntl-locked JSON at `<sandbox_ai_user_home()>/state/instances.json`.
 - `ipam.py` — `/24` subnet septuple allocator (isolated, core_proxy, dns, admin, admin_proxy, egress, ipc) over 10.100.0.0–10.255.255.0 with lowest-slot scan and slot reuse (`MAX_SLOTS = 5705`).
 - `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `.config/` and `.docker/` (immutable tooling/config plane).
 - `scaffold.py` — bootstraps `sandboxes/<id>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel).
@@ -48,8 +48,10 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 ### State and locking
 
-- `.state/instances.json`, `.state/ipam.json`, `.state/state.lock` are the only mutable orchestrator state.
+- Mutable orchestrator state lives under `<sandbox_ai_user_home()>/state/` (default `~/.sandbox-ai/state/`): `instances.json`, `ipam.json`, `state.lock`. The directory is created with mode `0700` by `sandbox init`.
+- `state.lock` is now **per-user** (not per-CWD): all `sandbox` invocations under the same user serialize on the same lock during provisioning, regardless of which working directory they were launched from.
 - `state.lock` is **transient** — held only during provisioning, released for the runtime lifetime of a sandbox. Don't add long-lived locks.
+- Lifecycle commands (`start`, `stop`, `destroy`, `status`, `attach`) hard-fail with a "run sandbox init first" error when `<home>/state/instances.json` is absent.
 
 ### ACL model (two patterns)
 
