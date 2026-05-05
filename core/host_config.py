@@ -9,8 +9,23 @@ strategy for machinectl invocations.
 import os
 import tomllib
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel
+
+
+def sandbox_ai_user_home() -> Path:
+    """Resolve the per-user sandbox-ai home directory.
+
+    Honors ``SANDBOX_AI_USER_HOME`` (test-isolation override). Otherwise
+    returns ``~/.sandbox-ai`` expanded for the current user.
+    """
+    return Path(os.environ.get("SANDBOX_AI_USER_HOME") or os.path.expanduser("~/.sandbox-ai"))
+
+
+def state_lock_path() -> Path:
+    """Canonical fcntl lock target serializing all per-user state mutations."""
+    return sandbox_ai_user_home() / "state" / "state.lock"
 
 
 class MachinectlAuth(StrEnum):
@@ -33,21 +48,22 @@ class HostConfig(BaseModel):
     host: HostSettings
 
     @classmethod
-    def from_toml(cls, project_dir: str) -> HostConfig:
-        """Parse sandbox-ai.toml from the given project directory.
+    def from_toml(cls) -> HostConfig:
+        """Parse the canonical per-user ``sandbox-ai.toml``.
 
-        Args:
-            project_dir: Absolute path to the project root. The loader
-                reads ``<project_dir>/sandbox-ai.toml``.
+        Resolves ``<sandbox_ai_user_home()>/config/sandbox-ai.toml``.
 
         Raises:
-            FileNotFoundError: If sandbox-ai.toml does not exist.
+            FileNotFoundError: If the canonical file does not exist.
             tomllib.TOMLDecodeError: If the file contains invalid TOML.
             pydantic.ValidationError: If the content fails schema validation.
         """
-        path = os.path.join(project_dir, "sandbox-ai.toml")
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
+        path = sandbox_ai_user_home() / "config" / "sandbox-ai.toml"
+        try:
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"No sandbox-ai.toml found at {path}. Run sandbox init to create one.") from exc
         return cls.model_validate(raw)
 
 

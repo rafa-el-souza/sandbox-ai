@@ -4,6 +4,9 @@ Implements the SCAFFOLD SUB-SEQUENCE (S1-S7) from the orchestrator design.
 Called on first `sandbox start` for a project directory.
 """
 
+from __future__ import annotations
+
+import json
 import os
 import subprocess
 import sys
@@ -11,6 +14,32 @@ from typing import TYPE_CHECKING
 
 from core.crypto import generate_credential
 from core.hydration import IMAGE_REGISTRY
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def ensure_per_user_tree(home: Path) -> None:
+    """Create ``<home>/``, ``<home>/config/``, ``<home>/state/`` with mode 0700.
+
+    Idempotent: ``exist_ok=True`` suppresses ``FileExistsError`` and does NOT
+    modify the mode of any pre-existing directory.
+    """
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    os.makedirs(home / "config", mode=0o700, exist_ok=True)
+    os.makedirs(home / "state", mode=0o700, exist_ok=True)
+
+
+def ensure_registry_seed(home: Path) -> None:
+    """Create an empty ``<home>/state/instances.json`` if it does not exist.
+
+    The presence of this file is the per-user-tree initialization signal
+    consumed by lifecycle commands.
+    """
+    registry_path = home / "state" / "instances.json"
+    if not registry_path.exists():
+        registry_path.write_text(json.dumps({}))
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

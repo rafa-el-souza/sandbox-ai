@@ -5,19 +5,23 @@ This specification defines the `sandbox-ai.toml` per-host orchestrator configura
 ## Requirements
 
 ### Requirement: Host Config File Location and Format
-The system SHALL read per-host orchestrator configuration from a file named `sandbox-ai.toml` located in the project root directory. The file SHALL use TOML format with a `[host]` section.
+The system SHALL read per-host orchestrator configuration from a file at the canonical path `<sandbox_ai_user_home()>/config/sandbox-ai.toml` (resolved via the `per-user-state-layout` capability). The file SHALL use TOML format with a `[host]` section. There is no CLI override for the path; testing uses the `SANDBOX_AI_USER_HOME` env var.
 
 #### Scenario: Valid host config parsed
-- **WHEN** `sandbox-ai.toml` exists in the project directory with a valid `[host]` section
+- **WHEN** `<home>/config/sandbox-ai.toml` exists with a valid `[host]` section
 - **THEN** the system parses it into a `HostConfig` Pydantic model without errors
 
 #### Scenario: Host config not found
-- **WHEN** `sandbox-ai.toml` does not exist in the project directory and no CLI override flags are provided
-- **THEN** the loader raises `FileNotFoundError` which callers translate to a user-facing error: "No sandbox-ai.toml found. Create one or pass --user."
+- **WHEN** `<home>/config/sandbox-ai.toml` does not exist
+- **THEN** the loader raises `FileNotFoundError` which callers translate to a user-facing error: "No sandbox-ai.toml found at `<resolved-path>`. Run `sandbox init` to create one."
 
 #### Scenario: Invalid TOML rejected
-- **WHEN** `sandbox-ai.toml` contains malformed TOML syntax
+- **WHEN** `<home>/config/sandbox-ai.toml` contains malformed TOML syntax
 - **THEN** the loader raises a parse error before any state changes occur
+
+#### Scenario: CWD-local sandbox-ai.toml is silently ignored
+- **WHEN** the loader runs and `<cwd>/sandbox-ai.toml` exists but `<home>/config/sandbox-ai.toml` does not
+- **THEN** the loader ignores the CWD-local file and raises `FileNotFoundError` for the canonical path. The doctor (separately) detects the legacy file and warns the operator to migrate.
 
 ### Requirement: Host Config Schema
 The `[host]` section SHALL contain `docker_unprivileged_user` (required string) and `machinectl_authentication` (string enum, default `"sudo"`). The `machinectl_authentication` field SHALL accept exactly two values: `"sudo"` and `"polkit"`.
@@ -39,11 +43,15 @@ The `[host]` section SHALL contain `docker_unprivileged_user` (required string) 
 - **THEN** the Pydantic model raises a `ValidationError` identifying the missing required field
 
 ### Requirement: Path-Parameterized Loader
-The `HostConfig.from_toml()` class method SHALL accept an explicit `project_dir: str` parameter and SHALL NOT read `os.getcwd()` internally.
+The `HostConfig.from_toml()` class method SHALL take no arguments and SHALL resolve the canonical path internally via `sandbox_ai_user_home()`. The previous `project_dir: str` parameter is removed.
 
-#### Scenario: Loader uses provided path
-- **WHEN** `HostConfig.from_toml("/some/project")` is called
-- **THEN** the loader reads `/some/project/sandbox-ai.toml` regardless of the process CWD
+#### Scenario: Loader uses canonical path
+- **WHEN** `HostConfig.from_toml()` is called
+- **THEN** the loader reads `<sandbox_ai_user_home()>/config/sandbox-ai.toml` regardless of the process CWD
+
+#### Scenario: Loader honors SANDBOX_AI_USER_HOME for testing
+- **WHEN** `HostConfig.from_toml()` is called with `SANDBOX_AI_USER_HOME=/tmp/t/.sandbox-ai` set
+- **THEN** the loader reads `/tmp/t/.sandbox-ai/config/sandbox-ai.toml`
 
 ### Requirement: Pydantic Model Structure
 The host config model SHALL use a `MachinectlAuth` StrEnum for the authentication field and a nested `HostSettings` model for the `[host]` section.

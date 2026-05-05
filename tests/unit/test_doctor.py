@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from tests.unit.conftest import CapturedConsole
 
 # ── Section 1: Data Types ────────────────────────────────────────────────────
@@ -423,22 +425,18 @@ class TestFilesystemChecks:
             assert result.status == "fail"
             assert "compose.yml" in result.detail
 
-    def test_state_dir_writable(self, tmp_path: Any) -> None:
+    def test_state_dir_writable(self, isolated_sandbox_ai_user_home: Path) -> None:
         from core.doctor import check_state_dir_writable
 
-        state_dir = tmp_path / ".state"
-        state_dir.mkdir()
-        with patch("core.doctor._get_sandbox_ai_home", return_value=str(tmp_path)):
-            result = check_state_dir_writable("sandbox", None)
-            assert result.status == "pass"
+        (isolated_sandbox_ai_user_home / "state").mkdir(parents=True)
+        result = check_state_dir_writable("sandbox", None)
+        assert result.status == "pass"
 
-    def test_state_dir_not_writable(self, tmp_path: Any) -> None:
+    def test_state_dir_not_writable(self, isolated_sandbox_ai_user_home: Path) -> None:
         from core.doctor import check_state_dir_writable
 
-        with (
-            patch("core.doctor._get_sandbox_ai_home", return_value=str(tmp_path)),
-            patch("tempfile.NamedTemporaryFile", side_effect=OSError("perm denied")),
-        ):
+        (isolated_sandbox_ai_user_home / "state").mkdir(parents=True)
+        with patch("tempfile.NamedTemporaryFile", side_effect=OSError("perm denied")):
             result = check_state_dir_writable("sandbox", None)
             assert result.status == "fail"
 
@@ -453,7 +451,7 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 16
+        assert len(checks) == 19
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert "machinectl_reachable" in ids
@@ -921,7 +919,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 16
+        assert len(checks) == 19
 
     def test_privilege_boundary_subset_contains_9_checks(self) -> None:
         """Task 9.12: Privilege boundary subset contains 9 checks (was 8)."""
@@ -1564,7 +1562,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
         assert "sudo" not in ids
-        assert len(checks) == 15  # one fewer than sudo mode
+        assert len(checks) == 18  # one fewer than sudo mode
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
@@ -1573,7 +1571,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 16
+        assert len(checks) == 19
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
@@ -1703,3 +1701,84 @@ class TestPolkitRegistry:
 
         names = {r.name for r in results}
         assert "sudo" not in names
+
+
+# ─── Per-User Tree Doctor Checks ─────────────────────────────────────────────
+
+
+class TestCheckPerUserTreeExists:
+    def test_pass_when_tree_present(self, isolated_sandbox_ai_user_home: Path) -> None:
+        from core.doctor import check_per_user_tree_exists
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        result = check_per_user_tree_exists("u", None)
+        assert result.status == "pass"
+
+    def test_fail_when_home_missing(self, isolated_sandbox_ai_user_home: Path) -> None:
+        from core.doctor import check_per_user_tree_exists
+
+        result = check_per_user_tree_exists("u", None)
+        assert result.status == "fail"
+        assert "missing" in result.detail.lower()
+        assert result.remediation is not None
+        assert "sandbox init" in result.remediation
+
+    def test_fail_when_state_subdir_missing(self, isolated_sandbox_ai_user_home: Path) -> None:
+        from core.doctor import check_per_user_tree_exists
+
+        # Create only home and config — state is missing.
+        (isolated_sandbox_ai_user_home / "config").mkdir(parents=True)
+        result = check_per_user_tree_exists("u", None)
+        assert result.status == "fail"
+        assert "state" in result.detail
+
+
+class TestCheckPerUserTreeMode:
+    def test_pass_when_all_0700(self, isolated_sandbox_ai_user_home: Path) -> None:
+        from core.doctor import check_per_user_tree_mode
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        result = check_per_user_tree_mode("u", None)
+        assert result.status == "pass"
+
+    def test_warn_on_mode_drift(self, isolated_sandbox_ai_user_home: Path) -> None:
+        import os
+
+        from core.doctor import check_per_user_tree_mode
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        os.chmod(isolated_sandbox_ai_user_home / "state", 0o755)
+        result = check_per_user_tree_mode("u", None)
+        assert result.status == "warn"
+        assert "0o755" in result.detail
+        assert result.remediation is not None
+        assert "chmod 0700" in result.remediation
+
+    def test_skip_when_tree_missing(self, isolated_sandbox_ai_user_home: Path) -> None:
+        from core.doctor import check_per_user_tree_mode
+
+        result = check_per_user_tree_mode("u", None)
+        assert result.status == "skip"
+
+
+class TestCheckLegacyCwdFiles:
+    def test_pass_when_no_legacy(self, tmp_path: Path, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_cwd_files
+
+        monkeypatch.chdir(tmp_path)
+        result = check_legacy_cwd_files("u", None)
+        assert result.status == "pass"
+
+    def test_warn_on_legacy_toml_and_state(self, tmp_path: Path, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_cwd_files
+
+        (tmp_path / "sandbox-ai.toml").write_text("")
+        (tmp_path / ".state").mkdir()
+        monkeypatch.chdir(tmp_path)
+        result = check_legacy_cwd_files("u", None)
+        assert result.status == "warn"
+        assert "sandbox-ai.toml" in result.detail
+        assert ".state" in result.detail

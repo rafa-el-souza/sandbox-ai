@@ -4,8 +4,10 @@ All subprocess interactions are mocked at the core.executor.Executor.run boundar
 Tests validate the full phase sequencing per the orchestrator design spec.
 """
 
+import contextlib
 import json
 import os
+import stat
 import subprocess
 import typing
 from pathlib import Path
@@ -82,6 +84,26 @@ RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name 
 WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"')
 
 
+# Capture the real seeder before any autouse patching can replace it. Tests that
+# want the real seeder to run apply ``wraps=_REAL_SEED_HOST_CONFIG`` so the
+# autouse no-op below is effectively bypassed.
+import cli.main as _cli_main_module  # noqa: E402
+
+_REAL_SEED_HOST_CONFIG = _cli_main_module._seed_host_config_if_absent
+
+
+@pytest.fixture(autouse=True)
+def _noop_init_seeder() -> typing.Iterator[None]:
+    """Skip the interactive host-config seeder during init tests.
+
+    The seeder normally prompts (TTY) or fails (non-TTY) when
+    ``<home>/config/sandbox-ai.toml`` is missing. CLI tests provide host
+    config via the ``_default_project_config`` autouse mock instead.
+    """
+    with patch("cli.main._seed_host_config_if_absent"):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _default_project_config() -> typing.Iterator[None]:
     """Auto-supply a default sandbox-ai.toml so post-init commands don't exit early.
@@ -121,9 +143,25 @@ def mock_sandbox_ai_home(tmp_path: Path) -> Path:
     return home
 
 
+def _user_home() -> Path:
+    """Resolve the per-user home from SANDBOX_AI_USER_HOME (autouse fixture sets it)."""
+    return Path(os.environ["SANDBOX_AI_USER_HOME"])
+
+
+def _seed_registry(home: Path) -> None:
+    """Mark the per-user state tree as initialized for hard-fail bypass."""
+    state_dir = home / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    registry = state_dir / "instances.json"
+    if not registry.exists():
+        registry.write_text("{}")
+
+
 def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     """Helper: register an instance and create its directory structure."""
-    reg = home / ".state" / "instances.json"
+    state_dir = _user_home() / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    reg = state_dir / "instances.json"
     reg.write_text(json.dumps({project_dir: instance_id}))
     inst = home / "sandboxes" / instance_id
     (inst / "docker" / "core").mkdir(parents=True)
@@ -144,9 +182,11 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     return inst
 
 
-def _write_ipam(home: Path, instance_id: str, base_index: int) -> None:
-    """Helper: write an IPAM entry."""
-    ipam = home / ".state" / "ipam.json"
+def _write_ipam(instance_id: str, base_index: int) -> None:
+    """Helper: write an IPAM entry to ``<user_home>/state/ipam.json``."""
+    state_dir = _user_home() / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    ipam = state_dir / "ipam.json"
     ipam.write_text(json.dumps({instance_id: base_index}))
 
 
@@ -162,7 +202,7 @@ class TestStartHappyPath:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -196,6 +236,7 @@ class TestStartHappyPath:
 
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
@@ -229,7 +270,7 @@ class TestStartHappyPath:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -262,7 +303,7 @@ class TestStartHappyPath:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -357,7 +398,7 @@ class TestStartComposeSpinner:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -570,7 +611,7 @@ class TestStartInstanceNameImmutabilityWarning:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -727,7 +768,7 @@ class TestDestroyConfirmation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -768,7 +809,7 @@ class TestDestroyConfirmation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -795,7 +836,7 @@ class TestDestroyPrefixGuard:
         # Manually write a corrupted registry pointing outside sandboxes/
         reg = home / ".state" / "instances.json"
         reg.write_text(json.dumps({project_dir: "../../../etc"}))
-        _write_ipam(home, "../../../etc", 0)
+        _write_ipam("../../../etc", 0)
 
         from cli.main import app
 
@@ -817,7 +858,7 @@ class TestDestroyIPAMAndRegistryCleanup:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 5)
+        _write_ipam(instance_id, 5)
 
         from cli.main import app
 
@@ -850,7 +891,7 @@ class TestDestroyRmtree:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -976,17 +1017,19 @@ class TestLockingDirect:
         assert isinstance(fd, int)
         _release_lock(fd)
 
-    def test_acquire_contention(self, tmp_path: Path) -> None:
+    def test_acquire_contention(self, isolated_sandbox_ai_user_home: Path) -> None:
         import fcntl as _fcntl
 
         from cli.main import _acquire_state_lock
+        from core.host_config import state_lock_path
 
-        lock_path = tmp_path / "state.lock"
+        lock_path = state_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
         _fcntl.flock(held_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         try:
             with pytest.raises(BlockingIOError):
-                _acquire_state_lock(str(tmp_path))
+                _acquire_state_lock(str(isolated_sandbox_ai_user_home))
         finally:
             _fcntl.flock(held_fd, _fcntl.LOCK_UN)
             os.close(held_fd)
@@ -1542,7 +1585,6 @@ class TestInitScaffoldDirect:
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs") as mock_dirs,
             patch("cli.main.write_sandbox_toml") as mock_toml,
             patch("cli.main._load_config", return_value=mock_config),
@@ -1551,7 +1593,7 @@ class TestInitScaffoldDirect:
             patch("cli.main.prompt_secrets") as mock_secrets,
             patch("cli.main.write_initialized_sentinel") as mock_sentinel,
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
             mock_dirs.assert_called_once()
             mock_toml.assert_called_once()
@@ -1579,6 +1621,7 @@ class TestStopNoInstance:
     def test_stop_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -1594,6 +1637,7 @@ class TestAttachNoInstance:
     def test_attach_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -1609,6 +1653,7 @@ class TestDestroyNoInstance:
     def test_destroy_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -1626,6 +1671,7 @@ class TestDestroyPrefixGuardInternal:
 
         from cli.main import app
 
+        _seed_registry(_user_home())
         # Mock _resolve_instance to return a path outside sandboxes/
         bad_path = str(home / "somewhere_else" / "evil")
         with (
@@ -1666,7 +1712,6 @@ class TestInitFirecrawl:
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -1675,7 +1720,7 @@ class TestInitFirecrawl:
             patch("cli.main.prompt_secrets") as mock_prompt,
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
             # Verify firecrawl secret was included in prompt_secrets call
             call_args = mock_prompt.call_args[0]
@@ -1704,6 +1749,27 @@ class TestDoctorAllPass:
         ):
             result = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert result.exit_code == 0
+
+
+class TestDoctorPerUserHomeDisplay:
+    """Doctor output displays the resolved per-user home (env var visibility)."""
+
+    def test_displays_resolved_home(
+        self, runner: CliRunner, isolated_sandbox_ai_user_home: Path
+    ) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        with (
+            patch("cli.main.detect_distro", return_value="debian"),
+            patch("cli.main.build_check_registry", return_value=[]),
+            patch("cli.main.run_checks", return_value=[CheckResult(status="pass", name="x", detail="")]),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["doctor", "--user", "sandbox"])
+        assert result.exit_code == 0
+        assert "Per-user home:" in result.output
+        assert str(isolated_sandbox_ai_user_home) in result.output
 
 
 class TestDoctorAnyFail:
@@ -1805,11 +1871,11 @@ class TestDoctorHostConfig:
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.detect_distro", return_value=None),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results),
             patch("cli.main.render_results"),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
@@ -1867,7 +1933,6 @@ class TestInitHappyPath:
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -1876,8 +1941,139 @@ class TestInitHappyPath:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
-            assert result.exit_code == 0
+            result = runner.invoke(app, ["init"])
+            assert result.exit_code == 0, result.output
+
+
+class TestInitPerUserTreeCreation:
+    """init creates `<home>/{config,state}/` with mode 0700 (idempotent)."""
+
+    def _common_patches(
+        self,
+        home: Path,
+        project_dir: str,
+        mock_config: object,
+    ) -> list[typing.Any]:
+        return [
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "ok\n", ""),
+            ),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ]
+
+    def _make_mock_config(self, project_dir: str) -> object:
+        from core.hydration import InstanceConfig
+
+        return InstanceConfig.model_validate(
+            {
+                "instance": {
+                    "name": "p",
+                    "user_project_root": project_dir,
+                    "host_uid": "1000",
+                },
+            }
+        )
+
+    def test_clean_install_creates_tree(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """init on a clean host creates <home>/, <home>/config/, <home>/state/."""
+        from cli.main import app
+
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0, result.output
+        assert isolated_sandbox_ai_user_home.is_dir()
+        assert (isolated_sandbox_ai_user_home / "config").is_dir()
+        assert (isolated_sandbox_ai_user_home / "state").is_dir()
+        assert stat.S_IMODE(isolated_sandbox_ai_user_home.stat().st_mode) == 0o700
+
+    def test_idempotent_on_existing_tree(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """Re-running init against an existing tree does not error."""
+        from cli.main import app
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0, result.output
+
+    def test_existing_registry_not_overwritten(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """A pre-populated registry is preserved; init only ensures presence."""
+        from cli.main import app
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        registry.write_text('{"/x": "x-aaa"}')
+
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0, result.output
+        # Pre-existing entry preserved
+        data = json.loads(registry.read_text())
+        assert data["/x"] == "x-aaa"
+        # New entry added too
+        assert project_dir in data
+
+    def test_sandbox_ai_user_home_redirect(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Setting SANDBOX_AI_USER_HOME redirects creation to that path."""
+        from cli.main import app
+
+        custom_home = tmp_path / "alt-home"
+        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))
+        project_dir = "/home/dev/p"
+        mock_config = self._make_mock_config(project_dir)
+        with contextlib.ExitStack() as es:
+            for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
+                es.enter_context(p)
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0, result.output
+        assert custom_home.is_dir()
+        assert (custom_home / "config").is_dir()
+        assert (custom_home / "state").is_dir()
 
 
 class TestInitReInitRejection:
@@ -1895,7 +2091,7 @@ class TestInitReInitRejection:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 1
             assert "already initialized" in result.output.lower() or "destroy" in result.output.lower()
 
@@ -1914,9 +2110,8 @@ class TestInitDryRun:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox", "--dry-run"])
+            result = runner.invoke(app, ["init", "--dry-run"])
             assert result.exit_code == 0
 
         # Registry should be unmodified
@@ -1941,11 +2136,10 @@ class TestInitDoctorPreFlightFailure:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results"),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 1
 
 
@@ -1976,7 +2170,6 @@ class TestInitNonTTY:
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -1985,23 +2178,102 @@ class TestInitNonTTY:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
 
 
-class TestInitMissingUser:
-    """Task 3.1: sandbox init without --user errors."""
+class TestRequirePerUserStateInitialized:
+    """Lifecycle commands fail with canonical error when state tree is uninitialized."""
 
-    def test_init_missing_user_exits_error(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])
+    def test_command_fails_when_uninitialized(
+        self, runner: CliRunner, command: str, isolated_sandbox_ai_user_home: Path
+    ) -> None:
+        from cli.main import app
+
+        # Ensure registry seed file is absent
+        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        if registry.exists():
+            registry.unlink()
+
+        args = [command]
+        if command == "destroy":
+            args.append("--force")
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert "per-user state not initialized" in result.output.lower()
+        assert str(isolated_sandbox_ai_user_home) in result.output
+        assert "sandbox init" in result.output.lower()
+
+
+class TestInitFlagRemoval:
+    """The legacy ``--user`` flag has been removed; Typer rejects it."""
+
+    def test_user_flag_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        result = runner.invoke(app, ["init", "--user", "sandbox"])
+        assert result.exit_code != 0
+        assert "no such option" in result.output.lower() or "--user" in result.output
+
+
+class TestInitDryRunNoConfigFallback:
+    """Dry-run with absent host config falls back to placeholder values."""
+
+    def test_dry_run_without_config_uses_dry_run_user(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/noproject"),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/dryrunfallback"),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+        ):
+            result = runner.invoke(app, ["init", "--dry-run"])
+        # dry-run path tolerates missing host config; auth defaults to sudo
+        assert result.exit_code == 0, result.output
+
+
+class TestInitNoConfigPostSeedFails:
+    """Defensive branch: missing config after seed (e.g. seed mocked)."""
+
+    def test_missing_config_after_seed_in_non_dry_run_exits(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/missing"),
             patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init"])
-            assert result.exit_code != 0
+        assert result.exit_code == 1
+        assert "no host config" in result.output.lower()
+
+
+class TestStdinIsTty:
+    def test_returns_isatty_value(self) -> None:
+        from cli.main import _stdin_is_tty
+
+        # Just ensure it returns a bool without raising
+        assert isinstance(_stdin_is_tty(), bool)
+
+
+class TestWarnLegacyCwdFiles:
+    def test_warns_on_legacy_toml_and_state(self, tmp_path: Path, captured_console: object) -> None:
+        from cli import main as cli_main
+        from cli.main import _warn_legacy_cwd_files
+
+        (tmp_path / "sandbox-ai.toml").write_text("")
+        (tmp_path / ".state").mkdir()
+
+        with patch.object(cli_main, "console", captured_console.console):  # type: ignore[attr-defined]
+            _warn_legacy_cwd_files(str(tmp_path), tmp_path / ".sandbox-ai")
+        out = captured_console.plain_output  # type: ignore[attr-defined]
+        assert "legacy" in out.lower()
+        assert "sandbox-ai.toml" in out
+        assert ".state" in out
 
 
 class TestInitHostConfigResolution:
@@ -2041,18 +2313,181 @@ class TestInitHostConfigResolution:
             result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
 
-    def test_init_without_config_and_without_user_errors(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        """init errors when no --user flag and no sandbox-ai.toml."""
+    def test_init_non_tty_without_config_fails_with_guidance(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """init in non-TTY mode without canonical host config exits with guidance."""
         from cli.main import app
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/noconfig"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            # Disable the autouse no-op so the real seeder runs.
+            patch("cli.main._seed_host_config_if_absent", wraps=_REAL_SEED_HOST_CONFIG),
+            patch("cli.main._stdin_is_tty", return_value=False),
         ):
             result = runner.invoke(app, ["init"])
-            assert result.exit_code == 1
-            assert "no user specified" in result.output.lower()
+        assert result.exit_code == 1, result.output
+        assert "non-interactive" in result.output.lower()
+        assert "sandbox-ai.toml" in result.output
+
+    def test_init_tty_seeds_host_config(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """init in TTY mode prompts and writes <home>/config/sandbox-ai.toml when absent."""
+        from cli.main import app
+        from core.hydration import InstanceConfig
+
+        project_dir = "/home/dev/seedproj"
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "seedproj", "user_project_root": project_dir, "host_uid": "1000"}}
+        )
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            # Run the real seeder
+            patch(
+                "cli.main._seed_host_config_if_absent",
+                wraps=_REAL_SEED_HOST_CONFIG,
+            ),
+            patch("cli.main._stdin_is_tty", return_value=True),
+            patch("cli.main.typer.prompt", side_effect=["sandbox-user", "sudo"]),
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init"])
+        seeded = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        assert seeded.exists(), f"output={result.output!r} exit={result.exit_code}"
+        body = seeded.read_text()
+        assert 'docker_unprivileged_user = "sandbox-user"' in body
+        assert 'machinectl_authentication = "sudo"' in body
+        assert result.exit_code == 0, result.output
+
+    def test_init_tty_rejects_empty_user(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """Empty docker_unprivileged_user is re-prompted until non-empty."""
+        from cli.main import app
+        from core.hydration import InstanceConfig
+
+        project_dir = "/home/dev/empty"
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "empty", "user_project_root": project_dir, "host_uid": "1000"}}
+        )
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main._seed_host_config_if_absent",
+                wraps=_REAL_SEED_HOST_CONFIG,
+            ),
+            patch("cli.main._stdin_is_tty", return_value=True),
+            # First prompt returns empty → re-prompt; second is non-empty user; third is auth.
+            patch("cli.main.typer.prompt", side_effect=["", "sandbox", "polkit"]),
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0, result.output
+        seeded = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        assert 'docker_unprivileged_user = "sandbox"' in seeded.read_text()
+
+    def test_init_tty_rejects_invalid_auth_value(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """Invalid machinectl_authentication value is rejected."""
+        from cli.main import app
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value="/home/dev/badauth"),
+            patch(
+                "cli.main._seed_host_config_if_absent",
+                wraps=_REAL_SEED_HOST_CONFIG,
+            ),
+            patch("cli.main._stdin_is_tty", return_value=True),
+            patch("cli.main.typer.prompt", side_effect=["sandbox", "weird"]),
+        ):
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 1
+        assert "invalid machinectl_authentication" in result.output.lower()
+
+    def test_init_existing_host_config_not_overwritten(
+        self,
+        runner: CliRunner,
+        mock_sandbox_ai_home: Path,
+        isolated_sandbox_ai_user_home: Path,
+    ) -> None:
+        """When the canonical host config exists, init does not prompt and does not overwrite."""
+        from cli.main import app
+        from core.hydration import InstanceConfig
+        from core.scaffold import ensure_per_user_tree
+
+        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        existing_body = '[host]\ndocker_unprivileged_user = "preserved"\nmachinectl_authentication = "polkit"\n'
+        cfg_path = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        cfg_path.write_text(existing_body)
+
+        project_dir = "/home/dev/preserve"
+        mock_config = InstanceConfig.model_validate(
+            {"instance": {"name": "preserve", "user_project_root": project_dir, "host_uid": "1000"}}
+        )
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main._seed_host_config_if_absent",
+                wraps=_REAL_SEED_HOST_CONFIG,
+            ),
+            patch("cli.main.typer.prompt") as mock_prompt,
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0, result.output
+        # No prompts issued because file existed
+        mock_prompt.assert_not_called()
+        # File untouched
+        assert cfg_path.read_text() == existing_body
 
 
 class TestInitAuthProbe:
@@ -2072,7 +2507,6 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2084,7 +2518,7 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
             # Verify the probe was called with sudo prefix
             probe_call = mock_run.call_args[0][0]
@@ -2100,13 +2534,12 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/failprobe"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch(
                 "cli.main.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 1, "", "permission denied"),
             ),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 1
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
@@ -2120,10 +2553,9 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/timeout"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="test", timeout=5)),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 1
             assert "timed out" in result.output.lower()
 
@@ -2141,7 +2573,6 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2153,7 +2584,7 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox", "--machinectl-auth", "polkit"])
+            result = runner.invoke(app, ["init", "--machinectl-auth", "polkit"])
             assert result.exit_code == 0
             probe_call = mock_run.call_args[0][0]
             assert "sudo" not in probe_call
@@ -2166,13 +2597,12 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/polkitfail"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch(
                 "cli.main.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 1, "", "auth failed"),
             ),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox", "--machinectl-auth", "polkit"])
+            result = runner.invoke(app, ["init", "--machinectl-auth", "polkit"])
             assert result.exit_code == 1
             assert "polkit" in result.output.lower()
 
@@ -2183,9 +2613,8 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/badauth"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox", "--machinectl-auth", "invalid"])
+            result = runner.invoke(app, ["init", "--machinectl-auth", "invalid"])
             assert result.exit_code == 1
             assert "invalid" in result.output.lower()
 
@@ -2196,10 +2625,9 @@ class TestInitAuthProbe:
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/nobin"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
             patch("cli.main.subprocess.run", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init", "--user", "sandbox"])
+            result = runner.invoke(app, ["init"])
             assert result.exit_code == 1
             assert "command not found" in result.output.lower()
 
@@ -2234,7 +2662,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         # Create tooling plane files for template validation
         _create_tooling_plane(home)
@@ -2255,7 +2683,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -2272,7 +2700,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 5)
+        _write_ipam("myproject-abc123", 5)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -2291,7 +2719,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -2308,7 +2736,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
         # Break the compose template
         (home / ".docker" / "compose.yml").write_text("{{ undefined_var }}")
@@ -2327,7 +2755,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         inst = _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
         # Write empty env file — secrets missing
         (inst / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""')
@@ -2353,6 +2781,7 @@ class TestDryRunNewInstance:
 
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
@@ -2434,7 +2863,7 @@ class TestCheckSecretsFirecrawl:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         inst = _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         # Write a sandbox.toml with mcp_firecrawl=true
@@ -2566,6 +2995,7 @@ class TestStatusNoInstance:
     def test_status_no_instance_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -2582,7 +3012,7 @@ class TestStatusRunning:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         from cli.main import ContainerInfo, app
 
@@ -2614,7 +3044,7 @@ class TestStatusStopped:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         from cli.main import app
 
@@ -2636,7 +3066,7 @@ class TestStatusDegraded:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         from cli.main import ContainerInfo, app
 
@@ -2663,7 +3093,7 @@ class TestStatusIPAM:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 3)
+        _write_ipam("myproject-abc123", 3)
 
         from cli.main import app
 
@@ -2687,7 +3117,7 @@ class TestStatusConfigWarnings:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         # Write env file with empty PG_PASSWORD
         inst_dir = home / "sandboxes" / "myproject-abc123"
@@ -3069,7 +3499,7 @@ class TestStartPipelineOrdering:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3249,7 +3679,7 @@ class TestDestroyFaultIsolation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
@@ -3276,7 +3706,7 @@ class TestDestroyFaultIsolation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3463,7 +3893,7 @@ class TestDestroyFaultIsolationWarnings:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3509,7 +3939,7 @@ class TestDestroyFaultIsolationWarnings:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3620,7 +4050,7 @@ class TestDryRunAuthModePreview:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -3649,7 +4079,7 @@ class TestDryRunAuthModePreview:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -3682,7 +4112,7 @@ class TestPolkitEndToEnd:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
         captured: dict[str, object] = {}
@@ -3729,12 +4159,15 @@ class TestPostInitMissingHostConfig:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch(
+                "cli.main.HostConfig.from_toml",
+                side_effect=FileNotFoundError("No sandbox-ai.toml found. Run sandbox init."),
+            ),
         ):
             args = [command]
             if command == "destroy":

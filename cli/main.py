@@ -4,14 +4,21 @@ Commands: init, start, stop, attach, destroy, doctor, status.
 All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 """
 
+from __future__ import annotations
+
 import fcntl
 import json as _json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
@@ -22,7 +29,7 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd
+from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd, sandbox_ai_user_home, state_lock_path
 from core.hydration import (
     InstanceConfig,
     build_jinja_context,
@@ -36,6 +43,8 @@ from core.scaffold import (
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
+    ensure_per_user_tree,
+    ensure_registry_seed,
     prompt_secrets,
     write_initialized_sentinel,
     write_sandbox_toml,
@@ -77,8 +86,7 @@ def _resolve_project_dir() -> str:
 
 def _resolve_instance(sandbox_ai_home: str, project_dir: str) -> tuple[str | None, str | None]:
     """Look up instance from registry. Returns (instance_dir, instance_id) or (None, None)."""
-    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-    registry = InstanceRegistry(registry_path)
+    registry = InstanceRegistry()
     instance_id = registry.lookup(project_dir)
     if instance_id is None:
         return None, None
@@ -172,8 +180,10 @@ def _warm_check(instance_dir: str, name: str, host_user: str, auth: MachinectlAu
 
 
 def _acquire_state_lock(instance_dir: str) -> int:
-    """Acquire per-instance state.lock. Returns fd. Raises BlockingIOError on contention."""
-    lock_path = os.path.join(instance_dir, "state.lock")
+    """Acquire the per-user state lock. Returns fd. Raises BlockingIOError on contention."""
+    del instance_dir
+    lock_path = str(state_lock_path())
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -200,8 +210,8 @@ def _release_lock(fd: int) -> None:
 
 def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
     """Phase 2: IPAM allocation. Returns base_index."""
-    ledger_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-    ledger = IPAMLedger(ledger_path)
+    del sandbox_ai_home
+    ledger = IPAMLedger()
     return ledger.allocate(instance_id)
 
 
@@ -708,7 +718,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     if instance_dir is None or instance_id is None:
         console.print(
-            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            "No sandbox instance found. Run `sandbox init` first.",
             style="red",
         )
         raise typer.Exit(code=1)
@@ -720,8 +730,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     name = config.instance.name
 
     # ── IPAM preview ─────────────────────────────────────────────────────
-    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-    ledger = IPAMLedger(ipam_path)
+    ledger = IPAMLedger()
     try:
         slot, is_existing = ledger.peek_next_slot(instance_id)
         isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
@@ -823,15 +832,11 @@ def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str,
     Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
-    del config  # accepted for signature stability with callers; host config is authoritative
+    del project_dir, config  # accepted for signature stability; host config is authoritative
     try:
-        project_config = HostConfig.from_toml(project_dir)
-    except FileNotFoundError:
-        console.print(
-            f"No sandbox-ai.toml found at {project_dir}. "
-            "Create one with [host].docker_unprivileged_user before running this command.",
-            style="red",
-        )
+        project_config = HostConfig.from_toml()
+    except FileNotFoundError as exc:
+        console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
     return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
 
@@ -856,9 +861,113 @@ def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> No
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 
+def _stdin_is_tty() -> bool:
+    """Boolean wrapper around ``sys.stdin.isatty()`` for ergonomic test patching.
+
+    Why a wrapper: typer's ``CliRunner`` substitutes ``sys.stdin`` with an
+    in-memory buffer at invoke time, which breaks ``patch("cli.main.sys.stdin")``
+    for tests that need to simulate TTY mode. Patching this function instead
+    is robust to runner-level stdin replacement.
+    """
+    return sys.stdin.isatty()
+
+
+def _require_per_user_state_initialized() -> None:
+    """Hard-fail when ``<home>/state/instances.json`` is absent.
+
+    Lifecycle commands (`start`, `stop`, `destroy`, `status`, `attach`) call
+    this as their first step. Initialization is signaled by the registry
+    file's presence, which `sandbox init` writes via `ensure_registry_seed`.
+    """
+    home = sandbox_ai_user_home()
+    registry = home / "state" / "instances.json"
+    if not registry.exists():
+        console.print(
+            f"Error: per-user state not initialized at {home}. Run `sandbox init` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+
+def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
+    """Seed ``<user_home>/config/sandbox-ai.toml`` when missing.
+
+    TTY mode prompts for ``docker_unprivileged_user`` (required, non-empty)
+    and ``machinectl_authentication`` (default ``sudo``). Non-TTY mode exits
+    with explicit guidance. Existing files are never overwritten. Dry-run
+    skips seeding entirely.
+    """
+    config_path = user_home / "config" / "sandbox-ai.toml"
+    if config_path.exists() or dry_run:
+        return
+
+    if not _stdin_is_tty():
+        console.print(
+            f"Cannot prompt for docker_unprivileged_user in non-interactive mode. "
+            f"Create {config_path} with a [host] section containing docker_unprivileged_user "
+            f"before running sandbox init.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    while True:
+        docker_user = typer.prompt("docker_unprivileged_user (e.g., sandbox)").strip()
+        if docker_user:
+            break
+        console.print("docker_unprivileged_user must not be empty.", style="yellow")
+
+    auth_input = (
+        typer.prompt(
+            "machinectl_authentication [sudo/polkit, default sudo]",
+            default="sudo",
+            show_default=False,
+        ).strip()
+        or "sudo"
+    )
+    try:
+        resolved_auth_for_seed = MachinectlAuth(auth_input)
+    except ValueError as exc:
+        console.print(
+            f"Invalid machinectl_authentication value: '{auth_input}'. Must be 'sudo' or 'polkit'.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from exc
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[host]\n"
+        f'docker_unprivileged_user = "{docker_user}"\n'
+        f'machinectl_authentication = "{resolved_auth_for_seed.value}"\n'
+    )
+
+
+def _warn_legacy_cwd_files(project_dir: str, user_home: Path) -> None:
+    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exists.
+
+    The legacy path tokens in this docstring are intentional and load-bearing:
+    they preserve the exact strings users may grep for during migration.
+    Per the per-user-config-and-state-relocation change (task 14.7), do not
+    remove them in future cleanups.
+    """
+    legacy_toml = os.path.join(project_dir, "sandbox-ai.toml")
+    if os.path.exists(legacy_toml):
+        console.print(
+            f"Found legacy {legacy_toml}. Per-host config now lives at "
+            f"{user_home / 'config' / 'sandbox-ai.toml'}. "
+            "Migrate manually or delete the legacy file.",
+            style="yellow",
+        )
+    legacy_state = os.path.join(project_dir, ".state")
+    if os.path.isdir(legacy_state):
+        console.print(
+            f"Found legacy {legacy_state}. Orchestrator state now lives at "
+            f"{user_home / 'state'}. Migrate manually or delete the legacy directory.",
+            style="yellow",
+        )
+
+
 @app.command()
 def init(
-    user: str | None = typer.Option(None, "--user", help="Unprivileged user for the sandbox"),
     machinectl_auth: str | None = typer.Option(
         None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
     ),
@@ -870,6 +979,13 @@ def init(
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
+    # Per-user tree creation (idempotent, mode 0700)
+    user_home = sandbox_ai_user_home()
+    ensure_per_user_tree(user_home)
+
+    # Legacy CWD-local file detection (advisory)
+    _warn_legacy_cwd_files(project_dir, user_home)
+
     # Re-init guard (D-6)
     instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
     if instance_dir is not None:
@@ -879,28 +995,31 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    # Resolution: docker_unprivileged_user (D5)
-    # Priority: --user flag → sandbox-ai.toml → error
+    # Seed canonical host config (TTY prompt or non-TTY fail) when absent
+    _seed_host_config_if_absent(user_home, dry_run=dry_run)
+
+    # Resolution: docker_unprivileged_user — canonical host config is authoritative
     project_config: HostConfig | None = None
     try:
-        project_config = HostConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
 
     resolved_user: str
-    if user is not None:
-        resolved_user = user
-    elif project_config is not None:
+    if project_config is not None:
         resolved_user = project_config.host.docker_unprivileged_user
+    elif dry_run:
+        resolved_user = "<dry-run>"
     else:
+        # Should not happen post-seed in interactive mode; non-TTY already exited above.
         console.print(
-            "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
+            f"No host config at {user_home / 'config' / 'sandbox-ai.toml'}. "
+            "Run sandbox init in an interactive shell or create the file manually.",
             style="red",
         )
         raise typer.Exit(code=1)
 
-    # Resolution: machinectl_authentication (D5)
-    # Priority: --machinectl-auth flag → sandbox-ai.toml → default "sudo"
+    # Resolution: machinectl_authentication (--machinectl-auth flag → host config → default sudo)
     resolved_auth: MachinectlAuth
     if machinectl_auth is not None:
         try:
@@ -1002,9 +1121,9 @@ def init(
     dev_user = os.environ.get("USER", "dev")
     apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
 
-    # S5: Register
-    registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-    registry = InstanceRegistry(registry_path)
+    # S5: Register — ensure registry seed exists, then register
+    ensure_registry_seed(user_home)
+    registry = InstanceRegistry()
     registry.register(project_dir, instance_id)
 
     # S6: Secret prompting (non-TTY safe)
@@ -1032,6 +1151,7 @@ def start(
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
 ) -> None:
     """Start the sandbox."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1044,7 +1164,7 @@ def start(
 
     if instance_dir is None or instance_id is None:
         console.print(
-            "No sandbox instance found. Run `sandbox init --user <user>` first.",
+            "No sandbox instance found. Run `sandbox init` first.",
             style="red",
         )
         raise typer.Exit(code=1)
@@ -1162,6 +1282,7 @@ def start(
 @app.command()
 def stop(clean: bool = False) -> None:
     """Stop the sandbox."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1208,6 +1329,7 @@ def stop(clean: bool = False) -> None:
 @app.command()
 def attach() -> None:
     """Attach to a running sandbox."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1232,6 +1354,7 @@ def attach() -> None:
 @app.command()
 def destroy(force: bool = False) -> None:
     """Permanently destroy a sandbox instance."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1286,16 +1409,14 @@ def destroy(force: bool = False) -> None:
 
         # Phase 5: State cleanup — IPAM — fault-isolated (D12)
         try:
-            ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-            ledger = IPAMLedger(ipam_path)
+            ledger = IPAMLedger()
             ledger.release(instance_id)
         except Exception as e:
             console.print(f"⚠ IPAM release warning: {e}", style="yellow")
 
         # Phase 6: State cleanup — Registry — fault-isolated (D12)
         try:
-            registry_path = os.path.join(sandbox_ai_home, ".state", "instances.json")
-            registry = InstanceRegistry(registry_path)
+            registry = InstanceRegistry()
             registry.remove(project_dir)
         except Exception as e:
             console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
@@ -1315,10 +1436,9 @@ def doctor(
     ),
 ) -> None:
     """Run host readiness diagnostics."""
-    project_dir = _resolve_project_dir()
     project_config: HostConfig | None = None
     try:
-        project_config = HostConfig.from_toml(project_dir)
+        project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
 
@@ -1347,6 +1467,8 @@ def doctor(
     else:
         resolved_auth = MachinectlAuth.SUDO
 
+    console.print(f"Per-user home: {sandbox_ai_user_home()}")
+
     distro = detect_distro()
     checks = build_check_registry(resolved_auth)
     results = run_checks(checks, resolved_user, distro)
@@ -1360,6 +1482,7 @@ def doctor(
 @app.command()
 def status() -> None:
     """Show sandbox instance status and diagnostics."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1407,8 +1530,7 @@ def status() -> None:
     # Container grid (running only)
     if is_running:
         # Derive static IPs for network column
-        ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-        ledger = IPAMLedger(ipam_path)
+        ledger = IPAMLedger()
         ip_map: dict[str, str] = {}
         try:
             slot, _is_existing = ledger.peek_next_slot(instance_id)
@@ -1446,8 +1568,7 @@ def status() -> None:
         console.print(table)
 
     # IPAM display
-    ipam_path = os.path.join(sandbox_ai_home, ".state", "ipam.json")
-    ledger = IPAMLedger(ipam_path)
+    ledger = IPAMLedger()
     try:
         slot, _is_existing = ledger.peek_next_slot(instance_id)
         if _is_existing:

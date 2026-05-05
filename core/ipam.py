@@ -11,7 +11,14 @@ import fcntl
 import json
 import os
 
+from core.host_config import sandbox_ai_user_home, state_lock_path
+
 MAX_SLOTS = 5705
+
+
+def _default_ledger_path() -> str:
+    """Resolve ``<home>/state/ipam.json`` for the current user."""
+    return str(sandbox_ai_user_home() / "state" / "ipam.json")
 
 
 class IPAMExhaustedError(Exception):
@@ -29,8 +36,8 @@ class IPAMLockException(BlockingIOError):
 class IPAMLedger:
     """File-backed IPAM ledger with fcntl locking for concurrent access."""
 
-    def __init__(self, ledger_path: str) -> None:
-        self._path = ledger_path
+    def __init__(self, ledger_path: str | None = None) -> None:
+        self._path = ledger_path if ledger_path is not None else _default_ledger_path()
 
     def _load(self) -> dict[str, int]:
         """Load the ledger from disk. Returns empty dict if file missing or corrupt."""
@@ -50,8 +57,8 @@ class IPAMLedger:
             json.dump(data, f, indent=2)
 
     def _acquire_lock(self) -> int:
-        """Acquire the IPAM lock file. Returns the lock fd."""
-        lock_path = self._path + ".lock"
+        """Acquire the per-user state lock. Returns the lock fd."""
+        lock_path = str(state_lock_path())
         os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:

@@ -9,7 +9,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Tooling Plane Bootstrapping
 - **WHEN** the orchestrator initiates execution on a fresh host machine
-- **THEN** the operator runs `sandbox init --user <user>` which resolves `SANDBOX_AI_HOME` from the location of the orchestrator source, scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<instance_name>-<hash_hex>/`, and writes the `.initialized` sentinel
+- **THEN** the operator runs `sandbox init`, which seeds `<sandbox_ai_user_home()>/config/sandbox-ai.toml` (TTY prompt or non-TTY fail), creates the per-user state tree at `<sandbox_ai_user_home()>/{config,state}/`, scaffolds the per-instance directory tree under `SANDBOX_AI_HOME/sandboxes/<instance_name>-<hash_hex>/`, and writes the `.initialized` sentinel
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start`
@@ -56,15 +56,15 @@ The system SHALL isolate all Docker command execution across the `dev`/`sandbox`
 - **THEN** it invokes: `subprocess.run(["machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited
 
 ### Requirement: Host Config Loading in CLI Commands
-All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`) SHALL load per-host config from `sandbox-ai.toml` via `HostConfig.from_toml(project_dir)` and read `docker_unprivileged_user` and `machinectl_authentication` from it. The `project_dir` SHALL be resolved from CWD via `_resolve_project_dir()`.
+All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`) SHALL load per-host config from `<sandbox_ai_user_home()>/config/sandbox-ai.toml` via `HostConfig.from_toml()` and read `docker_unprivileged_user` and `machinectl_authentication` from it. The canonical path is resolved internally; CWD is no longer consulted.
 
 #### Scenario: Post-init command reads host config
-- **WHEN** any post-init command runs and `sandbox-ai.toml` exists in the project directory
+- **WHEN** any post-init command runs and the canonical `sandbox-ai.toml` exists
 - **THEN** `docker_unprivileged_user` and `machinectl_authentication` are sourced from the `[host]` section
 
 #### Scenario: Post-init command fails without host config
-- **WHEN** any post-init command runs and `sandbox-ai.toml` does not exist in the project directory
-- **THEN** the CLI exits with an error directing the user to create `sandbox-ai.toml`
+- **WHEN** any post-init command runs and the canonical `sandbox-ai.toml` is absent
+- **THEN** the CLI exits with an error directing the user to run `sandbox init`
 
 ### Requirement: Automated AI Handover
 The system SHALL deliver an interactive shell session in the admin container to the operator after containers are confirmed healthy, optionally auto-starting the agent if a warmup prompt is configured.

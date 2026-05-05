@@ -30,7 +30,6 @@ SANDBOX_AI_HOME/                  # Git clone root
 │   └── crypto.py                 # Proxy credential generation (bcrypt)
 ├── .docker/                      # Immutable tooling plane (Dockerfiles)
 ├── .config/                      # Immutable config templates (Jinja2)
-├── .state/                       # Runtime state (instances.json, ipam.json)
 ├── sandboxes/<id>/               # Per-instance mutable state
 │   ├── sandbox.toml              # Instance configuration
 │   ├── .sandbox.env              # Secrets (never committed)
@@ -42,9 +41,18 @@ SANDBOX_AI_HOME/                  # Git clone root
 
 ## Configuration
 
-Each sandbox instance stores its configuration at `sandboxes/<id>/sandbox.toml`.
-The file is generated during `sandbox init` via the scaffolding pipeline and
-re-hydrated on every subsequent `sandbox start` to ensure infrastructure drift is eliminated.
+Per-host orchestrator config lives at `~/.sandbox-ai/config/sandbox-ai.toml`
+(seeded by `sandbox init` via interactive prompt or pre-created for non-TTY
+runs). Orchestrator state (`instances.json`, `ipam.json`, `state.lock`)
+lives under `~/.sandbox-ai/state/`. Both directories are created with mode
+`0700` and are per-user — they are shared across all working directories of
+the same user. The `SANDBOX_AI_USER_HOME` env var redirects the path for
+test isolation only.
+
+Each sandbox instance stores its per-instance configuration at
+`sandboxes/<id>/sandbox.toml`. The file is generated during `sandbox init`
+via the scaffolding pipeline and re-hydrated on every subsequent
+`sandbox start` to ensure infrastructure drift is eliminated.
 
 ## Development
 
