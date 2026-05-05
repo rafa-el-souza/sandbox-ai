@@ -137,3 +137,49 @@ class TestGenerateSSHKeypair:
         secrets_dir.mkdir()
         with pytest.raises(ValueError, match="Invalid pair_type"):
             generate_ssh_keypair(str(tmp_path), "invalid")
+
+
+class TestSecretsFileModes:
+    """Hydration writes secret files at restrictive mode regardless of umask (Decision 6)."""
+
+    def test_auth_keypair_modes(self, tmp_path: Path) -> None:
+        import os
+
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        old_umask = os.umask(0o022)
+        try:
+            generate_ssh_keypair(str(tmp_path), "auth")
+        finally:
+            os.umask(old_umask)
+        assert ((secrets_dir / "ipc_ssh_key").stat().st_mode & 0o777) == 0o600
+        assert ((secrets_dir / "authorized_keys").stat().st_mode & 0o777) == 0o600
+
+    def test_host_keypair_modes(self, tmp_path: Path) -> None:
+        import os
+
+        from core.crypto import generate_ssh_keypair
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        old_umask = os.umask(0o022)
+        try:
+            generate_ssh_keypair(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
+        finally:
+            os.umask(old_umask)
+        assert ((secrets_dir / "ipc_host_key").stat().st_mode & 0o777) == 0o600
+        assert ((secrets_dir / "ipc_known_hosts").stat().st_mode & 0o777) == 0o600
+
+    def test_htpasswd_mode_640(self, tmp_path: Path) -> None:
+        import os
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        old_umask = os.umask(0o022)
+        try:
+            write_htpasswd(str(proxy_dir), "proxyuser:$2b$12$x")
+        finally:
+            os.umask(old_umask)
+        assert ((proxy_dir / ".htpasswd").stat().st_mode & 0o777) == 0o640

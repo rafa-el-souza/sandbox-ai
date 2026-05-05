@@ -592,6 +592,107 @@ class TestRenderTemplates:
         assert violations == [], f"Unresolved Jinja2 markers found in rendered files: {violations}"
 
 
+class TestWriteRestricted:
+    """write_restricted bypasses umask and applies the requested mode."""
+
+    def test_mode_640_under_umask_022(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.hydration import write_restricted
+
+        old_umask = os.umask(0o022)
+        try:
+            target = tmp_path / "f.txt"
+            write_restricted(str(target), "hello", 0o640)
+            assert (target.stat().st_mode & 0o777) == 0o640
+        finally:
+            os.umask(old_umask)
+
+    def test_mode_600_under_permissive_umask(self, tmp_path: Path) -> None:
+        from core.hydration import write_restricted
+
+        old_umask = os.umask(0o000)
+        try:
+            target = tmp_path / "secret"
+            write_restricted(str(target), b"sekrit", 0o600)
+            assert (target.stat().st_mode & 0o777) == 0o600
+        finally:
+            os.umask(old_umask)
+
+    def test_overwrites_existing_file_at_mode(self, tmp_path: Path) -> None:
+        from core.hydration import write_restricted
+
+        target = tmp_path / "f"
+        target.write_text("old")
+        os.chmod(target, 0o644)
+        write_restricted(str(target), "new", 0o640)
+        assert target.read_text() == "new"
+        assert (target.stat().st_mode & 0o777) == 0o640
+
+    def test_accepts_str_or_bytes(self, tmp_path: Path) -> None:
+        from core.hydration import write_restricted
+
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        write_restricted(str(a), "abc", 0o640)
+        write_restricted(str(b), b"abc", 0o640)
+        assert a.read_bytes() == b.read_bytes() == b"abc"
+
+
+class TestRenderTemplatesRestrictiveModes:
+    """Hydration writes files at restrictive modes regardless of umask (Decision 6)."""
+
+    def test_rendered_files_mode_640_under_022_umask(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        instance.mkdir()
+        for d in [
+            "docker/core",
+            "docker/admin",
+            "docker/coredns",
+            "docker/extras",
+            "config/coredns",
+            "config/dnsdist",
+            "config/proxy",
+            "config/core",
+            "config/admin",
+            "secrets",
+            "log/core",
+            "log/admin",
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "custom/config/admin",
+            "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        _patch_templates_root(monkeypatch, tooling)
+        ctx = _build_test_context(str(instance))
+
+        old_umask = os.umask(0o022)
+        try:
+            render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
+        finally:
+            os.umask(old_umask)
+
+        # Spot-check several rendered files: all should be 0o640
+        for rel in [
+            "docker/compose.yml",
+            "config/coredns/Corefile",
+            "config/dnsdist/dnsdist.conf",
+            "config/proxy/squid.conf",
+            "config/core/.bashrc",
+            "config/admin/.zshrc",
+            "config/proxy/allowed_domains.txt",
+            "config/proxy/read_only_domains.txt",
+            "config/core/.claude.json",
+        ]:
+            path = instance / rel
+            assert path.exists(), f"missing {rel}"
+            mode = path.stat().st_mode & 0o777
+            assert mode == 0o640, f"{rel} has mode {oct(mode)}, expected 0o640"
+
+
 def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
     from core.ipam import derive_static_ips, derive_subnets
