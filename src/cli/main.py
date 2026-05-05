@@ -29,7 +29,7 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.helper_container import helper_mkdir_chown_dirs
+from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
 from core.host_config import (
     HostConfig,
     HostSettings,
@@ -246,58 +246,6 @@ def _phase_credentials(
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
 
     return password
-
-
-def _phase_credential_ownership(
-    instance_dir: str,
-    host_user: str,
-    secrets_dir: str | None = None,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
-) -> None:
-    """Phase 5b: Credential ownership matching via disposable helper container.
-
-    Runs chown(2) on all four IPC secret files to converge ownership to
-    uid 1000 inside the rootless Docker namespace. Must execute after ACL
-    grants (Phase 5) so the rootless Docker daemon can traverse the
-    instance directory tree.
-    """
-    resolved_secrets_dir = secrets_dir or os.path.join(instance_dir, "secrets")
-    secret_files = ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
-    filenames = " ".join(secret_files)
-    volume_args = f"-v {resolved_secrets_dir}:/secrets"
-    docker_cmd = (
-        f"docker run --rm --runtime=runc {volume_args} busybox sh -c '"
-        f"for f in {filenames}; do "
-        f"cp /secrets/$f /tmp/$f && chown 1000:1000 /tmp/$f && chmod 0600 /tmp/$f && mv /tmp/$f /secrets/$f; "
-        f"done'"
-    )
-
-    try:
-        subprocess.run(["setfacl", "-m", f"u:{host_user}:rwX", resolved_secrets_dir], check=True)
-    except subprocess.CalledProcessError as e:
-        raise SandboxExecutionError(f"Failed to escalate ACLs for secrets directory: {e}") from e
-
-    executor = Executor()
-    try:
-        executor.run(
-            [
-                *machinectl_cmd(host_user, auth),
-                "/bin/bash",
-                "-c",
-                docker_cmd,
-            ],
-            sentinel=True,
-        )
-    except SandboxExecutionError as e:
-        raise SandboxExecutionError(f"Credential ownership matching failed: {e}") from e
-    finally:
-        try:
-            subprocess.run(["setfacl", "-m", f"u:{host_user}:rX", resolved_secrets_dir], check=True)
-        except subprocess.CalledProcessError as e:
-            raise SandboxExecutionError(
-                f"Failed to downgrade ACLs for secrets directory. "
-                f"Fix: sudo setfacl -m u:{host_user}:rX {resolved_secrets_dir}"
-            ) from e
 
 
 def _phase_hydrate(
@@ -611,6 +559,44 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
     return ""
 
 
+# ─── Per-class consumer mapping (orchestrator-volumes Decision 1) ───────────
+# Each entry is (parent_relative_to_instance, files, in_container_consumer_uid, mode).
+# The helper-cp+chown phase chowns each group's files to (host_id_for_in_container(uid), 0).
+
+RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # CoreDNS rendered config
+    ("config/coredns", ("Corefile",), 65532, 0o640),
+    # dnsdist rendered config
+    ("config/dnsdist", ("dnsdist.conf",), 953, 0o640),
+    # Squid proxy ro files (post-drop worker uid)
+    (
+        "config/proxy",
+        ("squid.conf", "allowed_domains.txt", "read_only_domains.txt", "ERR_SANDBOX_403", ".htpasswd"),
+        13,
+        0o640,
+    ),
+    # Agent (core) dotfiles + sshd config
+    (
+        "config/core",
+        (".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"),
+        1000,
+        0o640,
+    ),
+    # Human (admin) dotfiles + statusline assets
+    (
+        "config/admin",
+        (".zshrc", ".tmux.conf", ".gitconfig", "gitmux.conf", "starship.toml"),
+        1000,
+        0o640,
+    ),
+    # Secrets — core consumer (agent) — mode 0600
+    ("secrets", ("authorized_keys", "ipc_host_key"), 1000, 0o600),
+    # Secrets — admin consumer (human) — mode 0600
+    ("secrets", ("ipc_known_hosts", "ipc_ssh_key"), 1000, 0o600),
+)
+"""Single source of truth for the helper-cp+chown phase and dry-run preview."""
+
+
 CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cache/core", (".claude",)),
     ("cache/admin", ("tmux_resurrect",)),
@@ -637,6 +623,42 @@ def _helper_mkdir_chown_plan(
         (os.path.join(instance_dir, parent), leaves, owner_uid, owner_gid)
         for parent, leaves in CACHE_LOG_LEAVES_BY_PARENT
     ]
+
+
+def _helper_cp_chown_plan(
+    instance_dir: str, host_user: str
+) -> list[tuple[str, tuple[str, ...], int, int, int]]:
+    """Return ``[(parent_abs, files, owner_uid, owner_gid, mode), ...]`` for ro files.
+
+    Owner uid is mapped via :func:`core.host_config.host_id_for_in_container`;
+    owner gid is always 0 (in-container root) so root-running parsers can read
+    the file before dropping privileges.
+    """
+    return [
+        (
+            os.path.join(instance_dir, parent),
+            files,
+            host_id_for_in_container(consumer_uid, host_user),
+            0,
+            mode,
+        )
+        for parent, files, consumer_uid, mode in RO_FILE_RECIPES
+    ]
+
+
+def _phase_helper_cp_chown_ro_files(
+    instance_dir: str,
+    host_user: str,
+    auth: MachinectlAuth,
+) -> None:
+    """Phase 5d: helper-cp + chown for ro single-file mounts.
+
+    Replaces today's ``_phase_credential_ownership`` — IPC SSH secrets are now
+    handled by the standard recipe (``secrets/`` group with consumer uid 1000,
+    mode 0600). One helper invocation per (parent, consumer_uid, mode) group.
+    """
+    for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
+        helper_chown_files(host_user, parent_abs, files, owner_uid, owner_gid, mode, auth)
 
 
 def _phase_helper_mkdir_chown_cache_log(
@@ -917,6 +939,15 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
             leaves_str = ", ".join(leaves)
             console.print(
                 f"    helper-mkdir+chown {parent_abs}/{{{leaves_str}}} → {owner_uid}:{owner_gid}",
+                style="dim",
+            )
+        for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(
+            instance_dir, host_user
+        ):
+            files_str = ", ".join(files)
+            console.print(
+                f"    helper-cp+chown {parent_abs}/{{{files_str}}} → "
+                f"{owner_uid}:{owner_gid} {mode:o}",
                 style="dim",
             )
     except SandboxExecutionError as exc:
@@ -1415,9 +1446,9 @@ def start(
         _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
         console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
-        # Phase 5b: Credential ownership matching (after ACL grants)
-        _phase_credential_ownership(instance_dir, host_user, auth=auth)
-        console.print("✓ Ownership — credential files converged")
+        # Phase 5d: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
+        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
+        console.print("✓ Ownership — ro config files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
