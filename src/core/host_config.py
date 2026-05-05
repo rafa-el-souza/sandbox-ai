@@ -136,18 +136,25 @@ def _parse_subid_file(path: Path, host_user: str) -> list[tuple[int, int]]:
     return ranges
 
 
+# Module-level path constants — overridable in tests via monkeypatch.
+# Production reads /etc/subuid and /etc/subgid; redirecting these constants
+# is the precise way to test the parser without patching the global ``Path``.
+_SUBUID_PATH: Path = Path("/etc/subuid")
+_SUBGID_PATH: Path = Path("/etc/subgid")
+
+
 def parse_subuid_for_user(host_user: str) -> list[tuple[int, int]]:
     """Return ``[(first_allocated, count), ...]`` for ``host_user`` from /etc/subuid.
 
     Multi-line entries are returned in file order. Empty list means the user
     has no entry (or /etc/subuid does not exist).
     """
-    return _parse_subid_file(Path("/etc/subuid"), host_user)
+    return _parse_subid_file(_SUBUID_PATH, host_user)
 
 
 def parse_subgid_for_user(host_user: str) -> list[tuple[int, int]]:
     """Return ``[(first_allocated, count), ...]`` for ``host_user`` from /etc/subgid."""
-    return _parse_subid_file(Path("/etc/subgid"), host_user)
+    return _parse_subid_file(_SUBGID_PATH, host_user)
 
 
 def host_id_for_in_container(N: int, host_user: str) -> int:

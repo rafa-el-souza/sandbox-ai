@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from core.host_config import (
@@ -195,75 +194,55 @@ def _write_subid_file(path: Path, body: str) -> None:
     path.write_text(body)
 
 
+def _patch_subuid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    """Redirect production's /etc/subuid path constant to a tmp file."""
+    f = tmp_path / "subuid"
+    f.write_text(body)
+    monkeypatch.setattr("core.host_config._SUBUID_PATH", f)
+    return f
+
+
+def _patch_subgid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    f = tmp_path / "subgid"
+    f.write_text(body)
+    monkeypatch.setattr("core.host_config._SUBGID_PATH", f)
+    return f
+
+
 class TestParseSubidFiles:
     """parse_subuid_for_user / parse_subgid_for_user."""
 
-    def test_single_range(self, tmp_path: Path) -> None:
-        f = tmp_path / "subuid"
-        _write_subid_file(f, "claude-sandbox:100000:65536\nother:200000:65536\n")
-        with patch("core.host_config.Path") as path_cls:
-            path_cls.return_value = f
-            assert parse_subuid_for_user("claude-sandbox") == [(100000, 65536)]
+    def test_single_range(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:100000:65536\nother:200000:65536\n")
+        assert parse_subuid_for_user("claude-sandbox") == [(100000, 65536)]
 
-    def test_multi_range(self, tmp_path: Path) -> None:
-        f = tmp_path / "subuid"
-        _write_subid_file(f, "u:1000:500\nu:2000:1000\nother:9000:10\n")
-        with patch("core.host_config.Path") as path_cls:
-            path_cls.return_value = f
-            assert parse_subuid_for_user("u") == [(1000, 500), (2000, 1000)]
+    def test_multi_range(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "u:1000:500\nu:2000:1000\nother:9000:10\n")
+        assert parse_subuid_for_user("u") == [(1000, 500), (2000, 1000)]
 
-    def test_user_absent_returns_empty(self, tmp_path: Path) -> None:
-        f = tmp_path / "subuid"
-        _write_subid_file(f, "other:200000:65536\n")
-        with patch("core.host_config.Path") as path_cls:
-            path_cls.return_value = f
-            assert parse_subuid_for_user("missing") == []
+    def test_user_absent_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "other:200000:65536\n")
+        assert parse_subuid_for_user("missing") == []
 
-    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
-        f = tmp_path / "nope"
-        with patch("core.host_config.Path") as path_cls:
-            path_cls.return_value = f
-            assert parse_subuid_for_user("anyone") == []
+    def test_missing_file_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Point the constant at a path that doesn't exist.
+        monkeypatch.setattr("core.host_config._SUBUID_PATH", tmp_path / "nope")
+        assert parse_subuid_for_user("anyone") == []
 
-    def test_skips_blank_and_comment_and_malformed(self, tmp_path: Path) -> None:
-        f = tmp_path / "subuid"
-        _write_subid_file(
-            f,
+    def test_skips_blank_and_comment_and_malformed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(
+            monkeypatch,
+            tmp_path,
             "\n# comment\nclaude-sandbox:100000:65536\nbadrow\nclaude-sandbox:notanint:42\n",
         )
-        with patch("core.host_config.Path") as path_cls:
-            path_cls.return_value = f
-            assert parse_subuid_for_user("claude-sandbox") == [(100000, 65536)]
+        assert parse_subuid_for_user("claude-sandbox") == [(100000, 65536)]
 
-    def test_subgid_uses_etc_subgid(self, tmp_path: Path) -> None:
-        # Verifies parse_subgid_for_user reads /etc/subgid (different file).
-        subuid = tmp_path / "subuid"
-        subgid = tmp_path / "subgid"
-        _write_subid_file(subuid, "u:1:2\n")
-        _write_subid_file(subgid, "u:9000:10\n")
-
-        def _path(arg: str) -> Path:
-            if arg == "/etc/subuid":
-                return subuid
-            if arg == "/etc/subgid":
-                return subgid
-            return Path(arg)
-
-        with patch("core.host_config.Path", side_effect=_path):
-            assert parse_subuid_for_user("u") == [(1, 2)]
-            assert parse_subgid_for_user("u") == [(9000, 10)]
-
-
-def _patch_subuid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
-    f = tmp_path / "subuid"
-    f.write_text(body)
-    monkeypatch.setattr("core.host_config.Path", lambda p: f if p == "/etc/subuid" else Path(p))
-
-
-def _patch_subgid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
-    f = tmp_path / "subgid"
-    f.write_text(body)
-    monkeypatch.setattr("core.host_config.Path", lambda p: f if p == "/etc/subgid" else Path(p))
+    def test_subgid_uses_separate_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """parse_subgid_for_user reads ``_SUBGID_PATH``, not ``_SUBUID_PATH``."""
+        _patch_subuid(monkeypatch, tmp_path, "u:1:2\n")
+        _patch_subgid(monkeypatch, tmp_path, "u:9000:10\n")
+        assert parse_subuid_for_user("u") == [(1, 2)]
+        assert parse_subgid_for_user("u") == [(9000, 10)]
 
 
 class TestHostIdForInContainer:
