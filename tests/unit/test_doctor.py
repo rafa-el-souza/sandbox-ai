@@ -409,18 +409,16 @@ class TestFilesystemChecks:
     def test_tooling_plane_intact(self) -> None:
         from core.doctor import check_tooling_plane
 
-        with patch("os.path.exists", return_value=True):
-            result = check_tooling_plane("sandbox", None)
-            assert result.status == "pass"
-            assert "17" in result.detail
+        result = check_tooling_plane("sandbox", None)
+        assert result.status == "pass"
+        assert "17" in result.detail
 
-    def test_tooling_plane_missing_files(self) -> None:
+    def test_tooling_plane_missing_files(self, tmp_path: Path) -> None:
         from core.doctor import check_tooling_plane
 
-        def selective_exists(path: str) -> bool:
-            return "compose.yml" not in path
-
-        with patch("os.path.exists", side_effect=selective_exists):
+        # Build a templates root missing compose.yml (and other entries)
+        (tmp_path / "docker").mkdir()
+        with patch("core.doctor._resource_files", return_value=tmp_path):
             result = check_tooling_plane("sandbox", None)
             assert result.status == "fail"
             assert "compose.yml" in result.detail

@@ -36,12 +36,12 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 - **Per-host** (`<sandbox_ai_user_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user` and `[host].machinectl_authentication` (`sudo` | `polkit`). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_USER_HOME` env var redirects this path for test isolation only.
 - **Per-instance** (`sandboxes/<id>/sandbox.toml`): generated during `sandbox init` and **re-hydrated on every `sandbox start`** via the Pydantic→Jinja2 pipeline in `core.hydration`. Drift is eliminated by regenerating compose/sidecar configs from the model on each start.
 
-### Core modules (`core/`)
+### Core modules (`src/core/`)
 
 - `executor.py` — sterile POSIX subprocess execution (the only sanctioned way to shell out).
 - `registry.py` — instance registry as fcntl-locked JSON at `<sandbox_ai_user_home()>/state/instances.json`.
 - `ipam.py` — `/24` subnet septuple allocator (isolated, core_proxy, dns, admin, admin_proxy, egress, ipc) over 10.100.0.0–10.255.255.0 with lowest-slot scan and slot reuse (`MAX_SLOTS = 5705`).
-- `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `.config/` and `.docker/` (immutable tooling/config plane).
+- `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `src/templates/config/` and `src/templates/docker/` (the immutable tooling/config plane), shipped with the wheel as the top-level `templates` Python package and discovered via `jinja2.PackageLoader("templates", package_path="")` / `importlib.resources`.
 - `scaffold.py` — bootstraps `sandboxes/<id>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel).
 - `crypto.py` — bcrypt htpasswd, SSH keypair, credential generation for the proxy sidecar.
 - `host_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder.
@@ -73,7 +73,7 @@ Use the `openspec-*` skills (`openspec-new-change`, `openspec-apply-change`, `op
 
 ## Conventions
 
-- 100% coverage gate on `core/` and `cli/` — new code without tests will fail `make coverage`.
+- 100% coverage gate on `src/core/` and `src/cli/` — new code without tests will fail `make coverage`.
 - mypy is strict, ruff line-length 120, target `py314`. Selected rules: `E,F,W,I,UP,B,SIM,TCH,RUF`.
-- `cli/__main__.py` is excluded from coverage (`tool.coverage.run.omit`).
-- Tests live in `tests/unit/` mirroring the `core/` and `cli/` layout.
+- `src/cli/__main__.py` is excluded from coverage (`tool.coverage.run.omit`).
+- Tests live in `tests/unit/` mirroring the `src/core/` and `src/cli/` layout.

@@ -370,13 +370,13 @@ class TestScaffoldTemplateResourceLimits:
 
 class TestRenderTemplates:
     @pytest.fixture
-    def tooling_and_instance(self, tmp_path: Path) -> tuple[Path, Path]:
-        """Create a minimal tooling plane and instance dir for render tests."""
+    def tooling_and_instance(self, tmp_path: Path, monkeypatch: object) -> tuple[Path, Path]:
+        """Create a minimal templates root + instance dir; redirect loader to it."""
         tooling = tmp_path / "tooling"
         instance = tmp_path / "instance"
 
         # Create a minimal compose.yml template
-        docker_dir = tooling / ".docker"
+        docker_dir = tooling / "docker"
         docker_dir.mkdir(parents=True)
         (docker_dir / "compose.yml").write_text("# rendered: {{ instance_name }}\nsubnet: {{ isolated_subnet }}\n")
         # Core Dockerfile template
@@ -404,7 +404,7 @@ class TestRenderTemplates:
         (extras_dir / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
 
         # Config templates
-        config_dir = tooling / ".config"
+        config_dir = tooling / "config"
         # coredns
         dns_dir = config_dir / "coredns"
         dns_dir.mkdir(parents=True)
@@ -453,6 +453,7 @@ class TestRenderTemplates:
         ]:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
+        _patch_templates_root(monkeypatch, tooling)
         return tooling, instance
 
     def test_renders_compose(self, tooling_and_instance: tuple[Path, Path]) -> None:
@@ -460,7 +461,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=True, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=False)
 
         rendered = (instance / "docker" / "compose.yml").read_text()
         assert "rendered: testproject" in rendered
@@ -471,7 +472,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         core_df = (instance / "docker" / "core" / "Dockerfile.core").read_text()
         assert "cgr.dev/chainguard/wolfi-base:latest" in core_df
@@ -484,7 +485,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         assert not (instance / "docker" / "extras" / "db-postgres.yml").exists()
         assert not (instance / "docker" / "extras" / "mcp-firecrawl.yml").exists()
@@ -494,7 +495,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=True, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=False)
 
         pg = (instance / "docker" / "extras" / "db-postgres.yml").read_text()
         assert "10.100.0.54" in pg
@@ -511,7 +512,7 @@ class TestRenderTemplates:
         (instance / "cache" / "core" / ".claude" / "settings.json").write_text("PRECIOUS")
         (instance / "log" / "admin" / "test.log").write_text("PRECIOUS")
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=True, mcp_firecrawl=True)
+        render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=True)
 
         assert (instance / "sandbox.toml").read_text() == "PRECIOUS"
         assert (instance / ".sandbox.env").read_text() == "PRECIOUS"
@@ -524,7 +525,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         corefile = (instance / "config" / "coredns" / "Corefile").read_text()
         assert "github.com" in corefile
@@ -534,7 +535,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         domains = (instance / "config" / "proxy" / "allowed_domains.txt").read_text()
         assert ".github.com" in domains
@@ -550,7 +551,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         assert (instance / "config" / "admin" / ".zshrc").exists()
         assert (instance / "config" / "core" / ".bashrc").exists()
@@ -565,7 +566,7 @@ class TestRenderTemplates:
         {{ }} markers in the deployed config.
 
         Synthetic stub limitation: The fixture tooling plane uses minimal stubs,
-        not the real .config/ files. This means the test would NOT have detected
+        not the real templates/config/ files. This means the test would NOT have detected
         the original Defect 1 (stubs contained no {{ }} markers). Full
         content-level coverage requires T2/T3 integration tests against the real
         tooling plane (separate change).
@@ -573,7 +574,7 @@ class TestRenderTemplates:
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=True, mcp_firecrawl=True)
+        render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=True)
 
         violations: list[str] = []
         for root, _dirs, files in os.walk(str(instance)):
@@ -660,11 +661,9 @@ class TestValidateTemplates:
         """All templates valid returns (count, [])."""
         from core.hydration import validate_templates
 
-        tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
@@ -675,11 +674,9 @@ class TestValidateTemplates:
         """mcp_firecrawl=True checks firecrawl template and Dockerfile."""
         from core.hydration import validate_templates
 
-        tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=True,
         )
@@ -692,80 +689,78 @@ class TestValidateTemplates:
     ) -> None:
         """7.T: All real templates valid with all components enabled.
 
-        Uses the actual project root as tooling_plane so
         validate_templates() renders compose.yml, db-postgres.yml,
         mcp-firecrawl.yml, Corefile, dnsdist.conf, squid.conf, and
-        every other Jinja2 template with StrictUndefined — catching
-        any variable that lacks a context key.
+        every other Jinja2 template with StrictUndefined against the
+        packaged templates module — catching any variable that lacks
+        a context key.
         """
         from core.hydration import validate_templates
 
-        project_root = str(Path(__file__).parent.parent.parent)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            project_root,
             db_postgres=True,
             mcp_firecrawl=True,
         )
         assert count > 0
         assert errors == [], f"UndefinedError with all components: {errors}"
 
-    def test_validate_missing_template(self, tmp_path: Path) -> None:
+    def test_validate_missing_template(self, tmp_path: Path, monkeypatch: object) -> None:
         """Missing template file produces TemplateNotFound error."""
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".docker" / "compose.yml").unlink()
+        (tooling / "docker" / "compose.yml").unlink()
+        _patch_templates_root(monkeypatch, tooling)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
         assert any("Template not found" in e for e in errors)
 
-    def test_validate_undefined_variable(self, tmp_path: Path) -> None:
+    def test_validate_undefined_variable(self, tmp_path: Path, monkeypatch: object) -> None:
         """Undefined variable in template produces UndefinedError."""
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".docker" / "compose.yml").write_text("{{ nonexistent_var }}")
+        (tooling / "docker" / "compose.yml").write_text("{{ nonexistent_var }}")
+        _patch_templates_root(monkeypatch, tooling)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
         assert any("Undefined variable" in e for e in errors)
 
-    def test_validate_syntax_error(self, tmp_path: Path) -> None:
+    def test_validate_syntax_error(self, tmp_path: Path, monkeypatch: object) -> None:
         """Syntax error in template produces TemplateSyntaxError."""
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".docker" / "compose.yml").write_text("{% if %}broken{% endif %}")
+        (tooling / "docker" / "compose.yml").write_text("{% if %}broken{% endif %}")
+        _patch_templates_root(monkeypatch, tooling)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
         assert any("Syntax error" in e for e in errors)
 
-    def test_validate_missing_static_file(self, tmp_path: Path) -> None:
+    def test_validate_missing_static_file(self, tmp_path: Path, monkeypatch: object) -> None:
         """Missing static file produces error."""
         from core.hydration import validate_templates
 
         tooling = _build_minimal_tooling(tmp_path)
-        (tooling / ".config" / "proxy" / "ERR_SANDBOX_403").unlink()
+        (tooling / "config" / "proxy" / "ERR_SANDBOX_403").unlink()
+        _patch_templates_root(monkeypatch, tooling)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
@@ -774,14 +769,14 @@ class TestValidateTemplates:
 
 
 def _build_minimal_tooling(tmp_path: Path) -> Path:
-    """Build minimal tooling plane for validate_templates tests.
+    """Build minimal templates root for validate_templates tests.
 
-    Config file set matches the updated _JINJA_RENDERED_CONFIG and
-    _STATIC_CONFIG_* lists so TestValidateTemplates exercises the correct
-    template and static file sets.
+    Layout matches the packaged ``templates`` module (no leading dots);
+    callers swap the PackageLoader and resource resolver via
+    ``_patch_templates_root`` so validate_templates reads from this tree.
     """
     tooling = tmp_path / "tooling"
-    docker_dir = tooling / ".docker"
+    docker_dir = tooling / "docker"
     docker_dir.mkdir(parents=True)
     (docker_dir / "compose.yml").write_text("# {{ instance_name }}\n")
     core_dir = docker_dir / "core"
@@ -801,7 +796,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     (extras_dir / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
     (extras_dir / "db-postgres.yml").write_text("# postgres: {{ db_postgres_admin_ip }}\n")
 
-    config_dir = tooling / ".config"
+    config_dir = tooling / "config"
     dns_dir = config_dir / "coredns"
     dns_dir.mkdir(parents=True)
     (dns_dir / "Corefile").write_text("# {{ instance_name }}\n")
@@ -856,6 +851,24 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     return tooling
 
 
+def _patch_templates_root(monkeypatch: object, tooling: Path) -> None:
+    """Redirect hydration's PackageLoader and resource resolver to ``tooling``.
+
+    Used by tests that mutate template files (delete/corrupt) to exercise
+    the validate_templates error branches without touching the packaged
+    templates module.
+    """
+    import core.hydration as hydration
+    import jinja2
+
+    monkeypatch.setattr(hydration, "_resource_files", lambda _name: tooling)  # type: ignore[attr-defined]
+
+    def _fake_package_loader(*_args: object, **_kwargs: object) -> jinja2.FileSystemLoader:
+        return jinja2.FileSystemLoader(str(tooling))
+
+    monkeypatch.setattr(jinja2, "PackageLoader", _fake_package_loader)  # type: ignore[attr-defined]
+
+
 class TestDbPostgresTemplateRendering:
     """Task 6.1: db-postgres.yml renders through Jinja2 with no ${...:-...} patterns."""
 
@@ -866,7 +879,9 @@ class TestDbPostgresTemplateRendering:
         import jinja2
 
         ctx = _build_test_context(str(tmp_path / "inst"))
-        template_content = (Path(__file__).parent.parent.parent / ".docker" / "extras" / "db-postgres.yml").read_text()
+        template_content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "db-postgres.yml"
+        ).read_text()
 
         env = jinja2.Environment(
             loader=jinja2.BaseLoader(),
@@ -886,7 +901,9 @@ class TestDbPostgresTemplateRendering:
         import jinja2
 
         ctx = _build_test_context(str(tmp_path / "inst"))
-        template_content = (Path(__file__).parent.parent.parent / ".docker" / "extras" / "db-postgres.yml").read_text()
+        template_content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "db-postgres.yml"
+        ).read_text()
 
         env = jinja2.Environment(
             loader=jinja2.BaseLoader(),
@@ -914,7 +931,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent / ".docker" / "extras" / "mcp-firecrawl.yml"
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "mcp-firecrawl.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -935,7 +952,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent / ".docker" / "extras" / "mcp-firecrawl.yml"
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "mcp-firecrawl.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -1003,7 +1020,7 @@ class TestReadOnlyDomainsGeneration:
         ctx = _build_test_context(str(instance))
         ctx["proxy_whitelist_read_only_domains"] = [".pypi.org", ".npmjs.com"]
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         domains_file = instance / "config" / "proxy" / "read_only_domains.txt"
         assert domains_file.exists()
@@ -1057,7 +1074,7 @@ class TestReadOnlyDomainsGeneration:
         ctx = _build_test_context(str(instance))
         ctx["proxy_whitelist_read_only_domains"] = []
 
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         domains_file = instance / "config" / "proxy" / "read_only_domains.txt"
         assert domains_file.exists()
@@ -1262,28 +1279,38 @@ class TestDnsdistTemplateContent:
 
     def test_dnsdist_wire_length_rule(self) -> None:
         """Template contains QNameWireLengthRule filter."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+        ).read_text()
         assert "QNameWireLengthRule(0, 65)" in content
         assert "DropAction()" in content
 
     def test_dnsdist_label_count_rule(self) -> None:
         """Template contains QNameLabelsCountRule filter."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+        ).read_text()
         assert "QNameLabelsCountRule(0, 7)" in content
 
     def test_dnsdist_set_local(self) -> None:
         """Template binds to 0.0.0.0:53."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+        ).read_text()
         assert 'setLocal("0.0.0.0:53")' in content
 
     def test_dnsdist_control_socket(self) -> None:
         """Template has localhost-only control socket."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+        ).read_text()
         assert 'controlSocket("127.0.0.1:5199")' in content
 
     def test_dnsdist_backend_coredns(self) -> None:
         """Template forwards to coredns via Jinja2 variable."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "dnsdist" / "dnsdist.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+        ).read_text()
         assert "{{ coredns_dns_ip }}" in content
         assert "newServer" in content
 
@@ -1293,23 +1320,31 @@ class TestSquidFirecrawlAcl:
 
     def test_firecrawl_src_acl(self) -> None:
         """squid.conf contains firecrawl_src source ACL."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+        ).read_text()
         assert "acl firecrawl_src src" in content
         assert "{{ mcp_firecrawl_proxy_ip }}" in content
 
     def test_safe_methods_acl(self) -> None:
         """squid.conf contains safe_methods ACL."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+        ).read_text()
         assert "acl safe_methods method GET HEAD OPTIONS" in content
 
     def test_firecrawl_allow_rule(self) -> None:
         """squid.conf contains firecrawl allow rule with safe_methods."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+        ).read_text()
         assert "http_access allow firecrawl_src authenticated_users safe_methods whitelist" in content
 
     def test_firecrawl_after_agent_admin(self) -> None:
         """Firecrawl allow rule appears after agent/admin allows and before deny all."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+        ).read_text()
         agent_pos = content.index("http_access allow agent_src")
         admin_pos = content.index("http_access allow admin_src")
         firecrawl_pos = content.index("http_access allow firecrawl_src")
@@ -1322,7 +1357,9 @@ def _render_compose(tmp_path: Path) -> str:
     import jinja2
 
     ctx = _build_test_context(str(tmp_path / "inst"))
-    template_content = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+    template_content = (
+        Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
+    ).read_text()
     env = jinja2.Environment(
         loader=jinja2.BaseLoader(),
         undefined=jinja2.StrictUndefined,
@@ -1335,7 +1372,9 @@ def _render_extras(tmp_path: Path, filename: str) -> str:
     import jinja2
 
     ctx = _build_test_context(str(tmp_path / "inst"))
-    template_content = (Path(__file__).parent.parent.parent / ".docker" / "extras" / filename).read_text()
+    template_content = (
+        Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / filename
+    ).read_text()
     env = jinja2.Environment(
         loader=jinja2.BaseLoader(),
         undefined=jinja2.StrictUndefined,
@@ -1348,7 +1387,7 @@ class TestComposeSecurityBaseline:
 
     def test_baseline_anchor_defined(self, tmp_path: Path) -> None:
         """compose.yml source contains x-security-baseline anchor."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         assert "x-security-baseline:" in raw
         assert "&security-baseline" in raw
 
@@ -1357,7 +1396,7 @@ class TestComposeSecurityBaseline:
         tmp_path: Path,
     ) -> None:
         """Baseline has security_opt, cap_drop, ipc, init, read_only."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Find the baseline block (between x-security-baseline and networks:)
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
@@ -1374,7 +1413,7 @@ class TestComposeSecurityBaseline:
         tmp_path: Path,
     ) -> None:
         """Baseline does NOT contain cap_add, sysctls, or tmpfs."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
         block = raw[start:end]
@@ -1416,7 +1455,7 @@ class TestComposeNetworkDefinitions:
 
     def test_new_networks_internal(self, tmp_path: Path) -> None:
         """All 4 new networks have internal: true."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         for net_name in [
             "core_proxy_net:",
             "dns_net:",
@@ -1430,7 +1469,7 @@ class TestComposeNetworkDefinitions:
 
     def test_proxy_net_removed(self, tmp_path: Path) -> None:
         """Legacy proxy_net network is no longer defined."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Extract networks block only
         net_start = raw.index("networks:")
         svc_start = raw.index("services:")
@@ -1802,7 +1841,6 @@ class TestHydrationIpcContext:
         """With mcp_firecrawl=True, .claude.json has mcpServers.firecrawl."""
         import json
 
-        tooling = _build_minimal_tooling(tmp_path)
         instance = tmp_path / "instance"
         for d in [
             "docker/core",
@@ -1817,7 +1855,7 @@ class TestHydrationIpcContext:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=True)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=True)
 
         claude_json = instance / "config" / "core" / ".claude.json"
         assert claude_json.exists()
@@ -1835,7 +1873,6 @@ class TestHydrationIpcContext:
         """With mcp_firecrawl=False, .claude.json is '{}'."""
         import json
 
-        tooling = _build_minimal_tooling(tmp_path)
         instance = tmp_path / "instance"
         for d in [
             "docker/core",
@@ -1850,7 +1887,7 @@ class TestHydrationIpcContext:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         claude_json = instance / "config" / "core" / ".claude.json"
         assert claude_json.exists()
@@ -1865,11 +1902,9 @@ class TestSshdConfigTemplate:
         """validate_templates passes with sshd_config in registry."""
         from core.hydration import validate_templates
 
-        tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
         count, errors = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
@@ -1886,7 +1921,7 @@ class TestSshdConfigTemplate:
             undefined=jinja2.StrictUndefined,
         )
         ctx = _build_test_context(str(tmp_path / "inst"))
-        tpl = env.get_template(".config/core/sshd_config")
+        tpl = env.get_template("config/core/sshd_config")
         rendered = tpl.render(ctx)
 
         assert "ListenAddress 10.100.6.3" in rendered
@@ -1924,7 +1959,7 @@ class TestComposeIpcNetAndW4Hardening:
     # --- (c) ipc_net network definition ---
     def test_compose_ipc_net_definition(self, tmp_path: Path) -> None:
         """ipc_net network block contains internal: true and enable_ipv6: false."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         assert "ipc_net:" in raw
         idx = raw.index("ipc_net:")
         block = raw[idx : idx + 300]
@@ -2116,7 +2151,7 @@ class TestComposeIpcNetAndW4Hardening:
     # --- (x) baseline excludes list-valued properties ---
     def test_compose_baseline_excludes_list_valued(self, tmp_path: Path) -> None:
         """x-security-baseline block does NOT contain cap_add, sysctls, or tmpfs."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
         block = raw[start:end]
@@ -2201,8 +2236,7 @@ class TestW4IntegrationVerification:
         assert "admin_ipc_ip" in context
         assert "firecrawl_isolated_ip" in context
 
-        tooling_plane = str(Path(__file__).resolve().parents[2])
-        validated, errors = validate_templates(context, tooling_plane, db_postgres=True, mcp_firecrawl=True)
+        validated, errors = validate_templates(context, db_postgres=True, mcp_firecrawl=True)
         assert errors == [], f"Template validation errors: {errors}"
         assert validated > 0
 
@@ -2226,8 +2260,7 @@ class TestW4IntegrationVerification:
 
         context = build_jinja_context(config, base_index, proxy_password="e2epass", instance_dir=str(tmp_path))
 
-        tooling_plane = str(Path(__file__).resolve().parents[2])
-        validated, errors = validate_templates(context, tooling_plane, db_postgres=True, mcp_firecrawl=True)
+        validated, errors = validate_templates(context, db_postgres=True, mcp_firecrawl=True)
         assert errors == [], f"E2E pipeline errors: {errors}"
         assert validated > 0
 
@@ -2310,7 +2343,7 @@ class TestImagePin:
         """hydration.py source does NOT contain 'IMAGE_DIGESTS ='."""
         from pathlib import Path
 
-        source = Path(__file__).resolve().parents[2] / "core" / "hydration.py"
+        source = Path(__file__).resolve().parents[2] / "src" / "core" / "hydration.py"
         content = source.read_text()
         assert "IMAGE_DIGESTS =" not in content
 
@@ -2374,7 +2407,7 @@ class TestDownstreamConsumerMigration:
         """scaffold.py source contains IMAGE_REGISTRY import (not IMAGE_DIGESTS)."""
         from pathlib import Path
 
-        source = Path(__file__).resolve().parents[2] / "core" / "scaffold.py"
+        source = Path(__file__).resolve().parents[2] / "src" / "core" / "scaffold.py"
         content = source.read_text()
         assert "IMAGE_REGISTRY" in content
         assert "IMAGE_DIGESTS" not in content
@@ -2394,8 +2427,8 @@ def _build_default_context(tmp_path: Path) -> dict[str, object]:
 
 
 def _get_dockerfile_lines(rel_path: str) -> list[str]:
-    """Read a Dockerfile from the project root and return its lines."""
-    root = Path(__file__).resolve().parents[2]
+    """Read a Dockerfile from the templates package and return its lines."""
+    root = Path(__file__).resolve().parents[2] / "src" / "templates"
     return (root / rel_path).read_text().splitlines()
 
 
@@ -2421,7 +2454,7 @@ class TestDockerfileUserContext:
 
     def test_branch_typescript_user_root_before_staging_mkdir(self) -> None:
         """branch-typescript: USER root before mkdir /staging."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-typescript")
         stage_text = "\n".join(stage)
         # USER root must appear before the staging mkdir
@@ -2439,7 +2472,7 @@ class TestDockerfileUserContext:
 
     def test_branch_typescript_user_unprivileged_before_npm(self) -> None:
         """branch-typescript: USER ${USERNAME} before npm install."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-typescript")
         user_switch_idx = next(
             (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
@@ -2455,7 +2488,7 @@ class TestDockerfileUserContext:
 
     def test_branch_python_user_root_before_staging_mkdir(self) -> None:
         """branch-python: USER root before staging mkdirs (both paths)."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-python")
         # All staging mkdirs must be under USER root
         user_context = "unknown"
@@ -2470,7 +2503,7 @@ class TestDockerfileUserContext:
 
     def test_branch_claude_user_root_before_staging_mkdir(self) -> None:
         """branch-claude: USER root before mkdir /staging."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-claude")
         root_idx = next(
             (i for i, line in enumerate(stage) if line.strip() == "USER root"),
@@ -2486,7 +2519,7 @@ class TestDockerfileUserContext:
 
     def test_branch_claude_user_unprivileged_before_npm(self) -> None:
         """branch-claude: USER ${USERNAME} before npm install."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-claude")
         user_switch_idx = next(
             (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
@@ -2502,7 +2535,7 @@ class TestDockerfileUserContext:
 
     def test_admin_user_root_before_entrypoint_copy(self) -> None:
         """Admin Dockerfile: USER root before COPY entrypoint.sh."""
-        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
         user_context = "unknown"
         for line in lines:
             stripped = line.strip()
@@ -2513,7 +2546,7 @@ class TestDockerfileUserContext:
 
     def test_admin_user_unprivileged_before_entrypoint(self) -> None:
         """Admin Dockerfile: USER ${USERNAME} between chmod and ENTRYPOINT."""
-        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
         chmod_idx = next(
             (i for i, line in enumerate(lines) if "chmod" in line and "entrypoint" in line),
             None,
@@ -2533,7 +2566,7 @@ class TestDockerfileUserContext:
 
     def test_claude_local_bin_path(self) -> None:
         """Dockerfile.core.wolfi uses ${HOME_DIR}/.local/bin/claude (not .claude/local/claude)."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         content = "\n".join(lines)
         assert "${HOME_DIR}/.local/bin/claude" in content or ".local/bin/claude" in content
         assert ".claude/local/claude" not in content
@@ -2617,13 +2650,13 @@ class TestDockerfileUserLint:
 
     def test_core_wolfi_zero_violations(self) -> None:
         """Lint on current Dockerfile.core.wolfi returns zero violations."""
-        content = "\n".join(_get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi"))
+        content = "\n".join(_get_dockerfile_lines("docker/core/Dockerfile.core.wolfi"))
         violations = _lint_dockerfile_user_context(content)
         assert violations == [], f"Violations in Dockerfile.core.wolfi: {violations}"
 
     def test_admin_debian_zero_violations(self) -> None:
         """Lint on current Dockerfile.admin.debian returns zero violations."""
-        content = "\n".join(_get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian"))
+        content = "\n".join(_get_dockerfile_lines("docker/admin/Dockerfile.admin.debian"))
         violations = _lint_dockerfile_user_context(content)
         assert violations == [], f"Violations in Dockerfile.admin.debian: {violations}"
 
@@ -2654,15 +2687,15 @@ class TestHealthcheckFixes:
     """Group 5.T: CoreDNS Dockerfile and Compose healthcheck fixes."""
 
     def test_coredns_dockerfile_exists(self) -> None:
-        """Dockerfile.coredns exists in .docker/coredns/."""
+        """Dockerfile.coredns exists in templates/docker/coredns/."""
         root = Path(__file__).resolve().parents[2]
-        df = root / ".docker" / "coredns" / "Dockerfile.coredns"
+        df = root / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns"
         assert df.exists(), "Dockerfile.coredns does not exist"
 
     def test_coredns_dockerfile_structure(self) -> None:
         """Dockerfile.coredns contains multi-stage build with probe stage."""
         root = Path(__file__).resolve().parents[2]
-        content = (root / ".docker" / "coredns" / "Dockerfile.coredns").read_text()
+        content = (root / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns").read_text()
         assert "FROM ${BUSYBOX_BASE} AS probe" in content
         assert "FROM ${CORE_BASE}" in content
         assert "COPY --from=probe /bin/wget /wget" in content
@@ -2675,7 +2708,7 @@ class TestHealthcheckFixes:
     def test_compose_coredns_build_block(self) -> None:
         """compose.yml template has coredns with build: block (not image:)."""
         root = Path(__file__).resolve().parents[2]
-        content = (root / ".docker" / "compose.yml").read_text()
+        content = (root / "src" / "templates" / "docker" / "compose.yml").read_text()
         assert "coredns:" in content
         coredns_idx = content.index("  coredns:")
         # Section ends at next blank line (double newline)
@@ -2691,7 +2724,7 @@ class TestHealthcheckFixes:
     def test_coredns_healthcheck_no_cmd_shell(self) -> None:
         """CoreDNS healthcheck uses CMD (not CMD-SHELL) with /wget."""
         root = Path(__file__).resolve().parents[2]
-        content = (root / ".docker" / "compose.yml").read_text()
+        content = (root / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Find the coredns healthcheck test line
         coredns_idx = content.index("coredns:")
         # Find healthcheck test line within coredns section
@@ -2703,7 +2736,7 @@ class TestHealthcheckFixes:
     def test_proxy_healthcheck_tcp_probe(self) -> None:
         """Proxy healthcheck uses TCP probe (not squidclient)."""
         root = Path(__file__).resolve().parents[2]
-        content = (root / ".docker" / "compose.yml").read_text()
+        content = (root / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Find proxy service section
         proxy_idx = content.index("\n  proxy:")
         proxy_section = content[proxy_idx : content.index("\n\n", proxy_idx)]
@@ -2724,7 +2757,7 @@ class TestHydrationPipelineRegistration:
 
     def test_render_copies_coredns_dockerfile(self, tmp_path: Path) -> None:
         """(b) After render_templates(), docker/coredns/Dockerfile.coredns exists in instance
-        and is identical to .docker/coredns/Dockerfile.coredns."""
+        and is identical to templates/docker/coredns/Dockerfile.coredns."""
         tooling = _build_minimal_tooling(tmp_path)
         instance = tmp_path / "instance"
         for d in [
@@ -2741,14 +2774,17 @@ class TestHydrationPipelineRegistration:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         rendered_df = instance / "docker" / "coredns" / "Dockerfile.coredns"
         assert rendered_df.exists(), "Dockerfile.coredns not copied to instance dir"
-        source_df = tooling / ".docker" / "coredns" / "Dockerfile.coredns"
+        source_df = (
+            Path(__file__).resolve().parents[2] / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns"
+        )
         assert rendered_df.read_text() == source_df.read_text(), "Copied file differs from source"
+        del tooling  # unused — render now uses packaged templates
 
-    def test_validate_templates_counts_coredns_dockerfile(self, tmp_path: Path) -> None:
+    def test_validate_templates_counts_coredns_dockerfile(self, tmp_path: Path, monkeypatch: object) -> None:
         """(c) validate_templates() includes Dockerfile.coredns in its validated total."""
         from core.hydration import validate_templates
 
@@ -2756,16 +2792,16 @@ class TestHydrationPipelineRegistration:
         ctx = _build_test_context(str(tmp_path / "inst"))
 
         # Baseline count without coredns Dockerfile considered
-        count, errors = validate_templates(ctx, str(tooling), db_postgres=False, mcp_firecrawl=False)
+        count, errors = validate_templates(ctx, db_postgres=False, mcp_firecrawl=False)
         assert errors == [], f"Unexpected errors: {errors}"
 
         # The coredns Dockerfile must be included in validated count.
         # We verify by checking that removing it causes a validation error.
-        coredns_df = tooling / ".docker" / "coredns" / "Dockerfile.coredns"
+        coredns_df = tooling / "docker" / "coredns" / "Dockerfile.coredns"
         coredns_df.unlink()
+        _patch_templates_root(monkeypatch, tooling)
         count_missing, errors_missing = validate_templates(
             ctx,
-            str(tooling),
             db_postgres=False,
             mcp_firecrawl=False,
         )
@@ -2774,10 +2810,10 @@ class TestHydrationPipelineRegistration:
         )
 
     def test_unconditional_files_includes_coredns_dockerfile(self) -> None:
-        """(d) _UNCONDITIONAL_FILES contains '.docker/coredns/Dockerfile.coredns' and has length 17."""
+        """(d) _UNCONDITIONAL_FILES contains 'docker/coredns/Dockerfile.coredns' and has length 17."""
         from core.doctor import _UNCONDITIONAL_FILES
 
-        assert ".docker/coredns/Dockerfile.coredns" in _UNCONDITIONAL_FILES
+        assert "docker/coredns/Dockerfile.coredns" in _UNCONDITIONAL_FILES
         assert len(_UNCONDITIONAL_FILES) == 17
 
     def test_check_tooling_plane_references_17(self) -> None:
@@ -2812,7 +2848,6 @@ class TestInfrastructureBugFixes:
 
     def test_render_templates_produces_coredns_dockerfile(self, tmp_path: Path) -> None:
         """(b) render_templates() produces docker/coredns/Dockerfile.coredns in instance."""
-        tooling = _build_minimal_tooling(tmp_path)
         instance = tmp_path / "inst"
         for d in [
             "docker/core",
@@ -2834,7 +2869,7 @@ class TestInfrastructureBugFixes:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         coredns_dockerfile = instance / "docker" / "coredns" / "Dockerfile.coredns"
         assert coredns_dockerfile.exists(), "Dockerfile.coredns should be rendered"
@@ -2843,17 +2878,14 @@ class TestInfrastructureBugFixes:
         """(c) validate_templates() reports zero errors and counts include coredns Dockerfile."""
         from core.hydration import validate_templates
 
-        tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
-        count, errors = validate_templates(ctx, str(tooling), db_postgres=False, mcp_firecrawl=False)
+        count, errors = validate_templates(ctx, db_postgres=False, mcp_firecrawl=False)
         assert errors == [], f"Validation errors: {errors}"
         assert count > 0, "Expected at least one validated template"
 
     def test_compose_healthchecks_correct(self, tmp_path: Path) -> None:
         """(d) compose.yml: coredns has build block, proxy healthcheck uses /dev/tcp,
         coredns healthcheck uses /wget."""
-        # Use the actual repo tooling plane for realistic compose.yml rendering
-        tooling = Path(__file__).resolve().parents[2]
         instance = tmp_path / "inst"
         for d in [
             "docker/core",
@@ -2875,7 +2907,7 @@ class TestInfrastructureBugFixes:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         compose = (instance / "docker" / "compose.yml").read_text()
         # coredns should have build: block, not image:
@@ -2887,8 +2919,22 @@ class TestInfrastructureBugFixes:
 
     def test_dockerfile_user_lint_zero_violations(self) -> None:
         """(e) Dockerfile USER lint on both rendered Dockerfiles returns zero violations."""
-        core_path = Path(__file__).resolve().parent.parent.parent / ".docker" / "core" / "Dockerfile.core.wolfi"
-        admin_path = Path(__file__).resolve().parent.parent.parent / ".docker" / "admin" / "Dockerfile.admin.debian"
+        core_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "src"
+            / "templates"
+            / "docker"
+            / "core"
+            / "Dockerfile.core.wolfi"
+        )
+        admin_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "src"
+            / "templates"
+            / "docker"
+            / "admin"
+            / "Dockerfile.admin.debian"
+        )
 
         for path in (core_path, admin_path):
             assert path.exists(), f"{path.name} not found"
@@ -2919,7 +2965,6 @@ class TestDnsdistCommandArray:
         """Rendered compose.yml dnsdist command is arguments-only, no binary name."""
         from ruamel.yaml import YAML
 
-        tooling = Path(__file__).resolve().parents[2]
         instance = tmp_path / "inst"
         for d in [
             "docker/core",
@@ -2941,7 +2986,7 @@ class TestDnsdistCommandArray:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         compose_text = (instance / "docker" / "compose.yml").read_text()
         ry = YAML(typ="safe")
@@ -2959,7 +3004,6 @@ class TestTmuxGvisorPollingConfig:
 
     def test_tmux_gvisor_polling_config(self, tmp_path: Path) -> None:
         """Rendered .tmux.conf has gVisor-compatible polling: interval 30, activity off."""
-        tooling = Path(__file__).resolve().parents[2]
         instance = tmp_path / "inst"
         for d in [
             "docker/core",
@@ -2981,7 +3025,7 @@ class TestTmuxGvisorPollingConfig:
             (instance / d).mkdir(parents=True, exist_ok=True)
 
         ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(tooling), str(instance), db_postgres=False, mcp_firecrawl=False)
+        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
         tmux_text = (instance / "config" / "admin" / ".tmux.conf").read_text()
 
@@ -3046,7 +3090,7 @@ class TestSecretsRemovalBindMounts:
 
     def test_compose_no_top_level_secrets(self, tmp_path: Path) -> None:
         """compose.yml template source has no top-level secrets: block."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # top-level secrets: is at column 0 (not indented)
         lines = raw.splitlines()
         top_level_secrets = [
@@ -3115,7 +3159,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_final_user_is_agent(self) -> None:
         """Dockerfile.core.wolfi last USER directive before ENTRYPOINT is USER ${USERNAME}."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         runtime_stage = _extract_stage(lines, "runtime")
         # Find the last USER directive in the runtime stage
         last_user = None
@@ -3130,7 +3174,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_no_final_user_root(self) -> None:
         """Dockerfile.core.wolfi does NOT have USER root as the last USER directive."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         runtime_stage = _extract_stage(lines, "runtime")
         last_user = None
         for line in runtime_stage:
@@ -3141,7 +3185,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_setcap_sshd_session(self) -> None:
         """Dockerfile.core.wolfi contains setcap cap_chown+ep /usr/lib/ssh/sshd-session."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         content = "\n".join(lines)
         assert "setcap cap_chown+ep /usr/lib/ssh/sshd-session" in content, (
             "Dockerfile must contain setcap cap_chown+ep on sshd-session"
@@ -3149,7 +3193,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_setcap_not_targeting_sshd(self) -> None:
         """Dockerfile.core.wolfi does NOT contain setcap targeting /usr/sbin/sshd."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         content = "\n".join(lines)
         assert "setcap" not in content or "/usr/sbin/sshd" not in content, (
             "setcap must NOT target /usr/sbin/sshd (must target /usr/lib/ssh/sshd-session)"
@@ -3221,7 +3265,7 @@ class TestCoreCapAddSecurityOptTmpfs:
 
     def test_non_core_retain_no_new_privs_true(self, tmp_path: Path) -> None:
         """Non-core services (coredns, proxy, admin, dnsdist) retain no-new-privileges:true."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # The baseline anchor must still have no-new-privileges:true
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
@@ -3238,12 +3282,16 @@ class TestSshdPidFileEntrypoint:
 
     def test_sshd_config_pidfile_none(self) -> None:
         """sshd_config template contains PidFile none."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "core" / "sshd_config").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "core" / "sshd_config"
+        ).read_text()
         assert "PidFile none" in content, "sshd_config must contain 'PidFile none' for non-root operation"
 
     def test_entrypoint_no_mkdir_run_sshd(self) -> None:
         """Core entrypoint.sh does NOT contain mkdir -p /run/sshd."""
-        content = (Path(__file__).parent.parent.parent / ".docker" / "core" / "entrypoint.sh").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "core" / "entrypoint.sh"
+        ).read_text()
         assert "mkdir -p /run/sshd" not in content, (
             "Entrypoint must NOT contain 'mkdir -p /run/sshd' — PidFile none eliminates need"
         )
@@ -3254,7 +3302,9 @@ def _render_squid_conf(tmp_path: Path) -> str:
     import jinja2
 
     ctx = _build_test_context(str(tmp_path / "inst"))
-    template_content = (Path(__file__).parent.parent.parent / ".config" / "proxy" / "squid.conf").read_text()
+    template_content = (
+        Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+    ).read_text()
     env = jinja2.Environment(
         loader=jinja2.BaseLoader(),
         undefined=jinja2.StrictUndefined,
@@ -3297,7 +3347,7 @@ class TestAdminRuntimeRunc:
 
     def test_admin_runtime_is_runc(self) -> None:
         """Admin service in compose.yml template has runtime: "runc"."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         admin_start = raw.index("\n  admin:")
         admin_block = raw[admin_start:]
         # Find runtime: line in admin block
@@ -3307,7 +3357,7 @@ class TestAdminRuntimeRunc:
 
     def test_admin_runtime_not_templated(self) -> None:
         """Admin service runtime is NOT the Jinja2 variable {{ runtime }}."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         admin_start = raw.index("\n  admin:")
         admin_block = raw[admin_start:]
         runtime_lines = [line.strip() for line in admin_block.splitlines() if line.strip().startswith("runtime:")]
@@ -3316,7 +3366,7 @@ class TestAdminRuntimeRunc:
 
     def test_core_retains_templated_runtime(self) -> None:
         """Core service retains runtime: "{{ runtime }}" (gVisor)."""
-        raw = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         core_start = raw.index("\n  core:")
         admin_start = raw.index("\n  admin:")
         core_block = raw[core_start:admin_start]
@@ -3331,28 +3381,36 @@ class TestTmuxPluginPaths:
 
     def test_tmux_plugin_manager_path_set(self) -> None:
         """.tmux.conf contains TMUX_PLUGIN_MANAGER_PATH set to /usr/local/tmux-plugins."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+        ).read_text()
         assert "set-environment -g TMUX_PLUGIN_MANAGER_PATH '/usr/local/tmux-plugins'" in content, (
             ".tmux.conf must set TMUX_PLUGIN_MANAGER_PATH to /usr/local/tmux-plugins"
         )
 
     def test_catppuccin_run_path_correct(self) -> None:
         """Catppuccin run path is /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+        ).read_text()
         assert "run /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux" in content, (
             "Catppuccin run directive must reference /usr/local/tmux-plugins/"
         )
 
     def test_tpm_run_path_correct(self) -> None:
         """TPM run path is /usr/local/tmux-plugins/tpm/tpm."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+        ).read_text()
         assert "run /usr/local/tmux-plugins/tpm/tpm" in content, (
             "TPM run directive must reference /usr/local/tmux-plugins/"
         )
 
     def test_no_stale_home_config_plugin_paths(self) -> None:
         """.tmux.conf does NOT contain any ~/.config/tmux/plugins/ paths."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".tmux.conf").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+        ).read_text()
         assert "~/.config/tmux/plugins/" not in content, (
             ".tmux.conf must NOT contain stale ~/.config/tmux/plugins/ paths"
         )
@@ -3367,22 +3425,30 @@ class TestLocaleTermExport:
 
     def test_zshrc_lang_c_utf8(self) -> None:
         """.zshrc contains LANG=C.UTF-8."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
+        ).read_text()
         assert "LANG=C.UTF-8" in content, ".zshrc must set LANG=C.UTF-8"
 
     def test_zshrc_lc_all_c_utf8(self) -> None:
         """.zshrc contains LC_ALL=C.UTF-8."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
+        ).read_text()
         assert "LC_ALL=C.UTF-8" in content, ".zshrc must set LC_ALL=C.UTF-8"
 
     def test_zshrc_no_en_us_utf8(self) -> None:
         """.zshrc does NOT contain en_US.UTF-8."""
-        content = (Path(__file__).parent.parent.parent / ".config" / "admin" / ".zshrc").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
+        ).read_text()
         assert "en_US.UTF-8" not in content, ".zshrc must NOT contain en_US.UTF-8 — locale is not installed in image"
 
     def test_entrypoint_term_export_before_tmux(self) -> None:
         """Admin entrypoint.sh contains TERM export before tmux new-session."""
-        content = (Path(__file__).parent.parent.parent / ".docker" / "admin" / "entrypoint.sh").read_text()
+        content = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "admin" / "entrypoint.sh"
+        ).read_text()
         assert 'export TERM="${TERM:-xterm-256color}"' in content, (
             "Admin entrypoint must export TERM with xterm-256color default"
         )
@@ -3440,7 +3506,9 @@ class TestRootlessHardeningPosture:
             errors.append(f"Admin runtime must be 'runc', got: {admin_runtime_lines}")
 
         # ── No secrets: blocks ────────────────────────────────────────────
-        raw_template = (Path(__file__).parent.parent.parent / ".docker" / "compose.yml").read_text()
+        raw_template = (
+            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
+        ).read_text()
         top_level_secrets = [
             line for line in raw_template.splitlines() if line.rstrip() == "secrets:" or line.startswith("secrets:")
         ]
