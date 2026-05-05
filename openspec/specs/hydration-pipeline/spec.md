@@ -1,6 +1,6 @@
 ## Purpose
 
-This specification defines the Pydantic + Jinja2 hydration pipeline that renders infrastructure templates from the tooling plane into per-instance directories on every `sandbox start`.
+This specification defines the Pydantic + Jinja2 hydration pipeline that renders infrastructure templates from the packaged `templates` Python module into per-instance directories on every `sandbox start`. Template paths in this spec are package-relative (e.g., `templates/docker/compose.yml` resolves to `importlib.resources.files("templates").joinpath("docker/compose.yml")`); the discovery mechanism is owned by the `templates-packaging` capability.
 
 ## Requirements
 
@@ -12,11 +12,11 @@ The system SHALL parse `sandbox.toml` into a typed Pydantic model and abort hydr
 - **THEN** no files in `sandboxes/<id>/docker/` or `sandboxes/<id>/config/` are created or overwritten
 
 ### Requirement: Template Rendering on Every Start
-The system SHALL render all Jinja2 templates from the tooling plane into the instance directory on every `sandbox start` invocation. Extension templates SHALL use Jinja2 `{{ var }}` syntax for infrastructure values and Compose-time `${VAR}` syntax only for secrets loaded via `env_file:`.
+The system SHALL render all Jinja2 templates from the `templates` package into the instance directory on every `sandbox start` invocation. Extension templates SHALL use Jinja2 `{{ var }}` syntax for infrastructure values and Compose-time `${VAR}` syntax only for secrets loaded via `env_file:`.
 
 #### Scenario: Compose and Dockerfile rendered
 - **WHEN** `sandbox start` proceeds to the hydration phase
-- **THEN** `.docker/compose.yml` is rendered into `sandboxes/<id>/docker/compose.yml` with all Jinja2 variables resolved from the Pydantic model context
+- **THEN** `templates/docker/compose.yml` is rendered into `sandboxes/<id>/docker/compose.yml` with all Jinja2 variables resolved from the Pydantic model context
 
 #### Scenario: Config templates rendered
 - **WHEN** `sandbox start` proceeds to the hydration phase
@@ -39,7 +39,7 @@ The system SHALL render extension override files only for components that are en
 
 #### Scenario: Enabled component renders extension template
 - **WHEN** `components.db_postgres = true`
-- **THEN** `.docker/extras/db-postgres.yml` is rendered into `sandboxes/<id>/docker/extras/db-postgres.yml`
+- **THEN** `templates/docker/extras/db-postgres.yml` is rendered into `sandboxes/<id>/docker/extras/db-postgres.yml`
 
 ### Requirement: Extras Jinja2 Context Completeness
 The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `dnsdist_image`, `agent_proxy_ip`, and `admin_proxy_ip`.
@@ -179,15 +179,15 @@ The rendered compose templates (main `compose.yml` and feature-gated extras) SHA
 The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations and tmux resurrect state directories within rendered config files. No rendered config file SHALL contain the literal path `/workspace/.sandbox/custom/` or `/workspace/.tmux_resurrect`.
 
 #### Scenario: Core config files use templatized custom path
-- **WHEN** `.config/core/.gitconfig` and `.config/core/.bashrc` are rendered
+- **WHEN** `templates/config/core/.gitconfig` and `templates/config/core/.bashrc` are rendered
 - **THEN** custom config references resolve to the value of `{{ custom_config_core }}` (not `/workspace/.sandbox/custom/`)
 
 #### Scenario: Admin config files use templatized custom path
-- **WHEN** `.config/admin/.zshrc` and `.config/admin/.tmux.conf` are rendered
+- **WHEN** `templates/config/admin/.zshrc` and `templates/config/admin/.tmux.conf` are rendered
 - **THEN** custom config references resolve to the value of `{{ custom_config_admin }}` (not `/workspace/.sandbox/custom/`)
 
 #### Scenario: Tmux resurrect dir uses templatized path
-- **WHEN** `.config/admin/.tmux.conf` is rendered
+- **WHEN** `templates/config/admin/.tmux.conf` is rendered
 - **THEN** the resurrect-dir setting resolves to the value of `{{ tmux_resurrect_dir }}` (not `/workspace/.tmux_resurrect`)
 
 #### Scenario: No hardcoded workspace sandbox paths in rendered output
@@ -195,14 +195,14 @@ The system SHALL use Jinja2 context variables — not hardcoded paths — for al
 - **THEN** zero files in the rendered instance contain `/workspace/.sandbox/` or `/workspace/.tmux_resurrect`
 
 ### Requirement: Gitconfig Default Filter Removal
-The `.config/core/.gitconfig` template SHALL use bare `{{ git_user }}` and `{{ git_email }}` without Jinja2 `| default()` filters. Default resolution is the responsibility of `build_jinja_context()`.
+The `templates/config/core/.gitconfig` template SHALL use bare `{{ git_user }}` and `{{ git_email }}` without Jinja2 `| default()` filters. Default resolution is the responsibility of `build_jinja_context()`.
 
 #### Scenario: Gitconfig uses bare context variables
-- **WHEN** `.config/core/.gitconfig` template source is inspected
+- **WHEN** `templates/config/core/.gitconfig` template source is inspected
 - **THEN** it contains `{{ git_user }}` and `{{ git_email }}` without `| default(...)` filters
 
 ### Requirement: Zshrc Load Order Contract
-The `.config/admin/.zshrc` template SHALL enforce a tail load order of: (1) `starship init`, (2) user override hook, (3) warmup prompt. A comment block SHALL document this contract.
+The `templates/config/admin/.zshrc` template SHALL enforce a tail load order of: (1) `starship init`, (2) user override hook, (3) warmup prompt. A comment block SHALL document this contract.
 
 #### Scenario: Starship init before user override
 - **WHEN** the rendered `.zshrc` is inspected
@@ -213,7 +213,7 @@ The `.config/admin/.zshrc` template SHALL enforce a tail load order of: (1) `sta
 - **THEN** the user override `source` block appears before the `SANDBOX_WARMUP_PROMPT` check
 
 #### Scenario: Load order contract comment present
-- **WHEN** the `.config/admin/.zshrc` template source is inspected
+- **WHEN** the `templates/config/admin/.zshrc` template source is inspected
 - **THEN** it contains a comment block documenting the load order: shell setup → starship init → user override → warmup prompt
 
 ### Requirement: Read-Only Domains Context Key
@@ -317,11 +317,11 @@ The system SHALL include `busybox_image` in the Jinja2 context returned by `buil
 - **THEN** `jinja2.UndefinedError` is raised during template rendering
 
 ### Requirement: CoreDNS Dockerfile Static Copy
-The system SHALL copy `.docker/coredns/Dockerfile.coredns` as a static file (not Jinja2-rendered) during `render_templates()`, using the existing `_copy_file()` mechanism. The `docker/coredns` subdirectory SHALL be included in `INSTANCE_SUBDIRS`.
+The system SHALL copy `templates/docker/coredns/Dockerfile.coredns` as a static file (not Jinja2-rendered) during `render_templates()`, using the existing `_copy_file()` mechanism (or its `importlib.resources`-based equivalent post-`src-layout-and-templates-packaging`). The `docker/coredns` subdirectory SHALL be included in `INSTANCE_SUBDIRS`.
 
 #### Scenario: CoreDNS Dockerfile copied to instance
 - **WHEN** `render_templates()` completes
-- **THEN** `sandboxes/<id>/docker/coredns/Dockerfile.coredns` exists and is identical to `.docker/coredns/Dockerfile.coredns`
+- **THEN** `sandboxes/<id>/docker/coredns/Dockerfile.coredns` exists and is identical to `templates/docker/coredns/Dockerfile.coredns` (the source from the templates package)
 
 #### Scenario: docker/coredns directory created by scaffold
 - **WHEN** `create_instance_dirs()` is called
@@ -329,4 +329,4 @@ The system SHALL copy `.docker/coredns/Dockerfile.coredns` as a static file (not
 
 #### Scenario: CoreDNS Dockerfile validated as static file
 - **WHEN** `validate_templates()` runs
-- **THEN** `.docker/coredns/Dockerfile.coredns` is included in the static file existence check and counts toward the validated total
+- **THEN** `templates/docker/coredns/Dockerfile.coredns` is included in the static file existence check and counts toward the validated total
