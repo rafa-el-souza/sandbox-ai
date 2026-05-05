@@ -51,6 +51,9 @@ packages = ["core", "cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
+markers = [
+    "integration: subprocess-level CLI tests (run with `make test-integration`)",
+]
 
 [tool.coverage.report]
 exclude_also = [

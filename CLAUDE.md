@@ -12,6 +12,7 @@ The project pins Python 3.14 (`.python-version`) and depends on [`uv`](https://d
 
 ```bash
 make test                       # unit tests (tests/unit)
+make test-integration           # subprocess-level integration tests (tests/integration)
 make test-file FILE=tests/unit/core/test_ipam.py   # single file
 uv run pytest tests/unit/core/test_ipam.py::test_name   # single test
 make coverage                   # enforces 100% on core/ + cli/
