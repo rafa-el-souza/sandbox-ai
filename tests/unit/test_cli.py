@@ -106,11 +106,13 @@ def _noop_init_seeder() -> typing.Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _default_bridge_gid() -> typing.Iterator[None]:
-    """Auto-supply workspace bridge gid resolution so build_jinja_context doesn't
-    require a real /etc/subgid + sb-ws group on the test host."""
+    """Auto-supply workspace bridge gid + subuid resolution so build_jinja_context
+    and the helper-mkdir plan don't require real /etc/subgid + sb-ws on the host."""
     with (
         patch("core.hydration.workspace_bridge_gid", return_value=200000),
         patch("core.hydration.in_container_gid_for_host_gid", return_value=1000),
+        patch("cli.main.host_id_for_in_container", return_value=100999),
+        patch("cli.main.host_gid_for_in_container", return_value=200999),
     ):
         yield
 
@@ -229,6 +231,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_hydrate") as mock_hydrate,
             patch("cli.main._phase_acl_grant") as mock_acl,
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -297,6 +300,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -330,6 +334,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -425,6 +430,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -596,6 +602,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -667,6 +674,7 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -698,6 +706,7 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -3460,6 +3469,124 @@ class TestACLPlanAsymmetry:
         descriptions = [d for _, d in plan]
         assert any("secrets dir traverse" in d for d in descriptions)
 
+class TestDryRunHelperMkdirPlanFallback:
+    """Dry-run preview reports gracefully when subuid resolver fails."""
+
+    def test_dry_run_handles_no_subuid_range(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+        from core.host_config import NoSubuidRangeError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam("myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main.host_id_for_in_container",
+                side_effect=NoSubuidRangeError("no entry for 'sandbox'"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            # Dry-run does not crash; reports the unavailability.
+            assert "helper-mkdir plan unavailable" in result.output
+
+
+class TestHelperMkdirChownPlan:
+    """Section 7: cache/log helper-mkdir+chown plan + phase."""
+
+    def test_plan_groups_leaves_by_parent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _helper_mkdir_chown_plan
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
+        plan = _helper_mkdir_chown_plan("/inst", "claude-sandbox")
+        assert plan == [
+            ("/inst/cache/core", (".claude",), 100999, 200999),
+            ("/inst/cache/admin", ("tmux_resurrect",), 100999, 200999),
+            ("/inst/log", ("core", "admin"), 100999, 200999),
+        ]
+
+    def test_phase_sets_default_acl_then_invokes_helper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_helper_mkdir_chown_cache_log
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
+
+        events: list[tuple[str, list[str]]] = []
+
+        def _fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            events.append(("setfacl", list(cmd)))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def _fake_helper(*a: object, **kw: object) -> None:
+            events.append(("helper", []))
+
+        monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
+        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+
+        _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", MachinectlAuth.SUDO, "dev")
+
+        # Three setfacl + three helper invocations, alternating
+        assert [e[0] for e in events] == ["setfacl", "helper", "setfacl", "helper", "setfacl", "helper"]
+        # First setfacl applies parent default ACL with u:dev:rwx
+        cmd = events[0][1]
+        assert cmd[:3] == ["setfacl", "-d", "-m"]
+        assert "u:dev:rwx" in cmd[3]
+        assert cmd[4] == "/inst/cache/core"
+
+    def test_phase_idempotent_re_invocation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_helper_mkdir_chown_cache_log
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2)
+        calls = {"setfacl": 0, "helper": 0}
+
+        def _fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            calls["setfacl"] += 1
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def _fake_helper(*a: object, **kw: object) -> None:
+            calls["helper"] += 1
+
+        monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
+        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+
+        for _ in range(2):
+            _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
+        assert calls == {"setfacl": 6, "helper": 6}
+
+    def test_phase_setfacl_failure_wrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_helper_mkdir_chown_cache_log
+        from core.exceptions import SandboxExecutionError
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2)
+
+        def _raise(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(1, cmd, stderr="permission denied")
+
+        monkeypatch.setattr("cli.main.subprocess.run", _raise)
+        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", lambda *a, **k: None)
+
+        with pytest.raises(SandboxExecutionError, match="permission denied"):
+            _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
+
+
 class TestPhaseACLGrantErrorWrapping:
     """Task 3.4: CalledProcessError → SandboxExecutionError with target path context."""
 
@@ -3625,6 +3752,7 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant", side_effect=track_acl),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_credential_ownership", side_effect=track_ownership),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
             patch("cli.main._phase_handover"),
@@ -3662,6 +3790,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),

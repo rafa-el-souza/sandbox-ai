@@ -29,11 +29,14 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
+from core.helper_container import helper_mkdir_chown_dirs
 from core.host_config import (
     HostConfig,
     HostSettings,
     MachinectlAuth,
     WorkspaceBridgeGroupMissingError,
+    host_gid_for_in_container,
+    host_id_for_in_container,
     machinectl_cmd,
     sandbox_ai_user_home,
     state_lock_path,
@@ -608,6 +611,67 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
     return ""
 
 
+CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cache/core", (".claude",)),
+    ("cache/admin", ("tmux_resurrect",)),
+    ("log", ("core", "admin")),
+)
+"""Per-parent grouping of cache/log leaves consumed by helper-mkdir+chown phase.
+
+Single source of truth for both execution (_phase_helper_mkdir_chown_cache_log)
+and dry-run preview (_helper_mkdir_chown_plan).
+"""
+
+
+def _helper_mkdir_chown_plan(
+    instance_dir: str, host_user: str
+) -> list[tuple[str, tuple[str, ...], int, int]]:
+    """Return ``[(parent_abs, leaves, owner_uid, owner_gid), ...]`` for cache/log.
+
+    ``owner_uid``/``owner_gid`` map in-container uid/gid 1000 (agent / human)
+    to their host subuid/subgid via :func:`core.host_config.host_id_for_in_container`.
+    """
+    owner_uid = host_id_for_in_container(1000, host_user)
+    owner_gid = host_gid_for_in_container(1000, host_user)
+    return [
+        (os.path.join(instance_dir, parent), leaves, owner_uid, owner_gid)
+        for parent, leaves in CACHE_LOG_LEAVES_BY_PARENT
+    ]
+
+
+def _phase_helper_mkdir_chown_cache_log(
+    instance_dir: str,
+    host_user: str,
+    auth: MachinectlAuth,
+    dev_user: str | None = None,
+) -> None:
+    """Phase 5c: helper-mkdir + chown for cache/log leaves.
+
+    For each cache/log parent: set the parent's default ACL so dev can read
+    agent-created files inside the leaf, then invoke the helper container to
+    ``mkdir -p`` and ``chown`` each leaf to the consumer subuid (in-container
+    uid 1000). Idempotent — re-runs are no-ops in the steady state.
+    """
+    default_entry = "u::rwx,g::---,o::---,m::rwx"
+    if dev_user:
+        default_entry += f",u:{dev_user}:rwx"
+
+    for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
+        try:
+            subprocess.run(
+                ["setfacl", "-d", "-m", default_entry, parent_abs],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+            raise SandboxExecutionError(
+                f"Default ACL setup failed for {parent_abs}: {stderr}"
+            ) from exc
+        helper_mkdir_chown_dirs(host_user, parent_abs, leaves, owner_uid, owner_gid, auth)
+
+
 def _phase_acl_grant(
     instance_dir: str,
     host_user: str,
@@ -846,6 +910,17 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
         instance_dir, host_user, config.instance.user_project_root, dev_user
     ):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
+
+    # Helper-mkdir+chown for cache/log — single source of truth via plan function
+    try:
+        for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
+            leaves_str = ", ".join(leaves)
+            console.print(
+                f"    helper-mkdir+chown {parent_abs}/{{{leaves_str}}} → {owner_uid}:{owner_gid}",
+                style="dim",
+            )
+    except SandboxExecutionError as exc:
+        console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
     # Compose up — match actual _phase_compose_up command
     env_file = os.path.join(instance_dir, ".sandbox.env")
@@ -1335,6 +1410,10 @@ def start(
         dev_user = os.environ.get("USER")
         _phase_acl_grant(instance_dir, host_user, config.instance.user_project_root, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
+
+        # Phase 5c: helper-mkdir+chown for cache/log leaves
+        _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
+        console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
         # Phase 5b: Credential ownership matching (after ACL grants)
         _phase_credential_ownership(instance_dir, host_user, auth=auth)
