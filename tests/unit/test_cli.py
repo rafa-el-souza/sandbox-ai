@@ -105,6 +105,17 @@ def _noop_init_seeder() -> typing.Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _default_bridge_gid() -> typing.Iterator[None]:
+    """Auto-supply workspace bridge gid resolution so build_jinja_context doesn't
+    require a real /etc/subgid + sb-ws group on the test host."""
+    with (
+        patch("core.hydration.workspace_bridge_gid", return_value=200000),
+        patch("core.hydration.in_container_gid_for_host_gid", return_value=1000),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _default_project_config() -> typing.Iterator[None]:
     """Auto-supply a default sandbox-ai.toml so post-init commands don't exit early.
 
@@ -500,6 +511,66 @@ class TestStartIPAMExhausted:
             result = runner.invoke(app, ["start"])
             assert result.exit_code == 1
             mock_release.assert_called_once()
+
+
+class TestStartWorkspaceBridgeMissing:
+    """Task 5.2: hydration aborts when workspace bridge group is missing."""
+
+    def test_start_aborts_with_remediation_hint(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+        from core.host_config import WorkspaceBridgeGroupMissingError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch(
+                "cli.main._phase_hydrate",
+                side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
+            ),
+            patch("cli.main._release_lock") as mock_release,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "sb-ws" in result.output
+            assert "sandbox doctor" in result.output
+            mock_release.assert_called_once()
+
+    def test_dry_run_aborts_with_remediation_hint(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+        from core.host_config import WorkspaceBridgeGroupMissingError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam("myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main.build_jinja_context",
+                side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 1
+            assert "sb-ws" in result.output
+            assert "sandbox doctor" in result.output
 
 
 class TestStartComposeUnhealthy:
@@ -1342,6 +1413,7 @@ class TestPhaseHydrateDirect:
 
     def test_phase_hydrate_calls_render(self) -> None:
         from cli.main import _phase_hydrate
+        from core.host_config import HostSettings
         from core.hydration import InstanceConfig
 
         mock_config = InstanceConfig.model_validate(
@@ -1353,12 +1425,13 @@ class TestPhaseHydrateDirect:
                 }
             }
         )
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
 
         with (
             patch("cli.main.build_jinja_context", return_value={}) as mock_ctx,
             patch("cli.main.render_templates") as mock_render,
         ):
-            _phase_hydrate(mock_config, 0, "pass", "/home", "/inst")
+            _phase_hydrate(mock_config, 0, "pass", "/home", "/inst", host)
             mock_ctx.assert_called_once()
             mock_render.assert_called_once()
 

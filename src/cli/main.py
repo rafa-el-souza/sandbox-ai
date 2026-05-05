@@ -29,7 +29,15 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd, sandbox_ai_user_home, state_lock_path
+from core.host_config import (
+    HostConfig,
+    HostSettings,
+    MachinectlAuth,
+    WorkspaceBridgeGroupMissingError,
+    machinectl_cmd,
+    sandbox_ai_user_home,
+    state_lock_path,
+)
 from core.hydration import (
     InstanceConfig,
     build_jinja_context,
@@ -295,9 +303,10 @@ def _phase_hydrate(
     proxy_password: str,
     sandbox_ai_home: str,
     instance_dir: str,
+    host: HostSettings,
 ) -> None:
     """Phase 4: Pydantic + Jinja2 hydration pipeline."""
-    context = build_jinja_context(config, base_index, proxy_password, instance_dir)
+    context = build_jinja_context(config, base_index, proxy_password, instance_dir, host=host)
     render_templates(
         context,
         instance_dir,
@@ -724,7 +733,9 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_settings = _resolve_host_settings(project_dir, config)
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     name = config.instance.name
 
@@ -747,7 +758,14 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
         raise typer.Exit(code=1) from None
 
     # ── Template validation ──────────────────────────────────────────────
-    context = build_jinja_context(config, slot, "DRY_RUN_PASSWORD", instance_dir)
+    try:
+        context = build_jinja_context(
+            config, slot, "DRY_RUN_PASSWORD", instance_dir, host=host_settings
+        )
+    except WorkspaceBridgeGroupMissingError as exc:
+        console.print(f"\n  [red]{exc}[/red]")
+        console.print("  [red]Run `sandbox doctor` for setup commands.[/red]")
+        raise typer.Exit(code=1) from None
     validated, errors = validate_templates(
         context,
         db_postgres=config.components_db_postgres.enabled,
@@ -830,13 +848,19 @@ def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str,
     Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
+    settings = _resolve_host_settings(project_dir, config)
+    return settings.docker_unprivileged_user, settings.machinectl_authentication
+
+
+def _resolve_host_settings(project_dir: str, config: InstanceConfig) -> HostSettings:
+    """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
     del project_dir, config  # accepted for signature stability; host config is authoritative
     try:
         project_config = HostConfig.from_toml()
     except FileNotFoundError as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
-    return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
+    return project_config.host
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
@@ -1178,7 +1202,9 @@ def start(
 
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_settings = _resolve_host_settings(project_dir, config)
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     # Project name immutability check (sandbox-toml-schema spec)
     # instance_id format: <instance_name>-<md5[:6]> — strip last 7 chars to recover original name
@@ -1241,7 +1267,18 @@ def start(
         console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 
         # Phase 4: Hydration
-        _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir)
+        try:
+            _phase_hydrate(
+                config, base_index, proxy_password, sandbox_ai_home, instance_dir, host_settings
+            )
+        except WorkspaceBridgeGroupMissingError as exc:
+            console.print(
+                f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
+                style="red bold",
+            )
+            if lock_fd is not None:
+                _release_lock(lock_fd)
+            raise typer.Exit(code=1) from None
         console.print("✓ Hydration — templates rendered")
 
         # Phase 5: ACL grants (Pattern A)

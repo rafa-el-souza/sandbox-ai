@@ -637,6 +637,63 @@ class TestWriteRestricted:
         assert a.read_bytes() == b.read_bytes() == b"abc"
 
 
+class TestBridgeGidContextKey:
+    """build_jinja_context populates in_container_workspace_bridge_gid when host is provided."""
+
+    def test_key_present_when_host_provided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from core.host_config import HostSettings
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+
+        monkeypatch.setattr("core.hydration.workspace_bridge_gid", lambda h: 201665)
+        monkeypatch.setattr(
+            "core.hydration.in_container_gid_for_host_gid", lambda gid, u: 1665
+        )
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        ctx = build_jinja_context(config, 0, "p", str(tmp_path), host=host)
+        assert ctx["in_container_workspace_bridge_gid"] == 1665
+
+    def test_key_absent_when_host_none(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config, 0, "p", str(tmp_path))
+        assert "in_container_workspace_bridge_gid" not in ctx
+
+    def test_missing_group_aborts_hydration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+
+        def _raise(host: object) -> int:
+            raise WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist")
+
+        monkeypatch.setattr("core.hydration.workspace_bridge_gid", _raise)
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(WorkspaceBridgeGroupMissingError):
+            build_jinja_context(config, 0, "p", str(tmp_path), host=host)
+
+
+class TestComposeGroupAdd:
+    """compose.yml renders group_add on core and admin services."""
+
+    def test_core_and_admin_have_group_add(self, tmp_path: Path) -> None:
+        rendered = _render_compose(tmp_path)
+        # Crude split into service-level chunks; sufficient since we only check membership.
+        assert "group_add:" in rendered
+        # appearing twice — once on core, once on admin
+        assert rendered.count("group_add:") == 2
+
+
 class TestRenderTemplatesRestrictiveModes:
     """Hydration writes files at restrictive modes regardless of umask (Decision 6)."""
 
@@ -752,6 +809,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "db_postgres_enabled": True,
         "mcp_firecrawl_enabled": False,
         "custom_claude_rules": "",
+        "in_container_workspace_bridge_gid": 1000,
     }
 
 
@@ -2330,6 +2388,7 @@ class TestW4IntegrationVerification:
 
         # Use base_index=0 for deterministic IPs
         context = build_jinja_context(config, base_index=0, proxy_password="testpass", instance_dir=str(tmp_path))
+        context["in_container_workspace_bridge_gid"] = 1000
 
         # Verify 7-tuple fields exist in context
         assert "ipc_subnet" in context
@@ -2360,6 +2419,7 @@ class TestW4IntegrationVerification:
         assert "admin_ipc_ip" in ips
 
         context = build_jinja_context(config, base_index, proxy_password="e2epass", instance_dir=str(tmp_path))
+        context["in_container_workspace_bridge_gid"] = 1000
 
         validated, errors = validate_templates(context, db_postgres=True, mcp_firecrawl=True)
         assert errors == [], f"E2E pipeline errors: {errors}"
