@@ -2310,7 +2310,7 @@ class TestImagePin:
         """hydration.py source does NOT contain 'IMAGE_DIGESTS ='."""
         from pathlib import Path
 
-        source = Path(__file__).resolve().parents[2] / "core" / "hydration.py"
+        source = Path(__file__).resolve().parents[2] / "src" / "core" / "hydration.py"
         content = source.read_text()
         assert "IMAGE_DIGESTS =" not in content
 
@@ -2374,7 +2374,7 @@ class TestDownstreamConsumerMigration:
         """scaffold.py source contains IMAGE_REGISTRY import (not IMAGE_DIGESTS)."""
         from pathlib import Path
 
-        source = Path(__file__).resolve().parents[2] / "core" / "scaffold.py"
+        source = Path(__file__).resolve().parents[2] / "src" / "core" / "scaffold.py"
         content = source.read_text()
         assert "IMAGE_REGISTRY" in content
         assert "IMAGE_DIGESTS" not in content

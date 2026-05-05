@@ -116,7 +116,7 @@ def get_install_cmd(distro: str | None, package: str) -> str:
 
 def _get_sandbox_ai_home() -> str:
     """Resolve SANDBOX_AI_HOME from the doctor module location."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ─── Section 3: Binary Availability Checks ──────────────────────────────────

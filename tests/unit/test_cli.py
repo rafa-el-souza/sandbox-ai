@@ -915,13 +915,13 @@ class TestDestroyRmtree:
 class TestResolveHelpers:
     """Direct tests for _resolve_sandbox_ai_home and _resolve_project_dir."""
 
-    def test_resolve_sandbox_ai_home_returns_parent_of_cli(self) -> None:
+    def test_resolve_sandbox_ai_home_returns_repo_root(self) -> None:
         from cli.main import _resolve_sandbox_ai_home
 
         result = _resolve_sandbox_ai_home()
         assert os.path.isabs(result)
-        # Should be the repo root (parent of cli/)
-        assert os.path.isdir(os.path.join(result, "cli"))
+        # Should be the repo root (parent of src/)
+        assert os.path.isdir(os.path.join(result, "src", "cli"))
 
     def test_resolve_project_dir_returns_cwd(self) -> None:
         from cli.main import _resolve_project_dir

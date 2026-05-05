@@ -76,7 +76,7 @@ class ContainerInfo:
 
 def _resolve_sandbox_ai_home() -> str:
     """Resolve SANDBOX_AI_HOME from the orchestrator source location."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _resolve_project_dir() -> str:
