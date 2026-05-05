@@ -21,7 +21,21 @@ from dataclasses import dataclass
 from importlib.resources import files as _resource_files
 from typing import TYPE_CHECKING, Literal
 
-from core.host_config import MachinectlAuth, machinectl_cmd, sandbox_ai_user_home
+from core.host_config import (
+    HostConfig,
+    HostSettings,
+    MachinectlAuth,
+    NoFreeGidInSubgidRangeError,
+    NoSubgidRangeError,
+    NoSubuidRangeError,
+    SubgidOutOfRangeError,
+    WorkspaceBridgeGroupMissingError,
+    autodetect_workspace_bridge_gid_recommendation,
+    host_id_for_in_container,
+    machinectl_cmd,
+    sandbox_ai_user_home,
+    workspace_bridge_gid,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -902,6 +916,291 @@ def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
 # ─── Section 8: Check Runner ────────────────────────────────────────────────
 
 
+# ─── Acl-Ownership-Recipes Checks ──────────────────────────────────────────
+
+
+def _load_host_settings_or_skip(check_name: str) -> HostSettings | CheckResult:
+    """Helper: load HostSettings or return a CheckResult skip if absent."""
+    try:
+        return HostConfig.from_toml().host
+    except FileNotFoundError:
+        return CheckResult(
+            status="skip",
+            name=check_name,
+            detail="sandbox-ai.toml not found; run `sandbox init` first",
+            category="Workspace Bridge",
+        )
+
+
+def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> CheckResult:
+    """Validate the workspace bridge group exists at a gid in the daemon's subgid range."""
+    del distro
+    settings_or_skip = _load_host_settings_or_skip("workspace bridge group")
+    if isinstance(settings_or_skip, CheckResult):
+        return settings_or_skip
+    host = settings_or_skip
+    name = f"workspace bridge group {host.workspace_bridge_group!r}"
+    try:
+        gid = workspace_bridge_gid(host)
+    except WorkspaceBridgeGroupMissingError:
+        try:
+            recommended = autodetect_workspace_bridge_gid_recommendation(host_user)
+            rec_str = str(recommended)
+        except (NoSubgidRangeError, NoFreeGidInSubgidRangeError):
+            rec_str = "<pick-a-gid-in-claude-sandbox-subgid-range>"
+        remediation = (
+            f"sudo groupadd -g {rec_str} {host.workspace_bridge_group} && "
+            f"sudo usermod -aG {host.workspace_bridge_group} $USER && "
+            "log out and back in"
+        )
+        return CheckResult(
+            status="fail",
+            name=name,
+            detail=f"group {host.workspace_bridge_group!r} does not exist on this host",
+            remediation=remediation,
+            category="Workspace Bridge",
+        )
+    except SubgidOutOfRangeError as exc:
+        return CheckResult(
+            status="fail",
+            name=name,
+            detail=str(exc),
+            remediation=(
+                "Recreate the bridge group at a gid within "
+                f"{host_user}'s /etc/subgid range"
+            ),
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name=name,
+        detail=f"gid={gid}",
+        category="Workspace Bridge",
+    )
+
+
+def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> CheckResult:
+    """Validate dev's current process has the bridge gid in supplementary groups."""
+    del distro
+    import grp
+    import pwd
+
+    settings_or_skip = _load_host_settings_or_skip("dev in workspace bridge group")
+    if isinstance(settings_or_skip, CheckResult):
+        return settings_or_skip
+    host = settings_or_skip
+    try:
+        bridge_gid = workspace_bridge_gid(host)
+    except (WorkspaceBridgeGroupMissingError, SubgidOutOfRangeError, NoSubgidRangeError) as exc:
+        return CheckResult(
+            status="fail",
+            name="dev in workspace bridge group",
+            detail=str(exc),
+            remediation="See `workspace bridge group` check",
+            category="Workspace Bridge",
+        )
+
+    if bridge_gid in os.getgroups():
+        return CheckResult(
+            status="pass",
+            name="dev in workspace bridge group",
+            detail=f"current process supplementary groups include gid {bridge_gid}",
+            category="Workspace Bridge",
+        )
+
+    current_user = pwd.getpwuid(os.getuid()).pw_name
+    in_etc_group = bridge_gid in {
+        g.gr_gid for g in grp.getgrall() if current_user in g.gr_mem
+    }
+    if in_etc_group:
+        return CheckResult(
+            status="fail",
+            name="dev in workspace bridge group",
+            detail=(
+                f"User {current_user!r} is a member of {host.workspace_bridge_group!r} in "
+                f"/etc/group but the current process's supplementary groups do not include gid "
+                f"{bridge_gid}"
+            ),
+            remediation="Log out and log back in to refresh group membership",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="fail",
+        name="dev in workspace bridge group",
+        detail=f"User {current_user!r} is not a member of {host.workspace_bridge_group!r}",
+        remediation=f"sudo usermod -aG {host.workspace_bridge_group} {current_user} && relogin",
+        category="Workspace Bridge",
+    )
+
+
+def check_subuid_resolver_works(host_user: str, distro: str | None) -> CheckResult:
+    """Validate /etc/subuid is readable and host_user has a usable subuid range."""
+    del distro
+    try:
+        host_uid = host_id_for_in_container(1000, host_user)
+    except NoSubuidRangeError as exc:
+        return CheckResult(
+            status="fail",
+            name="subuid resolver",
+            detail=str(exc),
+            remediation=(
+                f"Add a /etc/subuid entry for {host_user} (rootless docker setup); "
+                "see https://docs.docker.com/engine/security/rootless/"
+            ),
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="subuid resolver",
+        detail=f"in-container uid 1000 → host uid {host_uid}",
+        category="Workspace Bridge",
+    )
+
+
+def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult:
+    """Warn-only: helper container image is locally available."""
+    del host_user, distro
+    from core.hydration import IMAGE_REGISTRY
+
+    image = IMAGE_REGISTRY["busybox_musl"].pinned
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return CheckResult(
+            status="warn",
+            name="helper image cached",
+            detail="docker not reachable from current shell; will pull on first sandbox start",
+            category="Workspace Bridge",
+        )
+    if result.returncode == 0:
+        return CheckResult(
+            status="pass",
+            name="helper image cached",
+            detail=f"{image} present locally",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="warn",
+        name="helper image cached",
+        detail=f"{image} not in local cache; will be pulled on first sandbox start",
+        category="Workspace Bridge",
+    )
+
+
+def _scan_instance_dirs() -> list[str]:
+    """Return registered instance directories from ``<home>/state/instances.json``.
+
+    Instance dirs live at ``<sandbox_ai_home>/sandboxes/<instance_id>`` where
+    ``sandbox_ai_home`` is derived from this module's filesystem location
+    (matches :func:`cli.main._resolve_sandbox_ai_home`).
+    """
+    state_path = sandbox_ai_user_home() / "state" / "instances.json"
+    try:
+        with open(state_path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    instances = data.get("instances", {})
+    if not isinstance(instances, dict):
+        return []
+    sandbox_ai_home = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    candidates: list[str] = []
+    for instance_id in instances.values():
+        if not isinstance(instance_id, str):
+            continue
+        path = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+        if os.path.isdir(path):
+            candidates.append(path)
+    return candidates
+
+
+def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> CheckResult:
+    """Warn-only: scan registered instances' secrets/ for world-readable mode bits."""
+    del host_user, distro
+    leaks: list[str] = []
+    for inst in _scan_instance_dirs():
+        secrets_dir = os.path.join(inst, "secrets")
+        if not os.path.isdir(secrets_dir):
+            continue
+        for fname in os.listdir(secrets_dir):
+            fpath = os.path.join(secrets_dir, fname)
+            try:
+                mode = os.stat(fpath).st_mode & 0o777
+            except OSError:
+                continue
+            if mode & 0o004:  # other::r--
+                leaks.append(f"{fpath} (mode {mode:04o})")
+    if leaks:
+        sample = ", ".join(leaks[:3])
+        return CheckResult(
+            status="warn",
+            name="secrets hydrated restrictively",
+            detail=f"{len(leaks)} secret(s) world-readable: {sample}",
+            remediation="sandbox destroy && sandbox init && sandbox start",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="secrets hydrated restrictively",
+        detail="no world-readable secrets in registered instances",
+        category="Workspace Bridge",
+    )
+
+
+def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> CheckResult:
+    """Warn-only: detect instances whose cache/log leaves are still dev-owned."""
+    del distro
+    cache_log_leaves = [
+        ("cache/core/.claude",),
+        ("cache/admin/tmux_resurrect",),
+        ("log/core",),
+        ("log/admin",),
+    ]
+    try:
+        host_uid_1000 = host_id_for_in_container(1000, host_user)
+    except NoSubuidRangeError:
+        return CheckResult(
+            status="skip",
+            name="pre-existing instance layout",
+            detail="cannot resolve subuid; see `subuid resolver` check",
+            category="Workspace Bridge",
+        )
+
+    stale: list[str] = []
+    for inst in _scan_instance_dirs():
+        for leaves in cache_log_leaves:
+            for leaf in leaves:
+                leaf_path = os.path.join(inst, leaf)
+                try:
+                    st = os.stat(leaf_path)
+                except OSError:
+                    continue
+                if st.st_uid != host_uid_1000:
+                    stale.append(leaf_path)
+    if stale:
+        sample = ", ".join(stale[:3])
+        return CheckResult(
+            status="warn",
+            name="pre-existing instance layout",
+            detail=f"{len(stale)} cache/log leaf(s) not chowned to consumer subuid: {sample}",
+            remediation="sandbox destroy <instance> && sandbox init",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="pre-existing instance layout",
+        detail="no pre-change-4 instance layout detected",
+        category="Workspace Bridge",
+    )
+
+
 def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> list[Check]:
     """Build the doctor check registry with auth-mode-aware machinectl checks.
 
@@ -1082,6 +1381,55 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             category="Per-User Tree",
             depends_on=[],
             run=check_legacy_cwd_files,
+            remediation="",
+        ),
+        # Chain 6: workspace bridge group + helper-recipe prereqs
+        Check(
+            id="workspace_bridge_group_exists",
+            name="workspace bridge group",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_workspace_bridge_group_exists,
+            remediation="",
+        ),
+        Check(
+            id="dev_in_workspace_bridge_group",
+            name="dev in workspace bridge group",
+            category="Workspace Bridge",
+            depends_on=["workspace_bridge_group_exists"],
+            run=check_dev_in_workspace_bridge_group,
+            remediation="",
+        ),
+        Check(
+            id="subuid_resolver_works",
+            name="subuid resolver",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_subuid_resolver_works,
+            remediation="",
+        ),
+        Check(
+            id="helper_image_pulled",
+            name="helper image cached",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_helper_image_pulled,
+            remediation="",
+        ),
+        Check(
+            id="secrets_hydrated_restrictively",
+            name="secrets hydrated restrictively",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_secrets_hydrated_restrictively,
+            remediation="",
+        ),
+        Check(
+            id="pre_existing_instance_layout",
+            name="pre-existing instance layout",
+            category="Workspace Bridge",
+            depends_on=["subuid_resolver_works"],
+            run=check_pre_existing_instance_layout,
             remediation="",
         ),
     ]
