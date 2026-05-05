@@ -3918,6 +3918,74 @@ class TestStartErrorHandlerACLCleanup:
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
+    def test_helper_mkdir_chown_failure_triggers_revoke(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Section 10: cache/log helper-mkdir+chown failure → ACL cleanup runs."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch(
+                "cli.main._phase_helper_mkdir_chown_cache_log",
+                side_effect=SandboxExecutionError("helper-mkdir failed"),
+            ),
+            patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_called_once()
+
+    def test_workspace_shared_group_failure_triggers_revoke(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Section 10: workspace shared-group failure → ACL cleanup runs."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch(
+                "cli.main._phase_workspace_shared_group",
+                side_effect=SandboxExecutionError("workspace setup failed"),
+            ),
+            patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_called_once()
+
     def test_ipam_failure_does_not_trigger_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """WHEN IPAM fails (pre-Phase-5), THEN _revoke_acls is NOT called."""
         home = mock_sandbox_ai_home

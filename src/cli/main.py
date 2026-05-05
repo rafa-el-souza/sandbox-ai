@@ -1594,7 +1594,11 @@ def start(
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
         console.print(f"[FATAL] {e}", style="red bold")
-        # ACL cleanup on failure — only if Phase 5 has begun (D7)
+        # ACL cleanup on failure (Decision 4 of acl-ownership-recipes):
+        # named-ACL grants from Phase 5 are revoked here. Helper-recipe
+        # mutations (subuid chowns on cache/log/ro-files; chgrp+chmod+default
+        # ACL on the workspace) are NOT reverted — they're persistent state
+        # that survives intermediate stop/start cycles by design.
         if acl_granted:
             acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
             for w in acl_warnings:
