@@ -2036,6 +2036,15 @@ class TestCheckSecretsHydratedRestrictively:
         assert result.status == "warn"
         assert "ipc_host_key" in result.detail
 
+    def test_skip_when_sandboxes_root_unresolvable(self, monkeypatch: Any) -> None:
+        """Wheel-install signal: _scan_instance_dirs returns None → skip."""
+        from core.doctor import check_secrets_hydrated_restrictively
+
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: None)
+        result = check_secrets_hydrated_restrictively("u", None)
+        assert result.status == "skip"
+        assert "wheel install" in (result.detail or "").lower()
+
 
 class TestCheckPreExistingInstanceLayout:
     def test_pass_when_chowned(self, tmp_path: Any, monkeypatch: Any) -> None:
@@ -2077,6 +2086,16 @@ class TestCheckPreExistingInstanceLayout:
         monkeypatch.setattr("core.doctor.host_id_for_in_container", _raise)
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "skip"
+
+    def test_skip_when_sandboxes_root_unresolvable(self, monkeypatch: Any) -> None:
+        """Wheel-install signal: _scan_instance_dirs returns None → skip."""
+        from core.doctor import check_pre_existing_instance_layout
+
+        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 100999)
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: None)
+        result = check_pre_existing_instance_layout("u", None)
+        assert result.status == "skip"
+        assert "wheel install" in (result.detail or "").lower()
 
 
 class TestScanInstanceDirs:
@@ -2140,6 +2159,28 @@ class TestScanInstanceDirs:
         result = _scan_instance_dirs()
         assert result == [str(sandbox_ai_home / "sandboxes" / "myproj-abc")]
         assert os.path.exists(result[0])
+
+    def test_returns_none_when_sandboxes_root_missing(
+        self, isolated_sandbox_ai_user_home: Any, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """Wheel-install scenario: registry has entries but the sandboxes/ root
+        does not exist relative to ``__file__``. Returns ``None``."""
+        import json as _json
+
+        # __file__ points into a fake site-packages with no sandboxes/ tree.
+        fake_doctor_path = tmp_path / "site-packages" / "core" / "doctor.py"
+        fake_doctor_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_doctor_path.write_text("")
+        monkeypatch.setattr("core.doctor.__file__", str(fake_doctor_path))
+
+        state = isolated_sandbox_ai_user_home / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "instances.json").write_text(
+            _json.dumps({"instances": {"/home/dev/myproj": "myproj-abc"}})
+        )
+        from core.doctor import _scan_instance_dirs
+
+        assert _scan_instance_dirs() is None
 
 
 class TestCheckSecretsHydratedRestrictivelyEdges:

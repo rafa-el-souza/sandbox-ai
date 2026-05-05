@@ -1087,28 +1087,45 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
     )
 
 
-def _scan_instance_dirs() -> list[str]:
+def _scan_instance_dirs() -> list[str] | None:
     """Return registered instance directories from ``<home>/state/instances.json``.
 
-    Instance dirs live at ``<sandbox_ai_home>/sandboxes/<instance_id>`` where
-    ``sandbox_ai_home`` is derived from this module's filesystem location
-    (matches :func:`cli.main._resolve_sandbox_ai_home`).
+    Instance dirs currently live at ``<sandbox_ai_home>/sandboxes/<instance_id>``,
+    where ``sandbox_ai_home`` is derived from this module's filesystem location
+    (matches :func:`cli.main._resolve_sandbox_ai_home`). The ``__file__``-based
+    resolution only works in dev checkouts; under wheel installs it points
+    into ``site-packages/`` where no ``sandboxes/`` tree exists. Removing this
+    coupling is deferred to the change-5 followup that retires
+    ``_resolve_sandbox_ai_home``.
+
+    Returns:
+        - ``[]`` when no instances are registered (legitimate empty state).
+        - A list of resolved instance dirs when registered instances are
+          locatable on disk.
+        - ``None`` when the registry is non-empty but the orchestrator's
+          ``sandboxes/`` root cannot be located (wheel-install signal).
+          Callers should treat this as "cannot scan" and skip.
     """
     state_path = sandbox_ai_user_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
             data = json.load(f)
-    except FileNotFoundError, json.JSONDecodeError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return []
     instances = data.get("instances", {})
-    if not isinstance(instances, dict):
+    if not isinstance(instances, dict) or not instances:
         return []
     sandbox_ai_home = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sandboxes_root = os.path.join(sandbox_ai_home, "sandboxes")
+    if not os.path.isdir(sandboxes_root):
+        # Wheel install (or equivalent): registry has entries but __file__-based
+        # resolution does not reach a sandboxes/ tree. Signal "cannot scan".
+        return None
     candidates: list[str] = []
     for instance_id in instances.values():
         if not isinstance(instance_id, str):
             continue
-        path = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+        path = os.path.join(sandboxes_root, instance_id)
         if os.path.isdir(path):
             candidates.append(path)
     return candidates
@@ -1117,8 +1134,20 @@ def _scan_instance_dirs() -> list[str]:
 def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> CheckResult:
     """Warn-only: scan registered instances' secrets/ for world-readable mode bits."""
     del host_user, distro
+    instances = _scan_instance_dirs()
+    if instances is None:
+        return CheckResult(
+            status="skip",
+            name="secrets hydrated restrictively",
+            detail=(
+                "registry has entries but the orchestrator's sandboxes/ tree could not "
+                "be located from this module's __file__ (wheel install). Deferred until "
+                "the change-5 relocation lands."
+            ),
+            category="Workspace Bridge",
+        )
     leaks: list[str] = []
-    for inst in _scan_instance_dirs():
+    for inst in instances:
         secrets_dir = os.path.join(inst, "secrets")
         if not os.path.isdir(secrets_dir):
             continue
@@ -1166,8 +1195,20 @@ def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> Ch
             category="Workspace Bridge",
         )
 
+    instances = _scan_instance_dirs()
+    if instances is None:
+        return CheckResult(
+            status="skip",
+            name="pre-existing instance layout",
+            detail=(
+                "registry has entries but the orchestrator's sandboxes/ tree could not "
+                "be located from this module's __file__ (wheel install). Deferred until "
+                "the change-5 relocation lands."
+            ),
+            category="Workspace Bridge",
+        )
     stale: list[str] = []
-    for inst in _scan_instance_dirs():
+    for inst in instances:
         for leaves in cache_log_leaves:
             for leaf in leaves:
                 leaf_path = os.path.join(inst, leaf)
