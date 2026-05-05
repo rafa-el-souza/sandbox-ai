@@ -866,6 +866,23 @@ def _stdin_is_tty() -> bool:
     return sys.stdin.isatty()
 
 
+def _require_per_user_state_initialized() -> None:
+    """Hard-fail when ``<home>/state/instances.json`` is absent.
+
+    Lifecycle commands (`start`, `stop`, `destroy`, `status`, `attach`) call
+    this as their first step. Initialization is signaled by the registry
+    file's presence, which `sandbox init` writes via `ensure_registry_seed`.
+    """
+    home = sandbox_ai_user_home()
+    registry = home / "state" / "instances.json"
+    if not registry.exists():
+        console.print(
+            f"Error: per-user state not initialized at {home}. Run `sandbox init` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+
 def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
     """Seed ``<user_home>/config/sandbox-ai.toml`` when missing.
 
@@ -1122,6 +1139,7 @@ def start(
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
 ) -> None:
     """Start the sandbox."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1252,6 +1270,7 @@ def start(
 @app.command()
 def stop(clean: bool = False) -> None:
     """Stop the sandbox."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1298,6 +1317,7 @@ def stop(clean: bool = False) -> None:
 @app.command()
 def attach() -> None:
     """Attach to a running sandbox."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1322,6 +1342,7 @@ def attach() -> None:
 @app.command()
 def destroy(force: bool = False) -> None:
     """Permanently destroy a sandbox instance."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
@@ -1447,6 +1468,7 @@ def doctor(
 @app.command()
 def status() -> None:
     """Show sandbox instance status and diagnostics."""
+    _require_per_user_state_initialized()
     sandbox_ai_home = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 

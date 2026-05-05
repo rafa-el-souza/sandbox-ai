@@ -148,6 +148,15 @@ def _user_home() -> Path:
     return Path(os.environ["SANDBOX_AI_USER_HOME"])
 
 
+def _seed_registry(home: Path) -> None:
+    """Mark the per-user state tree as initialized for hard-fail bypass."""
+    state_dir = home / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    registry = state_dir / "instances.json"
+    if not registry.exists():
+        registry.write_text("{}")
+
+
 def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     """Helper: register an instance and create its directory structure."""
     state_dir = _user_home() / "state"
@@ -228,6 +237,7 @@ class TestStartHappyPath:
 
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
@@ -1612,6 +1622,7 @@ class TestStopNoInstance:
     def test_stop_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -1627,6 +1638,7 @@ class TestAttachNoInstance:
     def test_attach_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -1642,6 +1654,7 @@ class TestDestroyNoInstance:
     def test_destroy_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
@@ -1659,6 +1672,7 @@ class TestDestroyPrefixGuardInternal:
 
         from cli.main import app
 
+        _seed_registry(_user_home())
         # Mock _resolve_instance to return a path outside sandboxes/
         bad_path = str(home / "somewhere_else" / "evil")
         with (
@@ -2146,6 +2160,30 @@ class TestInitNonTTY:
         ):
             result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
+
+
+class TestRequirePerUserStateInitialized:
+    """Lifecycle commands fail with canonical error when state tree is uninitialized."""
+
+    @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])
+    def test_command_fails_when_uninitialized(
+        self, runner: CliRunner, command: str, isolated_sandbox_ai_user_home: Path
+    ) -> None:
+        from cli.main import app
+
+        # Ensure registry seed file is absent
+        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        if registry.exists():
+            registry.unlink()
+
+        args = [command]
+        if command == "destroy":
+            args.append("--force")
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert "per-user state not initialized" in result.output.lower()
+        assert str(isolated_sandbox_ai_user_home) in result.output
+        assert "sandbox init" in result.output.lower()
 
 
 class TestInitFlagRemoval:
@@ -2723,6 +2761,7 @@ class TestDryRunNewInstance:
 
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
@@ -2936,6 +2975,7 @@ class TestStatusNoInstance:
     def test_status_no_instance_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         from cli.main import app
 
+        _seed_registry(_user_home())
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
