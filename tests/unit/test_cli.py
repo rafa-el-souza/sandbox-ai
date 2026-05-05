@@ -104,10 +104,16 @@ def _noop_init_seeder() -> typing.Iterator[None]:
         yield
 
 
-@pytest.fixture(autouse=True)
-def _default_bridge_gid() -> typing.Iterator[None]:
-    """Auto-supply workspace bridge gid + subuid resolution so build_jinja_context
-    and the helper-mkdir plan don't require real /etc/subgid + sb-ws on the host."""
+@pytest.fixture
+def stub_bridge_resolution() -> typing.Iterator[None]:
+    """Opt-in patch for the workspace bridge gid + subuid resolvers.
+
+    Most CLI tests don't reach the start pipeline and don't need this. Tests
+    that drive ``start``/``dry-run`` or directly invoke a helper-recipe phase
+    take this fixture explicitly to redirect resolvers away from the real
+    /etc/subgid + sb-ws group. Tests that need different values override with
+    their own ``with patch(...)`` block.
+    """
     with (
         patch("core.hydration.workspace_bridge_gid", return_value=200000),
         patch("core.hydration.in_container_gid_for_host_gid", return_value=1000),
@@ -2564,6 +2570,7 @@ class TestResolveHostConfig:
             assert auth == MachinectlAuth.POLKIT
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunExistingInstance:
     """Task 12.1: --dry-run with existing instance."""
 
@@ -2778,6 +2785,7 @@ class TestDryRunIpamExhausted:
             assert result.exit_code == 1
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestCheckSecretsFirecrawl:
     """Cover firecrawl secret branch in _check_secrets."""
 
@@ -3293,6 +3301,7 @@ class TestACLPlanAsymmetry:
         assert any("secrets dir traverse" in d for d in descriptions)
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunHelperMkdirPlanFallback:
     """Dry-run preview reports gracefully when subuid resolver fails."""
 
@@ -3542,6 +3551,7 @@ class TestWorkspaceSharedGroup:
             _phase_workspace_shared_group(str(ws), host, "dev")
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunWorkspaceSharedGroupFallback:
     """Dry-run preview reports gracefully when the bridge gid lookup fails late."""
 
@@ -4408,6 +4418,7 @@ class TestStatusIPAMExhausted:
 # ── Section 7 (host-config-machinectl-auth): auth-mode-aware preview ──────
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunAuthModePreview:
     """Task 7.7: --dry-run preview reflects machinectl_authentication mode."""
 
