@@ -102,3 +102,15 @@ The `_SANDBOX_TOML_TEMPLATE` in `scaffold.py` SHALL import `IMAGE_REGISTRY` from
 #### Scenario: Generated sandbox.toml contains digest defaults
 - **WHEN** `sandbox init` scaffolds a new instance
 - **THEN** the generated `sandbox.toml` contains `base_image` values with `@sha256:` digest references (not mutable tags)
+
+### Requirement: Helper Container Image Pinning
+
+The disposable helper container (per `helper-container` capability) SHALL use the digest-pinned `IMAGE_REGISTRY["busybox_musl"]` reference. No code path SHALL invoke `docker run … busybox` (or any helper-class image) without the pinned digest.
+
+#### Scenario: Helper-container code path uses pinned digest
+- **WHEN** `helper_chown_files` or `helper_mkdir_chown_dirs` constructs its docker run command
+- **THEN** the image argument is `IMAGE_REGISTRY["busybox_musl"].pinned` (i.e., `busybox@sha256:<digest>`); the unpinned `busybox` reference is NOT used
+
+#### Scenario: Image digest rotation covers helper image
+- **WHEN** `scripts/rotate_digests.py` is invoked
+- **THEN** it picks up `busybox_musl` along with the other infrastructure images and rotates its digest as part of the standard rotation workflow

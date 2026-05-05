@@ -101,3 +101,37 @@ The `sandbox destroy` command SHALL refuse to operate when the per-user state tr
 #### Scenario: Resolved home in error message
 - **WHEN** the destroy command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home`
+
+### Requirement: Destroy Revokes Workspace Default-ACL Named Entry
+
+`sandbox destroy` SHALL apply the same workspace named-ACL revocation as `sandbox stop`: remove `u:<host_unprivileged_user>` from BOTH the effective and default ACLs of `<user_project_root>`. The workspace tree itself is NOT removed (it is the user's external code), but its named-ACL grants must be revoked symmetrically with stop to avoid persistent daemon access.
+
+#### Scenario: Workspace named-ACLs revoked symmetrically with stop
+- **WHEN** `sandbox destroy` executes ACL revocation
+- **THEN** `setfacl -x u:<host_unprivileged_user> <user_project_root>` AND `setfacl -d -x u:<host_unprivileged_user> <user_project_root>` are both applied
+
+#### Scenario: Workspace tree preserved on destroy
+- **WHEN** `sandbox destroy` completes
+- **THEN** `<user_project_root>` and its contents remain on the host (the tree is the user's external code; only the orchestrator-managed named ACLs are revoked)
+
+#### Scenario: Workspace shared-group state preserved on destroy
+- **WHEN** `sandbox destroy` completes
+- **THEN** `<user_project_root>` retains its bridge-group ownership, mode 2770 + setgid, and persistent default ACL portion; reverting these would require either pre-sandbox state recording (which we don't have, per `orchestrator-volumes` Decision 5 / Gap 4) or sudo (which the orchestrator does not invoke, per Decision 17). Operators who want a clean revert do `chgrp/chmod` manually.
+
+### Requirement: Destroy Removes Instance Tree With Helper-Recipe State
+
+`sandbox destroy` SHALL remove `sandboxes/<id>/` via `shutil.rmtree`, which transitively removes:
+- Cache/log leaves (subuid-owned, with inherited `u:dev:rwx` letting dev's `rmtree` succeed)
+- Ro single-files (`<consumer-uid>:0` owned, removed via parent dir write+x which dev has via existing ACLs)
+- Secrets (consumer-uid:0 mode 0600, same removal path)
+- All other instance state
+
+No explicit helper-recipe revocation is invoked; the rmtree handles it.
+
+#### Scenario: Destroy via rmtree handles subuid-owned files
+- **WHEN** `sandbox destroy` runs `shutil.rmtree(sandboxes/<id>/)`
+- **THEN** the operation succeeds despite cache/log files being subuid-owned; dev's inherited `u:dev:rwx` ACL on agent-created files plus parent-dir write+x permissions are sufficient for unlink/rmdir
+
+#### Scenario: Destroy via rmtree handles consumer-uid:0 owned files
+- **WHEN** `sandbox destroy` runs `shutil.rmtree`
+- **THEN** the operation succeeds despite ro files being `<consumer-uid>:0` owned; dev has write+x on the parent dirs (own dirs in `sandboxes/<id>/`), which is what unlink requires

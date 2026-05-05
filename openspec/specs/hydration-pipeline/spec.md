@@ -330,3 +330,31 @@ The system SHALL copy `templates/docker/coredns/Dockerfile.coredns` as a static 
 #### Scenario: CoreDNS Dockerfile validated as static file
 - **WHEN** `validate_templates()` runs
 - **THEN** `templates/docker/coredns/Dockerfile.coredns` is included in the static file existence check and counts toward the validated total
+
+### Requirement: Workspace Bridge gid Context Key
+
+The Jinja2 context returned by `build_jinja_context()` SHALL include `in_container_workspace_bridge_gid`, computed at hydration time via `in_container_gid_for_host_gid(workspace_bridge_gid(host), host.docker_unprivileged_user)`. The compose template references this key for the `group_add` entries on `core` and `admin` services (per `compose-security-baseline`'s "Workspace Bridge Group Membership" requirement).
+
+#### Scenario: Context includes in_container_workspace_bridge_gid
+- **WHEN** `build_jinja_context()` is called and the host has a configured bridge group at a valid subgid-range gid
+- **THEN** the returned context includes `in_container_workspace_bridge_gid` with the integer value of the in-container gid
+
+#### Scenario: Bridge group resolution failure aborts hydration
+- **WHEN** `build_jinja_context()` is called and `workspace_bridge_gid(host)` raises (group missing or out of subgid range)
+- **THEN** hydration aborts with the propagated error before any template is rendered; the operator is directed to `sandbox doctor` for remediation
+
+#### Scenario: StrictUndefined catches missing bridge gid in compose template
+- **WHEN** `compose.yml` references `{{ in_container_workspace_bridge_gid }}` and the context omits the key (e.g., due to a build_jinja_context regression)
+- **THEN** `jinja2.StrictUndefined` raises `UndefinedError` during rendering, identifying the missing key
+
+### Requirement: Hydration Writes Sensitive Files at Restrictive Mode
+
+Hydration SHALL write sensitive files at restrictive modes from creation, bypassing the orchestrator process's umask. This requirement complements `orchestrator-volumes`'s "Hydration Writes Sensitive Files at Restrictive Mode" by anchoring the contract in the hydration pipeline's responsibility.
+
+#### Scenario: Ro config files use os.open with explicit mode 0640
+- **WHEN** `render_templates()` writes a file in the consumer-uid-0-chown ro-files set (Corefile, dnsdist conf, dotfiles, sshd_config, all 5 proxy files)
+- **THEN** the file is created via `os.open(path, O_WRONLY | O_CREAT | O_EXCL, 0o640)` and content is written via `os.write` (or equivalent that does NOT pass through `open(..., "w")` which would respect umask)
+
+#### Scenario: Programmatically-generated ro files also use restrictive mode
+- **WHEN** `render_templates()` programmatically generates `allowed_domains.txt`, `read_only_domains.txt`, or `.htpasswd`
+- **THEN** the same `os.open` + explicit mode 0640 pattern is used
