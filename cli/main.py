@@ -1455,6 +1455,8 @@ def doctor(
     else:
         resolved_auth = MachinectlAuth.SUDO
 
+    console.print(f"Per-user home: {sandbox_ai_user_home()}")
+
     distro = detect_distro()
     checks = build_check_registry(resolved_auth)
     results = run_checks(checks, resolved_user, distro)

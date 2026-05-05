@@ -20,7 +20,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from core.host_config import MachinectlAuth, machinectl_cmd
+from core.host_config import MachinectlAuth, machinectl_cmd, sandbox_ai_user_home
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -787,6 +787,91 @@ def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
     )
 
 
+def check_per_user_tree_exists(user: str, distro: str | None) -> CheckResult:
+    """Verify that ``<home>/``, ``<home>/config/``, ``<home>/state/`` exist."""
+    del user, distro
+    home = sandbox_ai_user_home()
+    missing: list[str] = []
+    for sub in ("", "config", "state"):
+        candidate = home / sub if sub else home
+        if not candidate.is_dir():
+            missing.append(str(candidate))
+    if not missing:
+        return CheckResult(
+            status="pass",
+            name="per-user tree exists",
+            detail=f"All required directories present at {home}",
+        )
+    return CheckResult(
+        status="fail",
+        name="per-user tree exists",
+        detail=f"Missing directories: {', '.join(missing)}",
+        remediation=f"Run sandbox init to create the per-user tree at {home}.",
+    )
+
+
+def check_per_user_tree_mode(user: str, distro: str | None) -> CheckResult:
+    """Warn when ``<home>``, ``<home>/config``, or ``<home>/state`` are more permissive than 0700."""
+    import stat as _stat
+
+    del user, distro
+    home = sandbox_ai_user_home()
+    drift: list[tuple[str, int]] = []
+    for sub in ("", "config", "state"):
+        path = home / sub if sub else home
+        if not path.is_dir():
+            # Tree absent — defer to existence check.
+            return CheckResult(
+                status="skip",
+                name="per-user tree mode",
+                detail="Tree not initialized (see per-user tree exists)",
+            )
+        mode = _stat.S_IMODE(path.stat().st_mode)
+        if mode != 0o700:
+            drift.append((str(path), mode))
+    if not drift:
+        return CheckResult(
+            status="pass",
+            name="per-user tree mode",
+            detail="All directories are mode 0700",
+        )
+    paths = ", ".join(f"{p} (mode {oct(m)})" for p, m in drift)
+    fix = "; ".join(f"chmod 0700 {p}" for p, _m in drift)
+    return CheckResult(
+        status="warn",
+        name="per-user tree mode",
+        detail=f"Mode drift detected: {paths}; expected 0700",
+        remediation=fix,
+    )
+
+
+def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
+    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exist."""
+    del user, distro
+    cwd = os.getcwd()
+    home = sandbox_ai_user_home()
+    legacy: list[str] = []
+    if os.path.exists(os.path.join(cwd, "sandbox-ai.toml")):
+        legacy.append(os.path.join(cwd, "sandbox-ai.toml"))
+    if os.path.isdir(os.path.join(cwd, ".state")):
+        legacy.append(os.path.join(cwd, ".state"))
+    if not legacy:
+        return CheckResult(
+            status="pass",
+            name="legacy CWD files",
+            detail="No legacy CWD-local orchestrator files detected",
+        )
+    return CheckResult(
+        status="warn",
+        name="legacy CWD files",
+        detail=f"Legacy files detected: {', '.join(legacy)}",
+        remediation=(
+            f"Per-host config now lives at {home / 'config' / 'sandbox-ai.toml'} and orchestrator state at "
+            f"{home / 'state'}. Migrate manually or delete the legacy files."
+        ),
+    )
+
+
 def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
     """Check that the .state/ directory is writable."""
     sandbox_home = _get_sandbox_ai_home()
@@ -966,6 +1051,31 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             category="Supply Chain",
             depends_on=["docker_available"],
             run=functools.partial(check_image_digests, auth_mode=auth_mode),
+            remediation="",
+        ),
+        # Chain 5: per-user tree
+        Check(
+            id="per_user_tree_exists",
+            name="per-user tree exists",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_per_user_tree_exists,
+            remediation="",
+        ),
+        Check(
+            id="per_user_tree_mode",
+            name="per-user tree mode",
+            category="Per-User Tree",
+            depends_on=["per_user_tree_exists"],
+            run=check_per_user_tree_mode,
+            remediation="",
+        ),
+        Check(
+            id="legacy_cwd_files",
+            name="legacy CWD files",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_legacy_cwd_files,
             remediation="",
         ),
     ]

@@ -1752,6 +1752,27 @@ class TestDoctorAllPass:
             assert result.exit_code == 0
 
 
+class TestDoctorPerUserHomeDisplay:
+    """Doctor output displays the resolved per-user home (env var visibility)."""
+
+    def test_displays_resolved_home(
+        self, runner: CliRunner, isolated_sandbox_ai_user_home: Path
+    ) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        with (
+            patch("cli.main.detect_distro", return_value="debian"),
+            patch("cli.main.build_check_registry", return_value=[]),
+            patch("cli.main.run_checks", return_value=[CheckResult(status="pass", name="x", detail="")]),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["doctor", "--user", "sandbox"])
+        assert result.exit_code == 0
+        assert "Per-user home:" in result.output
+        assert str(isolated_sandbox_ai_user_home) in result.output
+
+
 class TestDoctorAnyFail:
     """Task 10.1: sandbox doctor --user — some checks fail."""
 
