@@ -345,7 +345,9 @@ def _compute_ancestors(instance_dir: str) -> list[str]:
     return ancestors
 
 
-def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], str]]:
+def _acl_grant_plan(
+    instance_dir: str, host_user: str, user_project_root: str | None = None, dev_user: str | None = None
+) -> list[tuple[list[str], str]]:
     """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
 
     Returns a list of (setfacl_args, description) tuples:
@@ -354,6 +356,11 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
     - docker/: ``rX`` recursive
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
+    - secrets/: dir-level ``rX`` traverse
+    - workspace named-ACL: effective ``rwx`` plus default with named entry on user_project_root
+
+    Cache/log Option-B grants are intentionally absent — replaced by the
+    helper-mkdir+chown phase (acl-ownership-recipes Decision 1).
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -401,54 +408,82 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
         )
     )
 
-    # secrets/ — recursive read + conditional execute
+    # secrets/ — dir-level traverse only (per-file ownership handled by helper-cp+chown)
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rX", secrets_dir],
-            f"secrets dir: {secrets_dir}",
+            ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
+            f"secrets dir traverse: {secrets_dir}",
         )
     )
 
-    # ── rw bind-mount sources for rootless Docker ──────────────────────
-    # Rootless Docker's namespace-root maps to host_user. Every rw bind-mount
-    # source needs write access from that user for mountpoint creation.
-    # Grant rwX on specific subdirectories, not the entire cache/ or log/ tree.
-
-    rw_mount_sources = [
-        "cache/core/.claude",
-        "cache/admin/tmux_resurrect",
-        "log/core",
-        "log/admin",
-    ]
-    for subdir in rw_mount_sources:
-        target = os.path.join(instance_dir, subdir)
-        # Effective ACL: rwX for existing files/dirs
+    # Workspace named-ACL — granted at start, revoked at stop. Provides the
+    # rootless Docker daemon traverse + r/w access to the gofer-mounted /workspace.
+    # Persistent shared-group state (chgrp/chmod/setgid + persistent default ACL
+    # entries) is applied separately by _phase_workspace_shared_group.
+    if user_project_root is not None:
+        # Ancestor traverse on workspace path components above instance_dir's chain
+        ws_ancestors = _compute_workspace_ancestors(user_project_root)
+        for ancestor in ws_ancestors:
+            plan.append(
+                (
+                    ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
+                    f"workspace ancestor traverse: {ancestor}",
+                )
+            )
         plan.append(
             (
-                ["setfacl", "-R", "-m", f"u:{host_user}:rwX", target],
-                f"rw mount source: {target}",
+                ["setfacl", "-m", f"u:{host_user}:rwx", user_project_root],
+                f"workspace named-ACL: {user_project_root}",
             )
         )
-        # Default ACL: rwX for future files/dirs created by containers
+        default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+        if dev_user:
+            default_entry += f",u:{dev_user}:rwx"
         plan.append(
             (
-                ["setfacl", "-R", "-d", "-m", f"u:{host_user}:rwX", target],
-                f"rw mount default: {target}",
+                ["setfacl", "-d", "-m", default_entry, user_project_root],
+                f"workspace default ACL: {user_project_root}",
             )
         )
 
     return plan
 
 
-def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], str]]:
+def _compute_workspace_ancestors(user_project_root: str) -> list[str]:
+    """Walk ancestors of ``user_project_root`` owned by the current uid.
+
+    Returns shallowest-first; excludes ``/`` and ``user_project_root`` itself.
+    """
+    current_uid = os.getuid()
+    abs_path = os.path.abspath(user_project_root)
+    ancestors: list[str] = []
+    parent = os.path.dirname(abs_path)
+    while parent != "/":
+        try:
+            stat = os.stat(parent)
+        except OSError:
+            break
+        if stat.st_uid != current_uid:
+            break
+        ancestors.append(parent)
+        parent = os.path.dirname(parent)
+    ancestors.reverse()
+    return ancestors
+
+
+def _acl_revoke_plan(
+    instance_dir: str, host_user: str, user_project_root: str | None = None
+) -> list[tuple[list[str], str]]:
     """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
 
     Ancestors are NOT revoked (D3 — grant-only model). Returns a list of
     (setfacl_args, description) tuples for: instance root, docker/ (recursive),
-    config/ (recursive), .sandbox.env, and rw bind-mount sources
-    (cache/core/.claude, cache/admin/tmux_resurrect, log/core, log/admin)
-    with both effective and default ACL entries.
+    config/ (recursive), .sandbox.env, secrets/ dir, and the workspace
+    named-ACL (effective + default entry portion).
+
+    Cache/log entries are intentionally absent post-change-4 — there is no
+    named ACL on those paths to revoke.
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -487,25 +522,29 @@ def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str],
         )
     )
 
-    # rw bind-mount sources — effective + default ACL removal
-    rw_mount_sources = [
-        "cache/core/.claude",
-        "cache/admin/tmux_resurrect",
-        "log/core",
-        "log/admin",
-    ]
-    for subdir in rw_mount_sources:
-        target = os.path.join(instance_dir, subdir)
+    # secrets/ dir-level traverse
+    secrets_dir = os.path.join(instance_dir, "secrets/")
+    plan.append(
+        (
+            ["setfacl", "-x", f"u:{host_user}", secrets_dir],
+            f"secrets dir traverse: {secrets_dir}",
+        )
+    )
+
+    # Workspace named-ACL — both effective and default-entry revocation.
+    # Persistent shared-group state (chgrp/chmod/setgid + g::rwx, u:dev:rwx
+    # default) is left intact (Decision 4).
+    if user_project_root is not None:
         plan.append(
             (
-                ["setfacl", "-R", "-x", f"u:{host_user}", target],
-                f"rw mount source: {target}",
+                ["setfacl", "-x", f"u:{host_user}", user_project_root],
+                f"workspace named-ACL: {user_project_root}",
             )
         )
         plan.append(
             (
-                ["setfacl", "-R", "-d", "-x", f"u:{host_user}", target],
-                f"rw mount default: {target}",
+                ["setfacl", "-d", "-x", f"u:{host_user}", user_project_root],
+                f"workspace default named entry: {user_project_root}",
             )
         )
 
@@ -569,14 +608,19 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
     return ""
 
 
-def _phase_acl_grant(instance_dir: str, host_user: str) -> None:
+def _phase_acl_grant(
+    instance_dir: str,
+    host_user: str,
+    user_project_root: str | None = None,
+    dev_user: str | None = None,
+) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
 
     Each setfacl call runs as direct subprocess.run (NOT via Executor.run —
     sentinel injection would corrupt the setfacl command, per I-1).
     CalledProcessError is wrapped in SandboxExecutionError (D6).
     """
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user):
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, user_project_root, dev_user):
         try:
             subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
@@ -692,14 +736,16 @@ def _compose_down(
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str) -> list[str]:
+def _revoke_acls(
+    instance_dir: str, host_user: str, user_project_root: str | None = None
+) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
     Iterates _acl_revoke_plan(). Uses check=False; failures are collected
     as warning strings, not raised. Returns list of warning messages.
     """
     warnings: list[str] = []
-    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user):
+    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, user_project_root):
         try:
             result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
             if result.returncode != 0:
@@ -795,7 +841,10 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     console.print("\n  [bold]Commands that would execute:[/bold]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user):
+    dev_user = os.environ.get("USER")
+    for acl_cmd, description in _acl_grant_plan(
+        instance_dir, host_user, config.instance.user_project_root, dev_user
+    ):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
     # Compose up — match actual _phase_compose_up command
@@ -1283,7 +1332,8 @@ def start(
 
         # Phase 5: ACL grants (Pattern A)
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
-        _phase_acl_grant(instance_dir, host_user)
+        dev_user = os.environ.get("USER")
+        _phase_acl_grant(instance_dir, host_user, config.instance.user_project_root, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 5b: Credential ownership matching (after ACL grants)
@@ -1299,7 +1349,7 @@ def start(
         console.print(f"[FATAL] {e}", style="red bold")
         # ACL cleanup on failure — only if Phase 5 has begun (D7)
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user)
+            acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
@@ -1349,7 +1399,7 @@ def stop(clean: bool = False) -> None:
     _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
 
     # ACL revocation (Pattern A) — fault-isolated (D5)
-    acl_warnings = _revoke_acls(instance_dir, host_user)
+    acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
     for w in acl_warnings:
         console.print(f"⚠ {w}", style="yellow")
 
@@ -1431,7 +1481,7 @@ def destroy(force: bool = False) -> None:
             console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
         # Phase 3: ACL revocation — fault-isolated (D5)
-        acl_warnings = _revoke_acls(instance_dir, host_user)
+        acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
         for w in acl_warnings:
             console.print(f"⚠ {w}", style="yellow")
 

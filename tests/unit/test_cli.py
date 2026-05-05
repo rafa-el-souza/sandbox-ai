@@ -1589,16 +1589,21 @@ class TestComposeDownDirect:
 
 
 class TestRevokeACLsDirect:
-    """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings."""
+    """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings.
+
+    Post-acl-ownership-recipes: cache/log Option-B grants are gone; workspace
+    named-ACL is now revoked. Plan entries when user_project_root is provided:
+    instance root + docker/ + config/ + .sandbox.env + secrets/ + workspace
+    (effective + default named-entry) = 7.
+    """
 
     def test_revoke_acls_calls_setfacl_for_all_plan_entries(self) -> None:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
-            warnings = _revoke_acls("/inst", "sandbox")
-            # instance root + docker/ + config/ + .sandbox.env + 4x(effective+default) rw mounts = 12
-            assert mock_run.call_count == 12
+            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            assert mock_run.call_count == 7
             assert warnings == []
 
     def test_partial_failure_continues_and_collects_warnings(self) -> None:
@@ -1615,9 +1620,9 @@ class TestRevokeACLsDirect:
             return subprocess.CompletedProcess([], 0, "", "")
 
         with patch("subprocess.run", side_effect=side_effect):
-            warnings = _revoke_acls("/inst", "sandbox")
+            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
 
-        assert call_count == 12  # All 12 entries attempted
+        assert call_count == 7
         assert len(warnings) == 1
         assert "No such file" in warnings[0]
 
@@ -1626,9 +1631,9 @@ class TestRevokeACLsDirect:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
-            warnings = _revoke_acls("/inst", "sandbox")
+            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
 
-        assert len(warnings) == 12  # All fail with OSError
+        assert len(warnings) == 7
         assert all("setfacl not found" in w for w in warnings)
 
 
@@ -3346,8 +3351,8 @@ class TestACLPlanAsymmetry:
         root_entries = [(args, d) for args, d in plan if "instance root" in d]
         assert any("r-x" in " ".join(args) for args, _ in root_entries)
 
-    def test_grant_plan_includes_rw_mount_sources(self, tmp_path: Path) -> None:
-        """Grant plan includes rw mount source entries for all four subdirectories."""
+    def test_grant_plan_excludes_cache_log_option_b(self, tmp_path: Path) -> None:
+        """Post-acl-ownership-recipes: cache/log Option-B grants are absent from grant plan."""
         from cli.main import _acl_grant_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3357,60 +3362,66 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        descriptions = [d for _, d in plan]
+        for args, desc in plan:
+            for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
+                assert cache_log not in desc
+                assert not any(cache_log in arg for arg in args)
+            assert "rwX" not in " ".join(args), f"rwX Option-B grant survived: {desc}"
 
-        expected_subdirs = [
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "log/core",
-            "log/admin",
-        ]
-        for subdir in expected_subdirs:
-            target = str(instance_dir / subdir)
-            assert any(d == f"rw mount source: {target}" for d in descriptions), (
-                f"Missing rw mount source entry for {subdir}"
-            )
-            # Verify setfacl args contain -R -m and rwX
-            source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
-            assert len(source_entries) == 1
-            args = source_entries[0][0]
-            assert "-R" in args
-            assert "-m" in args
-            assert any("rwX" in a for a in args)
-
-    def test_grant_plan_includes_default_acls(self, tmp_path: Path) -> None:
-        """Grant plan includes default ACL entries (-d flag) for rw mount subdirectories."""
+    def test_grant_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
+        """Workspace named-ACL is granted when user_project_root is supplied."""
         from cli.main import _acl_grant_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
         instance_dir.mkdir(parents=True)
-        (instance_dir / "docker").mkdir()
-        (instance_dir / "config").mkdir()
-        (instance_dir / ".sandbox.env").write_text("")
+        ws = tmp_path / "myws"
+        ws.mkdir()
 
-        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", str(ws), dev_user="dev")
         descriptions = [d for _, d in plan]
+        assert any("workspace named-ACL" in d for d in descriptions)
+        assert any("workspace default ACL" in d for d in descriptions)
+        # Effective entry contains rwx
+        ws_eff = next((a, d) for a, d in plan if "workspace named-ACL" in d)
+        assert "u:sandbox:rwx" in " ".join(ws_eff[0])
+        # Default entry includes both host_user and dev_user
+        ws_def = next((a, d) for a, d in plan if "workspace default ACL" in d)
+        joined = " ".join(ws_def[0])
+        assert "u:sandbox:rwx" in joined
+        assert "u:dev:rwx" in joined
 
-        expected_subdirs = [
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "log/core",
-            "log/admin",
-        ]
-        for subdir in expected_subdirs:
-            target = str(instance_dir / subdir)
-            assert any(d == f"rw mount default: {target}" for d in descriptions), (
-                f"Missing rw mount default entry for {subdir}"
-            )
-            # Verify setfacl args contain -d and -m
-            default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
-            assert len(default_entries) == 1
-            args = default_entries[0][0]
-            assert "-d" in args
-            assert "-m" in args
+    def test_revoke_plan_excludes_cache_log(self, tmp_path: Path) -> None:
+        """Post-acl-ownership-recipes: cache/log entries are absent from revoke plan."""
+        from cli.main import _acl_revoke_plan
 
-    def test_revoke_plan_includes_rw_mount_sources(self, tmp_path: Path) -> None:
-        """Revoke plan includes entries for all four rw mount subdirectories (effective + default)."""
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox")
+        for args, desc in plan:
+            for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
+                assert cache_log not in desc
+                assert not any(cache_log in arg for arg in args)
+
+    def test_revoke_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
+        """Workspace named-ACL effective and default-entry revocations."""
+        from cli.main import _acl_revoke_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        ws = tmp_path / "myws"
+
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox", str(ws))
+        descriptions = [d for _, d in plan]
+        assert any("workspace named-ACL" in d for d in descriptions)
+        assert any("workspace default named entry" in d for d in descriptions)
+        # The default revocation uses -d -x
+        ws_def = next((a, d) for a, d in plan if "workspace default named entry" in d)
+        assert "-d" in ws_def[0]
+        assert "-x" in ws_def[0]
+
+    def test_revoke_plan_omits_workspace_when_user_project_root_none(self, tmp_path: Path) -> None:
+        """No workspace entries when user_project_root is None (back-compat call shape)."""
         from cli.main import _acl_revoke_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3418,31 +3429,36 @@ class TestACLPlanAsymmetry:
 
         plan = _acl_revoke_plan(str(instance_dir), "sandbox")
         descriptions = [d for _, d in plan]
+        # Match description-prefix tokens, not substrings — tmp_path may contain "workspace".
+        assert not any(d.startswith("workspace ") for d in descriptions)
 
-        expected_subdirs = [
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "log/core",
-            "log/admin",
-        ]
-        for subdir in expected_subdirs:
-            target = str(instance_dir / subdir)
-            # Effective removal
-            assert any(d == f"rw mount source: {target}" for d in descriptions), (
-                f"Missing rw mount source revoke for {subdir}"
-            )
-            source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
-            assert "-x" in source_entries[0][0]
-            assert "-R" in source_entries[0][0]
+    def test_grant_plan_handles_unstattable_workspace_ancestor(self, tmp_path: Path) -> None:
+        """_compute_workspace_ancestors stops cleanly at a non-stat-able parent."""
+        from cli.main import _acl_grant_plan
 
-            # Default removal
-            assert any(d == f"rw mount default: {target}" for d in descriptions), (
-                f"Missing rw mount default revoke for {subdir}"
-            )
-            default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
-            assert "-d" in default_entries[0][0]
-            assert "-x" in default_entries[0][0]
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
 
+        # Workspace under a nonexistent path → os.stat on the parent raises OSError.
+        plan = _acl_grant_plan(
+            str(instance_dir), "sandbox", "/nonexistent-root/myproj", dev_user="dev"
+        )
+        # Should not have crashed; the workspace named-ACL is still queued.
+        assert any("workspace named-ACL" in d for _, d in plan)
+
+    def test_grant_plan_includes_secrets_traverse(self, tmp_path: Path) -> None:
+        """Grant plan retains a dir-level traverse on secrets/."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        descriptions = [d for _, d in plan]
+        assert any("secrets dir traverse" in d for d in descriptions)
 
 class TestPhaseACLGrantErrorWrapping:
     """Task 3.4: CalledProcessError → SandboxExecutionError with target path context."""
