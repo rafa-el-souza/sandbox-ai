@@ -182,9 +182,8 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     return inst
 
 
-def _write_ipam(home: Path, instance_id: str, base_index: int) -> None:
-    """Helper: write an IPAM entry."""
-    del home
+def _write_ipam(instance_id: str, base_index: int) -> None:
+    """Helper: write an IPAM entry to ``<user_home>/state/ipam.json``."""
     state_dir = _user_home() / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     ipam = state_dir / "ipam.json"
@@ -203,7 +202,7 @@ class TestStartHappyPath:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -271,7 +270,7 @@ class TestStartHappyPath:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -304,7 +303,7 @@ class TestStartHappyPath:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -399,7 +398,7 @@ class TestStartComposeSpinner:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -612,7 +611,7 @@ class TestStartInstanceNameImmutabilityWarning:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -769,7 +768,7 @@ class TestDestroyConfirmation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -810,7 +809,7 @@ class TestDestroyConfirmation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -837,7 +836,7 @@ class TestDestroyPrefixGuard:
         # Manually write a corrupted registry pointing outside sandboxes/
         reg = home / ".state" / "instances.json"
         reg.write_text(json.dumps({project_dir: "../../../etc"}))
-        _write_ipam(home, "../../../etc", 0)
+        _write_ipam("../../../etc", 0)
 
         from cli.main import app
 
@@ -859,7 +858,7 @@ class TestDestroyIPAMAndRegistryCleanup:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 5)
+        _write_ipam(instance_id, 5)
 
         from cli.main import app
 
@@ -892,7 +891,7 @@ class TestDestroyRmtree:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -2663,7 +2662,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         # Create tooling plane files for template validation
         _create_tooling_plane(home)
@@ -2684,7 +2683,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -2701,7 +2700,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 5)
+        _write_ipam("myproject-abc123", 5)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -2720,7 +2719,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -2737,7 +2736,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
         # Break the compose template
         (home / ".docker" / "compose.yml").write_text("{{ undefined_var }}")
@@ -2756,7 +2755,7 @@ class TestDryRunExistingInstance:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         inst = _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
         # Write empty env file — secrets missing
         (inst / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""')
@@ -2864,7 +2863,7 @@ class TestCheckSecretsFirecrawl:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         inst = _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         # Write a sandbox.toml with mcp_firecrawl=true
@@ -3013,7 +3012,7 @@ class TestStatusRunning:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         from cli.main import ContainerInfo, app
 
@@ -3045,7 +3044,7 @@ class TestStatusStopped:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         from cli.main import app
 
@@ -3067,7 +3066,7 @@ class TestStatusDegraded:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         from cli.main import ContainerInfo, app
 
@@ -3094,7 +3093,7 @@ class TestStatusIPAM:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 3)
+        _write_ipam("myproject-abc123", 3)
 
         from cli.main import app
 
@@ -3118,7 +3117,7 @@ class TestStatusConfigWarnings:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         # Write env file with empty PG_PASSWORD
         inst_dir = home / "sandboxes" / "myproject-abc123"
@@ -3500,7 +3499,7 @@ class TestStartPipelineOrdering:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3680,7 +3679,7 @@ class TestDestroyFaultIsolation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
@@ -3707,7 +3706,7 @@ class TestDestroyFaultIsolation:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3894,7 +3893,7 @@ class TestDestroyFaultIsolationWarnings:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -3940,7 +3939,7 @@ class TestDestroyFaultIsolationWarnings:
         project_dir = "/home/dev/myproject"
         instance_id = "myproject-abc123"
         _register_instance(home, project_dir, instance_id)
-        _write_ipam(home, instance_id, 0)
+        _write_ipam(instance_id, 0)
 
         from cli.main import app
 
@@ -4051,7 +4050,7 @@ class TestDryRunAuthModePreview:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -4080,7 +4079,7 @@ class TestDryRunAuthModePreview:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
         _create_tooling_plane(home)
 
         from cli.main import app
@@ -4113,7 +4112,7 @@ class TestPolkitEndToEnd:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
         captured: dict[str, object] = {}
@@ -4160,7 +4159,7 @@ class TestPostInitMissingHostConfig:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/myproject"
         _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam(home, "myproject-abc123", 0)
+        _write_ipam("myproject-abc123", 0)
 
         with (
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),

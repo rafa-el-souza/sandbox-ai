@@ -862,7 +862,13 @@ def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> No
 
 
 def _stdin_is_tty() -> bool:
-    """Boolean wrapper around ``sys.stdin.isatty()`` for ergonomic test patching."""
+    """Boolean wrapper around ``sys.stdin.isatty()`` for ergonomic test patching.
+
+    Why a wrapper: typer's ``CliRunner`` substitutes ``sys.stdin`` with an
+    in-memory buffer at invoke time, which breaks ``patch("cli.main.sys.stdin")``
+    for tests that need to simulate TTY mode. Patching this function instead
+    is robust to runner-level stdin replacement.
+    """
     return sys.stdin.isatty()
 
 
@@ -936,7 +942,13 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
 
 def _warn_legacy_cwd_files(project_dir: str, user_home: Path) -> None:
-    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exists."""
+    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exists.
+
+    The legacy path tokens in this docstring are intentional and load-bearing:
+    they preserve the exact strings users may grep for during migration.
+    Per the per-user-config-and-state-relocation change (task 14.7), do not
+    remove them in future cleanups.
+    """
     legacy_toml = os.path.join(project_dir, "sandbox-ai.toml")
     if os.path.exists(legacy_toml):
         console.print(

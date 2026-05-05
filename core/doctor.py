@@ -846,7 +846,13 @@ def check_per_user_tree_mode(user: str, distro: str | None) -> CheckResult:
 
 
 def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
-    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exist."""
+    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exist.
+
+    The legacy path tokens in this docstring are intentional and load-bearing:
+    they help users grepping the codebase during migration. Per the
+    per-user-config-and-state-relocation change (task 14.7), do not remove
+    them in future cleanups.
+    """
     del user, distro
     cwd = os.getcwd()
     home = sandbox_ai_user_home()
