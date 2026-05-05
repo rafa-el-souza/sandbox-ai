@@ -145,16 +145,16 @@ The system SHALL set `NO_PROXY` environment variables per container, scoped to o
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
 - **THEN** the firecrawl service's `NO_PROXY` includes `{{ core_proxy_subnet }}` and `{{ dns_subnet }}` but does NOT include `{{ isolated_subnet }}`, `{{ admin_subnet }}`, or `{{ admin_proxy_subnet }}`
 
-### Requirement: Service Rename dns-sidecar to coredns
-The system SHALL rename the `dns-sidecar` service to `coredns` in compose templates and rename the configuration directory from `.config/dns-sidecar/` to `.config/coredns/`.
+### Requirement: CoreDNS Service Naming
+The DNS resolver service SHALL be named `coredns` in compose templates, with its configuration sourced from `templates/config/coredns/`.
 
 #### Scenario: Service name in compose
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the DNS service is named `coredns`, not `dns-sidecar`
+- **THEN** the DNS service is named `coredns`
 
-#### Scenario: Config directory renamed
+#### Scenario: CoreDNS config directory present
 - **WHEN** the tooling plane is inspected
-- **THEN** `.config/coredns/Corefile` exists and `.config/dns-sidecar/` does NOT exist
+- **THEN** `templates/config/coredns/Corefile` exists in the packaged `templates` module
 
 ### Requirement: Per-Container extra_hosts Resolution
 The system SHALL configure `extra_hosts` entries per container to resolve cross-network service names to the correct static IP on each container's own network. Containers SHALL reference the proxy and dnsdist IPs from their respective networks.
