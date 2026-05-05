@@ -40,6 +40,7 @@ class Executor:
         env: dict[str, str] | None = None,
         *,
         sentinel: bool = False,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """
         Executes a command synchronously in a sterile POSIX environment,
@@ -59,6 +60,8 @@ class Executor:
             sterile_env.update(env)
 
         kwargs: dict[str, Any] = {"check": True, "env": sterile_env}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         if not interactive:
             kwargs["capture_output"] = True
@@ -88,6 +91,11 @@ class Executor:
             if not interactive and e.stderr:
                 error_msg += f"\nError Trace:\n{e.stderr}"
             raise SandboxExecutionError(error_msg) from e
+        except subprocess.TimeoutExpired as e:
+            raise SandboxExecutionError(
+                f"[FATAL] Sandbox Execution Fault: Command '{' '.join(cmd)}' "
+                f"timed out after {e.timeout}s."
+            ) from e
         except OSError as e:
             # Handle cases where binary doesn't exist
             raise SandboxExecutionError(
