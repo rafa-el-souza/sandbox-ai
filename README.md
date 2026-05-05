@@ -20,16 +20,18 @@ sandbox doctor    # Run host readiness diagnostics
 
 ```
 SANDBOX_AI_HOME/                  # Git clone root
-├── cli/                          # CLI entrypoint (typer)
-├── core/                         # Core modules
-│   ├── executor.py               # Sterile POSIX subprocess execution
-│   ├── registry.py               # Instance registry (fcntl-locked JSON)
-│   ├── ipam.py                   # Subnet allocator (lowest-slot scan)
-│   ├── hydration.py              # Pydantic → Jinja2 template pipeline
-│   ├── scaffold.py               # Instance directory bootstrapper
-│   └── crypto.py                 # Proxy credential generation (bcrypt)
-├── .docker/                      # Immutable tooling plane (Dockerfiles)
-├── .config/                      # Immutable config templates (Jinja2)
+├── src/
+│   ├── cli/                      # CLI entrypoint (typer)
+│   ├── core/                     # Core modules
+│   │   ├── executor.py           # Sterile POSIX subprocess execution
+│   │   ├── registry.py           # Instance registry (fcntl-locked JSON)
+│   │   ├── ipam.py               # Subnet allocator (lowest-slot scan)
+│   │   ├── hydration.py          # Pydantic → Jinja2 template pipeline
+│   │   ├── scaffold.py           # Instance directory bootstrapper
+│   │   └── crypto.py             # Proxy credential generation (bcrypt)
+│   └── templates/                # Packaged Jinja2 sources (top-level `templates`)
+│       ├── docker/               # Immutable tooling plane (Dockerfiles)
+│       └── config/               # Immutable config templates
 ├── sandboxes/<id>/               # Per-instance mutable state
 │   ├── sandbox.toml              # Instance configuration
 │   ├── .sandbox.env              # Secrets (never committed)
