@@ -65,3 +65,15 @@ The system SHALL revoke the `sandbox` user's ACL grants on instance root, `docke
 #### Scenario: Partial revocation failure reported as warning
 - **WHEN** one or more ACL revocation targets fail during stop
 - **THEN** the failure is reported as a warning and remaining targets are still attempted
+
+
+### Requirement: Per-User State Initialization Required
+The `sandbox stop` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
+
+#### Scenario: Stop on uninitialized host
+- **WHEN** `sandbox stop` is invoked and `<home>/state/instances.json` does not exist
+- **THEN** the CLI exits with: "Error: per-user state not initialized at `<resolved-home>`. Run `sandbox init` first." and exit code 1
+
+#### Scenario: Resolved home in error message
+- **WHEN** the stop command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
+- **THEN** the error message contains `/tmp/test-home`

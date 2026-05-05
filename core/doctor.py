@@ -879,11 +879,11 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
 
 
 def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
-    """Check that the .state/ directory is writable."""
-    sandbox_home = _get_sandbox_ai_home()
-    state_dir = os.path.join(sandbox_home, ".state")
+    """Check that the per-user ``<home>/state/`` directory is writable."""
+    del user, distro
+    state_dir = sandbox_ai_user_home() / "state"
     try:
-        with tempfile.NamedTemporaryFile(dir=state_dir, delete=True):
+        with tempfile.NamedTemporaryFile(dir=str(state_dir), delete=True):
             pass
         return CheckResult(
             status="pass",
@@ -895,7 +895,7 @@ def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
             status="fail",
             name="state dir writable",
             detail=f"{state_dir} is not writable",
-            remediation=f"Fix permissions: chmod 755 {state_dir}",
+            remediation=f"Fix permissions: chmod 0700 {state_dir}",
         )
 
 

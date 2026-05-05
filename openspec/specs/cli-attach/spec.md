@@ -29,3 +29,15 @@ The system SHALL drop the user into the admin container via machinectl and `dock
 #### Scenario: Terminal handed to admin container (polkit mode)
 - **WHEN** containers are confirmed running and `machinectl_authentication` is `"polkit"`
 - **THEN** `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed without `sudo` prefix
+
+
+### Requirement: Per-User State Initialization Required
+The `sandbox attach` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
+
+#### Scenario: Attach on uninitialized host
+- **WHEN** `sandbox attach` is invoked and `<home>/state/instances.json` does not exist
+- **THEN** the CLI exits with: "Error: per-user state not initialized at `<resolved-home>`. Run `sandbox init` first." and exit code 1
+
+#### Scenario: Resolved home in error message
+- **WHEN** the attach command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
+- **THEN** the error message contains `/tmp/test-home`

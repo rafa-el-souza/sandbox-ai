@@ -77,3 +77,15 @@ The `ip_map` used by `sandbox status` SHALL include entries for all containers w
 #### Scenario: ip_map uses new key names
 - **WHEN** `sandbox status` constructs the IP display map
 - **THEN** the map does NOT reference `dns_sidecar_ip`, `proxy_ip`, `admin_isolated_ip`, or `mcp_firecrawl_isolated_ip`
+
+
+### Requirement: Per-User State Initialization Required
+The `sandbox status` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
+
+#### Scenario: Status on uninitialized host
+- **WHEN** `sandbox status` is invoked and `<home>/state/instances.json` does not exist
+- **THEN** the CLI exits with: "Error: per-user state not initialized at `<resolved-home>`. Run `sandbox init` first." and exit code 1
+
+#### Scenario: Resolved home in error message
+- **WHEN** the status command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
+- **THEN** the error message contains `/tmp/test-home`

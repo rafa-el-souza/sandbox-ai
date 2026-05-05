@@ -425,22 +425,18 @@ class TestFilesystemChecks:
             assert result.status == "fail"
             assert "compose.yml" in result.detail
 
-    def test_state_dir_writable(self, tmp_path: Any) -> None:
+    def test_state_dir_writable(self, isolated_sandbox_ai_user_home: Path) -> None:
         from core.doctor import check_state_dir_writable
 
-        state_dir = tmp_path / ".state"
-        state_dir.mkdir()
-        with patch("core.doctor._get_sandbox_ai_home", return_value=str(tmp_path)):
-            result = check_state_dir_writable("sandbox", None)
-            assert result.status == "pass"
+        (isolated_sandbox_ai_user_home / "state").mkdir(parents=True)
+        result = check_state_dir_writable("sandbox", None)
+        assert result.status == "pass"
 
-    def test_state_dir_not_writable(self, tmp_path: Any) -> None:
+    def test_state_dir_not_writable(self, isolated_sandbox_ai_user_home: Path) -> None:
         from core.doctor import check_state_dir_writable
 
-        with (
-            patch("core.doctor._get_sandbox_ai_home", return_value=str(tmp_path)),
-            patch("tempfile.NamedTemporaryFile", side_effect=OSError("perm denied")),
-        ):
+        (isolated_sandbox_ai_user_home / "state").mkdir(parents=True)
+        with patch("tempfile.NamedTemporaryFile", side_effect=OSError("perm denied")):
             result = check_state_dir_writable("sandbox", None)
             assert result.status == "fail"
 

@@ -261,17 +261,17 @@ The system SHALL verify that the unconditional template and static files exist i
 - **THEN** the check reports FAIL listing the missing files
 
 ### Requirement: State Directory Writability
-The system SHALL verify that the `.state/` directory is writable.
+The system SHALL verify that the per-user state directory `<sandbox_ai_user_home()>/state/` is writable.
 
 **Dependencies:** None (root check)
 
 #### Scenario: Directory writable
-- **WHEN** a temporary file can be created and removed in `.state/`
+- **WHEN** a temporary file can be created and removed in `<home>/state/`
 - **THEN** the check reports PASS
 
 #### Scenario: Directory not writable
-- **WHEN** file creation in `.state/` fails
-- **THEN** the check reports FAIL with guidance on directory permissions
+- **WHEN** file creation in `<home>/state/` fails
+- **THEN** the check reports FAIL with guidance on directory permissions (`chmod 0700 <home>/state/`)
 
 ### Requirement: Cascading Skip Logic
 The system SHALL skip checks whose dependencies have failed, displaying skipped checks explicitly in the output.
@@ -343,3 +343,56 @@ The system SHALL provide a function to execute a filtered subset of doctor check
 #### Scenario: Subset results match full doctor format
 - **WHEN** the subset API returns results
 - **THEN** the return type is `list[CheckResult]`, identical to `run_checks`, and compatible with `render_results`
+
+
+### Requirement: Per-User Tree Existence Check
+The `sandbox doctor` command SHALL include a check that the per-user tree (`<home>/`, `<home>/config/`, `<home>/state/`) exists. If any directory is missing, the doctor SHALL report the omission and direct the operator to run `sandbox init`. The check SHALL NOT auto-create the tree.
+
+#### Scenario: Tree present
+- **WHEN** `sandbox doctor` runs and all three directories exist
+- **THEN** the per-user-tree-existence check passes
+
+#### Scenario: Tree absent
+- **WHEN** `sandbox doctor` runs and `<home>/` does not exist
+- **THEN** the check reports: "FAIL: per-user tree not initialized at `<resolved-home>`. Run `sandbox init` to create it." and the doctor exits non-zero
+
+#### Scenario: Partial tree
+- **WHEN** `sandbox doctor` runs and `<home>/` exists but `<home>/state/` is missing
+- **THEN** the check reports the specific missing subdirectory and directs the operator to run `sandbox init` (which is idempotent and will create the missing piece)
+
+### Requirement: Per-User Tree Mode Check
+The `sandbox doctor` command SHALL include a check that `<home>/`, `<home>/config/`, and `<home>/state/` each have mode `0700`. If any is more permissive, the doctor SHALL emit a warning identifying the path, the actual mode, and the expected mode. The doctor SHALL NOT auto-fix the mode.
+
+#### Scenario: All modes correct
+- **WHEN** `sandbox doctor` runs and all three directories have mode `0700`
+- **THEN** the per-user-tree-mode check passes silently
+
+#### Scenario: Mode drift on state subdirectory
+- **WHEN** `sandbox doctor` runs and `<home>/state/` has mode `0755`
+- **THEN** the check warns: "WARNING: `<home>/state/` has mode `0755`; expected `0700`. Run `chmod 0700 <home>/state/` to remediate." The doctor continues to other checks (warning, not failure).
+
+#### Scenario: Mode check skipped when tree absent
+- **WHEN** `sandbox doctor` runs and `<home>/` does not exist
+- **THEN** the per-user-tree-mode check is skipped (the existence check already reported the absence)
+
+### Requirement: Resolved Per-User Home in Doctor Output
+The `sandbox doctor` command SHALL display the resolved per-user home path in its output. This makes a misconfigured `SANDBOX_AI_USER_HOME` env var visible to the operator.
+
+#### Scenario: Default home displayed
+- **WHEN** `sandbox doctor` runs with `SANDBOX_AI_USER_HOME` unset
+- **THEN** the doctor output contains a line of the form: "Per-user home: `<expanded-path>`" where `<expanded-path>` is `os.path.expanduser("~/.sandbox-ai")`
+
+#### Scenario: Override home displayed
+- **WHEN** `sandbox doctor` runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
+- **THEN** the doctor output contains: "Per-user home: `/tmp/test-home`" so the operator sees the override is active
+
+### Requirement: Legacy CWD-Local File Detection
+The `sandbox doctor` command SHALL detect legacy `<cwd>/sandbox-ai.toml` and `<cwd>/.state/` and warn the operator that these files are no longer used.
+
+#### Scenario: Legacy host config detected
+- **WHEN** `sandbox doctor` runs and `<cwd>/sandbox-ai.toml` exists
+- **THEN** the doctor emits a warning: "Found legacy `<cwd>/sandbox-ai.toml`. Per-host config now lives at `<resolved-home>/config/sandbox-ai.toml`. Migrate manually or delete the legacy file."
+
+#### Scenario: Legacy state directory detected
+- **WHEN** `sandbox doctor` runs and `<cwd>/.state/` exists
+- **THEN** the doctor emits a warning: "Found legacy `<cwd>/.state/`. Orchestrator state now lives at `<resolved-home>/state/`. Migrate manually or delete the legacy directory."

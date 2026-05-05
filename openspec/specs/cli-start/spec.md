@@ -199,3 +199,15 @@ The system SHALL grant `rwX` ACLs (effective and default) to the `host_unprivile
 #### Scenario: rw bind-mount ACLs appear in dry-run preview
 - **WHEN** `sandbox start --dry-run` is invoked
 - **THEN** the command preview includes the rw bind-mount source ACL entries from `_acl_grant_plan()`
+
+
+### Requirement: Per-User State Initialization Required
+The `sandbox start` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
+
+#### Scenario: Start on uninitialized host
+- **WHEN** `sandbox start` is invoked and `<home>/state/instances.json` does not exist
+- **THEN** the CLI exits with: "Error: per-user state not initialized at `<resolved-home>`. Run `sandbox init` first." and exit code 1, before any other phase runs (registry lookup, lock acquisition, doctor pre-flight all skipped)
+
+#### Scenario: Resolved home in error message
+- **WHEN** the start command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
+- **THEN** the error message contains `/tmp/test-home` so the operator can verify which path was checked
