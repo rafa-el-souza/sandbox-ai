@@ -151,3 +151,35 @@ Services with sshd auth paths through `/run` SHALL mount the `/run` tmpfs with `
 - **WHEN** the `compose.yml` template source is inspected for the admin service
 - **THEN** the admin service's `tmpfs` block does NOT include a `/run` entry
 
+### Requirement: Workspace Bridge Group Membership for core and admin
+
+The rendered `compose.yml` SHALL include `group_add` (or compose-equivalent) entries on the `core` and `admin` services that add the in-container gid corresponding to the host workspace bridge group. The value is computed at hydration time via `in_container_gid_for_host_gid(workspace_bridge_gid(host), host.docker_unprivileged_user)`.
+
+#### Scenario: core service has group_add for bridge gid
+- **WHEN** `compose.yml` is rendered with a configured workspace bridge group
+- **THEN** the `core` service block contains `group_add: ["{{ in_container_workspace_bridge_gid }}"]` (or equivalent), with the value resolved to the in-container gid that maps to the host bridge group
+
+#### Scenario: admin service has group_add for bridge gid
+- **WHEN** `compose.yml` is rendered
+- **THEN** the `admin` service block contains the same `group_add` entry
+
+#### Scenario: Numeric group_add only — no in-image group required
+- **WHEN** the agent images are inspected
+- **THEN** they do NOT need to define an internal `sb-ws` (or similarly-named) group at the bridge gid; Linux access checks operate on numeric gids per Decision 12
+
+### Requirement: Agent Shell Init Sets Restrictive Umask for Workspace Writes
+
+The agent shell init files (`templates/config/core/.bashrc`, `templates/config/admin/.zshrc`) SHALL set `umask 007` so that files created by the agent under the workspace land at mode `0660` group `<bridge-group>` (via setgid + supplementary group inheritance). This is required for dev to read/write back agent-created files in the workspace via the shared-group recipe.
+
+#### Scenario: Core .bashrc sets umask 007
+- **WHEN** the rendered `templates/config/core/.bashrc` is inspected
+- **THEN** it contains `umask 007` early in the file, before any user override hook
+
+#### Scenario: Admin .zshrc sets umask 007
+- **WHEN** the rendered `templates/config/admin/.zshrc` is inspected
+- **THEN** it contains `umask 007` early in the file, before any user override hook
+
+#### Scenario: New files in workspace land at mode 0660
+- **WHEN** the agent (in-container uid 1000, supplementary gid <bridge-gid>) creates a new file under `/workspace`
+- **THEN** the resulting file has mode `0660` and group `<bridge-gid>`, allowing dev (sb-ws member on host) to read/write via group bits
+

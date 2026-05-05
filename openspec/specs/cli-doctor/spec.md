@@ -396,3 +396,87 @@ The `sandbox doctor` command SHALL detect legacy `<cwd>/sandbox-ai.toml` and `<c
 #### Scenario: Legacy state directory detected
 - **WHEN** `sandbox doctor` runs and `<cwd>/.state/` exists
 - **THEN** the doctor emits a warning: "Found legacy `<cwd>/.state/`. Orchestrator state now lives at `<resolved-home>/state/`. Migrate manually or delete the legacy directory."
+
+### Requirement: Workspace Bridge Group Existence Check
+
+The doctor SHALL include a check `workspace_bridge_group_exists` that verifies the configured bridge group (`HostSettings.workspace_bridge_group`, default `sb-ws`) exists at a gid in the daemon user's subgid range. On failure, the check SHALL print copy-pasteable `groupadd` and `usermod` commands using `autodetect_workspace_bridge_gid_recommendation` to fill in the recommended gid (per Decision 13 / Option M).
+
+#### Scenario: Group exists with valid gid passes
+- **WHEN** the doctor runs and `getent group <bridge-group>` returns a gid in `<docker_unprivileged_user>`'s subgid range
+- **THEN** the check passes
+
+#### Scenario: Group missing prints recommendation with autodetected gid
+- **WHEN** the doctor runs and the configured bridge group does not exist
+- **THEN** the check fails with: `"FAIL: group '<name>' does not exist. Run: sudo groupadd -g <recommended-gid> <name> && sudo usermod -aG <name> <current-user>. Then log out and back in."` where `<name>` is the configured `workspace_bridge_group` and `<recommended-gid>` comes from `autodetect_workspace_bridge_gid_recommendation`
+
+#### Scenario: Group exists but gid out of range
+- **WHEN** the doctor runs and the configured bridge group exists at a gid OUTSIDE the daemon user's subgid range
+- **THEN** the check fails with: `"FAIL: group '<name>' exists at gid <actual-gid>, which is outside <docker_unprivileged_user>'s subgid range. Either delete and re-create the group at a gid in range, or override [host].workspace_bridge_group to point at a different group."`
+
+#### Scenario: Recommendation falls back if autodetect itself fails
+- **WHEN** the doctor's failure path tries to compute a recommendation but `autodetect_workspace_bridge_gid_recommendation` raises (e.g., `NoSubgidRangeError` because the daemon user is not in `/etc/subgid`)
+- **THEN** the failure message includes the autodetect error and a fallback hint to verify rootless docker setup
+
+### Requirement: Dev Process Membership Check
+
+The doctor SHALL include a check `dev_in_workspace_bridge_group` that verifies the doctor's *current process* has the bridge gid in its supplementary groups (`os.getgroups()`). This catches the post-`usermod`/pre-relogin pitfall where `/etc/group` shows membership but the running process's group set is stale.
+
+#### Scenario: Process has gid in supplementary groups passes
+- **WHEN** the doctor runs and `workspace_bridge_gid(host)` is in `os.getgroups()`
+- **THEN** the check passes
+
+#### Scenario: /etc/group says member but process group set is stale
+- **WHEN** the doctor runs, `os.getlogin()` is in the bridge group's `gr_mem` per `grp.getgrnam`, but `workspace_bridge_gid(host)` is NOT in `os.getgroups()`
+- **THEN** the check fails with: `"User is a member of '<name>' in /etc/group, but the current process's supplementary groups don't include gid <bridge-gid>. Log out and log back in to refresh group membership before running 'sandbox start'."`
+
+#### Scenario: Not a member at all
+- **WHEN** the doctor runs and the user is not in the bridge group's `gr_mem`
+- **THEN** the check fails with: `"User is not a member of '<name>'. Run: sudo usermod -aG <name> <current-user>, then log out and back in."`
+
+### Requirement: Subuid Resolver Sanity Check
+
+The doctor SHALL include a check `subuid_resolver_works` that verifies `host_id_for_in_container(1000, host.docker_unprivileged_user)` returns a sane mapped uid (i.e., does not raise `NoSubuidRangeError` or `SubuidOutOfRangeError`).
+
+#### Scenario: Resolver returns a uid
+- **WHEN** the doctor runs and `host_id_for_in_container(1000, ...)` returns a positive integer
+- **THEN** the check passes
+
+#### Scenario: Daemon user has no subuid entry
+- **WHEN** the doctor runs and `host_id_for_in_container(1000, ...)` raises `NoSubuidRangeError`
+- **THEN** the check fails with the error's message and a hint pointing at `/etc/subuid` and rootless docker setup documentation
+
+### Requirement: Helper Image Locally-Cached Check
+
+The doctor SHALL include a warn-only check `helper_image_pulled` that runs `docker image inspect <pinned-busybox-ref>` and reports whether the image is locally cached. The check SHALL NOT trigger a pull (diagnostic commands have no side effects).
+
+#### Scenario: Image cached passes
+- **WHEN** the doctor runs and `docker image inspect <pinned-busybox-ref>` exits 0
+- **THEN** the check passes
+
+#### Scenario: Image not cached warns
+- **WHEN** the doctor runs and `docker image inspect <pinned-busybox-ref>` exits non-zero
+- **THEN** the check emits a warning: `"WARN: helper image <pinned-ref> is not locally cached; will be pulled on first 'sandbox start' (~1MB)."`. The doctor proceeds with subsequent checks; this is not a fatal error.
+
+### Requirement: Secrets Hydrated Restrictively Check
+
+The doctor SHALL include a warn-only check `secrets_hydrated_restrictively` that scans `secrets/` and `config/` files in registered instance directories for any file with `other::r--` (mode bits revealing world-readable). Such files indicate a hydration regression where Decision 6's restrictive-mode-at-write-time contract was violated.
+
+#### Scenario: All sensitive files have restrictive mode
+- **WHEN** the doctor runs and every file under `secrets/` and the consumer-uid-0-chown ro-files set has mode `0600` or `0640` (no `other::r--`)
+- **THEN** the check passes
+
+#### Scenario: Stray world-readable secret detected
+- **WHEN** the doctor finds any secret file with `other::r--` set
+- **THEN** the check emits a warning identifying the file and recommending `sandbox stop && sandbox start` (which re-hydrates and re-applies the helper-cp+chown phase)
+
+### Requirement: Pre-Existing Instance Layout Check
+
+The doctor SHALL include a warn-only check `pre_existing_instance_layout` that detects instance directories whose cache/log leaves are still in the pre-change-4 layout (dev-owned with named-ACL `u:host_user:rwX` rather than subuid-owned). The check SHALL recommend `sandbox destroy <instance> && sandbox init` for any such instance.
+
+#### Scenario: Instance in new layout passes
+- **WHEN** the doctor inspects an instance whose cache/log leaves are subuid-owned
+- **THEN** the check passes for that instance
+
+#### Scenario: Instance in pre-change-4 layout warns
+- **WHEN** the doctor inspects an instance whose `cache/core/.claude` (or any cache/log leaf) is owned by `dev` rather than the consumer subuid
+- **THEN** the check emits a warning identifying the instance and recommending `sandbox destroy <instance-name> && sandbox init`

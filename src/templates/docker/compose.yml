@@ -227,6 +227,8 @@ services:
         max-file: "5"
     cap_add:
       - CHOWN
+    group_add:
+      - "{{ in_container_workspace_bridge_gid }}"
     security_opt:
       - no-new-privileges:false
     runtime: "{{ runtime }}"
@@ -313,6 +315,8 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+    group_add:
+      - "{{ in_container_workspace_bridge_gid }}"
     runtime: "runc"
     tmpfs:
       - /home/human/.cache:nosuid,nodev

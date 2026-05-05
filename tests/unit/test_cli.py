@@ -104,6 +104,26 @@ def _noop_init_seeder() -> typing.Iterator[None]:
         yield
 
 
+@pytest.fixture
+def stub_bridge_resolution() -> typing.Iterator[None]:
+    """Opt-in patch for the workspace bridge gid + subuid resolvers.
+
+    Most CLI tests don't reach the start pipeline and don't need this. Tests
+    that drive ``start``/``dry-run`` or directly invoke a helper-recipe phase
+    take this fixture explicitly to redirect resolvers away from the real
+    /etc/subgid + sb-ws group. Tests that need different values override with
+    their own ``with patch(...)`` block.
+    """
+    with (
+        patch("core.hydration.workspace_bridge_gid", return_value=200000),
+        patch("core.hydration.in_container_gid_for_host_gid", return_value=1000),
+        patch("cli.main.workspace_bridge_gid", return_value=200000),
+        patch("cli.main.host_id_for_in_container", return_value=100999),
+        patch("cli.main.host_gid_for_in_container", return_value=200999),
+    ):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _default_project_config() -> typing.Iterator[None]:
     """Auto-supply a default sandbox-ai.toml so post-init commands don't exit early.
@@ -217,7 +237,9 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate") as mock_hydrate,
             patch("cli.main._phase_acl_grant") as mock_acl,
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -285,7 +307,9 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="proxypass123"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -318,7 +342,9 @@ class TestStartHappyPath:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -413,7 +439,9 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -502,6 +530,62 @@ class TestStartIPAMExhausted:
             mock_release.assert_called_once()
 
 
+class TestStartWorkspaceBridgeMissing:
+    """Task 5.2: hydration aborts when workspace bridge group is missing."""
+
+    def test_start_aborts_with_remediation_hint(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import app
+        from core.host_config import WorkspaceBridgeGroupMissingError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch(
+                "cli.main._phase_hydrate",
+                side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
+            ),
+            patch("cli.main._release_lock") as mock_release,
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            assert "sb-ws" in result.output
+            assert "sandbox doctor" in result.output
+            mock_release.assert_called_once()
+
+    def test_dry_run_aborts_with_remediation_hint(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import app
+        from core.host_config import WorkspaceBridgeGroupMissingError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam("myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main.build_jinja_context",
+                side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert result.exit_code == 1
+            assert "sb-ws" in result.output
+            assert "sandbox doctor" in result.output
+
+
 class TestStartComposeUnhealthy:
     """Task 8.2: compose unhealthy exit."""
 
@@ -524,7 +608,9 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -595,7 +681,9 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -626,7 +714,9 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -1073,268 +1163,89 @@ class TestPhaseCredentialsDirect:
             assert line.startswith("proxyuser:$2b$")
 
 
-class TestCredentialOwnershipMatching:
-    """10.T: _phase_credential_ownership invokes helper container for credential ownership.
+class TestHelperCpChownRoFiles:
+    """Section 8: helper-cp+chown phase replacing _phase_credential_ownership.
 
-    Implements: cli-start/spec.md §Instance Pre-Flight Checks,
-                ssh-ipc-transport/spec.md §Credential Ownership Matching
+    Verifies the per-class consumer mapping (orchestrator-volumes Decision 1)
+    is honored: dnsdist 953, coredns 65532, proxy 13, agent/human 1000;
+    secrets land at 0600, ro config at 0640.
     """
 
-    def test_phase_credential_ownership_invokes_chown_via_machinectl(self, tmp_path: Path) -> None:
-        """_phase_credential_ownership runs docker chown via machinectl."""
-        from cli.main import _phase_credential_ownership
+    def test_plan_covers_all_per_class_consumers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _helper_cp_chown_plan
 
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
+        plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
+        owners = {p[2]: (p[0], p[1], p[4]) for p in plan}
+        # Each consumer uid is mapped via subuid resolver
+        assert 100000 + 65532 in owners  # coredns
+        assert 100000 + 953 in owners  # dnsdist
+        assert 100000 + 13 in owners  # proxy
+        assert 100000 + 1000 in owners  # agent/human/secrets
+        # Modes per design table
+        modes_by_uid: dict[int, set[int]] = {}
+        for entry in plan:
+            modes_by_uid.setdefault(entry[2], set()).add(entry[4])
+        assert 0o640 in modes_by_uid[100000 + 13]  # proxy ro
+        assert 0o640 in modes_by_uid[100000 + 65532]  # coredns ro
+        # Secrets at 0600 for the 1000-consumer
+        assert 0o600 in modes_by_uid[100000 + 1000]
+        # gid is always 0
+        for entry in plan:
+            assert entry[3] == 0
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
+    def test_plan_includes_legacy_ipc_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The four IPC SSH secrets continue to land at 1000:0 0600 via the standard recipe."""
+        from cli.main import _helper_cp_chown_plan
 
-        with patch("cli.main.Executor", return_value=mock_executor_instance):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-            # Executor.run must be called once for the chown operation
-            mock_executor_instance.run.assert_called_once()
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1000 if n == 1000 else 0)
+        plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
+        secrets_files: set[str] = set()
+        for parent, files, owner_uid, owner_gid, mode in plan:
+            if parent.endswith("/secrets"):
+                assert owner_uid == 1000
+                assert owner_gid == 0
+                assert mode == 0o600
+                secrets_files.update(files)
+        assert {"ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"} <= secrets_files
 
-    def test_chown_command_targets_all_four_secret_files(self, tmp_path: Path) -> None:
-        """Helper container chowns all four IPC secret files."""
-        from cli.main import _phase_credential_ownership
+    def test_phase_invokes_helper_per_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_helper_cp_chown_ro_files
+        from core.host_config import MachinectlAuth
 
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
+        invocations: list[tuple[str, ...]] = []
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
+        def _fake(
+            host_user: str,
+            parent: str,
+            files: typing.Iterable[str],
+            uid: int,
+            gid: int,
+            mode: int,
+            auth: object,
+            **kw: object,
+        ) -> None:
+            invocations.append((parent, *files))
 
-        with patch("cli.main.Executor", return_value=mock_executor_instance):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-            call_args = mock_executor_instance.run.call_args[0][0]
-            cmd_str = " ".join(call_args)
-            # Must reference all four secret files
-            for secret in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"):
-                assert secret in cmd_str, f"chown command must target {secret}, got: {cmd_str}"
+        monkeypatch.setattr("cli.main.helper_chown_files", _fake)
+        _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
+        # One invocation per RO_FILE_RECIPES entry (7 groups)
+        assert len(invocations) == 7
 
-    def test_chown_uses_docker_run_with_runc_runtime(self, tmp_path: Path) -> None:
-        """Helper container uses docker run --rm --runtime=runc busybox."""
-        from cli.main import _phase_credential_ownership
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-
-        with patch("cli.main.Executor", return_value=mock_executor_instance):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-            call_args = mock_executor_instance.run.call_args[0][0]
-            cmd_str = " ".join(call_args)
-            assert "docker run" in cmd_str, f"Must use docker run, got: {cmd_str}"
-            assert "--rm" in cmd_str, f"Must use --rm, got: {cmd_str}"
-            assert "--runtime=runc" in cmd_str, f"Must use --runtime=runc, got: {cmd_str}"
-            assert "busybox" in cmd_str, f"Must use busybox image, got: {cmd_str}"
-            assert "chown 1000:1000" in cmd_str, f"Must chown to 1000:1000, got: {cmd_str}"
-
-    def test_chown_executed_via_machinectl_shell(self, tmp_path: Path) -> None:
-        """Chown command is executed via machinectl shell as docker_unprivileged_user."""
-        from cli.main import _phase_credential_ownership
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-
-        with patch("cli.main.Executor", return_value=mock_executor_instance):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-            call_args = mock_executor_instance.run.call_args[0][0]
-            assert "sudo" in call_args, "Must use sudo"
-            assert "machinectl" in call_args, "Must use machinectl"
-            assert "shell" in call_args, "Must use shell subcommand"
-            assert "claude-sandbox@.host" in call_args, "Must execute as docker_unprivileged_user"
-
-    def test_chown_failure_raises_execution_error(self, tmp_path: Path) -> None:
-        """Helper container failure wraps and re-raises SandboxExecutionError."""
-        from cli.main import _phase_credential_ownership
+    def test_phase_propagates_helper_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_helper_cp_chown_ro_files
         from core.exceptions import SandboxExecutionError
+        from core.host_config import MachinectlAuth
 
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.side_effect = SandboxExecutionError("chown failed")
+        def _raise(*a: object, **kw: object) -> None:
+            raise SandboxExecutionError("helper failed")
 
-        with (
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-            pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"),
-        ):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-
-
-class TestPhaseCredentialOwnership:
-    """Tasks 1.1, 1.2 RED: _phase_credential_ownership() unit tests.
-
-    Implements: ssh-ipc-transport/spec.md §Credential Ownership Matching
-    """
-
-    def test_invokes_chown_via_machinectl_with_runc(self, tmp_path: Path) -> None:
-        """_phase_credential_ownership calls Executor.run with machinectl shell + docker run
-        --rm --runtime=runc busybox chown 1000:1000 targeting all four secret files."""
-        from cli.main import _phase_credential_ownership
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-
-        with (
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-            patch("subprocess.run") as mock_run,
-        ):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-
-            assert mock_run.call_count == 2
-            escalation_call = mock_run.call_args_list[0]
-            downgrade_call = mock_run.call_args_list[1]
-            assert escalation_call[0][0] == ["setfacl", "-m", "u:claude-sandbox:rwX", str(secrets_dir)]
-            assert downgrade_call[0][0] == ["setfacl", "-m", "u:claude-sandbox:rX", str(secrets_dir)]
-
-            mock_executor_instance.run.assert_called_once()
-            call_args = mock_executor_instance.run.call_args[0][0]
-            cmd_str = " ".join(call_args)
-
-            # machinectl shell envelope
-            assert "sudo" in call_args, "Must use sudo"
-            assert "machinectl" in call_args, "Must use machinectl"
-            assert "shell" in call_args, "Must use shell subcommand"
-            assert "claude-sandbox@.host" in call_args, "Must execute as docker_unprivileged_user"
-            # docker run structure
-            assert "docker run" in cmd_str, f"Must use docker run, got: {cmd_str}"
-            assert "--rm" in cmd_str, f"Must use --rm, got: {cmd_str}"
-            assert "--runtime=runc" in cmd_str, f"Must use --runtime=runc, got: {cmd_str}"
-            assert "busybox" in cmd_str, f"Must use busybox image, got: {cmd_str}"
-            assert f"-v {secrets_dir}:/secrets" in cmd_str, f"Must bind-mount secrets directory, got: {cmd_str}"
-            assert "cp /secrets/" in cmd_str, f"Must use copy-replace mutator, got: {cmd_str}"
-            assert "chown 1000:1000" in cmd_str, f"Must chown to 1000:1000, got: {cmd_str}"
-            # All four secret files
-            for secret in ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"):
-                assert secret in cmd_str, f"chown command must target {secret}, got: {cmd_str}"
-
-    def test_failure_raises_execution_error_with_prefix(self, tmp_path: Path) -> None:
-        """Helper container failure raises SandboxExecutionError with
-        'Credential ownership matching failed:' prefix."""
-        from cli.main import _phase_credential_ownership
-        from core.exceptions import SandboxExecutionError
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.run.side_effect = SandboxExecutionError("chown failed")
-
-        with (
-            patch("cli.main.Executor", return_value=mock_executor_instance),
-            patch("subprocess.run") as mock_run,
-        ):
-            with pytest.raises(SandboxExecutionError, match="Credential ownership matching failed"):
-                _phase_credential_ownership(
-                    str(tmp_path),
-                    host_user="claude-sandbox",
-                    secrets_dir=str(secrets_dir),
-                )
-            assert mock_run.call_count == 2
-
-    def test_acl_escalation_failure_raises_error(self, tmp_path: Path) -> None:
-        from cli.main import _phase_credential_ownership
-        from core.exceptions import SandboxExecutionError
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        with (
-            patch("cli.main.Executor"),
-            patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "setfacl")),
-            pytest.raises(SandboxExecutionError, match="Failed to escalate ACLs for secrets directory"),
-        ):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
-
-    def test_acl_downgrade_failure_raises_fix_diagnostic(self, tmp_path: Path) -> None:
-        import re
-
-        from cli.main import _phase_credential_ownership
-        from core.exceptions import SandboxExecutionError
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        def mock_run(cmd: list[str], *args: typing.Any, **kwargs: typing.Any) -> MagicMock:
-            if cmd[2] == "u:claude-sandbox:rX":
-                raise subprocess.CalledProcessError(1, cmd)
-            return MagicMock()
-
-        expected_match = re.escape(f"Fix: sudo setfacl -m u:claude-sandbox:rX {secrets_dir}")
-        with (
-            patch("cli.main.Executor"),
-            patch("subprocess.run", side_effect=mock_run),
-            pytest.raises(SandboxExecutionError, match=expected_match),
-        ):
-            _phase_credential_ownership(
-                str(tmp_path),
-                host_user="claude-sandbox",
-                secrets_dir=str(secrets_dir),
-            )
+        monkeypatch.setattr("cli.main.helper_chown_files", _raise)
+        with pytest.raises(SandboxExecutionError, match="helper failed"):
+            _phase_helper_cp_chown_ro_files("/inst", "u", MachinectlAuth.SUDO)
 
 
 class TestPhaseHydrateDirect:
@@ -1342,6 +1253,7 @@ class TestPhaseHydrateDirect:
 
     def test_phase_hydrate_calls_render(self) -> None:
         from cli.main import _phase_hydrate
+        from core.host_config import HostSettings
         from core.hydration import InstanceConfig
 
         mock_config = InstanceConfig.model_validate(
@@ -1353,12 +1265,13 @@ class TestPhaseHydrateDirect:
                 }
             }
         )
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
 
         with (
             patch("cli.main.build_jinja_context", return_value={}) as mock_ctx,
             patch("cli.main.render_templates") as mock_render,
         ):
-            _phase_hydrate(mock_config, 0, "pass", "/home", "/inst")
+            _phase_hydrate(mock_config, 0, "pass", "/home", "/inst", host)
             mock_ctx.assert_called_once()
             mock_render.assert_called_once()
 
@@ -1516,16 +1429,21 @@ class TestComposeDownDirect:
 
 
 class TestRevokeACLsDirect:
-    """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings."""
+    """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings.
+
+    Post-acl-ownership-recipes: cache/log Option-B grants are gone; workspace
+    named-ACL is now revoked. Plan entries when user_project_root is provided:
+    instance root + docker/ + config/ + .sandbox.env + secrets/ + workspace
+    (effective + default named-entry) = 7.
+    """
 
     def test_revoke_acls_calls_setfacl_for_all_plan_entries(self) -> None:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
-            warnings = _revoke_acls("/inst", "sandbox")
-            # instance root + docker/ + config/ + .sandbox.env + 4x(effective+default) rw mounts = 12
-            assert mock_run.call_count == 12
+            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            assert mock_run.call_count == 7
             assert warnings == []
 
     def test_partial_failure_continues_and_collects_warnings(self) -> None:
@@ -1542,9 +1460,9 @@ class TestRevokeACLsDirect:
             return subprocess.CompletedProcess([], 0, "", "")
 
         with patch("subprocess.run", side_effect=side_effect):
-            warnings = _revoke_acls("/inst", "sandbox")
+            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
 
-        assert call_count == 12  # All 12 entries attempted
+        assert call_count == 7
         assert len(warnings) == 1
         assert "No such file" in warnings[0]
 
@@ -1553,9 +1471,9 @@ class TestRevokeACLsDirect:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
-            warnings = _revoke_acls("/inst", "sandbox")
+            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
 
-        assert len(warnings) == 12  # All fail with OSError
+        assert len(warnings) == 7
         assert all("setfacl not found" in w for w in warnings)
 
 
@@ -2652,6 +2570,7 @@ class TestResolveHostConfig:
             assert auth == MachinectlAuth.POLKIT
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunExistingInstance:
     """Task 12.1: --dry-run with existing instance."""
 
@@ -2866,6 +2785,7 @@ class TestDryRunIpamExhausted:
             assert result.exit_code == 1
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestCheckSecretsFirecrawl:
     """Cover firecrawl secret branch in _check_secrets."""
 
@@ -3273,8 +3193,8 @@ class TestACLPlanAsymmetry:
         root_entries = [(args, d) for args, d in plan if "instance root" in d]
         assert any("r-x" in " ".join(args) for args, _ in root_entries)
 
-    def test_grant_plan_includes_rw_mount_sources(self, tmp_path: Path) -> None:
-        """Grant plan includes rw mount source entries for all four subdirectories."""
+    def test_grant_plan_excludes_cache_log_option_b(self, tmp_path: Path) -> None:
+        """Post-acl-ownership-recipes: cache/log Option-B grants are absent from grant plan."""
         from cli.main import _acl_grant_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3284,60 +3204,66 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        descriptions = [d for _, d in plan]
+        for args, desc in plan:
+            for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
+                assert cache_log not in desc
+                assert not any(cache_log in arg for arg in args)
+            assert "rwX" not in " ".join(args), f"rwX Option-B grant survived: {desc}"
 
-        expected_subdirs = [
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "log/core",
-            "log/admin",
-        ]
-        for subdir in expected_subdirs:
-            target = str(instance_dir / subdir)
-            assert any(d == f"rw mount source: {target}" for d in descriptions), (
-                f"Missing rw mount source entry for {subdir}"
-            )
-            # Verify setfacl args contain -R -m and rwX
-            source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
-            assert len(source_entries) == 1
-            args = source_entries[0][0]
-            assert "-R" in args
-            assert "-m" in args
-            assert any("rwX" in a for a in args)
-
-    def test_grant_plan_includes_default_acls(self, tmp_path: Path) -> None:
-        """Grant plan includes default ACL entries (-d flag) for rw mount subdirectories."""
+    def test_grant_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
+        """Workspace named-ACL is granted when user_project_root is supplied."""
         from cli.main import _acl_grant_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
         instance_dir.mkdir(parents=True)
-        (instance_dir / "docker").mkdir()
-        (instance_dir / "config").mkdir()
-        (instance_dir / ".sandbox.env").write_text("")
+        ws = tmp_path / "myws"
+        ws.mkdir()
 
-        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", str(ws), dev_user="dev")
         descriptions = [d for _, d in plan]
+        assert any("workspace named-ACL" in d for d in descriptions)
+        assert any("workspace default ACL" in d for d in descriptions)
+        # Effective entry contains rwx
+        ws_eff = next((a, d) for a, d in plan if "workspace named-ACL" in d)
+        assert "u:sandbox:rwx" in " ".join(ws_eff[0])
+        # Default entry includes both host_user and dev_user
+        ws_def = next((a, d) for a, d in plan if "workspace default ACL" in d)
+        joined = " ".join(ws_def[0])
+        assert "u:sandbox:rwx" in joined
+        assert "u:dev:rwx" in joined
 
-        expected_subdirs = [
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "log/core",
-            "log/admin",
-        ]
-        for subdir in expected_subdirs:
-            target = str(instance_dir / subdir)
-            assert any(d == f"rw mount default: {target}" for d in descriptions), (
-                f"Missing rw mount default entry for {subdir}"
-            )
-            # Verify setfacl args contain -d and -m
-            default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
-            assert len(default_entries) == 1
-            args = default_entries[0][0]
-            assert "-d" in args
-            assert "-m" in args
+    def test_revoke_plan_excludes_cache_log(self, tmp_path: Path) -> None:
+        """Post-acl-ownership-recipes: cache/log entries are absent from revoke plan."""
+        from cli.main import _acl_revoke_plan
 
-    def test_revoke_plan_includes_rw_mount_sources(self, tmp_path: Path) -> None:
-        """Revoke plan includes entries for all four rw mount subdirectories (effective + default)."""
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox")
+        for args, desc in plan:
+            for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
+                assert cache_log not in desc
+                assert not any(cache_log in arg for arg in args)
+
+    def test_revoke_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
+        """Workspace named-ACL effective and default-entry revocations."""
+        from cli.main import _acl_revoke_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        ws = tmp_path / "myws"
+
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox", str(ws))
+        descriptions = [d for _, d in plan]
+        assert any("workspace named-ACL" in d for d in descriptions)
+        assert any("workspace default named entry" in d for d in descriptions)
+        # The default revocation uses -d -x
+        ws_def = next((a, d) for a, d in plan if "workspace default named entry" in d)
+        assert "-d" in ws_def[0]
+        assert "-x" in ws_def[0]
+
+    def test_revoke_plan_omits_workspace_when_user_project_root_none(self, tmp_path: Path) -> None:
+        """No workspace entries when user_project_root is None (back-compat call shape)."""
         from cli.main import _acl_revoke_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3345,30 +3271,400 @@ class TestACLPlanAsymmetry:
 
         plan = _acl_revoke_plan(str(instance_dir), "sandbox")
         descriptions = [d for _, d in plan]
+        # Match description-prefix tokens, not substrings — tmp_path may contain "workspace".
+        assert not any(d.startswith("workspace ") for d in descriptions)
 
-        expected_subdirs = [
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "log/core",
-            "log/admin",
+    def test_grant_plan_handles_unstattable_workspace_ancestor(self, tmp_path: Path) -> None:
+        """_compute_workspace_ancestors stops cleanly at a non-stat-able parent."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+
+        # Workspace under a nonexistent path → os.stat on the parent raises OSError.
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", "/nonexistent-root/myproj", dev_user="dev")
+        # Should not have crashed; the workspace named-ACL is still queued.
+        assert any("workspace named-ACL" in d for _, d in plan)
+
+    def test_grant_plan_includes_secrets_traverse(self, tmp_path: Path) -> None:
+        """Grant plan retains a dir-level traverse on secrets/."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        descriptions = [d for _, d in plan]
+        assert any("secrets dir traverse" in d for d in descriptions)
+
+
+@pytest.mark.usefixtures("stub_bridge_resolution")
+class TestDryRunHelperMkdirPlanFallback:
+    """Dry-run preview reports gracefully when subuid resolver fails."""
+
+    def test_dry_run_handles_no_subuid_range(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        from cli.main import app
+        from core.host_config import NoSubuidRangeError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam("myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main.host_id_for_in_container",
+                side_effect=NoSubuidRangeError("no entry for 'sandbox'"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            # Dry-run does not crash; reports the unavailability.
+            assert "helper-mkdir plan unavailable" in result.output
+
+
+class TestWorkspaceSharedGroup:
+    """Section 9: workspace shared-group recipe (chgrp + chmod 2770 + setfacl)."""
+
+    def test_drift_detection_first_run_triggers_recursive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.txt").write_text("hello")
+        (ws / "sub").mkdir()
+        (ws / "sub" / "b.txt").write_text("world")
+
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        # Drift: workspace lacks setgid bit initially → recursive path runs.
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: True)
+
+        recursive_calls: list[tuple[str, int]] = []
+
+        def _fake_recursive(path: str, gid: int) -> tuple[int, list[str]]:
+            recursive_calls.append((path, gid))
+            return 0, []
+
+        monkeypatch.setattr("cli.main._workspace_shared_group_recursive", _fake_recursive)
+        monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        _phase_workspace_shared_group(str(ws), host, "dev")
+        assert recursive_calls == [(str(ws), os.stat(ws).st_gid)]
+
+    def test_steady_state_skips_recursive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
+        called: list[bool] = []
+
+        def _track(*a: object, **k: object) -> tuple[int, list[str]]:
+            called.append(True)
+            return 0, []
+
+        monkeypatch.setattr("cli.main._workspace_shared_group_recursive", _track)
+        monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        _phase_workspace_shared_group(str(ws), host, "dev")
+        assert called == []
+
+    def test_recursive_failure_aggregated_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        captured_console: typing.Any,
+    ) -> None:
+        """Per-file failures from the recursive helper are aggregated into a warning."""
+        from cli import main as main_mod
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "cli.main._workspace_shared_group_recursive",
+            lambda *a, **k: (3, ["/ws/root.bin", "/ws/x", "/ws/y"]),
+        )
+        monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+        # Redirect the module-level Rich Console to the test buffer so we can
+        # actually inspect the warning text.
+        monkeypatch.setattr(main_mod, "console", captured_console.console)
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        _phase_workspace_shared_group(str(ws), host, "dev")
+        out = captured_console.plain_output
+        assert "3 file(s) skipped" in out
+        # Sample paths surface in the warning.
+        assert "/ws/root.bin" in out
+
+    def test_setfacl_failure_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.exceptions import SandboxExecutionError
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
+
+        def _raise(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(1, cmd, stderr="permission denied")
+
+        monkeypatch.setattr("cli.main.subprocess.run", _raise)
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(SandboxExecutionError, match="permission denied"):
+            _phase_workspace_shared_group(str(ws), host, "dev")
+
+    def test_missing_bridge_group_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        def _raise(host: object) -> int:
+            raise WorkspaceBridgeGroupMissingError("group missing")
+
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", _raise)
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(WorkspaceBridgeGroupMissingError):
+            _phase_workspace_shared_group(str(ws), host, "dev")
+
+    def test_recursive_chmod_failure_collected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """chown succeeds but chmod fails → failure counted, not raised."""
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "f.txt").write_text("x")
+        monkeypatch.setattr("cli.main.os.chown", lambda *a, **k: None)
+
+        def _raise_chmod(path: str, mode: int) -> None:
+            raise PermissionError("chmod denied")
+
+        monkeypatch.setattr("cli.main.os.chmod", _raise_chmod)
+        count, sample = _workspace_shared_group_recursive(str(ws), 200500)
+        assert count >= 1
+        assert any("f.txt" in s for s in sample)
+
+    def test_recursive_helper_collects_per_file_failures(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "ok.txt").write_text("hi")
+        (ws / "bad.txt").write_text("hi")
+
+        def _chown_selective(path: str, uid: int, gid: int, follow_symlinks: bool = True) -> None:
+            if path.endswith("bad.txt"):
+                raise PermissionError("nope")
+
+        monkeypatch.setattr("cli.main.os.chown", _chown_selective)
+        # Real chmod is fine on tmp_path.
+        count, sample = _workspace_shared_group_recursive(str(ws), os.stat(ws).st_gid)
+        assert count == 1
+        assert any("bad.txt" in s for s in sample)
+
+    def test_plan_for_dry_run_includes_all_steps(self) -> None:
+        from cli.main import _workspace_shared_group_plan
+
+        plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
+        ops = [op for op, _ in plan]
+        assert any("chgrp 200500" in op for op in ops)
+        assert any("chmod 2770" in op for op in ops)
+        assert any("setfacl -m u:claude-sandbox:rwx" in op for op in ops)
+        # Default ACL includes both host_user and dev_user
+        default_op = next(op for op in ops if "setfacl -d" in op)
+        assert "u:claude-sandbox:rwx" in default_op
+        assert "u:dev:rwx" in default_op
+
+    def test_drift_helper_treats_unstattable_workspace_as_drift(self, tmp_path: Path) -> None:
+        from cli.main import _workspace_needs_recursive_setup
+
+        # Nonexistent path → os.stat raises → treat as drift.
+        assert _workspace_needs_recursive_setup(str(tmp_path / "missing"), 200500) is True
+
+    def test_drift_helper_steady_state_returns_false(self, tmp_path: Path) -> None:
+        """When setgid AND group ownership match, no recursive setup is needed."""
+        import stat
+
+        from cli.main import _workspace_needs_recursive_setup
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        os.chmod(ws, ws.stat().st_mode | stat.S_ISGID)
+        bridge_gid = ws.stat().st_gid
+        assert _workspace_needs_recursive_setup(str(ws), bridge_gid) is False
+
+    def test_recursive_real_walk_chmods_dirs_and_files(self, tmp_path: Path) -> None:
+        """End-to-end: recursive helper sets 2770 on dirs, 0660 on files."""
+        import stat
+
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        sub = ws / "sub"
+        sub.mkdir()
+        (ws / "a.txt").write_text("hi")
+        (sub / "b.txt").write_text("ho")
+        # symlinks should be skipped for chmod
+        (ws / "link").symlink_to("a.txt")
+
+        count, _ = _workspace_shared_group_recursive(str(ws), ws.stat().st_gid)
+        assert count == 0
+        assert sub.stat().st_mode & 0o7777 == 0o2770
+        assert (ws / "a.txt").stat().st_mode & 0o0777 == 0o0660
+        assert stat.S_ISLNK((ws / "link").lstat().st_mode)
+
+    def test_root_chmod_failure_wrapped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.exceptions import SandboxExecutionError
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: 200500)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
+        monkeypatch.setattr(
+            "cli.main.os.chown",
+            lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope")),
+        )
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(SandboxExecutionError, match="chgrp/chmod failed"):
+            _phase_workspace_shared_group(str(ws), host, "dev")
+
+
+@pytest.mark.usefixtures("stub_bridge_resolution")
+class TestDryRunWorkspaceSharedGroupFallback:
+    """Dry-run preview reports gracefully when the bridge gid lookup fails late."""
+
+    def test_dry_run_reports_workspace_plan_unavailable(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """If build_jinja_context succeeds but bridge gid lookup fails on the
+        dry-run preview path, the preview reports the issue and exits 0."""
+        from cli.main import app
+        from core.host_config import NoSubgidRangeError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam("myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        # build_jinja_context's bridge_gid lookup goes through
+        # core.hydration.workspace_bridge_gid (mocked to 200000 by the autouse
+        # fixture). The dry-run preview's workspace plan uses the cli.main
+        # reference; making it raise here exercises the fallback branch.
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main.workspace_bridge_gid",
+                side_effect=NoSubgidRangeError("no subgid for sandbox"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "shared-group plan unavailable" in result.output
+
+
+class TestHelperMkdirChownPlan:
+    """Section 7: cache/log helper-mkdir+chown plan + phase."""
+
+    def test_plan_groups_leaves_by_parent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _helper_mkdir_chown_plan
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
+        plan = _helper_mkdir_chown_plan("/inst", "claude-sandbox")
+        assert plan == [
+            ("/inst/cache/core", (".claude",), 100999, 200999),
+            ("/inst/cache/admin", ("tmux_resurrect",), 100999, 200999),
+            ("/inst/log", ("core", "admin"), 100999, 200999),
         ]
-        for subdir in expected_subdirs:
-            target = str(instance_dir / subdir)
-            # Effective removal
-            assert any(d == f"rw mount source: {target}" for d in descriptions), (
-                f"Missing rw mount source revoke for {subdir}"
-            )
-            source_entries = [(args, d) for args, d in plan if d == f"rw mount source: {target}"]
-            assert "-x" in source_entries[0][0]
-            assert "-R" in source_entries[0][0]
 
-            # Default removal
-            assert any(d == f"rw mount default: {target}" for d in descriptions), (
-                f"Missing rw mount default revoke for {subdir}"
-            )
-            default_entries = [(args, d) for args, d in plan if d == f"rw mount default: {target}"]
-            assert "-d" in default_entries[0][0]
-            assert "-x" in default_entries[0][0]
+    def test_phase_sets_default_acl_then_invokes_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_helper_mkdir_chown_cache_log
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
+
+        events: list[tuple[str, list[str]]] = []
+
+        def _fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            events.append(("setfacl", list(cmd)))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def _fake_helper(*a: object, **kw: object) -> None:
+            events.append(("helper", []))
+
+        monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
+        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+
+        _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", MachinectlAuth.SUDO, "dev")
+
+        # Three setfacl + three helper invocations, alternating
+        assert [e[0] for e in events] == ["setfacl", "helper", "setfacl", "helper", "setfacl", "helper"]
+        # First setfacl applies parent default ACL with u:dev:rwx
+        cmd = events[0][1]
+        assert cmd[:3] == ["setfacl", "-d", "-m"]
+        assert "u:dev:rwx" in cmd[3]
+        assert cmd[4] == "/inst/cache/core"
+
+    def test_phase_idempotent_re_invocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_helper_mkdir_chown_cache_log
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2)
+        calls = {"setfacl": 0, "helper": 0}
+
+        def _fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            calls["setfacl"] += 1
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def _fake_helper(*a: object, **kw: object) -> None:
+            calls["helper"] += 1
+
+        monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
+        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+
+        for _ in range(2):
+            _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
+        assert calls == {"setfacl": 6, "helper": 6}
+
+    def test_phase_setfacl_failure_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _phase_helper_mkdir_chown_cache_log
+        from core.exceptions import SandboxExecutionError
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2)
+
+        def _raise(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(1, cmd, stderr="permission denied")
+
+        monkeypatch.setattr("cli.main.subprocess.run", _raise)
+        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", lambda *a, **k: None)
+
+        with pytest.raises(SandboxExecutionError, match="permission denied"):
+            _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
 
 
 class TestPhaseACLGrantErrorWrapping:
@@ -3536,7 +3832,9 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant", side_effect=track_acl),
-            patch("cli.main._phase_credential_ownership", side_effect=track_ownership),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=track_ownership),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -3572,7 +3870,9 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
@@ -3602,7 +3902,73 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_credential_ownership", side_effect=SandboxExecutionError("chown failed")),
+            patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=SandboxExecutionError("chown failed")),
+            patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_called_once()
+
+    def test_helper_mkdir_chown_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        """Section 10: cache/log helper-mkdir+chown failure → ACL cleanup runs."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch(
+                "cli.main._phase_helper_mkdir_chown_cache_log",
+                side_effect=SandboxExecutionError("helper-mkdir failed"),
+            ),
+            patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start"])
+            assert result.exit_code == 1
+            mock_revoke.assert_called_once()
+
+    def test_workspace_shared_group_failure_triggers_revoke(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Section 10: workspace shared-group failure → ACL cleanup runs."""
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch(
+                "cli.main._phase_workspace_shared_group",
+                side_effect=SandboxExecutionError("workspace setup failed"),
+            ),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
@@ -4052,6 +4418,7 @@ class TestStatusIPAMExhausted:
 # ── Section 7 (host-config-machinectl-auth): auth-mode-aware preview ──────
 
 
+@pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunAuthModePreview:
     """Task 7.7: --dry-run preview reflects machinectl_authentication mode."""
 

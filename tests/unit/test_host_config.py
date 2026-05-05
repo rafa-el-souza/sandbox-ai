@@ -8,8 +8,21 @@ from core.host_config import (
     HostConfig,
     HostSettings,
     MachinectlAuth,
+    NoFreeGidInSubgidRangeError,
+    NoSubgidRangeError,
+    NoSubuidRangeError,
+    SubgidOutOfRangeError,
+    SubuidOutOfRangeError,
+    WorkspaceBridgeGroupMissingError,
+    autodetect_workspace_bridge_gid_recommendation,
+    host_gid_for_in_container,
+    host_id_for_in_container,
+    in_container_gid_for_host_gid,
     machinectl_cmd,
+    parse_subgid_for_user,
+    parse_subuid_for_user,
     sandbox_ai_user_home,
+    workspace_bridge_gid,
 )
 from pydantic import ValidationError
 
@@ -172,3 +185,268 @@ class TestMachinectlCmd:
         b = machinectl_cmd("sandbox", MachinectlAuth.SUDO)
         assert a == b
         assert a is not b
+
+
+# ─── Subuid / subgid resolvers ──────────────────────────────────────────────
+
+
+def _write_subid_file(path: Path, body: str) -> None:
+    path.write_text(body)
+
+
+def _patch_subuid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    """Redirect production's /etc/subuid path constant to a tmp file."""
+    f = tmp_path / "subuid"
+    f.write_text(body)
+    monkeypatch.setattr("core.host_config._SUBUID_PATH", f)
+    return f
+
+
+def _patch_subgid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    f = tmp_path / "subgid"
+    f.write_text(body)
+    monkeypatch.setattr("core.host_config._SUBGID_PATH", f)
+    return f
+
+
+class TestParseSubidFiles:
+    """parse_subuid_for_user / parse_subgid_for_user."""
+
+    def test_single_range(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:100000:65536\nother:200000:65536\n")
+        assert parse_subuid_for_user("claude-sandbox") == [(100000, 65536)]
+
+    def test_multi_range(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "u:1000:500\nu:2000:1000\nother:9000:10\n")
+        assert parse_subuid_for_user("u") == [(1000, 500), (2000, 1000)]
+
+    def test_user_absent_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "other:200000:65536\n")
+        assert parse_subuid_for_user("missing") == []
+
+    def test_missing_file_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Point the constant at a path that doesn't exist.
+        monkeypatch.setattr("core.host_config._SUBUID_PATH", tmp_path / "nope")
+        assert parse_subuid_for_user("anyone") == []
+
+    def test_skips_blank_and_comment_and_malformed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_subuid(
+            monkeypatch,
+            tmp_path,
+            "\n# comment\nclaude-sandbox:100000:65536\nbadrow\nclaude-sandbox:notanint:42\n",
+        )
+        assert parse_subuid_for_user("claude-sandbox") == [(100000, 65536)]
+
+    def test_subgid_uses_separate_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """parse_subgid_for_user reads ``_SUBGID_PATH``, not ``_SUBUID_PATH``."""
+        _patch_subuid(monkeypatch, tmp_path, "u:1:2\n")
+        _patch_subgid(monkeypatch, tmp_path, "u:9000:10\n")
+        assert parse_subuid_for_user("u") == [(1, 2)]
+        assert parse_subgid_for_user("u") == [(9000, 10)]
+
+
+class TestHostIdForInContainer:
+    """host_id_for_in_container forward map."""
+
+    def test_n_zero_returns_primary_uid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _Pw:
+            pw_uid = 4242
+            pw_gid = 4343
+
+        monkeypatch.setattr("core.host_config.pwd.getpwnam", lambda u: _Pw())
+        assert host_id_for_in_container(0, "claude-sandbox") == 4242
+
+    def test_n_zero_unknown_user_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(u: str) -> None:
+            raise KeyError(u)
+
+        monkeypatch.setattr("core.host_config.pwd.getpwnam", _raise)
+        with pytest.raises(NoSubuidRangeError):
+            host_id_for_in_container(0, "missing")
+
+    def test_n_one_maps_to_first_allocated(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:100000:65536\n")
+        assert host_id_for_in_container(1, "claude-sandbox") == 100000
+
+    def test_n_one_thousand(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:100000:65536\n")
+        assert host_id_for_in_container(1000, "claude-sandbox") == 100999
+
+    def test_n_out_of_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:100000:10\n")
+        with pytest.raises(SubuidOutOfRangeError):
+            host_id_for_in_container(11, "claude-sandbox")
+
+    def test_no_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "other:1:1\n")
+        with pytest.raises(NoSubuidRangeError):
+            host_id_for_in_container(1, "claude-sandbox")
+
+    def test_negative_n_raises(self) -> None:
+        with pytest.raises(SubuidOutOfRangeError):
+            host_id_for_in_container(-1, "claude-sandbox")
+
+    def test_multi_range_spans_correctly(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subuid(monkeypatch, tmp_path, "claude-sandbox:1000:5\nclaude-sandbox:9000:5\n")
+        # range 1: 1..5 → 1000..1004
+        # range 2: 6..10 → 9000..9004
+        assert host_id_for_in_container(5, "claude-sandbox") == 1004
+        assert host_id_for_in_container(6, "claude-sandbox") == 9000
+        assert host_id_for_in_container(10, "claude-sandbox") == 9004
+        with pytest.raises(SubuidOutOfRangeError):
+            host_id_for_in_container(11, "claude-sandbox")
+
+
+class TestHostGidForInContainer:
+    """host_gid_for_in_container forward map."""
+
+    def test_n_zero_returns_primary_gid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _Pw:
+            pw_uid = 1
+            pw_gid = 7777
+
+        monkeypatch.setattr("core.host_config.pwd.getpwnam", lambda u: _Pw())
+        assert host_gid_for_in_container(0, "claude-sandbox") == 7777
+
+    def test_n_zero_unknown_user_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(u: str) -> None:
+            raise KeyError(u)
+
+        monkeypatch.setattr("core.host_config.pwd.getpwnam", _raise)
+        with pytest.raises(NoSubgidRangeError):
+            host_gid_for_in_container(0, "missing")
+
+    def test_forward_map(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:65536\n")
+        assert host_gid_for_in_container(1, "claude-sandbox") == 200000
+
+    def test_negative_raises(self) -> None:
+        with pytest.raises(SubgidOutOfRangeError):
+            host_gid_for_in_container(-1, "u")
+
+    def test_no_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "other:1:1\n")
+        with pytest.raises(NoSubgidRangeError):
+            host_gid_for_in_container(1, "claude-sandbox")
+
+    def test_out_of_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:5\n")
+        with pytest.raises(SubgidOutOfRangeError):
+            host_gid_for_in_container(6, "claude-sandbox")
+
+
+class TestInContainerGidForHostGid:
+    """in_container_gid_for_host_gid inverse map."""
+
+    def test_within_range(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:65536\n")
+        # host gid 200000 → in-container 1 (first allocated maps to N=1)
+        assert in_container_gid_for_host_gid(200000, "claude-sandbox") == 1
+        assert in_container_gid_for_host_gid(200999, "claude-sandbox") == 1000
+
+    def test_out_of_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:65536\n")
+        with pytest.raises(SubgidOutOfRangeError):
+            in_container_gid_for_host_gid(50, "claude-sandbox")
+
+    def test_no_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "other:1:1\n")
+        with pytest.raises(NoSubgidRangeError):
+            in_container_gid_for_host_gid(200000, "claude-sandbox")
+
+    def test_multi_range_inverse(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "u:1000:5\nu:9000:5\n")
+        # 1000 → 1, 1004 → 5, 9000 → 6, 9004 → 10
+        assert in_container_gid_for_host_gid(1000, "u") == 1
+        assert in_container_gid_for_host_gid(1004, "u") == 5
+        assert in_container_gid_for_host_gid(9000, "u") == 6
+        assert in_container_gid_for_host_gid(9004, "u") == 10
+
+
+class TestWorkspaceBridgeGid:
+    """workspace_bridge_gid resolver."""
+
+    def test_resolves_and_validates(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:65536\n")
+
+        class _Gr:
+            gr_gid = 200500
+
+        monkeypatch.setattr("core.host_config.grp.getgrnam", lambda n: _Gr())
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        assert workspace_bridge_gid(host) == 200500
+
+    def test_missing_group_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(n: str) -> None:
+            raise KeyError(n)
+
+        monkeypatch.setattr("core.host_config.grp.getgrnam", _raise)
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(WorkspaceBridgeGroupMissingError):
+            workspace_bridge_gid(host)
+
+    def test_out_of_range_propagates(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:5\n")
+
+        class _Gr:
+            gr_gid = 99
+
+        monkeypatch.setattr("core.host_config.grp.getgrnam", lambda n: _Gr())
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(SubgidOutOfRangeError):
+            workspace_bridge_gid(host)
+
+
+class TestAutodetectRecommendation:
+    """autodetect_workspace_bridge_gid_recommendation."""
+
+    def test_picks_above_min(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:65536\n")
+        monkeypatch.setattr("core.host_config.grp.getgrall", lambda: [])
+        # in_container_min=1000 → host gid offset 999 → 200999
+        gid = autodetect_workspace_bridge_gid_recommendation("claude-sandbox", in_container_min=1000)
+        assert gid == 200999
+
+    def test_skips_used_gids(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:65536\n")
+
+        class _Gr:
+            def __init__(self, gid: int) -> None:
+                self.gr_gid = gid
+
+        monkeypatch.setattr("core.host_config.grp.getgrall", lambda: [_Gr(200999), _Gr(201000)])
+        gid = autodetect_workspace_bridge_gid_recommendation("claude-sandbox", in_container_min=1000)
+        assert gid == 201001
+
+    def test_no_range_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "other:1:1\n")
+        monkeypatch.setattr("core.host_config.grp.getgrall", lambda: [])
+        with pytest.raises(NoSubgidRangeError):
+            autodetect_workspace_bridge_gid_recommendation("claude-sandbox")
+
+    def test_no_free_gid_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _patch_subgid(monkeypatch, tmp_path, "claude-sandbox:200000:3\n")
+
+        class _Gr:
+            def __init__(self, gid: int) -> None:
+                self.gr_gid = gid
+
+        # All in-range gids used; only offset 0 maps below in_container_min anyway.
+        monkeypatch.setattr(
+            "core.host_config.grp.getgrall",
+            lambda: [_Gr(200000), _Gr(200001), _Gr(200002)],
+        )
+        with pytest.raises(NoFreeGidInSubgidRangeError):
+            autodetect_workspace_bridge_gid_recommendation("claude-sandbox", in_container_min=1)
+
+
+class TestHostSettingsBridgeGroup:
+    """HostSettings has the new workspace_bridge_group field with default."""
+
+    def test_default(self) -> None:
+        h = HostSettings(docker_unprivileged_user="claude-sandbox")
+        assert h.workspace_bridge_group == "sb-ws"
+
+    def test_override(self) -> None:
+        h = HostSettings(docker_unprivileged_user="claude-sandbox", workspace_bridge_group="bridge")
+        assert h.workspace_bridge_group == "bridge"

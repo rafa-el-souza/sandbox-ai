@@ -72,7 +72,7 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 - **THEN** dry-run reports the missing file path and exits with code 1
 
 ### Requirement: Command Preview
-The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`.
+The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately (named-ACL grants from `_acl_grant_plan`; cache/log mkdir+chown from `_helper_mkdir_chown_plan`; ro-file cp+chown from `_helper_cp_chown_plan`; workspace shared-group operations from `_workspace_shared_group_plan`).
 
 #### Scenario: Compose command displayed
 - **WHEN** dry-run completes validation
@@ -86,9 +86,17 @@ The system SHALL display the exact subprocess commands that would be executed du
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"polkit"`
 - **THEN** the preview shows `machinectl shell ... docker exec -it` without `sudo` prefix
 
-#### Scenario: ACL commands displayed
+#### Scenario: Named-ACL grant commands displayed
 - **WHEN** dry-run completes validation
-- **THEN** the `setfacl` commands that would be executed for Pattern A grants are displayed
+- **THEN** the `setfacl` commands emitted by `_acl_grant_plan()` are displayed (instance root, docker/, config/, secrets/ traverse, .sandbox.env, ancestor traverse, workspace named-ACL effective + default)
+
+#### Scenario: Helper-recipe operations displayed
+- **WHEN** dry-run completes validation
+- **THEN** the cache/log helper-mkdir+chown plan and the ro-files helper-cp+chown plan are displayed with their resolved consumer-uid:gid and mode values; the workspace shared-group plan is displayed with the resolved bridge-gid
+
+#### Scenario: Helper-recipe plans degrade gracefully when unresolvable
+- **WHEN** dry-run runs on a host where the bridge group or subuid range cannot be resolved
+- **THEN** the preview reports each unresolvable plan with a clear "unavailable" annotation rather than crashing
 
 ### Requirement: IPAMLedger Read-Only Peek
 The `IPAMLedger` class SHALL provide a `peek_next_slot(instance_id)` method that returns `tuple[int, bool]` — the slot index and whether the instance already has an existing allocation — without acquiring a lock or modifying the ledger.

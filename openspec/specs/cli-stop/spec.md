@@ -52,19 +52,41 @@ The system SHALL remove all named Docker volumes when `sandbox stop --clean` is 
 - **THEN** `docker compose down -v` has been executed and all named volumes for the instance are absent from the Docker volume list
 
 ### Requirement: ACL Revocation After Shutdown
-The system SHALL revoke the `sandbox` user's ACL grants on instance root, `docker/`, `config/`, `.sandbox.env`, and rw bind-mount source subdirectories (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`) after containers are confirmed down. Revocation of rw bind-mount sources SHALL remove both effective and default ACL entries. Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
+The system SHALL revoke the `<host_unprivileged_user>` named-ACL grants applied during Phase 5 of `sandbox start`, after containers are confirmed down. The revoke set is the output of `_acl_revoke_plan()`, which per `orchestrator-volumes` covers: instance root, `docker/` (recursive), `config/` (dir-level traverse), `secrets/` (dir-level traverse), `.sandbox.env`, AND the workspace mount's named ACL — both the effective entry on `user_project_root` AND the named-entry portion of the workspace's default ACL. Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
 
-#### Scenario: sandbox ACL removed after stop
-- **WHEN** `docker compose down` confirms all containers have exited
-- **THEN** `setfacl -x u:<host_unprivileged_user>` is applied independently to `sandboxes/<id>/`, `sandboxes/<id>/docker/` (recursive), `sandboxes/<id>/config/` (recursive), and `sandboxes/<id>/.sandbox.env`
+The cache/log rw bind-mount sources (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`) are NOT in the revoke set: post-change-4, they are subuid-chowned (no `u:<host_unprivileged_user>` named ACL exists on them), so there is nothing to revoke. Their persistent state is preserved across stop per `orchestrator-volumes`'s lifecycle taxonomy.
 
-#### Scenario: rw bind-mount source ACLs revoked after stop
+#### Scenario: sandbox ACL removed from instance dir set after stop
 - **WHEN** `docker compose down` confirms all containers have exited
-- **THEN** `setfacl -R -x u:<host_unprivileged_user>` (effective) and `setfacl -R -d -x u:<host_unprivileged_user>` (default) are applied independently to `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`
+- **THEN** `setfacl -x u:<host_unprivileged_user>` is applied independently to `sandboxes/<id>/`, `sandboxes/<id>/docker/` (recursive), `sandboxes/<id>/config/` (dir-level), `sandboxes/<id>/secrets/` (dir-level), and `sandboxes/<id>/.sandbox.env`
+
+#### Scenario: workspace named-ACL revoked symmetrically (effective + default)
+- **WHEN** `docker compose down` confirms all containers have exited
+- **THEN** `setfacl -x u:<host_unprivileged_user> <user_project_root>` AND `setfacl -d -x u:<host_unprivileged_user> <user_project_root>` are both applied; the persistent portion of the workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is preserved
+
+#### Scenario: cache/log rw bind-mount sources NOT in revoke set
+- **WHEN** `_acl_revoke_plan()` is called
+- **THEN** the returned target set does NOT include `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, or `log/admin`; these are subuid-chowned (no named ACL to revoke) and their state is preserved across stop
 
 #### Scenario: Partial revocation failure reported as warning
 - **WHEN** one or more ACL revocation targets fail during stop
 - **THEN** the failure is reported as a warning and remaining targets are still attempted
+
+### Requirement: Stop Does Not Revoke Helper-Recipe Operations
+
+`sandbox stop` SHALL NOT revoke any operation performed by the cache/log helper-recipe phase, the ro-files helper-recipe phase, or the workspace shared-group phase's persistent operations (chgrp, chmod 2770, persistent default ACL portion). These are in the `granted-once, persistent` or `applied-on-every-start, idempotent, never-revoked` lifecycles per `orchestrator-volumes`.
+
+#### Scenario: Cache/log subuid ownership preserved across stop
+- **WHEN** `sandbox stop` completes
+- **THEN** cache/log leaves remain owned by the consumer subuid; agent state is preserved for the next start
+
+#### Scenario: Ro-file consumer-uid:0 ownership preserved across stop
+- **WHEN** `sandbox stop` completes
+- **THEN** ro single-files (Corefile, dnsdist conf, proxy files, dotfiles, secrets) remain owned by `<consumer-uid>:0` with their respective modes; the next start re-renders them dev-owned and re-chowns them via the helper phase
+
+#### Scenario: Workspace shared-group state preserved across stop
+- **WHEN** `sandbox stop` completes
+- **THEN** `<user_project_root>` retains its bridge-group ownership, mode 2770 + setgid, and the persistent default ACL portion; only the named ACL is revoked
 
 
 ### Requirement: Per-User State Initialization Required

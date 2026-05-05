@@ -29,7 +29,19 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import HostConfig, MachinectlAuth, machinectl_cmd, sandbox_ai_user_home, state_lock_path
+from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
+from core.host_config import (
+    HostConfig,
+    HostSettings,
+    MachinectlAuth,
+    WorkspaceBridgeGroupMissingError,
+    host_gid_for_in_container,
+    host_id_for_in_container,
+    machinectl_cmd,
+    sandbox_ai_user_home,
+    state_lock_path,
+    workspace_bridge_gid,
+)
 from core.hydration import (
     InstanceConfig,
     build_jinja_context,
@@ -237,67 +249,16 @@ def _phase_credentials(
     return password
 
 
-def _phase_credential_ownership(
-    instance_dir: str,
-    host_user: str,
-    secrets_dir: str | None = None,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
-) -> None:
-    """Phase 5b: Credential ownership matching via disposable helper container.
-
-    Runs chown(2) on all four IPC secret files to converge ownership to
-    uid 1000 inside the rootless Docker namespace. Must execute after ACL
-    grants (Phase 5) so the rootless Docker daemon can traverse the
-    instance directory tree.
-    """
-    resolved_secrets_dir = secrets_dir or os.path.join(instance_dir, "secrets")
-    secret_files = ("ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts")
-    filenames = " ".join(secret_files)
-    volume_args = f"-v {resolved_secrets_dir}:/secrets"
-    docker_cmd = (
-        f"docker run --rm --runtime=runc {volume_args} busybox sh -c '"
-        f"for f in {filenames}; do "
-        f"cp /secrets/$f /tmp/$f && chown 1000:1000 /tmp/$f && chmod 0600 /tmp/$f && mv /tmp/$f /secrets/$f; "
-        f"done'"
-    )
-
-    try:
-        subprocess.run(["setfacl", "-m", f"u:{host_user}:rwX", resolved_secrets_dir], check=True)
-    except subprocess.CalledProcessError as e:
-        raise SandboxExecutionError(f"Failed to escalate ACLs for secrets directory: {e}") from e
-
-    executor = Executor()
-    try:
-        executor.run(
-            [
-                *machinectl_cmd(host_user, auth),
-                "/bin/bash",
-                "-c",
-                docker_cmd,
-            ],
-            sentinel=True,
-        )
-    except SandboxExecutionError as e:
-        raise SandboxExecutionError(f"Credential ownership matching failed: {e}") from e
-    finally:
-        try:
-            subprocess.run(["setfacl", "-m", f"u:{host_user}:rX", resolved_secrets_dir], check=True)
-        except subprocess.CalledProcessError as e:
-            raise SandboxExecutionError(
-                f"Failed to downgrade ACLs for secrets directory. "
-                f"Fix: sudo setfacl -m u:{host_user}:rX {resolved_secrets_dir}"
-            ) from e
-
-
 def _phase_hydrate(
     config: InstanceConfig,
     base_index: int,
     proxy_password: str,
     sandbox_ai_home: str,
     instance_dir: str,
+    host: HostSettings,
 ) -> None:
     """Phase 4: Pydantic + Jinja2 hydration pipeline."""
-    context = build_jinja_context(config, base_index, proxy_password, instance_dir)
+    context = build_jinja_context(config, base_index, proxy_password, instance_dir, host=host)
     render_templates(
         context,
         instance_dir,
@@ -336,7 +297,9 @@ def _compute_ancestors(instance_dir: str) -> list[str]:
     return ancestors
 
 
-def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], str]]:
+def _acl_grant_plan(
+    instance_dir: str, host_user: str, user_project_root: str | None = None, dev_user: str | None = None
+) -> list[tuple[list[str], str]]:
     """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
 
     Returns a list of (setfacl_args, description) tuples:
@@ -345,6 +308,11 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
     - docker/: ``rX`` recursive
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
+    - secrets/: dir-level ``rX`` traverse
+    - workspace named-ACL: effective ``rwx`` plus default with named entry on user_project_root
+
+    Cache/log Option-B grants are intentionally absent — replaced by the
+    helper-mkdir+chown phase (acl-ownership-recipes Decision 1).
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -392,54 +360,82 @@ def _acl_grant_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], 
         )
     )
 
-    # secrets/ — recursive read + conditional execute
+    # secrets/ — dir-level traverse only (per-file ownership handled by helper-cp+chown)
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rX", secrets_dir],
-            f"secrets dir: {secrets_dir}",
+            ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
+            f"secrets dir traverse: {secrets_dir}",
         )
     )
 
-    # ── rw bind-mount sources for rootless Docker ──────────────────────
-    # Rootless Docker's namespace-root maps to host_user. Every rw bind-mount
-    # source needs write access from that user for mountpoint creation.
-    # Grant rwX on specific subdirectories, not the entire cache/ or log/ tree.
-
-    rw_mount_sources = [
-        "cache/core/.claude",
-        "cache/admin/tmux_resurrect",
-        "log/core",
-        "log/admin",
-    ]
-    for subdir in rw_mount_sources:
-        target = os.path.join(instance_dir, subdir)
-        # Effective ACL: rwX for existing files/dirs
+    # Workspace named-ACL — granted at start, revoked at stop. Provides the
+    # rootless Docker daemon traverse + r/w access to the gofer-mounted /workspace.
+    # Persistent shared-group state (chgrp/chmod/setgid + persistent default ACL
+    # entries) is applied separately by _phase_workspace_shared_group.
+    if user_project_root is not None:
+        # Ancestor traverse on workspace path components above instance_dir's chain
+        ws_ancestors = _compute_workspace_ancestors(user_project_root)
+        for ancestor in ws_ancestors:
+            plan.append(
+                (
+                    ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
+                    f"workspace ancestor traverse: {ancestor}",
+                )
+            )
         plan.append(
             (
-                ["setfacl", "-R", "-m", f"u:{host_user}:rwX", target],
-                f"rw mount source: {target}",
+                ["setfacl", "-m", f"u:{host_user}:rwx", user_project_root],
+                f"workspace named-ACL: {user_project_root}",
             )
         )
-        # Default ACL: rwX for future files/dirs created by containers
+        default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+        if dev_user:
+            default_entry += f",u:{dev_user}:rwx"
         plan.append(
             (
-                ["setfacl", "-R", "-d", "-m", f"u:{host_user}:rwX", target],
-                f"rw mount default: {target}",
+                ["setfacl", "-d", "-m", default_entry, user_project_root],
+                f"workspace default ACL: {user_project_root}",
             )
         )
 
     return plan
 
 
-def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str], str]]:
+def _compute_workspace_ancestors(user_project_root: str) -> list[str]:
+    """Walk ancestors of ``user_project_root`` owned by the current uid.
+
+    Returns shallowest-first; excludes ``/`` and ``user_project_root`` itself.
+    """
+    current_uid = os.getuid()
+    abs_path = os.path.abspath(user_project_root)
+    ancestors: list[str] = []
+    parent = os.path.dirname(abs_path)
+    while parent != "/":
+        try:
+            stat = os.stat(parent)
+        except OSError:
+            break
+        if stat.st_uid != current_uid:
+            break
+        ancestors.append(parent)
+        parent = os.path.dirname(parent)
+    ancestors.reverse()
+    return ancestors
+
+
+def _acl_revoke_plan(
+    instance_dir: str, host_user: str, user_project_root: str | None = None
+) -> list[tuple[list[str], str]]:
     """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
 
     Ancestors are NOT revoked (D3 — grant-only model). Returns a list of
     (setfacl_args, description) tuples for: instance root, docker/ (recursive),
-    config/ (recursive), .sandbox.env, and rw bind-mount sources
-    (cache/core/.claude, cache/admin/tmux_resurrect, log/core, log/admin)
-    with both effective and default ACL entries.
+    config/ (recursive), .sandbox.env, secrets/ dir, and the workspace
+    named-ACL (effective + default entry portion).
+
+    Cache/log entries are intentionally absent post-change-4 — there is no
+    named ACL on those paths to revoke.
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -478,25 +474,29 @@ def _acl_revoke_plan(instance_dir: str, host_user: str) -> list[tuple[list[str],
         )
     )
 
-    # rw bind-mount sources — effective + default ACL removal
-    rw_mount_sources = [
-        "cache/core/.claude",
-        "cache/admin/tmux_resurrect",
-        "log/core",
-        "log/admin",
-    ]
-    for subdir in rw_mount_sources:
-        target = os.path.join(instance_dir, subdir)
+    # secrets/ dir-level traverse
+    secrets_dir = os.path.join(instance_dir, "secrets/")
+    plan.append(
+        (
+            ["setfacl", "-x", f"u:{host_user}", secrets_dir],
+            f"secrets dir traverse: {secrets_dir}",
+        )
+    )
+
+    # Workspace named-ACL — both effective and default-entry revocation.
+    # Persistent shared-group state (chgrp/chmod/setgid + g::rwx, u:dev:rwx
+    # default) is left intact (Decision 4).
+    if user_project_root is not None:
         plan.append(
             (
-                ["setfacl", "-R", "-x", f"u:{host_user}", target],
-                f"rw mount source: {target}",
+                ["setfacl", "-x", f"u:{host_user}", user_project_root],
+                f"workspace named-ACL: {user_project_root}",
             )
         )
         plan.append(
             (
-                ["setfacl", "-R", "-d", "-x", f"u:{host_user}", target],
-                f"rw mount default: {target}",
+                ["setfacl", "-d", "-x", f"u:{host_user}", user_project_root],
+                f"workspace default named entry: {user_project_root}",
             )
         )
 
@@ -560,14 +560,261 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
     return ""
 
 
-def _phase_acl_grant(instance_dir: str, host_user: str) -> None:
+# ─── Per-class consumer mapping (orchestrator-volumes Decision 1) ───────────
+# Each entry is (parent_relative_to_instance, files, in_container_consumer_uid, mode).
+# The helper-cp+chown phase chowns each group's files to (host_id_for_in_container(uid), 0).
+
+RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # CoreDNS rendered config
+    ("config/coredns", ("Corefile",), 65532, 0o640),
+    # dnsdist rendered config
+    ("config/dnsdist", ("dnsdist.conf",), 953, 0o640),
+    # Squid proxy ro files (post-drop worker uid)
+    (
+        "config/proxy",
+        ("squid.conf", "allowed_domains.txt", "read_only_domains.txt", "ERR_SANDBOX_403", ".htpasswd"),
+        13,
+        0o640,
+    ),
+    # Agent (core) dotfiles + sshd config
+    (
+        "config/core",
+        (".bashrc", ".npmrc", ".gitconfig", "CLAUDE.md", "sshd_config"),
+        1000,
+        0o640,
+    ),
+    # Human (admin) dotfiles + statusline assets
+    (
+        "config/admin",
+        (".zshrc", ".tmux.conf", ".gitconfig", "gitmux.conf", "starship.toml"),
+        1000,
+        0o640,
+    ),
+    # Secrets — core consumer (agent) — mode 0600
+    ("secrets", ("authorized_keys", "ipc_host_key"), 1000, 0o600),
+    # Secrets — admin consumer (human) — mode 0600
+    ("secrets", ("ipc_known_hosts", "ipc_ssh_key"), 1000, 0o600),
+)
+"""Single source of truth for the helper-cp+chown phase and dry-run preview."""
+
+
+CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cache/core", (".claude",)),
+    ("cache/admin", ("tmux_resurrect",)),
+    ("log", ("core", "admin")),
+)
+"""Per-parent grouping of cache/log leaves consumed by helper-mkdir+chown phase.
+
+Single source of truth for both execution (_phase_helper_mkdir_chown_cache_log)
+and dry-run preview (_helper_mkdir_chown_plan).
+"""
+
+
+def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int]]:
+    """Return ``[(parent_abs, leaves, owner_uid, owner_gid), ...]`` for cache/log.
+
+    ``owner_uid``/``owner_gid`` map in-container uid/gid 1000 (agent / human)
+    to their host subuid/subgid via :func:`core.host_config.host_id_for_in_container`.
+    """
+    owner_uid = host_id_for_in_container(1000, host_user)
+    owner_gid = host_gid_for_in_container(1000, host_user)
+    return [
+        (os.path.join(instance_dir, parent), leaves, owner_uid, owner_gid)
+        for parent, leaves in CACHE_LOG_LEAVES_BY_PARENT
+    ]
+
+
+def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int, int]]:
+    """Return ``[(parent_abs, files, owner_uid, owner_gid, mode), ...]`` for ro files.
+
+    Owner uid is mapped via :func:`core.host_config.host_id_for_in_container`;
+    owner gid is always 0 (in-container root) so root-running parsers can read
+    the file before dropping privileges.
+    """
+    return [
+        (
+            os.path.join(instance_dir, parent),
+            files,
+            host_id_for_in_container(consumer_uid, host_user),
+            0,
+            mode,
+        )
+        for parent, files, consumer_uid, mode in RO_FILE_RECIPES
+    ]
+
+
+def _workspace_needs_recursive_setup(workspace: str, bridge_gid: int) -> bool:
+    """Detect drift on the workspace root: setgid bit AND group ownership."""
+    import stat as _stat
+
+    try:
+        st = os.stat(workspace)
+    except OSError:
+        # Workspace inaccessible; treat as needing recursive setup so the
+        # caller fails loudly with the underlying chgrp/setfacl error.
+        return True
+    has_setgid = bool(st.st_mode & _stat.S_ISGID)
+    has_correct_group = st.st_gid == bridge_gid
+    return not (has_setgid and has_correct_group)
+
+
+def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[int, list[str]]:
+    """Apply chgrp + chmod recursively, best-effort.
+
+    Returns (failure_count, sample_failure_paths). Per-file failures (typically
+    EPERM on non-dev-owned files) are collected and reported in aggregate per
+    Decision 17 — the orchestrator does not escalate via sudo.
+    """
+    failures: list[str] = []
+    sample_limit = 5
+    for root, dirs, files in os.walk(workspace):
+        for name in (*dirs, *files):
+            path = os.path.join(root, name)
+            try:
+                os.chown(path, -1, bridge_gid, follow_symlinks=False)
+            except OSError:
+                if len(failures) < sample_limit:
+                    failures.append(path)
+                continue
+            try:
+                if name in dirs:
+                    os.chmod(path, 0o2770)
+                else:
+                    if not os.path.islink(path):
+                        os.chmod(path, 0o0660)
+            except OSError:
+                if len(failures) < sample_limit:
+                    failures.append(path)
+    return len(failures), failures
+
+
+def _workspace_shared_group_plan(
+    user_project_root: str, bridge_gid: int, dev_user: str | None, host_user: str
+) -> list[tuple[str, str]]:
+    """Return the (operation_summary, target) list for the workspace shared-group recipe.
+
+    Used by both execution and dry-run preview.
+    """
+    default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+    if dev_user:
+        default_entry += f",u:{dev_user}:rwx"
+    return [
+        (f"chgrp {bridge_gid}", user_project_root),
+        ("chmod 2770", user_project_root),
+        (f"setfacl -m u:{host_user}:rwx", user_project_root),
+        (f"setfacl -d -m {default_entry}", user_project_root),
+    ]
+
+
+def _phase_workspace_shared_group(
+    user_project_root: str,
+    host: HostSettings,
+    dev_user: str | None = None,
+) -> None:
+    """Phase 5e: chgrp + chmod 2770 + setfacl on user_project_root.
+
+    Drift-detects the workspace root: when not yet at setgid + bridge_gid,
+    runs the recursive recipe (best-effort, per-file failures aggregated and
+    reported, orchestrator never escalates to sudo per Decision 17). Then
+    applies idempotent root-level chgrp/chmod/setfacl on every start.
+
+    Raises:
+        WorkspaceBridgeGroupMissingError: if the bridge group is missing.
+    """
+    bridge_gid = workspace_bridge_gid(host)
+    host_user = host.docker_unprivileged_user
+
+    if _workspace_needs_recursive_setup(user_project_root, bridge_gid):
+        failure_count, sample_paths = _workspace_shared_group_recursive(user_project_root, bridge_gid)
+        if failure_count:
+            sample = ", ".join(sample_paths)
+            console.print(
+                f"⚠ Workspace shared-group: {failure_count} file(s) skipped (non-dev-owned). Sample: {sample}",
+                style="yellow",
+            )
+
+    # Steady-state idempotent root setup
+    try:
+        os.chown(user_project_root, -1, bridge_gid, follow_symlinks=False)
+        os.chmod(user_project_root, 0o2770)
+    except OSError as exc:
+        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {user_project_root}: {exc}") from exc
+
+    default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+    if dev_user:
+        default_entry += f",u:{dev_user}:rwx"
+    for args, label in (
+        (["setfacl", "-m", f"u:{host_user}:rwx", user_project_root], "effective"),
+        (["setfacl", "-d", "-m", default_entry, user_project_root], "default"),
+    ):
+        try:
+            subprocess.run(args, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+            raise SandboxExecutionError(
+                f"Workspace shared-group {label} ACL failed for {user_project_root}: {stderr}"
+            ) from exc
+
+
+def _phase_helper_cp_chown_ro_files(
+    instance_dir: str,
+    host_user: str,
+    auth: MachinectlAuth,
+) -> None:
+    """Phase 5d: helper-cp + chown for ro single-file mounts.
+
+    Replaces today's ``_phase_credential_ownership`` — IPC SSH secrets are now
+    handled by the standard recipe (``secrets/`` group with consumer uid 1000,
+    mode 0600). One helper invocation per (parent, consumer_uid, mode) group.
+    """
+    for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
+        helper_chown_files(host_user, parent_abs, files, owner_uid, owner_gid, mode, auth)
+
+
+def _phase_helper_mkdir_chown_cache_log(
+    instance_dir: str,
+    host_user: str,
+    auth: MachinectlAuth,
+    dev_user: str | None = None,
+) -> None:
+    """Phase 5c: helper-mkdir + chown for cache/log leaves.
+
+    For each cache/log parent: set the parent's default ACL so dev can read
+    agent-created files inside the leaf, then invoke the helper container to
+    ``mkdir -p`` and ``chown`` each leaf to the consumer subuid (in-container
+    uid 1000). Idempotent — re-runs are no-ops in the steady state.
+    """
+    default_entry = "u::rwx,g::---,o::---,m::rwx"
+    if dev_user:
+        default_entry += f",u:{dev_user}:rwx"
+
+    for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
+        try:
+            subprocess.run(
+                ["setfacl", "-d", "-m", default_entry, parent_abs],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+            raise SandboxExecutionError(f"Default ACL setup failed for {parent_abs}: {stderr}") from exc
+        helper_mkdir_chown_dirs(host_user, parent_abs, leaves, owner_uid, owner_gid, auth)
+
+
+def _phase_acl_grant(
+    instance_dir: str,
+    host_user: str,
+    user_project_root: str | None = None,
+    dev_user: str | None = None,
+) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
 
     Each setfacl call runs as direct subprocess.run (NOT via Executor.run —
     sentinel injection would corrupt the setfacl command, per I-1).
     CalledProcessError is wrapped in SandboxExecutionError (D6).
     """
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user):
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, user_project_root, dev_user):
         try:
             subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
@@ -683,14 +930,14 @@ def _compose_down(
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str) -> list[str]:
+def _revoke_acls(instance_dir: str, host_user: str, user_project_root: str | None = None) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
     Iterates _acl_revoke_plan(). Uses check=False; failures are collected
     as warning strings, not raised. Returns list of warning messages.
     """
     warnings: list[str] = []
-    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user):
+    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, user_project_root):
         try:
             result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
             if result.returncode != 0:
@@ -724,7 +971,9 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_settings = _resolve_host_settings(project_dir, config)
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     name = config.instance.name
 
@@ -747,7 +996,12 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
         raise typer.Exit(code=1) from None
 
     # ── Template validation ──────────────────────────────────────────────
-    context = build_jinja_context(config, slot, "DRY_RUN_PASSWORD", instance_dir)
+    try:
+        context = build_jinja_context(config, slot, "DRY_RUN_PASSWORD", instance_dir, host=host_settings)
+    except WorkspaceBridgeGroupMissingError as exc:
+        console.print(f"\n  [red]{exc}[/red]")
+        console.print("  [red]Run `sandbox doctor` for setup commands.[/red]")
+        raise typer.Exit(code=1) from None
     validated, errors = validate_templates(
         context,
         db_postgres=config.components_db_postgres.enabled,
@@ -777,8 +1031,36 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     console.print("\n  [bold]Commands that would execute:[/bold]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user):
+    dev_user = os.environ.get("USER")
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, config.instance.user_project_root, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
+
+    # Helper-mkdir+chown for cache/log — single source of truth via plan function
+    try:
+        for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
+            leaves_str = ", ".join(leaves)
+            console.print(
+                f"    helper-mkdir+chown {parent_abs}/{{{leaves_str}}} → {owner_uid}:{owner_gid}",
+                style="dim",
+            )
+        for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
+            files_str = ", ".join(files)
+            console.print(
+                f"    helper-cp+chown {parent_abs}/{{{files_str}}} → {owner_uid}:{owner_gid} {mode:o}",
+                style="dim",
+            )
+    except SandboxExecutionError as exc:
+        console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
+
+    # Workspace shared-group plan
+    try:
+        bridge_gid = workspace_bridge_gid(host_settings)
+        for op, target in _workspace_shared_group_plan(
+            config.instance.user_project_root, bridge_gid, os.environ.get("USER"), host_user
+        ):
+            console.print(f"    workspace: {op} {target}", style="dim")
+    except SandboxExecutionError as exc:
+        console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # Compose up — match actual _phase_compose_up command
     env_file = os.path.join(instance_dir, ".sandbox.env")
@@ -830,13 +1112,19 @@ def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str,
     Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
+    settings = _resolve_host_settings(project_dir, config)
+    return settings.docker_unprivileged_user, settings.machinectl_authentication
+
+
+def _resolve_host_settings(project_dir: str, config: InstanceConfig) -> HostSettings:
+    """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
     del project_dir, config  # accepted for signature stability; host config is authoritative
     try:
         project_config = HostConfig.from_toml()
     except FileNotFoundError as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
-    return project_config.host.docker_unprivileged_user, project_config.host.machinectl_authentication
+    return project_config.host
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
@@ -1178,7 +1466,9 @@ def start(
 
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_settings = _resolve_host_settings(project_dir, config)
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     # Project name immutability check (sandbox-toml-schema spec)
     # instance_id format: <instance_name>-<md5[:6]> — strip last 7 chars to recover original name
@@ -1241,17 +1531,35 @@ def start(
         console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 
         # Phase 4: Hydration
-        _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir)
+        try:
+            _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir, host_settings)
+        except WorkspaceBridgeGroupMissingError as exc:
+            console.print(
+                f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
+                style="red bold",
+            )
+            if lock_fd is not None:
+                _release_lock(lock_fd)
+            raise typer.Exit(code=1) from None
         console.print("✓ Hydration — templates rendered")
 
         # Phase 5: ACL grants (Pattern A)
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
-        _phase_acl_grant(instance_dir, host_user)
+        dev_user = os.environ.get("USER")
+        _phase_acl_grant(instance_dir, host_user, config.instance.user_project_root, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
-        # Phase 5b: Credential ownership matching (after ACL grants)
-        _phase_credential_ownership(instance_dir, host_user, auth=auth)
-        console.print("✓ Ownership — credential files converged")
+        # Phase 5c: helper-mkdir+chown for cache/log leaves
+        _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
+        console.print("✓ Cache/log — leaves chowned to consumer subuid")
+
+        # Phase 5d: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
+        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
+        console.print("✓ Ownership — ro config files converged")
+
+        # Phase 5e: workspace shared-group recipe (chgrp + chmod 2770 + setfacl)
+        _phase_workspace_shared_group(config.instance.user_project_root, host_settings, dev_user)
+        console.print("✓ Workspace — shared-group recipe applied")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
@@ -1260,9 +1568,13 @@ def start(
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
         console.print(f"[FATAL] {e}", style="red bold")
-        # ACL cleanup on failure — only if Phase 5 has begun (D7)
+        # ACL cleanup on failure (Decision 4 of acl-ownership-recipes):
+        # named-ACL grants from Phase 5 are revoked here. Helper-recipe
+        # mutations (subuid chowns on cache/log/ro-files; chgrp+chmod+default
+        # ACL on the workspace) are NOT reverted — they're persistent state
+        # that survives intermediate stop/start cycles by design.
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user)
+            acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
@@ -1312,7 +1624,7 @@ def stop(clean: bool = False) -> None:
     _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
 
     # ACL revocation (Pattern A) — fault-isolated (D5)
-    acl_warnings = _revoke_acls(instance_dir, host_user)
+    acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
     for w in acl_warnings:
         console.print(f"⚠ {w}", style="yellow")
 
@@ -1394,7 +1706,7 @@ def destroy(force: bool = False) -> None:
             console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
         # Phase 3: ACL revocation — fault-isolated (D5)
-        acl_warnings = _revoke_acls(instance_dir, host_user)
+        acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
         for w in acl_warnings:
             console.print(f"⚠ {w}", style="yellow")
 

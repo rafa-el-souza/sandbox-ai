@@ -81,3 +81,111 @@ The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, and `machin
 #### Scenario: Import path
 - **WHEN** other modules need host config or machinectl prefix building
 - **THEN** they import from `core.host_config`
+
+### Requirement: Subuid/Subgid Range Parsers
+
+The system SHALL provide `parse_subuid_for_user(host_user: str) -> list[tuple[int, int]]` and `parse_subgid_for_user(host_user: str) -> list[tuple[int, int]]` in `core.host_config`. Each returns a list of `(first_allocated, count)` tuples for every line in `/etc/subuid` (or `/etc/subgid`) matching the given user. An empty list indicates the user has no subuid/subgid entry.
+
+#### Scenario: Single-range subgid parsed correctly
+- **WHEN** `/etc/subgid` contains `claude-sandbox:165536:65536` and `parse_subgid_for_user("claude-sandbox")` is called
+- **THEN** the result is `[(165536, 65536)]`
+
+#### Scenario: Multi-range subgid parsed correctly
+- **WHEN** `/etc/subgid` contains two lines for the user (rare but legal per `man subuid`)
+- **THEN** both ranges appear in the result list, in file order
+
+#### Scenario: User with no entry returns empty list
+- **WHEN** `parse_subgid_for_user("does-not-exist")` is called
+- **THEN** the result is `[]`
+
+### Requirement: Forward Userns Mapping
+
+The system SHALL provide `host_id_for_in_container(N: int, host_user: str) -> int` and `host_gid_for_in_container(N: int, host_user: str) -> int` in `core.host_config`. The forward map for in-container uid/gid `N ≥ 1` is `first_allocated + N - 1` per the standard rootless-docker userns convention. For `N == 0`, the function returns the user's primary uid/gid (in-container root maps to the daemon owner).
+
+#### Scenario: In-container uid 1000 maps via subuid line
+- **WHEN** `/etc/subuid` has `claude-sandbox:165536:65536` and `host_id_for_in_container(1000, "claude-sandbox")` is called
+- **THEN** the result is `166535` (= 165536 + 1000 - 1)
+
+#### Scenario: In-container uid 0 maps to daemon owner
+- **WHEN** `host_id_for_in_container(0, "claude-sandbox")` is called and `claude-sandbox` is uid 1001
+- **THEN** the result is `1001`
+
+#### Scenario: User with no subuid raises NoSubuidRangeError
+- **WHEN** `host_id_for_in_container(1000, "no-such-user")` is called
+- **THEN** `NoSubuidRangeError` is raised with a message identifying the user
+
+#### Scenario: N exceeds the subuid range raises SubuidOutOfRangeError
+- **WHEN** `host_id_for_in_container(70000, "claude-sandbox")` is called and the subuid range is `[165536, 165536+65536)`
+- **THEN** `SubuidOutOfRangeError` is raised, identifying both N and the available range(s)
+
+### Requirement: Inverse Userns Mapping
+
+The system SHALL provide `in_container_gid_for_host_gid(host_gid: int, host_user: str) -> int` in `core.host_config`. It iterates `parse_subgid_for_user(host_user)` ranges; if `host_gid` falls in some range `[first_allocated, first_allocated + count)`, it returns `host_gid - first_allocated + 1`. Otherwise it raises `SubgidOutOfRangeError`.
+
+#### Scenario: Host gid in subgid range inverse-maps correctly
+- **WHEN** `/etc/subgid` has `claude-sandbox:165536:65536` and `in_container_gid_for_host_gid(201665, "claude-sandbox")` is called
+- **THEN** the result is `36130` (= 201665 - 165536 + 1)
+
+#### Scenario: Host gid outside subgid range raises
+- **WHEN** `in_container_gid_for_host_gid(100, "claude-sandbox")` is called (gid below the subgid range)
+- **THEN** `SubgidOutOfRangeError` is raised, listing the searched ranges
+
+#### Scenario: Multi-range subgid: matches the range containing the gid
+- **WHEN** `/etc/subgid` has two ranges for the user and the host gid falls in the second
+- **THEN** the inverse map is computed against the second range's `first_allocated`
+
+### Requirement: Workspace Bridge Group Configuration
+
+`HostSettings` SHALL gain an optional field `workspace_bridge_group: str = "sb-ws"`. The orchestrator SHALL resolve this name to a host gid via `grp.getgrnam` whenever it needs the workspace bridge gid; the orchestrator SHALL NOT use the name for any access-control purpose (Linux access checks operate on numeric gids).
+
+#### Scenario: Default value is sb-ws
+- **WHEN** `sandbox-ai.toml` does not specify `[host].workspace_bridge_group`
+- **THEN** `host_config.host.workspace_bridge_group == "sb-ws"`
+
+#### Scenario: Operator overrides the name
+- **WHEN** `sandbox-ai.toml` contains `[host] workspace_bridge_group = "my-bridge"`
+- **THEN** `host_config.host.workspace_bridge_group == "my-bridge"`
+
+#### Scenario: Resolved gid drives all operations
+- **WHEN** any orchestrator code path needs the workspace bridge group's gid
+- **THEN** it calls `workspace_bridge_gid(host_config.host)` rather than referencing the name string
+
+### Requirement: workspace_bridge_gid Helper
+
+The system SHALL provide `workspace_bridge_gid(host: HostSettings) -> int` in `core.host_config` that resolves `host.workspace_bridge_group` to a host gid via `grp.getgrnam`, then validates the gid is in `host.docker_unprivileged_user`'s subgid range via `in_container_gid_for_host_gid`. The function returns the host gid (not the in-container gid; callers can compute the in-container gid via `in_container_gid_for_host_gid` if needed).
+
+#### Scenario: Group exists and gid is in subgid range
+- **WHEN** `workspace_bridge_gid(host)` is called and the configured group exists at gid `201665`, which is in the subgid range
+- **THEN** the function returns `201665`
+
+#### Scenario: Group does not exist raises WorkspaceBridgeGroupMissingError
+- **WHEN** `workspace_bridge_gid(host)` is called and the configured group does not exist
+- **THEN** `WorkspaceBridgeGroupMissingError` is raised, identifying the configured group name
+
+#### Scenario: Group exists but gid is out of subgid range raises SubgidOutOfRangeError
+- **WHEN** the configured group exists at a gid outside the daemon user's subgid range
+- **THEN** `SubgidOutOfRangeError` is raised (propagated from `in_container_gid_for_host_gid`)
+
+### Requirement: Autodetect Recommendation for Workspace Bridge gid
+
+The system SHALL provide `autodetect_workspace_bridge_gid_recommendation(host_user: str, in_container_min: int = 1000) -> int` in `core.host_config`. The function picks the lowest available host gid in `host_user`'s subgid range(s) such that the corresponding in-container gid is `>= in_container_min` (default 1000, biasing above the conventional system-group range). The function is pure (no side effects) and is used by the doctor to print recommended `groupadd` commands. It does NOT mutate the host group database.
+
+#### Scenario: Recommendation respects the in_container_min default
+- **WHEN** `/etc/subgid` has `claude-sandbox:165536:65536`, no group at gid `166535`, and `autodetect_workspace_bridge_gid_recommendation("claude-sandbox")` is called
+- **THEN** the recommendation is `166535` (host gid producing in-container gid 1000)
+
+#### Scenario: Recommendation skips already-used gids
+- **WHEN** the lowest candidate gid is taken by another group
+- **THEN** the recommendation advances to the next available gid in the range
+
+#### Scenario: Function does NOT create the group
+- **WHEN** `autodetect_workspace_bridge_gid_recommendation` returns
+- **THEN** the host group database is unchanged; only the integer recommendation is returned
+
+#### Scenario: No subgid range raises NoSubgidRangeError
+- **WHEN** the user has no subgid entry
+- **THEN** `NoSubgidRangeError` is raised
+
+#### Scenario: Subgid range fully populated raises NoFreeGidInSubgidRangeError
+- **WHEN** every gid in every subgid range is already in `grp.getgrall()`
+- **THEN** `NoFreeGidInSubgidRangeError` is raised

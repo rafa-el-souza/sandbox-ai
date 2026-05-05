@@ -592,6 +592,156 @@ class TestRenderTemplates:
         assert violations == [], f"Unresolved Jinja2 markers found in rendered files: {violations}"
 
 
+class TestWriteRestricted:
+    """write_restricted bypasses umask and applies the requested mode."""
+
+    def test_mode_640_under_umask_022(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.hydration import write_restricted
+
+        old_umask = os.umask(0o022)
+        try:
+            target = tmp_path / "f.txt"
+            write_restricted(str(target), "hello", 0o640)
+            assert (target.stat().st_mode & 0o777) == 0o640
+        finally:
+            os.umask(old_umask)
+
+    def test_mode_600_under_permissive_umask(self, tmp_path: Path) -> None:
+        from core.hydration import write_restricted
+
+        old_umask = os.umask(0o000)
+        try:
+            target = tmp_path / "secret"
+            write_restricted(str(target), b"sekrit", 0o600)
+            assert (target.stat().st_mode & 0o777) == 0o600
+        finally:
+            os.umask(old_umask)
+
+    def test_overwrites_existing_file_at_mode(self, tmp_path: Path) -> None:
+        from core.hydration import write_restricted
+
+        target = tmp_path / "f"
+        target.write_text("old")
+        os.chmod(target, 0o644)
+        write_restricted(str(target), "new", 0o640)
+        assert target.read_text() == "new"
+        assert (target.stat().st_mode & 0o777) == 0o640
+
+    def test_accepts_str_or_bytes(self, tmp_path: Path) -> None:
+        from core.hydration import write_restricted
+
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        write_restricted(str(a), "abc", 0o640)
+        write_restricted(str(b), b"abc", 0o640)
+        assert a.read_bytes() == b.read_bytes() == b"abc"
+
+
+class TestBridgeGidContextKey:
+    """build_jinja_context populates in_container_workspace_bridge_gid when host is provided."""
+
+    def test_key_present_when_host_provided(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import HostSettings
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+
+        monkeypatch.setattr("core.hydration.workspace_bridge_gid", lambda h: 201665)
+        monkeypatch.setattr("core.hydration.in_container_gid_for_host_gid", lambda gid, u: 1665)
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        ctx = build_jinja_context(config, 0, "p", str(tmp_path), host=host)
+        assert ctx["in_container_workspace_bridge_gid"] == 1665
+
+    def test_key_absent_when_host_none(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config, 0, "p", str(tmp_path))
+        assert "in_container_workspace_bridge_gid" not in ctx
+
+    def test_missing_group_aborts_hydration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+
+        def _raise(host: object) -> int:
+            raise WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist")
+
+        monkeypatch.setattr("core.hydration.workspace_bridge_gid", _raise)
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(WorkspaceBridgeGroupMissingError):
+            build_jinja_context(config, 0, "p", str(tmp_path), host=host)
+
+
+class TestComposeGroupAdd:
+    """compose.yml renders group_add on core and admin services."""
+
+    def test_core_and_admin_have_group_add(self, tmp_path: Path) -> None:
+        rendered = _render_compose(tmp_path)
+        # Crude split into service-level chunks; sufficient since we only check membership.
+        assert "group_add:" in rendered
+        # appearing twice — once on core, once on admin
+        assert rendered.count("group_add:") == 2
+
+
+class TestRenderTemplatesRestrictiveModes:
+    """Hydration writes files at restrictive modes regardless of umask (Decision 6)."""
+
+    def test_rendered_files_mode_640_under_022_umask(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tooling = _build_minimal_tooling(tmp_path)
+        instance = tmp_path / "instance"
+        instance.mkdir()
+        for d in [
+            "docker/core",
+            "docker/admin",
+            "docker/coredns",
+            "docker/extras",
+            "config/coredns",
+            "config/dnsdist",
+            "config/proxy",
+            "config/core",
+            "config/admin",
+            "secrets",
+            "log/core",
+            "log/admin",
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "custom/config/admin",
+            "custom/config/core",
+        ]:
+            (instance / d).mkdir(parents=True, exist_ok=True)
+
+        _patch_templates_root(monkeypatch, tooling)
+        ctx = _build_test_context(str(instance))
+
+        old_umask = os.umask(0o022)
+        try:
+            render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
+        finally:
+            os.umask(old_umask)
+
+        # Spot-check several rendered files: all should be 0o640
+        for rel in [
+            "docker/compose.yml",
+            "config/coredns/Corefile",
+            "config/dnsdist/dnsdist.conf",
+            "config/proxy/squid.conf",
+            "config/core/.bashrc",
+            "config/admin/.zshrc",
+            "config/proxy/allowed_domains.txt",
+            "config/proxy/read_only_domains.txt",
+            "config/core/.claude.json",
+        ]:
+            path = instance / rel
+            assert path.exists(), f"missing {rel}"
+            mode = path.stat().st_mode & 0o777
+            assert mode == 0o640, f"{rel} has mode {oct(mode)}, expected 0o640"
+
+
 def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
     from core.ipam import derive_static_ips, derive_subnets
@@ -651,6 +801,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "db_postgres_enabled": True,
         "mcp_firecrawl_enabled": False,
         "custom_claude_rules": "",
+        "in_container_workspace_bridge_gid": 1000,
     }
 
 
@@ -2229,6 +2380,7 @@ class TestW4IntegrationVerification:
 
         # Use base_index=0 for deterministic IPs
         context = build_jinja_context(config, base_index=0, proxy_password="testpass", instance_dir=str(tmp_path))
+        context["in_container_workspace_bridge_gid"] = 1000
 
         # Verify 7-tuple fields exist in context
         assert "ipc_subnet" in context
@@ -2259,6 +2411,7 @@ class TestW4IntegrationVerification:
         assert "admin_ipc_ip" in ips
 
         context = build_jinja_context(config, base_index, proxy_password="e2epass", instance_dir=str(tmp_path))
+        context["in_container_workspace_bridge_gid"] = 1000
 
         validated, errors = validate_templates(context, db_postgres=True, mcp_firecrawl=True)
         assert errors == [], f"E2E pipeline errors: {errors}"

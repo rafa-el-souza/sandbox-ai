@@ -9,6 +9,8 @@ import secrets
 
 import bcrypt
 
+from core.hydration import RESTRICTIVE_RO_MODE, RESTRICTIVE_SECRET_MODE, write_restricted
+
 
 def generate_credential() -> str:
     """Generate a cryptographically secure URL-safe credential string.
@@ -37,8 +39,7 @@ def write_htpasswd(config_proxy_dir: str, htpasswd_line: str) -> None:
     """
     htpasswd_path = os.path.join(config_proxy_dir, ".htpasswd")
     tmp_path = htpasswd_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        f.write(htpasswd_line + "\n")
+    write_restricted(tmp_path, htpasswd_line + "\n", RESTRICTIVE_RO_MODE)
     os.replace(tmp_path, htpasswd_path)
 
 
@@ -82,9 +83,7 @@ def generate_ssh_keypair(
         format=serialization.PrivateFormat.OpenSSH,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    with open(private_key_path, "wb") as f:
-        f.write(private_pem)
-    os.chmod(private_key_path, 0o600)
+    write_restricted(private_key_path, private_pem, RESTRICTIVE_SECRET_MODE)
 
     # Write public key / known_hosts
     public_ssh = public_key.public_bytes(
@@ -94,9 +93,7 @@ def generate_ssh_keypair(
 
     if pair_type == "auth":
         # authorized_keys: ssh-ed25519 <base64> format (already in OpenSSH format)
-        with open(public_key_path, "wb") as f:
-            f.write(public_ssh)
-            f.write(b"\n")
+        write_restricted(public_key_path, public_ssh + b"\n", RESTRICTIVE_SECRET_MODE)
     else:
         # known_hosts: <ip> ssh-ed25519 <base64>
         # Extract just the base64 portion from the OpenSSH public key
@@ -104,5 +101,4 @@ def generate_ssh_keypair(
         key_type = parts[0]
         key_data = parts[1]
         known_hosts_line = f"{core_ipc_ip} {key_type} {key_data}\n"
-        with open(public_key_path, "w") as f:
-            f.write(known_hosts_line)
+        write_restricted(public_key_path, known_hosts_line, RESTRICTIVE_SECRET_MODE)

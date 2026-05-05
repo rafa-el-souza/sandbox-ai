@@ -33,7 +33,7 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 ### Two configuration scopes
 
-- **Per-host** (`<sandbox_ai_user_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user` and `[host].machinectl_authentication` (`sudo` | `polkit`). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_USER_HOME` env var redirects this path for test isolation only.
+- **Per-host** (`<sandbox_ai_user_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user`, `[host].machinectl_authentication` (`sudo` | `polkit`), and `[host].workspace_bridge_group` (default `sb-ws`, the group used by the workspace shared-group recipe). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_USER_HOME` env var redirects this path for test isolation only.
 - **Per-instance** (`sandboxes/<id>/sandbox.toml`): generated during `sandbox init` and **re-hydrated on every `sandbox start`** via the Pydantic→Jinja2 pipeline in `core.hydration`. Drift is eliminated by regenerating compose/sidecar configs from the model on each start.
 
 ### Core modules (`src/core/`)
@@ -44,7 +44,8 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 - `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `src/templates/config/` and `src/templates/docker/` (the immutable tooling/config plane), shipped with the wheel as the top-level `templates` Python package and discovered via `jinja2.PackageLoader("templates", package_path="")` / `importlib.resources`.
 - `scaffold.py` — bootstraps `sandboxes/<id>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel).
 - `crypto.py` — bcrypt htpasswd, SSH keypair, credential generation for the proxy sidecar.
-- `host_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder.
+- `host_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder + subuid/subgid resolvers (`host_id_for_in_container`, `in_container_gid_for_host_gid`, `workspace_bridge_gid`, `autodetect_workspace_bridge_gid_recommendation`).
+- `helper_container.py` — disposable-helper-container primitives (`helper_chown_files`, `helper_mkdir_chown_dirs`) used by the helper-recipe phases. Pins `IMAGE_REGISTRY["busybox_musl"]`; runs every helper invocation with the full hardening baseline (runc runtime, network none, read-only rootfs, cap-drop ALL + cap-add CHOWN/DAC_OVERRIDE, no-new-privileges, tmpfs /tmp).
 - `doctor.py` — host readiness check registry used by `sandbox doctor`.
 
 ### State and locking
@@ -54,12 +55,24 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 - `state.lock` is **transient** — held only during provisioning, released for the runtime lifetime of a sandbox. Don't add long-lived locks.
 - Lifecycle commands (`start`, `stop`, `destroy`, `status`, `attach`) hard-fail with a "run sandbox init first" error when `<home>/state/instances.json` is absent.
 
-### ACL model (two patterns)
+### ACL/ownership model (lifecycle × mechanism)
 
-- **Pattern A**: sandbox user gets read access granted on `start`, revoked on `stop`.
-- **Pattern B**: dev user has persistent access via default ACLs, never revoked.
+The orchestrator-volumes capability uses an orthogonal taxonomy: lifecycle (when does the operation apply / when is it reversed) × mechanism (what host operation is performed).
 
-When touching filesystem permissions, identify which pattern applies before changing anything.
+**Lifecycles**:
+- `granted-at-start, revoked-at-stop` — applied during `sandbox start`, reversed during `sandbox stop`/`destroy`.
+- `granted-once, persistent` — applied during the first start, never revoked (e.g. ancestor traverse, workspace shared-group).
+- `applied-on-every-start, idempotent, never-revoked` — re-applied every start; preserved across stop/start cycles (e.g. cache/log subuid chowns).
+
+**Mechanisms**:
+- `named-acl` — `setfacl -m u:<user>:<perms>` and its reverse. Used for instance dir, `docker/`, `config/`, `.sandbox.env`, `secrets/` traverse, and the workspace effective + named-default-entry portion.
+- `subuid-chown` — chown to the consumer's host subuid via the disposable helper container. Used for cache/log leaves with the parent's default ACL granting `u:dev:rwx` so dev can read agent-created files.
+- `consumer-uid-0-chown` — chown to `<consumer-uid>:0` mode `0640` (ro config) or `0600` (secrets) via the helper container. Mode mapping in `cli.main.RO_FILE_RECIPES`.
+- `shared-group` — `chgrp <bridge-gid> + chmod 2770 + setfacl` on the workspace tree, with the agent's container picking up the bridge gid via `--group-add` (computed at hydration time as `in_container_gid_for_host_gid(host_bridge_gid, claude-sandbox)`).
+
+The bridge group is resolved via `[host].workspace_bridge_group` (default `sb-ws`); the orchestrator never invokes `sudo`, so operators set up the group manually via `groupadd -g <gid-in-subgid-range> sb-ws` + `usermod -aG sb-ws $USER` (then re-login). `sandbox doctor` autodetects a recommended gid and prints copy-pasteable commands when the group is missing.
+
+When touching filesystem permissions, identify which (lifecycle, mechanism) pair applies before changing anything. Plans live in `cli.main._acl_grant_plan`, `_acl_revoke_plan`, `_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan` — single source of truth shared with the dry-run preview.
 
 ## OpenSpec workflow
 

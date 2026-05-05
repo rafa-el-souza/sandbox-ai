@@ -17,6 +17,7 @@ from typing import Any
 import jinja2
 from pydantic import BaseModel
 
+from core.host_config import HostSettings, in_container_gid_for_host_gid, workspace_bridge_gid
 from core.ipam import derive_static_ips, derive_subnets
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,8 @@ def build_jinja_context(
     base_index: int,
     proxy_password: str,
     instance_dir: str,
+    *,
+    host: HostSettings | None = None,
 ) -> dict[str, Any]:
     """Build the complete Jinja2 template context from parsed config + IPAM.
 
@@ -233,9 +236,21 @@ def build_jinja_context(
         ``StrictUndefined`` configuration enforces completeness — any variable
         referenced in a template but absent from this context raises
         ``UndefinedError`` at render time and during ``--dry-run`` validation.
+
+    When ``host`` is provided, ``in_container_workspace_bridge_gid`` is added to
+    the context. Errors from :func:`core.host_config.workspace_bridge_gid` (group
+    missing or out-of-range) propagate so hydration aborts before rendering;
+    callers should translate to a "run sandbox doctor" message.
     """
     isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
+
+    extra: dict[str, Any] = {}
+    if host is not None:
+        bridge_gid = workspace_bridge_gid(host)
+        extra["in_container_workspace_bridge_gid"] = in_container_gid_for_host_gid(
+            bridge_gid, host.docker_unprivileged_user
+        )
 
     return {
         # Network — 7-subnet topology
@@ -310,6 +325,7 @@ def build_jinja_context(
         "mcp_firecrawl_enabled": config.components.mcp_firecrawl,
         # Custom CLAUDE.md rules (user-authored, concatenated into rendered output)
         "custom_claude_rules": _read_optional_file(os.path.join(instance_dir, "custom/config/core/CLAUDE.md")),
+        **extra,
     }
 
 
@@ -412,16 +428,12 @@ def render_templates(
     # Generate allowed_domains.txt from whitelist
     domains = context.get("proxy_whitelist_domains", [])
     domains_path = os.path.join(instance_dir, "config/proxy/allowed_domains.txt")
-    with open(domains_path, "w") as f:
-        for domain in domains:
-            f.write(f"{domain}\n")
+    write_restricted(domains_path, "".join(f"{d}\n" for d in domains), RESTRICTIVE_RO_MODE)
 
     # Generate read_only_domains.txt from whitelist (N4)
     read_only_domains = context.get("proxy_whitelist_read_only_domains", [])
     read_only_path = os.path.join(instance_dir, "config/proxy/read_only_domains.txt")
-    with open(read_only_path, "w") as f:
-        for domain in read_only_domains:
-            f.write(f"{domain}\n")
+    write_restricted(read_only_path, "".join(f"{d}\n" for d in read_only_domains), RESTRICTIVE_RO_MODE)
 
     # Validation warning: orphaned read_only_domains entries not in domains
     allowed_domains = set(context.get("proxy_whitelist_domains", []))
@@ -459,9 +471,40 @@ def render_templates(
         claude_json_data = {}
 
     claude_json_path = os.path.join(instance_dir, "config/core/.claude.json")
-    with open(claude_json_path, "w") as f:
-        json.dump(claude_json_data, f, indent=2)
-        f.write("\n")
+    write_restricted(
+        claude_json_path,
+        json.dumps(claude_json_data, indent=2) + "\n",
+        RESTRICTIVE_RO_MODE,
+    )
+
+
+RESTRICTIVE_RO_MODE = 0o640
+"""Default mode for read-only config files written by hydration.
+
+Group-readable so that helper-cp+chown can chgrp to a consumer's group
+without exposing ``other::r--`` during the render → helper-chown intermediate
+window (Decision 6 of acl-ownership-recipes)."""
+
+RESTRICTIVE_SECRET_MODE = 0o600
+"""Mode for secrets written by hydration / scaffolding (private keys, env files)."""
+
+
+def write_restricted(path: str, content: str | bytes, mode: int) -> None:
+    """Atomically write ``content`` to ``path`` at exactly ``mode`` bits, bypassing umask.
+
+    Uses ``os.open(O_WRONLY|O_CREAT|O_TRUNC, mode)`` so the resulting file mode
+    is the requested mode regardless of process umask. Existing files are
+    truncated; the requested mode is re-applied via ``os.fchmod`` to defeat
+    POSIX's "open with O_CREAT does not set mode if file exists" semantics.
+    """
+    payload = content.encode("utf-8") if isinstance(content, str) else content
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, mode)
+    try:
+        os.fchmod(fd, mode)
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
 
 
 def _render_file(
@@ -470,27 +513,29 @@ def _render_file(
     instance_dir: str,
     output_rel: str,
     context: dict[str, Any],
+    *,
+    mode: int = RESTRICTIVE_RO_MODE,
 ) -> None:
-    """Render a single Jinja2 template to the instance directory."""
+    """Render a single Jinja2 template to the instance directory at the given mode."""
     template = env.get_template(template_rel)
     rendered = template.render(context)
     output_path = os.path.join(instance_dir, output_rel)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
-        f.write(rendered)
+    write_restricted(output_path, rendered, mode)
 
 
 def _copy_file(
     src_rel: str,
     instance_dir: str,
     dst_rel: str,
+    *,
+    mode: int = RESTRICTIVE_RO_MODE,
 ) -> None:
-    """Copy a static file from the templates package to the instance directory."""
+    """Copy a static file from the templates package to the instance directory at the given mode."""
     resource = _resource_files("templates").joinpath(src_rel)
     dst = os.path.join(instance_dir, dst_rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    with open(dst, "wb") as f:
-        f.write(resource.read_bytes())
+    write_restricted(dst, resource.read_bytes(), mode)
 
 
 # ─── Dry-Run Validation ─────────────────────────────────────────────────────
