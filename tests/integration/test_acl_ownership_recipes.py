@@ -15,11 +15,13 @@ and runs anywhere — it asserts the helper invocation shape via a stub Executor
 
 from __future__ import annotations
 
+import functools
 import getpass
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -203,11 +205,30 @@ def test_workspace_drift_detection(tmp_path: Path) -> None:
 # ─── E (option) — workspace named-ACL round-trip with real setfacl/getfacl ─
 
 
-def _setfacl_available() -> bool:
-    return shutil.which("setfacl") is not None and shutil.which("getfacl") is not None
+@functools.cache
+def _setfacl_supports_acls() -> bool:
+    """Probe whether setfacl actually mutates ACLs on the system tmp filesystem.
+
+    Both binaries (``setfacl``, ``getfacl``) and POSIX ACL support on the
+    underlying filesystem are required. The latter is uncommon to be missing
+    but possible on some tmpfs / overlayfs configurations. Probes by running
+    a no-op ``setfacl -m`` against a fresh tempdir; cached for the test
+    session so the probe runs once.
+    """
+    if not (shutil.which("setfacl") and shutil.which("getfacl")):
+        return False
+    with tempfile.TemporaryDirectory() as td:
+        result = subprocess.run(
+            ["setfacl", "-m", f"u:{getpass.getuser()}:rwx", td],
+            capture_output=True,
+        )
+        return result.returncode == 0
 
 
-@pytest.mark.skipif(not _setfacl_available(), reason="setfacl/getfacl not installed")
+@pytest.mark.skipif(
+    not _setfacl_supports_acls(),
+    reason="setfacl/getfacl not installed or POSIX ACLs unsupported on tmp filesystem",
+)
 def test_workspace_named_acl_round_trip(tmp_path: Path) -> None:
     """Real setfacl/getfacl: revoke removes the named ACL but preserves persistent state.
 
