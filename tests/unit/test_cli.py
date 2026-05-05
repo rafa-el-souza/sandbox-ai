@@ -111,6 +111,7 @@ def _default_bridge_gid() -> typing.Iterator[None]:
     with (
         patch("core.hydration.workspace_bridge_gid", return_value=200000),
         patch("core.hydration.in_container_gid_for_host_gid", return_value=1000),
+        patch("cli.main.workspace_bridge_gid", return_value=200000),
         patch("cli.main.host_id_for_in_container", return_value=100999),
         patch("cli.main.host_gid_for_in_container", return_value=200999),
     ):
@@ -231,6 +232,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_hydrate") as mock_hydrate,
             patch("cli.main._phase_acl_grant") as mock_acl,
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
@@ -300,6 +302,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
@@ -334,6 +337,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
@@ -430,6 +434,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
@@ -602,6 +607,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
@@ -674,6 +680,7 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
@@ -706,6 +713,7 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
@@ -3318,6 +3326,265 @@ class TestDryRunHelperMkdirPlanFallback:
             assert "helper-mkdir plan unavailable" in result.output
 
 
+class TestWorkspaceSharedGroup:
+    """Section 9: workspace shared-group recipe (chgrp + chmod 2770 + setfacl)."""
+
+    def test_drift_detection_first_run_triggers_recursive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.txt").write_text("hello")
+        (ws / "sub").mkdir()
+        (ws / "sub" / "b.txt").write_text("world")
+
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        # Drift: workspace lacks setgid bit initially → recursive path runs.
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: True)
+
+        recursive_calls: list[tuple[str, int]] = []
+
+        def _fake_recursive(path: str, gid: int) -> tuple[int, list[str]]:
+            recursive_calls.append((path, gid))
+            return 0, []
+
+        monkeypatch.setattr("cli.main._workspace_shared_group_recursive", _fake_recursive)
+        monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        _phase_workspace_shared_group(str(ws), host, "dev")
+        assert recursive_calls == [(str(ws), os.stat(ws).st_gid)]
+
+    def test_steady_state_skips_recursive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
+        called: list[bool] = []
+        def _track(*a: object, **k: object) -> tuple[int, list[str]]:
+            called.append(True)
+            return 0, []
+
+        monkeypatch.setattr("cli.main._workspace_shared_group_recursive", _track)
+        monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        _phase_workspace_shared_group(str(ws), host, "dev")
+        assert called == []
+
+    def test_recursive_failure_aggregated_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "cli.main._workspace_shared_group_recursive",
+            lambda *a, **k: (3, ["/ws/root.bin", "/ws/x", "/ws/y"]),
+        )
+        monkeypatch.setattr("cli.main.subprocess.run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        _phase_workspace_shared_group(str(ws), host, "dev")
+        # Aggregate warning printed (rich console; just verify the function returns)
+        # via capsys we can't inspect rich console, so just assert no raise.
+
+    def test_setfacl_failure_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.exceptions import SandboxExecutionError
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: os.stat(ws).st_gid)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
+
+        def _raise(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(1, cmd, stderr="permission denied")
+
+        monkeypatch.setattr("cli.main.subprocess.run", _raise)
+
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(SandboxExecutionError, match="permission denied"):
+            _phase_workspace_shared_group(str(ws), host, "dev")
+
+    def test_missing_bridge_group_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        def _raise(host: object) -> int:
+            raise WorkspaceBridgeGroupMissingError("group missing")
+
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", _raise)
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(WorkspaceBridgeGroupMissingError):
+            _phase_workspace_shared_group(str(ws), host, "dev")
+
+    def test_recursive_chmod_failure_collected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """chown succeeds but chmod fails → failure counted, not raised."""
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "f.txt").write_text("x")
+        monkeypatch.setattr("cli.main.os.chown", lambda *a, **k: None)
+
+        def _raise_chmod(path: str, mode: int) -> None:
+            raise PermissionError("chmod denied")
+
+        monkeypatch.setattr("cli.main.os.chmod", _raise_chmod)
+        count, sample = _workspace_shared_group_recursive(str(ws), 200500)
+        assert count >= 1
+        assert any("f.txt" in s for s in sample)
+
+    def test_recursive_helper_collects_per_file_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "ok.txt").write_text("hi")
+        (ws / "bad.txt").write_text("hi")
+
+        def _chown_selective(path: str, uid: int, gid: int, follow_symlinks: bool = True) -> None:
+            if path.endswith("bad.txt"):
+                raise PermissionError("nope")
+
+        monkeypatch.setattr("cli.main.os.chown", _chown_selective)
+        # Real chmod is fine on tmp_path.
+        count, sample = _workspace_shared_group_recursive(str(ws), os.stat(ws).st_gid)
+        assert count == 1
+        assert any("bad.txt" in s for s in sample)
+
+    def test_plan_for_dry_run_includes_all_steps(self) -> None:
+        from cli.main import _workspace_shared_group_plan
+
+        plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
+        ops = [op for op, _ in plan]
+        assert any("chgrp 200500" in op for op in ops)
+        assert any("chmod 2770" in op for op in ops)
+        assert any("setfacl -m u:claude-sandbox:rwx" in op for op in ops)
+        # Default ACL includes both host_user and dev_user
+        default_op = next(op for op in ops if "setfacl -d" in op)
+        assert "u:claude-sandbox:rwx" in default_op
+        assert "u:dev:rwx" in default_op
+
+    def test_drift_helper_treats_unstattable_workspace_as_drift(
+        self, tmp_path: Path
+    ) -> None:
+        from cli.main import _workspace_needs_recursive_setup
+
+        # Nonexistent path → os.stat raises → treat as drift.
+        assert _workspace_needs_recursive_setup(str(tmp_path / "missing"), 200500) is True
+
+    def test_drift_helper_steady_state_returns_false(self, tmp_path: Path) -> None:
+        """When setgid AND group ownership match, no recursive setup is needed."""
+        import stat
+
+        from cli.main import _workspace_needs_recursive_setup
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        os.chmod(ws, ws.stat().st_mode | stat.S_ISGID)
+        bridge_gid = ws.stat().st_gid
+        assert _workspace_needs_recursive_setup(str(ws), bridge_gid) is False
+
+    def test_recursive_real_walk_chmods_dirs_and_files(self, tmp_path: Path) -> None:
+        """End-to-end: recursive helper sets 2770 on dirs, 0660 on files."""
+        import stat
+
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        sub = ws / "sub"
+        sub.mkdir()
+        (ws / "a.txt").write_text("hi")
+        (sub / "b.txt").write_text("ho")
+        # symlinks should be skipped for chmod
+        (ws / "link").symlink_to("a.txt")
+
+        count, _ = _workspace_shared_group_recursive(str(ws), ws.stat().st_gid)
+        assert count == 0
+        assert sub.stat().st_mode & 0o7777 == 0o2770
+        assert (ws / "a.txt").stat().st_mode & 0o0777 == 0o0660
+        assert stat.S_ISLNK((ws / "link").lstat().st_mode)
+
+    def test_root_chmod_failure_wrapped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cli.main import _phase_workspace_shared_group
+        from core.exceptions import SandboxExecutionError
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda h: 200500)
+        monkeypatch.setattr("cli.main._workspace_needs_recursive_setup", lambda *a, **k: False)
+        monkeypatch.setattr(
+            "cli.main.os.chown",
+            lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope")),
+        )
+        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        with pytest.raises(SandboxExecutionError, match="chgrp/chmod failed"):
+            _phase_workspace_shared_group(str(ws), host, "dev")
+
+
+class TestDryRunWorkspaceSharedGroupFallback:
+    """Dry-run preview reports gracefully when the bridge gid lookup fails late."""
+
+    def test_dry_run_reports_workspace_plan_unavailable(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """If build_jinja_context succeeds but bridge gid lookup fails on the
+        dry-run preview path, the preview reports the issue and exits 0."""
+        from cli.main import app
+        from core.host_config import NoSubgidRangeError
+
+        home = mock_sandbox_ai_home
+        project_dir = "/home/dev/myproject"
+        _register_instance(home, project_dir, "myproject-abc123")
+        _write_ipam("myproject-abc123", 0)
+        _create_tooling_plane(home)
+
+        # build_jinja_context's bridge_gid lookup goes through
+        # core.hydration.workspace_bridge_gid (mocked to 200000 by the autouse
+        # fixture). The dry-run preview's workspace plan uses the cli.main
+        # reference; making it raise here exercises the fallback branch.
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._resolve_project_dir", return_value=project_dir),
+            patch(
+                "cli.main.workspace_bridge_gid",
+                side_effect=NoSubgidRangeError("no subgid for sandbox"),
+            ),
+        ):
+            result = runner.invoke(app, ["start", "--dry-run"])
+            assert "shared-group plan unavailable" in result.output
+
+
 class TestHelperMkdirChownPlan:
     """Section 7: cache/log helper-mkdir+chown plan + phase."""
 
@@ -3575,6 +3842,7 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_acl_grant", side_effect=track_acl),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=track_ownership),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -3611,6 +3879,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,

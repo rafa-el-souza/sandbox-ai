@@ -40,6 +40,7 @@ from core.host_config import (
     machinectl_cmd,
     sandbox_ai_user_home,
     state_lock_path,
+    workspace_bridge_gid,
 )
 from core.hydration import (
     InstanceConfig,
@@ -646,6 +647,128 @@ def _helper_cp_chown_plan(
     ]
 
 
+def _workspace_needs_recursive_setup(workspace: str, bridge_gid: int) -> bool:
+    """Detect drift on the workspace root: setgid bit AND group ownership."""
+    import stat as _stat
+
+    try:
+        st = os.stat(workspace)
+    except OSError:
+        # Workspace inaccessible; treat as needing recursive setup so the
+        # caller fails loudly with the underlying chgrp/setfacl error.
+        return True
+    has_setgid = bool(st.st_mode & _stat.S_ISGID)
+    has_correct_group = st.st_gid == bridge_gid
+    return not (has_setgid and has_correct_group)
+
+
+def _workspace_shared_group_recursive(
+    workspace: str, bridge_gid: int
+) -> tuple[int, list[str]]:
+    """Apply chgrp + chmod recursively, best-effort.
+
+    Returns (failure_count, sample_failure_paths). Per-file failures (typically
+    EPERM on non-dev-owned files) are collected and reported in aggregate per
+    Decision 17 — the orchestrator does not escalate via sudo.
+    """
+    failures: list[str] = []
+    sample_limit = 5
+    for root, dirs, files in os.walk(workspace):
+        for name in (*dirs, *files):
+            path = os.path.join(root, name)
+            try:
+                os.chown(path, -1, bridge_gid, follow_symlinks=False)
+            except OSError:
+                if len(failures) < sample_limit:
+                    failures.append(path)
+                continue
+            try:
+                if name in dirs:
+                    os.chmod(path, 0o2770)
+                else:
+                    if not os.path.islink(path):
+                        os.chmod(path, 0o0660)
+            except OSError:
+                if len(failures) < sample_limit:
+                    failures.append(path)
+    return len(failures), failures
+
+
+def _workspace_shared_group_plan(
+    user_project_root: str, bridge_gid: int, dev_user: str | None, host_user: str
+) -> list[tuple[str, str]]:
+    """Return the (operation_summary, target) list for the workspace shared-group recipe.
+
+    Used by both execution and dry-run preview.
+    """
+    default_entry = (
+        f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+    )
+    if dev_user:
+        default_entry += f",u:{dev_user}:rwx"
+    return [
+        (f"chgrp {bridge_gid}", user_project_root),
+        ("chmod 2770", user_project_root),
+        (f"setfacl -m u:{host_user}:rwx", user_project_root),
+        (f"setfacl -d -m {default_entry}", user_project_root),
+    ]
+
+
+def _phase_workspace_shared_group(
+    user_project_root: str,
+    host: HostSettings,
+    dev_user: str | None = None,
+) -> None:
+    """Phase 5e: chgrp + chmod 2770 + setfacl on user_project_root.
+
+    Drift-detects the workspace root: when not yet at setgid + bridge_gid,
+    runs the recursive recipe (best-effort, per-file failures aggregated and
+    reported, orchestrator never escalates to sudo per Decision 17). Then
+    applies idempotent root-level chgrp/chmod/setfacl on every start.
+
+    Raises:
+        WorkspaceBridgeGroupMissingError: if the bridge group is missing.
+    """
+    bridge_gid = workspace_bridge_gid(host)
+    host_user = host.docker_unprivileged_user
+
+    if _workspace_needs_recursive_setup(user_project_root, bridge_gid):
+        failure_count, sample_paths = _workspace_shared_group_recursive(
+            user_project_root, bridge_gid
+        )
+        if failure_count:
+            sample = ", ".join(sample_paths)
+            console.print(
+                f"⚠ Workspace shared-group: {failure_count} file(s) skipped "
+                f"(non-dev-owned). Sample: {sample}",
+                style="yellow",
+            )
+
+    # Steady-state idempotent root setup
+    try:
+        os.chown(user_project_root, -1, bridge_gid, follow_symlinks=False)
+        os.chmod(user_project_root, 0o2770)
+    except OSError as exc:
+        raise SandboxExecutionError(
+            f"Workspace root chgrp/chmod failed for {user_project_root}: {exc}"
+        ) from exc
+
+    default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+    if dev_user:
+        default_entry += f",u:{dev_user}:rwx"
+    for args, label in (
+        (["setfacl", "-m", f"u:{host_user}:rwx", user_project_root], "effective"),
+        (["setfacl", "-d", "-m", default_entry, user_project_root], "default"),
+    ):
+        try:
+            subprocess.run(args, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+            raise SandboxExecutionError(
+                f"Workspace shared-group {label} ACL failed for {user_project_root}: {stderr}"
+            ) from exc
+
+
 def _phase_helper_cp_chown_ro_files(
     instance_dir: str,
     host_user: str,
@@ -952,6 +1075,16 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
             )
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
+
+    # Workspace shared-group plan
+    try:
+        bridge_gid = workspace_bridge_gid(host_settings)
+        for op, target in _workspace_shared_group_plan(
+            config.instance.user_project_root, bridge_gid, os.environ.get("USER"), host_user
+        ):
+            console.print(f"    workspace: {op} {target}", style="dim")
+    except SandboxExecutionError as exc:
+        console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # Compose up — match actual _phase_compose_up command
     env_file = os.path.join(instance_dir, ".sandbox.env")
@@ -1449,6 +1582,10 @@ def start(
         # Phase 5d: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
+
+        # Phase 5e: workspace shared-group recipe (chgrp + chmod 2770 + setfacl)
+        _phase_workspace_shared_group(config.instance.user_project_root, host_settings, dev_user)
+        console.print("✓ Workspace — shared-group recipe applied")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
