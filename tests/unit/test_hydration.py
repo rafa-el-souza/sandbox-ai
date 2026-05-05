@@ -566,7 +566,7 @@ class TestRenderTemplates:
         {{ }} markers in the deployed config.
 
         Synthetic stub limitation: The fixture tooling plane uses minimal stubs,
-        not the real .config/ files. This means the test would NOT have detected
+        not the real templates/config/ files. This means the test would NOT have detected
         the original Defect 1 (stubs contained no {{ }} markers). Full
         content-level coverage requires T2/T3 integration tests against the real
         tooling plane (separate change).
@@ -2429,8 +2429,7 @@ def _build_default_context(tmp_path: Path) -> dict[str, object]:
 def _get_dockerfile_lines(rel_path: str) -> list[str]:
     """Read a Dockerfile from the templates package and return its lines."""
     root = Path(__file__).resolve().parents[2] / "src" / "templates"
-    rel = rel_path.lstrip(".")
-    return (root / rel).read_text().splitlines()
+    return (root / rel_path).read_text().splitlines()
 
 
 def _extract_stage(lines: list[str], stage_name: str) -> list[str]:
@@ -2455,7 +2454,7 @@ class TestDockerfileUserContext:
 
     def test_branch_typescript_user_root_before_staging_mkdir(self) -> None:
         """branch-typescript: USER root before mkdir /staging."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-typescript")
         stage_text = "\n".join(stage)
         # USER root must appear before the staging mkdir
@@ -2473,7 +2472,7 @@ class TestDockerfileUserContext:
 
     def test_branch_typescript_user_unprivileged_before_npm(self) -> None:
         """branch-typescript: USER ${USERNAME} before npm install."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-typescript")
         user_switch_idx = next(
             (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
@@ -2489,7 +2488,7 @@ class TestDockerfileUserContext:
 
     def test_branch_python_user_root_before_staging_mkdir(self) -> None:
         """branch-python: USER root before staging mkdirs (both paths)."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-python")
         # All staging mkdirs must be under USER root
         user_context = "unknown"
@@ -2504,7 +2503,7 @@ class TestDockerfileUserContext:
 
     def test_branch_claude_user_root_before_staging_mkdir(self) -> None:
         """branch-claude: USER root before mkdir /staging."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-claude")
         root_idx = next(
             (i for i, line in enumerate(stage) if line.strip() == "USER root"),
@@ -2520,7 +2519,7 @@ class TestDockerfileUserContext:
 
     def test_branch_claude_user_unprivileged_before_npm(self) -> None:
         """branch-claude: USER ${USERNAME} before npm install."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         stage = _extract_stage(lines, "branch-claude")
         user_switch_idx = next(
             (i for i, line in enumerate(stage) if "${USERNAME}" in line and line.strip().startswith("USER")),
@@ -2536,7 +2535,7 @@ class TestDockerfileUserContext:
 
     def test_admin_user_root_before_entrypoint_copy(self) -> None:
         """Admin Dockerfile: USER root before COPY entrypoint.sh."""
-        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
         user_context = "unknown"
         for line in lines:
             stripped = line.strip()
@@ -2547,7 +2546,7 @@ class TestDockerfileUserContext:
 
     def test_admin_user_unprivileged_before_entrypoint(self) -> None:
         """Admin Dockerfile: USER ${USERNAME} between chmod and ENTRYPOINT."""
-        lines = _get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian")
+        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
         chmod_idx = next(
             (i for i, line in enumerate(lines) if "chmod" in line and "entrypoint" in line),
             None,
@@ -2567,7 +2566,7 @@ class TestDockerfileUserContext:
 
     def test_claude_local_bin_path(self) -> None:
         """Dockerfile.core.wolfi uses ${HOME_DIR}/.local/bin/claude (not .claude/local/claude)."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         content = "\n".join(lines)
         assert "${HOME_DIR}/.local/bin/claude" in content or ".local/bin/claude" in content
         assert ".claude/local/claude" not in content
@@ -2651,13 +2650,13 @@ class TestDockerfileUserLint:
 
     def test_core_wolfi_zero_violations(self) -> None:
         """Lint on current Dockerfile.core.wolfi returns zero violations."""
-        content = "\n".join(_get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi"))
+        content = "\n".join(_get_dockerfile_lines("docker/core/Dockerfile.core.wolfi"))
         violations = _lint_dockerfile_user_context(content)
         assert violations == [], f"Violations in Dockerfile.core.wolfi: {violations}"
 
     def test_admin_debian_zero_violations(self) -> None:
         """Lint on current Dockerfile.admin.debian returns zero violations."""
-        content = "\n".join(_get_dockerfile_lines(".docker/admin/Dockerfile.admin.debian"))
+        content = "\n".join(_get_dockerfile_lines("docker/admin/Dockerfile.admin.debian"))
         violations = _lint_dockerfile_user_context(content)
         assert violations == [], f"Violations in Dockerfile.admin.debian: {violations}"
 
@@ -2688,7 +2687,7 @@ class TestHealthcheckFixes:
     """Group 5.T: CoreDNS Dockerfile and Compose healthcheck fixes."""
 
     def test_coredns_dockerfile_exists(self) -> None:
-        """Dockerfile.coredns exists in .docker/coredns/."""
+        """Dockerfile.coredns exists in templates/docker/coredns/."""
         root = Path(__file__).resolve().parents[2]
         df = root / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns"
         assert df.exists(), "Dockerfile.coredns does not exist"
@@ -2758,7 +2757,7 @@ class TestHydrationPipelineRegistration:
 
     def test_render_copies_coredns_dockerfile(self, tmp_path: Path) -> None:
         """(b) After render_templates(), docker/coredns/Dockerfile.coredns exists in instance
-        and is identical to .docker/coredns/Dockerfile.coredns."""
+        and is identical to templates/docker/coredns/Dockerfile.coredns."""
         tooling = _build_minimal_tooling(tmp_path)
         instance = tmp_path / "instance"
         for d in [
@@ -3160,7 +3159,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_final_user_is_agent(self) -> None:
         """Dockerfile.core.wolfi last USER directive before ENTRYPOINT is USER ${USERNAME}."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         runtime_stage = _extract_stage(lines, "runtime")
         # Find the last USER directive in the runtime stage
         last_user = None
@@ -3175,7 +3174,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_no_final_user_root(self) -> None:
         """Dockerfile.core.wolfi does NOT have USER root as the last USER directive."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         runtime_stage = _extract_stage(lines, "runtime")
         last_user = None
         for line in runtime_stage:
@@ -3186,7 +3185,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_setcap_sshd_session(self) -> None:
         """Dockerfile.core.wolfi contains setcap cap_chown+ep /usr/lib/ssh/sshd-session."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         content = "\n".join(lines)
         assert "setcap cap_chown+ep /usr/lib/ssh/sshd-session" in content, (
             "Dockerfile must contain setcap cap_chown+ep on sshd-session"
@@ -3194,7 +3193,7 @@ class TestCoreNonRootSshd:
 
     def test_dockerfile_setcap_not_targeting_sshd(self) -> None:
         """Dockerfile.core.wolfi does NOT contain setcap targeting /usr/sbin/sshd."""
-        lines = _get_dockerfile_lines(".docker/core/Dockerfile.core.wolfi")
+        lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
         content = "\n".join(lines)
         assert "setcap" not in content or "/usr/sbin/sshd" not in content, (
             "setcap must NOT target /usr/sbin/sshd (must target /usr/lib/ssh/sshd-session)"
