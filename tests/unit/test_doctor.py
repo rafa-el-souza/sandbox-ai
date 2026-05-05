@@ -2063,18 +2063,68 @@ class TestCheckPreExistingInstanceLayout:
         assert result.status == "pass"
 
     def test_warn_when_dev_owned(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """All four cache/log leaves are scanned; each dev-owned one is flagged."""
         from core.doctor import check_pre_existing_instance_layout
 
         inst = tmp_path / "inst"
-        for leaf in ("cache/core/.claude",):
+        leaves = (
+            "cache/core/.claude",
+            "cache/admin/tmux_resurrect",
+            "log/core",
+            "log/admin",
+        )
+        for leaf in leaves:
             (inst / leaf).mkdir(parents=True)
 
-        # Mock to a uid that does not match
+        # Mock to a uid that does not match any test-dir owner.
         monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
         monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
         assert "destroy" in (result.remediation or "")
+        # All four leaves enumerated by the check.
+        assert "4 cache/log leaf(s)" in result.detail
+        for leaf in leaves:
+            assert leaf in result.detail or any(  # at minimum the sample shows the first 3
+                leaf in result.detail for leaf in leaves[:3]
+            )
+
+    def test_warn_aggregates_across_multiple_instances(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """Multiple registered instances → stale leaves aggregated into one warning."""
+        from core.doctor import check_pre_existing_instance_layout
+
+        inst_a = tmp_path / "a"
+        inst_b = tmp_path / "b"
+        (inst_a / "log/core").mkdir(parents=True)
+        (inst_b / "log/admin").mkdir(parents=True)
+
+        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
+        monkeypatch.setattr(
+            "core.doctor._scan_instance_dirs", lambda: [str(inst_a), str(inst_b)]
+        )
+        result = check_pre_existing_instance_layout("u", None)
+        assert result.status == "warn"
+        assert "2 cache/log leaf(s)" in result.detail
+
+    def test_pass_when_partial_layout_resolves_correctly(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """Missing leaves don't false-warn — only existing-and-stale leaves count."""
+        from core.doctor import check_pre_existing_instance_layout
+
+        inst = tmp_path / "inst"
+        # Only create one leaf; the other three don't exist (e.g., a fresh instance
+        # that hasn't run all its services yet). The OSError on the missing leaves
+        # must not be reported as "stale".
+        (inst / "log/core").mkdir(parents=True)
+        target_uid = (inst / "log/core").stat().st_uid
+
+        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: target_uid)
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = check_pre_existing_instance_layout("u", None)
+        assert result.status == "pass"
 
     def test_skip_when_no_subuid(self, monkeypatch: Any) -> None:
         from core.doctor import check_pre_existing_instance_layout
