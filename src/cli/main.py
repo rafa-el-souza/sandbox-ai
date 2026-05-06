@@ -7,6 +7,7 @@ All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json as _json
 import os
 import shutil
@@ -50,7 +51,7 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
-from core.registry import InstanceRegistry, generate_instance_id
+from core.registry import InstanceRegistry
 from core.scaffold import (
     _detect_git_config,
     apply_default_acls,
@@ -97,13 +98,18 @@ def _resolve_project_dir() -> str:
 
 
 def _resolve_instance(install_root: str, project_dir: str) -> tuple[str | None, str | None]:
-    """Look up instance from registry. Returns (instance_dir, instance_id) or (None, None)."""
+    """Look up instance from registry by basename of project_dir.
+
+    Returns ``(instance_dir, instance_id)`` where ``instance_id`` is the on-disk
+    directory's basename (still ``<name>-<hash>`` during the change-5 transition).
+    """
+    del install_root
+    name = os.path.basename(os.path.abspath(project_dir))
     registry = InstanceRegistry()
-    instance_id = registry.lookup(project_dir)
-    if instance_id is None:
+    entry = registry.get(name)
+    if entry is None:
         return None, None
-    instance_dir = os.path.join(install_root, "sandboxes", instance_id)
-    return instance_dir, instance_id
+    return entry.instance_dir, os.path.basename(entry.instance_dir)
 
 
 def _load_config(instance_dir: str) -> InstanceConfig:
@@ -1367,10 +1373,11 @@ def init(
         if not git_email:
             git_email = detected_email
 
-    # Derive instance identity
-    instance_id = generate_instance_id(project_dir)
+    # Derive instance identity (transitional; group 5/6 retires the hash suffix).
+    instance_name = os.path.basename(os.path.abspath(project_dir))
+    _id_hash = hashlib.md5(os.path.abspath(project_dir).encode("utf-8")).hexdigest()[:6]
+    instance_id = f"{instance_name}-{_id_hash}"
     instance_dir = os.path.join(install_root, "sandboxes", instance_id)
-    instance_name = os.path.basename(project_dir)
 
     if dry_run:
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
@@ -1407,10 +1414,11 @@ def init(
     dev_user = os.environ.get("USER", "dev")
     apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
 
-    # S5: Register — ensure registry seed exists, then register
+    # S5: Register — ensure registry seed exists, then register by name.
+    # Transitional: allow_overwrite preserves init's idempotent re-run behavior;
+    # the strict uniqueness gate moves to the new positional-<inst> flow in group 5.
     ensure_registry_seed(user_home)
-    registry = InstanceRegistry()
-    registry.register(project_dir, instance_id)
+    InstanceRegistry().register(instance_name, instance_dir, allow_overwrite=True)
 
     # S6: Secret prompting (non-TTY safe)
     required_secrets: list[tuple[str, str]] = [
@@ -1727,7 +1735,7 @@ def destroy(force: bool = False) -> None:
         # Phase 6: State cleanup — Registry — fault-isolated (D12)
         try:
             registry = InstanceRegistry()
-            registry.remove(project_dir)
+            registry.remove(os.path.basename(os.path.abspath(project_dir)))
         except Exception as e:
             console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
 

@@ -182,8 +182,12 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     state_dir = _user_home() / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     reg = state_dir / "instances.json"
-    reg.write_text(json.dumps({project_dir: instance_id}))
     inst = home / "sandboxes" / instance_id
+    # New name-keyed shape: name = basename(project_dir).
+    name = os.path.basename(os.path.abspath(project_dir))
+    reg.write_text(
+        json.dumps({name: {"instance_dir": str(inst), "created_at": "2026-01-01T00:00:00Z"}})
+    )
     (inst / "docker" / "core").mkdir(parents=True)
     (inst / "docker" / "admin").mkdir(parents=True)
     (inst / "docker" / "extras").mkdir(parents=True)
@@ -1955,7 +1959,9 @@ class TestInitPerUserTreeCreation:
 
         ensure_per_user_state(isolated_sandbox_ai_home)
         registry = isolated_sandbox_ai_home / "state" / "instances.json"
-        registry.write_text('{"/x": "x-aaa"}')
+        registry.write_text(
+            json.dumps({"existing": {"instance_dir": "/x/sandboxes/existing", "created_at": "2026-01-01T00:00:00Z"}})
+        )
 
         project_dir = "/home/dev/p"
         mock_config = self._make_mock_config(project_dir)
@@ -1964,11 +1970,11 @@ class TestInitPerUserTreeCreation:
                 es.enter_context(p)
             result = runner.invoke(app, ["init"])
         assert result.exit_code == 0, result.output
-        # Pre-existing entry preserved
         data = json.loads(registry.read_text())
-        assert data["/x"] == "x-aaa"
-        # New entry added too
-        assert project_dir in data
+        # Pre-existing entry preserved
+        assert "existing" in data
+        # New entry added too, keyed by basename
+        assert "p" in data
 
     def test_sandbox_ai_home_redirect(
         self,
