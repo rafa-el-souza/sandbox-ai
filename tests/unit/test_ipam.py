@@ -14,7 +14,7 @@ from core.ipam import (
 
 
 @pytest.fixture
-def ledger(isolated_sandbox_ai_user_home: Path) -> IPAMLedger:
+def ledger(isolated_sandbox_ai_home: Path) -> IPAMLedger:
     """Create an IPAM ledger rooted at the per-user home (autouse fixture)."""
     return IPAMLedger()
 
@@ -59,9 +59,9 @@ class TestIPAMLedger:
         """Releasing a non-existent instance_id does not raise."""
         ledger.release("nonexistent")
 
-    def test_overflow_detection(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_overflow_detection(self, isolated_sandbox_ai_home: Path) -> None:
         """IPAMExhaustedError raised when all 5705 slots consumed."""
-        ledger_path = _ledger_file(isolated_sandbox_ai_user_home)
+        ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         data = {f"p{i}": i for i in range(5705)}
         ledger_path.write_text(json.dumps(data))
@@ -70,16 +70,16 @@ class TestIPAMLedger:
         with pytest.raises(IPAMExhaustedError, match="sandbox destroy"):
             ledger.allocate("one-more-instance")
 
-    def test_corrupt_json_recovers(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_corrupt_json_recovers(self, isolated_sandbox_ai_home: Path) -> None:
         """Corrupt JSON ledger is treated as empty."""
-        ledger_path = _ledger_file(isolated_sandbox_ai_user_home)
+        ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         ledger_path.write_text("{ bad json }")
         ledger = IPAMLedger()
         idx = ledger.allocate("instance-aaa")
         assert idx == 0
 
-    def test_lock_contention_raises(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_lock_contention_raises(self, isolated_sandbox_ai_home: Path) -> None:
         """IPAMLockException raised when lock is already held."""
         from unittest.mock import patch
 
@@ -263,9 +263,9 @@ class TestPeekNextSlot:
         assert slot == 1
         assert is_existing is False
 
-    def test_peek_exhausted_raises(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_peek_exhausted_raises(self, isolated_sandbox_ai_home: Path) -> None:
         """IPAMExhaustedError raised when all 5705 slots consumed."""
-        ledger_path = _ledger_file(isolated_sandbox_ai_user_home)
+        ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         data = {f"p{i}": i for i in range(5705)}
         ledger_path.write_text(json.dumps(data))
@@ -374,9 +374,9 @@ class TestIpam7Tuple:
         """MAX_SLOTS is 5705 for the 7-subnet-per-instance model."""
         assert MAX_SLOTS == 5705
 
-    def test_ipam_exhausted_at_5705(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_ipam_exhausted_at_5705(self, isolated_sandbox_ai_home: Path) -> None:
         """IPAMExhaustedError raised when all 5705 slots consumed."""
-        ledger_path = _ledger_file(isolated_sandbox_ai_user_home)
+        ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         data = {f"p{i}": i for i in range(5705)}
         ledger_path.write_text(json.dumps(data))

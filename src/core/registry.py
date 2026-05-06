@@ -1,7 +1,7 @@
 """Instance registry: maps absolute project directories to sandbox instance IDs.
 
 Uses fcntl LOCK_EX for concurrent write safety. The registry is persisted
-as a JSON file at ``<sandbox_ai_user_home()>/state/instances.json``.
+as a JSON file at ``<sandbox_ai_home()>/state/instances.json``.
 """
 
 import fcntl
@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 
-from core.host_config import sandbox_ai_user_home, state_lock_path
+from core.host_config import sandbox_ai_home, state_lock_path
 
 
 def generate_instance_id(project_dir: str) -> str:
@@ -25,7 +25,7 @@ def generate_instance_id(project_dir: str) -> str:
 
 def _default_registry_path() -> str:
     """Resolve ``<home>/state/instances.json`` for the current user."""
-    return str(sandbox_ai_user_home() / "state" / "instances.json")
+    return str(sandbox_ai_home() / "state" / "instances.json")
 
 
 class InstanceRegistry:

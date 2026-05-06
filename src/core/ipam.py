@@ -11,14 +11,14 @@ import fcntl
 import json
 import os
 
-from core.host_config import sandbox_ai_user_home, state_lock_path
+from core.host_config import sandbox_ai_home, state_lock_path
 
 MAX_SLOTS = 5705
 
 
 def _default_ledger_path() -> str:
     """Resolve ``<home>/state/ipam.json`` for the current user."""
-    return str(sandbox_ai_user_home() / "state" / "ipam.json")
+    return str(sandbox_ai_home() / "state" / "ipam.json")
 
 
 class IPAMExhaustedError(Exception):

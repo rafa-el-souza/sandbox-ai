@@ -6,7 +6,7 @@ from core.registry import InstanceRegistry, generate_instance_id
 
 
 @pytest.fixture
-def registry(isolated_sandbox_ai_user_home: Path) -> InstanceRegistry:
+def registry(isolated_sandbox_ai_home: Path) -> InstanceRegistry:
     """Create a registry rooted at the per-user home (autouse fixture)."""
     return InstanceRegistry()
 
@@ -65,7 +65,7 @@ class TestInstanceRegistry:
         registry.register("/home/dev/myproject", "myproject-bbb222")
         assert registry.lookup("/home/dev/myproject") == "myproject-bbb222"
 
-    def test_concurrent_write_safety(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_concurrent_write_safety(self, isolated_sandbox_ai_home: Path) -> None:
         """Two threads writing concurrently do not corrupt the registry."""
         errors: list[Exception] = []
 
@@ -88,7 +88,7 @@ class TestInstanceRegistry:
         assert reg.lookup("/home/dev/p1") == "p1-aaa111"
         assert reg.lookup("/home/dev/p2") == "p2-bbb222"
 
-    def test_persistence_across_instances(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_persistence_across_instances(self, isolated_sandbox_ai_home: Path) -> None:
         """Data persists across InstanceRegistry instances (file-backed)."""
         reg1 = InstanceRegistry()
         reg1.register("/home/dev/myproject", "myproject-abc123")
@@ -96,16 +96,16 @@ class TestInstanceRegistry:
         reg2 = InstanceRegistry()
         assert reg2.lookup("/home/dev/myproject") == "myproject-abc123"
 
-    def test_corrupt_json_recovers(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_corrupt_json_recovers(self, isolated_sandbox_ai_home: Path) -> None:
         """Corrupt JSON file is treated as empty registry."""
-        registry_path = _registry_file(isolated_sandbox_ai_user_home)
+        registry_path = _registry_file(isolated_sandbox_ai_home)
         registry_path.parent.mkdir(parents=True, exist_ok=True)
         registry_path.write_text("{ corrupt json !!!")
         reg = InstanceRegistry()
         assert reg.lookup("/home/dev/anything") is None
 
-    def test_default_path_uses_user_home(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_default_path_uses_user_home(self, isolated_sandbox_ai_home: Path) -> None:
         """No-arg constructor resolves <user_home>/state/instances.json."""
         reg = InstanceRegistry()
         reg.register("/home/dev/x", "x-aaa")
-        assert _registry_file(isolated_sandbox_ai_user_home).exists()
+        assert _registry_file(isolated_sandbox_ai_home).exists()

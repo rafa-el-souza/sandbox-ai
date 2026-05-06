@@ -35,10 +35,11 @@ from core.host_config import (
     HostSettings,
     MachinectlAuth,
     WorkspaceBridgeGroupMissingError,
+    ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
     machinectl_cmd,
-    sandbox_ai_user_home,
+    sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
 )
@@ -55,7 +56,6 @@ from core.scaffold import (
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
-    ensure_per_user_tree,
     ensure_registry_seed,
     prompt_secrets,
     write_initialized_sentinel,
@@ -96,13 +96,13 @@ def _resolve_project_dir() -> str:
     return os.path.abspath(os.getcwd())
 
 
-def _resolve_instance(sandbox_ai_home: str, project_dir: str) -> tuple[str | None, str | None]:
+def _resolve_instance(install_root: str, project_dir: str) -> tuple[str | None, str | None]:
     """Look up instance from registry. Returns (instance_dir, instance_id) or (None, None)."""
     registry = InstanceRegistry()
     instance_id = registry.lookup(project_dir)
     if instance_id is None:
         return None, None
-    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+    instance_dir = os.path.join(install_root, "sandboxes", instance_id)
     return instance_dir, instance_id
 
 
@@ -220,9 +220,9 @@ def _release_lock(fd: int) -> None:
 # ─── Phase implementations ──────────────────────────────────────────────────
 
 
-def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
+def _phase_ipam(install_root: str, instance_id: str) -> int:
     """Phase 2: IPAM allocation. Returns base_index."""
-    del sandbox_ai_home
+    del install_root
     ledger = IPAMLedger()
     return ledger.allocate(instance_id)
 
@@ -253,7 +253,7 @@ def _phase_hydrate(
     config: InstanceConfig,
     base_index: int,
     proxy_password: str,
-    sandbox_ai_home: str,
+    install_root: str,
     instance_dir: str,
     host: HostSettings,
 ) -> None:
@@ -951,7 +951,7 @@ def _revoke_acls(instance_dir: str, host_user: str, user_project_root: str | Non
 # ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
 
 
-def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
+def _dry_run_pipeline(install_root: str, project_dir: str) -> None:
     """Simulate the full start pipeline without side effects.
 
     Validates config parsing, IPAM allocation, template rendering, secret
@@ -960,7 +960,7 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     console.print("\n[bold]Dry-run: sandbox start[/bold]\n")
 
     # ── Instance resolution ──────────────────────────────────────────────
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
 
     if instance_dir is None or instance_id is None:
         console.print(
@@ -1165,7 +1165,7 @@ def _require_per_user_state_initialized() -> None:
     this as their first step. Initialization is signaled by the registry
     file's presence, which `sandbox init` writes via `ensure_registry_seed`.
     """
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     registry = home / "state" / "instances.json"
     if not registry.exists():
         console.print(
@@ -1262,18 +1262,18 @@ def init(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
 ) -> None:
     """Initialize a new sandbox instance for the current project."""
-    sandbox_ai_home = _resolve_sandbox_ai_home()
+    install_root = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
     # Per-user tree creation (idempotent, mode 0700)
-    user_home = sandbox_ai_user_home()
-    ensure_per_user_tree(user_home)
+    user_home = sandbox_ai_home()
+    ensure_per_user_state(user_home)
 
     # Legacy CWD-local file detection (advisory)
     _warn_legacy_cwd_files(project_dir, user_home)
 
     # Re-init guard (D-6)
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
     if instance_dir is not None:
         console.print(
             "Instance already initialized for this directory. Run `sandbox destroy` first.",
@@ -1369,7 +1369,7 @@ def init(
 
     # Derive instance identity
     instance_id = generate_instance_id(project_dir)
-    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
+    instance_dir = os.path.join(install_root, "sandboxes", instance_id)
     instance_name = os.path.basename(project_dir)
 
     if dry_run:
@@ -1438,15 +1438,15 @@ def start(
 ) -> None:
     """Start the sandbox."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
+    install_root = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
     if dry_run:
-        _dry_run_pipeline(sandbox_ai_home, project_dir)
+        _dry_run_pipeline(install_root, project_dir)
         return
 
     # Phase 0: Instance resolution
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
 
     if instance_dir is None or instance_id is None:
         console.print(
@@ -1520,7 +1520,7 @@ def start(
     acl_granted = False
     try:
         # Phase 2: IPAM
-        base_index = _phase_ipam(sandbox_ai_home, instance_id)
+        base_index = _phase_ipam(install_root, instance_id)
         console.print("✓ IPAM — network allocation complete")
 
         # Phase 3: Credentials (generation only)
@@ -1532,7 +1532,7 @@ def start(
 
         # Phase 4: Hydration
         try:
-            _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir, host_settings)
+            _phase_hydrate(config, base_index, proxy_password, install_root, instance_dir, host_settings)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -1593,10 +1593,10 @@ def start(
 def stop(clean: bool = False) -> None:
     """Stop the sandbox."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
+    install_root = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
     if instance_dir is None or instance_id is None:
         console.print("No sandbox instance found for this directory.", style="red")
         raise typer.Exit(code=1)
@@ -1640,10 +1640,10 @@ def stop(clean: bool = False) -> None:
 def attach() -> None:
     """Attach to a running sandbox."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
+    install_root = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
     if instance_dir is None or instance_id is None:
         console.print("No sandbox instance found for this directory.", style="red")
         raise typer.Exit(code=1)
@@ -1665,16 +1665,16 @@ def attach() -> None:
 def destroy(force: bool = False) -> None:
     """Permanently destroy a sandbox instance."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
+    install_root = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
     if instance_dir is None or instance_id is None:
         console.print("No sandbox instance found for this directory.", style="red")
         raise typer.Exit(code=1)
 
     # Prefix guard — before anything else
-    sandboxes_prefix = os.path.join(sandbox_ai_home, "sandboxes")
+    sandboxes_prefix = os.path.join(install_root, "sandboxes")
     if not instance_dir.startswith(sandboxes_prefix):
         console.print(
             "[FATAL] Instance directory path fails prefix guard. Aborting.",
@@ -1777,7 +1777,7 @@ def doctor(
     else:
         resolved_auth = MachinectlAuth.SUDO
 
-    console.print(f"Per-user home: {sandbox_ai_user_home()}")
+    console.print(f"Per-user home: {sandbox_ai_home()}")
 
     distro = detect_distro()
     checks = build_check_registry(resolved_auth)
@@ -1793,11 +1793,11 @@ def doctor(
 def status() -> None:
     """Show sandbox instance status and diagnostics."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
+    install_root = _resolve_sandbox_ai_home()
     project_dir = _resolve_project_dir()
 
     # Instance resolution
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
+    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
     if instance_dir is None or instance_id is None:
         console.print("No sandbox instance found for this directory.", style="red")
         raise typer.Exit(code=1)

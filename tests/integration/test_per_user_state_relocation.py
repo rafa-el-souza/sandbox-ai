@@ -1,6 +1,6 @@
 """Subprocess-level coverage for the per-user state relocation change.
 
-Each test invokes the CLI via ``uv run sandbox …`` with ``SANDBOX_AI_USER_HOME``
+Each test invokes the CLI via ``uv run sandbox …`` with ``SANDBOX_AI_HOME``
 redirected to ``tmp_path``. The user's real ``~/.sandbox-ai/`` is never touched.
 """
 
@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _env(home: Path) -> dict[str, str]:
     """Build a subprocess env that redirects per-user home to ``home``."""
     env = os.environ.copy()
-    env["SANDBOX_AI_USER_HOME"] = str(home)
+    env["SANDBOX_AI_HOME"] = str(home)
     return env
 
 
@@ -78,14 +78,14 @@ def test_init_creates_state_dir_with_mode_0700(tmp_path: Path) -> None:
     """Init creates `<home>/state/` with mode 0700 on a clean host.
 
     Uses a pre-seeded host config to bypass the interactive prompt without
-    pre-creating any directories. ensure_per_user_tree then creates the
+    pre-creating any directories. ensure_per_user_state then creates the
     full tree with mode 0700.
     """
     home = tmp_path / ".sandbox-ai"
     # Pre-create a parent dir for the host config and use mkdtemp-style:
-    # we want to verify that ensure_per_user_tree creates `home` itself with 0700.
+    # we want to verify that ensure_per_user_state creates `home` itself with 0700.
     # So we cannot pre-create `home`. Instead, pre-seed the config file by writing
-    # to a sibling location, then move it after ensure_per_user_tree has run is
+    # to a sibling location, then move it after ensure_per_user_state has run is
     # not possible from outside. Workaround: pre-create only `<home>/config/` to
     # hold the seed and assert mode 0700 on `<home>/state/` (created fresh).
     (home / "config").mkdir(parents=True)
@@ -94,7 +94,7 @@ def test_init_creates_state_dir_with_mode_0700(tmp_path: Path) -> None:
     )
     _run_sandbox(["init"], home=home, stdin=subprocess.DEVNULL)
     assert (home / "state").is_dir()
-    # Freshly created by ensure_per_user_tree → mode 0700
+    # Freshly created by ensure_per_user_state → mode 0700
     assert stat.S_IMODE((home / "state").stat().st_mode) == 0o700
 
 

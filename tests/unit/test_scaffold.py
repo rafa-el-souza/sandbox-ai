@@ -6,11 +6,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from core.host_config import ensure_per_user_state
 from core.scaffold import (
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
-    ensure_per_user_tree,
     ensure_registry_seed,
     prompt_secrets,
     write_initialized_sentinel,
@@ -379,38 +379,7 @@ class TestPromptSecretsNonTTY:
             prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")], MagicMock())
 
 
-# ─── ensure_per_user_tree / ensure_registry_seed ─────────────────────────────
-
-
-class TestEnsurePerUserTree:
-    """Per-user tree creation: idempotent, mode 0700, does not modify existing modes."""
-
-    def test_creates_tree_with_mode_0700(self, tmp_path: Path) -> None:
-        home = tmp_path / ".sandbox-ai"
-        ensure_per_user_tree(home)
-        assert home.is_dir()
-        assert (home / "config").is_dir()
-        assert (home / "state").is_dir()
-        assert stat.S_IMODE(home.stat().st_mode) == 0o700
-        assert stat.S_IMODE((home / "config").stat().st_mode) == 0o700
-        assert stat.S_IMODE((home / "state").stat().st_mode) == 0o700
-
-    def test_idempotent(self, tmp_path: Path) -> None:
-        home = tmp_path / ".sandbox-ai"
-        ensure_per_user_tree(home)
-        ensure_per_user_tree(home)  # must not raise
-
-    def test_does_not_modify_existing_mode(self, tmp_path: Path) -> None:
-        """Pre-existing dirs keep their mode (exist_ok=True semantics)."""
-        home = tmp_path / ".sandbox-ai"
-        home.mkdir(mode=0o755)
-        (home / "config").mkdir(mode=0o755)
-        (home / "state").mkdir(mode=0o755)
-        ensure_per_user_tree(home)
-        # Modes preserved (no auto-fix)
-        assert stat.S_IMODE(home.stat().st_mode) == 0o755
-        assert stat.S_IMODE((home / "config").stat().st_mode) == 0o755
-        assert stat.S_IMODE((home / "state").stat().st_mode) == 0o755
+# ─── ensure_registry_seed ────────────────────────────────────────────────────
 
 
 class TestEnsureRegistrySeed:
@@ -418,7 +387,7 @@ class TestEnsureRegistrySeed:
 
     def test_creates_empty_registry(self, tmp_path: Path) -> None:
         home = tmp_path / ".sandbox-ai"
-        ensure_per_user_tree(home)
+        ensure_per_user_state(home)
         ensure_registry_seed(home)
         registry = home / "state" / "instances.json"
         assert registry.exists()
@@ -426,7 +395,7 @@ class TestEnsureRegistrySeed:
 
     def test_does_not_overwrite_existing(self, tmp_path: Path) -> None:
         home = tmp_path / ".sandbox-ai"
-        ensure_per_user_tree(home)
+        ensure_per_user_state(home)
         registry = home / "state" / "instances.json"
         registry.write_text('{"/x": "x-aaa"}')
         ensure_registry_seed(home)

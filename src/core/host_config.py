@@ -21,18 +21,33 @@ from pydantic import BaseModel
 from core.exceptions import SandboxExecutionError
 
 
-def sandbox_ai_user_home() -> Path:
+def sandbox_ai_home() -> Path:
     """Resolve the per-user sandbox-ai home directory.
 
-    Honors ``SANDBOX_AI_USER_HOME`` (test-isolation override). Otherwise
+    Honors ``SANDBOX_AI_HOME`` (test-isolation override). Otherwise
     returns ``~/.sandbox-ai`` expanded for the current user.
     """
-    return Path(os.environ.get("SANDBOX_AI_USER_HOME") or os.path.expanduser("~/.sandbox-ai"))
+    return Path(os.environ.get("SANDBOX_AI_HOME") or os.path.expanduser("~/.sandbox-ai"))
 
 
 def state_lock_path() -> Path:
     """Canonical fcntl lock target serializing all per-user state mutations."""
-    return sandbox_ai_user_home() / "state" / "state.lock"
+    return sandbox_ai_home() / "state" / "state.lock"
+
+
+def ensure_per_user_state(home: Path) -> None:
+    """Create the per-user state tree with mode ``0700``.
+
+    Creates ``<home>/``, ``<home>/config/``, ``<home>/state/``,
+    ``<home>/instances/``, and ``<home>/workspaces/``. Idempotent:
+    ``exist_ok=True`` suppresses ``FileExistsError`` and does NOT
+    modify the mode of any pre-existing directory.
+    """
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    os.makedirs(home / "config", mode=0o700, exist_ok=True)
+    os.makedirs(home / "state", mode=0o700, exist_ok=True)
+    os.makedirs(home / "instances", mode=0o700, exist_ok=True)
+    os.makedirs(home / "workspaces", mode=0o700, exist_ok=True)
 
 
 class MachinectlAuth(StrEnum):
@@ -59,14 +74,14 @@ class HostConfig(BaseModel):
     def from_toml(cls) -> HostConfig:
         """Parse the canonical per-user ``sandbox-ai.toml``.
 
-        Resolves ``<sandbox_ai_user_home()>/config/sandbox-ai.toml``.
+        Resolves ``<sandbox_ai_home()>/config/sandbox-ai.toml``.
 
         Raises:
             FileNotFoundError: If the canonical file does not exist.
             tomllib.TOMLDecodeError: If the file contains invalid TOML.
             pydantic.ValidationError: If the content fails schema validation.
         """
-        path = sandbox_ai_user_home() / "config" / "sandbox-ai.toml"
+        path = sandbox_ai_home() / "config" / "sandbox-ai.toml"
         try:
             with open(path, "rb") as f:
                 raw = tomllib.load(f)

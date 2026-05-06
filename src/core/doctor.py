@@ -33,7 +33,7 @@ from core.host_config import (
     autodetect_workspace_bridge_gid_recommendation,
     host_id_for_in_container,
     machinectl_cmd,
-    sandbox_ai_user_home,
+    sandbox_ai_home,
     workspace_bridge_gid,
 )
 
@@ -804,7 +804,7 @@ def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
 def check_per_user_tree_exists(user: str, distro: str | None) -> CheckResult:
     """Verify that ``<home>/``, ``<home>/config/``, ``<home>/state/`` exist."""
     del user, distro
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     missing: list[str] = []
     for sub in ("", "config", "state"):
         candidate = home / sub if sub else home
@@ -829,7 +829,7 @@ def check_per_user_tree_mode(user: str, distro: str | None) -> CheckResult:
     import stat as _stat
 
     del user, distro
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     drift: list[tuple[str, int]] = []
     for sub in ("", "config", "state"):
         path = home / sub if sub else home
@@ -869,7 +869,7 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
     """
     del user, distro
     cwd = os.getcwd()
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     legacy: list[str] = []
     if os.path.exists(os.path.join(cwd, "sandbox-ai.toml")):
         legacy.append(os.path.join(cwd, "sandbox-ai.toml"))
@@ -895,7 +895,7 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
 def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
     """Check that the per-user ``<home>/state/`` directory is writable."""
     del user, distro
-    state_dir = sandbox_ai_user_home() / "state"
+    state_dir = sandbox_ai_home() / "state"
     try:
         with tempfile.NamedTemporaryFile(dir=str(state_dir), delete=True):
             pass
@@ -1106,17 +1106,17 @@ def _scan_instance_dirs() -> list[str] | None:
           ``sandboxes/`` root cannot be located (wheel-install signal).
           Callers should treat this as "cannot scan" and skip.
     """
-    state_path = sandbox_ai_user_home() / "state" / "instances.json"
+    state_path = sandbox_ai_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError, json.JSONDecodeError:
         return []
     instances = data.get("instances", {})
     if not isinstance(instances, dict) or not instances:
         return []
-    sandbox_ai_home = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    sandboxes_root = os.path.join(sandbox_ai_home, "sandboxes")
+    home_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sandboxes_root = os.path.join(home_root, "sandboxes")
     if not os.path.isdir(sandboxes_root):
         # Wheel install (or equivalent): registry has entries but __file__-based
         # resolution does not reach a sandboxes/ tree. Signal "cannot scan".

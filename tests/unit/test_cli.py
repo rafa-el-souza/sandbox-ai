@@ -164,8 +164,8 @@ def mock_sandbox_ai_home(tmp_path: Path) -> Path:
 
 
 def _user_home() -> Path:
-    """Resolve the per-user home from SANDBOX_AI_USER_HOME (autouse fixture sets it)."""
-    return Path(os.environ["SANDBOX_AI_USER_HOME"])
+    """Resolve the per-user home from SANDBOX_AI_HOME (autouse fixture sets it)."""
+    return Path(os.environ["SANDBOX_AI_HOME"])
 
 
 def _seed_registry(home: Path) -> None:
@@ -1107,7 +1107,7 @@ class TestLockingDirect:
         assert isinstance(fd, int)
         _release_lock(fd)
 
-    def test_acquire_contention(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_acquire_contention(self, isolated_sandbox_ai_home: Path) -> None:
         import fcntl as _fcntl
 
         from cli.main import _acquire_state_lock
@@ -1119,7 +1119,7 @@ class TestLockingDirect:
         _fcntl.flock(held_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         try:
             with pytest.raises(BlockingIOError):
-                _acquire_state_lock(str(isolated_sandbox_ai_user_home))
+                _acquire_state_lock(str(isolated_sandbox_ai_home))
         finally:
             _fcntl.flock(held_fd, _fcntl.LOCK_UN)
             os.close(held_fd)
@@ -1672,7 +1672,7 @@ class TestDoctorAllPass:
 class TestDoctorPerUserHomeDisplay:
     """Doctor output displays the resolved per-user home (env var visibility)."""
 
-    def test_displays_resolved_home(self, runner: CliRunner, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_displays_resolved_home(self, runner: CliRunner, isolated_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.doctor import CheckResult
 
@@ -1685,7 +1685,7 @@ class TestDoctorPerUserHomeDisplay:
             result = runner.invoke(app, ["doctor", "--user", "sandbox"])
         assert result.exit_code == 0
         assert "Per-user home:" in result.output
-        assert str(isolated_sandbox_ai_user_home) in result.output
+        assert str(isolated_sandbox_ai_home) in result.output
 
 
 class TestDoctorAnyFail:
@@ -1905,9 +1905,9 @@ class TestInitPerUserTreeCreation:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
-        """init on a clean host creates <home>/, <home>/config/, <home>/state/."""
+        """init on a clean host creates the full per-user tree (config/state/instances/workspaces)."""
         from cli.main import app
 
         project_dir = "/home/dev/p"
@@ -1917,22 +1917,24 @@ class TestInitPerUserTreeCreation:
                 es.enter_context(p)
             result = runner.invoke(app, ["init"])
         assert result.exit_code == 0, result.output
-        assert isolated_sandbox_ai_user_home.is_dir()
-        assert (isolated_sandbox_ai_user_home / "config").is_dir()
-        assert (isolated_sandbox_ai_user_home / "state").is_dir()
-        assert stat.S_IMODE(isolated_sandbox_ai_user_home.stat().st_mode) == 0o700
+        assert isolated_sandbox_ai_home.is_dir()
+        assert (isolated_sandbox_ai_home / "config").is_dir()
+        assert (isolated_sandbox_ai_home / "state").is_dir()
+        assert (isolated_sandbox_ai_home / "instances").is_dir()
+        assert (isolated_sandbox_ai_home / "workspaces").is_dir()
+        assert stat.S_IMODE(isolated_sandbox_ai_home.stat().st_mode) == 0o700
 
     def test_idempotent_on_existing_tree(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """Re-running init against an existing tree does not error."""
         from cli.main import app
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        ensure_per_user_state(isolated_sandbox_ai_home)
         project_dir = "/home/dev/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
@@ -1945,14 +1947,14 @@ class TestInitPerUserTreeCreation:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """A pre-populated registry is preserved; init only ensures presence."""
         from cli.main import app
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
-        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        ensure_per_user_state(isolated_sandbox_ai_home)
+        registry = isolated_sandbox_ai_home / "state" / "instances.json"
         registry.write_text('{"/x": "x-aaa"}')
 
         project_dir = "/home/dev/p"
@@ -1968,18 +1970,18 @@ class TestInitPerUserTreeCreation:
         # New entry added too
         assert project_dir in data
 
-    def test_sandbox_ai_user_home_redirect(
+    def test_sandbox_ai_home_redirect(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Setting SANDBOX_AI_USER_HOME redirects creation to that path."""
+        """Setting SANDBOX_AI_HOME redirects creation to that path."""
         from cli.main import app
 
         custom_home = tmp_path / "alt-home"
-        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(custom_home))
         project_dir = "/home/dev/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
@@ -2103,12 +2105,12 @@ class TestRequirePerUserStateInitialized:
 
     @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])
     def test_command_fails_when_uninitialized(
-        self, runner: CliRunner, command: str, isolated_sandbox_ai_user_home: Path
+        self, runner: CliRunner, command: str, isolated_sandbox_ai_home: Path
     ) -> None:
         from cli.main import app
 
         # Ensure registry seed file is absent
-        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        registry = isolated_sandbox_ai_home / "state" / "instances.json"
         if registry.exists():
             registry.unlink()
 
@@ -2118,7 +2120,7 @@ class TestRequirePerUserStateInitialized:
         result = runner.invoke(app, args)
         assert result.exit_code == 1
         assert "per-user state not initialized" in result.output.lower()
-        assert str(isolated_sandbox_ai_user_home) in result.output
+        assert str(isolated_sandbox_ai_home) in result.output
         assert "sandbox init" in result.output.lower()
 
 
@@ -2233,7 +2235,7 @@ class TestInitHostConfigResolution:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """init in non-TTY mode without canonical host config exits with guidance."""
         from cli.main import app
@@ -2248,13 +2250,14 @@ class TestInitHostConfigResolution:
             result = runner.invoke(app, ["init"])
         assert result.exit_code == 1, result.output
         assert "non-interactive" in result.output.lower()
-        assert "sandbox-ai.toml" in result.output
+        # Rich may line-wrap long paths; collapse newlines before substring check.
+        assert "sandbox-ai.toml" in result.output.replace("\n", "")
 
     def test_init_tty_seeds_host_config(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """init in TTY mode prompts and writes <home>/config/sandbox-ai.toml when absent."""
         from cli.main import app
@@ -2287,7 +2290,7 @@ class TestInitHostConfigResolution:
             patch("cli.main.write_initialized_sentinel"),
         ):
             result = runner.invoke(app, ["init"])
-        seeded = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert seeded.exists(), f"output={result.output!r} exit={result.exit_code}"
         body = seeded.read_text()
         assert 'docker_unprivileged_user = "sandbox-user"' in body
@@ -2298,7 +2301,7 @@ class TestInitHostConfigResolution:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """Empty docker_unprivileged_user is re-prompted until non-empty."""
         from cli.main import app
@@ -2332,14 +2335,14 @@ class TestInitHostConfigResolution:
         ):
             result = runner.invoke(app, ["init"])
         assert result.exit_code == 0, result.output
-        seeded = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert 'docker_unprivileged_user = "sandbox"' in seeded.read_text()
 
     def test_init_tty_rejects_invalid_auth_value(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """Invalid machinectl_authentication value is rejected."""
         from cli.main import app
@@ -2362,16 +2365,16 @@ class TestInitHostConfigResolution:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """When the canonical host config exists, init does not prompt and does not overwrite."""
         from cli.main import app
+        from core.host_config import ensure_per_user_state
         from core.hydration import InstanceConfig
-        from core.scaffold import ensure_per_user_tree
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        ensure_per_user_state(isolated_sandbox_ai_home)
         existing_body = '[host]\ndocker_unprivileged_user = "preserved"\nmachinectl_authentication = "polkit"\n'
-        cfg_path = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        cfg_path = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         cfg_path.write_text(existing_body)
 
         project_dir = "/home/dev/preserve"

@@ -19,17 +19,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def ensure_per_user_tree(home: Path) -> None:
-    """Create ``<home>/``, ``<home>/config/``, ``<home>/state/`` with mode 0700.
-
-    Idempotent: ``exist_ok=True`` suppresses ``FileExistsError`` and does NOT
-    modify the mode of any pre-existing directory.
-    """
-    os.makedirs(home, mode=0o700, exist_ok=True)
-    os.makedirs(home / "config", mode=0o700, exist_ok=True)
-    os.makedirs(home / "state", mode=0o700, exist_ok=True)
-
-
 def ensure_registry_seed(home: Path) -> None:
     """Create an empty ``<home>/state/instances.json`` if it does not exist.
 
