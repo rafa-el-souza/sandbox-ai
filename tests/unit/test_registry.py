@@ -132,23 +132,26 @@ class TestPersistence:
 
 class TestConcurrency:
     def test_concurrent_writes_dont_corrupt(self, isolated_sandbox_ai_home: Path) -> None:
+        """Both writers complete and both entries land in the registry under fcntl serialization."""
         del isolated_sandbox_ai_home
-        errors: list[Exception] = []
+        thread_excs: list[BaseException] = []
+        original_hook = threading.excepthook
 
-        def writer(name: str, path: str) -> None:
-            try:
-                InstanceRegistry().register(name, path)
-            except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+        def capture(args: threading.ExceptHookArgs) -> None:
+            thread_excs.append(args.exc_value if args.exc_value else BaseException("unknown"))
 
-        t1 = threading.Thread(target=writer, args=("a", "/x/a"))
-        t2 = threading.Thread(target=writer, args=("b", "/x/b"))
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        threading.excepthook = capture
+        try:
+            t1 = threading.Thread(target=lambda: InstanceRegistry().register("a", "/x/a"))
+            t2 = threading.Thread(target=lambda: InstanceRegistry().register("b", "/x/b"))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        finally:
+            threading.excepthook = original_hook
 
-        assert not errors
+        assert thread_excs == []
         reg = InstanceRegistry()
         assert reg.get("a") is not None
         assert reg.get("b") is not None

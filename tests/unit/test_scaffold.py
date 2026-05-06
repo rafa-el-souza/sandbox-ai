@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from core.host_config import ensure_per_user_state
 from core.scaffold import (
+    WorkspaceSpec,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
@@ -54,26 +55,46 @@ class TestCreateInstanceDirs:
         create_instance_dirs(str(instance_dir))
         create_instance_dirs(str(instance_dir))  # Should not raise
 
+    def test_creates_workspace_dirs_with_mode_0700(self, tmp_path: Path) -> None:
+        """Each entry in ``workspaces`` produces ``<workspace.path>`` with mode 0700."""
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        ws_main = tmp_path / "workspaces" / "proj" / "main"
+        ws_api = tmp_path / "workspaces" / "proj" / "api"
+        specs = [
+            WorkspaceSpec(name="main", bootstrap_mode="empty", source=None, path=str(ws_main)),
+            WorkspaceSpec(name="api", bootstrap_mode="copy", source="/src", path=str(ws_api)),
+        ]
+        create_instance_dirs(str(instance_dir), specs)
+        assert ws_main.is_dir()
+        assert ws_api.is_dir()
+        assert stat.S_IMODE(ws_main.stat().st_mode) == 0o700
+        assert stat.S_IMODE(ws_api.stat().st_mode) == 0o700
+
 
 class TestWriteSandboxToml:
+    def _ws(self, path: str = "/home/dev/myproject") -> list[WorkspaceSpec]:
+        return [WorkspaceSpec(name="main", bootstrap_mode="copy", source=path, path=path)]
+
     def test_generates_valid_toml(self, tmp_path: Path) -> None:
-        """sandbox.toml is written with auto-derived defaults."""
+        """sandbox.toml is written with auto-derived defaults and a [workspaces.main] block."""
         instance_dir = tmp_path / "sandboxes" / "myproject-abc123"
         instance_dir.mkdir(parents=True)
 
         write_sandbox_toml(
             instance_dir=str(instance_dir),
             instance_name="myproject",
-            project_dir="/home/dev/myproject",
+            workspaces=self._ws(),
         )
 
         toml_path = instance_dir / "sandbox.toml"
         assert toml_path.exists()
         content = toml_path.read_text()
 
-        # Verify key fields present
         assert 'name = "myproject"' in content
-        assert 'user_project_root = "/home/dev/myproject"' in content
+        assert "[workspaces.main]" in content
+        assert 'bootstrap_mode = "copy"' in content
+        assert 'source = "/home/dev/myproject"' in content
+        assert 'path = "/home/dev/myproject"' in content
         assert "host_unprivileged_user" not in content
         assert "host_uid" in content
 
@@ -85,7 +106,7 @@ class TestWriteSandboxToml:
         write_sandbox_toml(
             instance_dir=str(instance_dir),
             instance_name="myproject",
-            project_dir="/home/dev/myproject",
+            workspaces=self._ws(),
         )
 
         content = (instance_dir / "sandbox.toml").read_text()
@@ -175,12 +196,12 @@ class TestCreateEnvFile:
 class TestApplyDefaultAcls:
     @patch("subprocess.run")
     def test_calls_setfacl_on_required_dirs(self, mock_run: MagicMock) -> None:
-        """setfacl -d -m called on log/, cache/, and user_project_root."""
+        """setfacl -d -m called on log/, cache/, and each registered workspace path."""
         mock_run.return_value = MagicMock(returncode=0)
 
         apply_default_acls(
             instance_dir="/sandboxes/myproject-abc123",
-            user_project_root="/home/dev/myproject",
+            workspace_paths=["/home/dev/myproject"],
             dev_user="dev",
         )
 
@@ -199,6 +220,19 @@ class TestApplyDefaultAcls:
             ),
         ]
         mock_run.assert_has_calls(expected_calls, any_order=False)
+
+    @patch("subprocess.run")
+    def test_fans_out_per_workspace(self, mock_run: MagicMock) -> None:
+        """Each workspace path receives a setfacl -d call."""
+        mock_run.return_value = MagicMock(returncode=0)
+        apply_default_acls(
+            instance_dir="/sandboxes/x",
+            workspace_paths=["/ws/a", "/ws/b"],
+            dev_user="dev",
+        )
+        called = [c.args[0] for c in mock_run.call_args_list]
+        assert ["setfacl", "-d", "-m", "u:dev:rwx", "/ws/a"] in called
+        assert ["setfacl", "-d", "-m", "u:dev:rwx", "/ws/b"] in called
 
 
 class TestPromptSecrets:
@@ -260,6 +294,9 @@ class TestWriteInitializedSentinel:
 class TestWriteSandboxTomlGitFields:
     """Task 2.1: git_user/git_email params interpolated into sandbox.toml."""
 
+    def _ws(self) -> list[WorkspaceSpec]:
+        return [WorkspaceSpec(name="main", bootstrap_mode="copy", source="/dev/test", path="/dev/test")]
+
     def test_git_user_interpolated(self, tmp_path: Path) -> None:
         """git_user value is written into sandbox.toml."""
         instance_dir = tmp_path / "sandboxes" / "test"
@@ -268,7 +305,7 @@ class TestWriteSandboxTomlGitFields:
         write_sandbox_toml(
             instance_dir=str(instance_dir),
             instance_name="test",
-            project_dir="/dev/test",
+            workspaces=self._ws(),
             git_user="Jane Doe",
             git_email="jane@example.com",
         )
@@ -285,7 +322,7 @@ class TestWriteSandboxTomlGitFields:
         write_sandbox_toml(
             instance_dir=str(instance_dir),
             instance_name="test",
-            project_dir="/dev/test",
+            workspaces=self._ws(),
         )
 
         content = (instance_dir / "sandbox.toml").read_text()

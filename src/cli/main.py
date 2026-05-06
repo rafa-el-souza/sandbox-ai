@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json as _json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,7 @@ from core.hydration import (
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
 from core.registry import InstanceRegistry
 from core.scaffold import (
+    WorkspaceSpec,
     _detect_git_config,
     apply_default_acls,
     create_env_file,
@@ -62,6 +64,9 @@ from core.scaffold import (
     write_initialized_sentinel,
     write_sandbox_toml,
 )
+from core.walker import BoundaryPathError as WalkerBoundaryPathError
+from core.walker import walk_ancestors
+from core.workspace_copy import copy_workspace
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -85,6 +90,135 @@ class ContainerInfo:
 
 
 # ─── Resolution helpers ─────────────────────────────────────────────────────
+
+
+_NAME_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_RESERVED_NAMES: frozenset[str] = frozenset(
+    {
+        # Orchestrator-internal / spec-reserved
+        "_backups",
+        "default",
+        "all",
+        "none",
+        "system",
+        # Subnet names from the IPAM septuple
+        "isolated",
+        "core_proxy",
+        "dns",
+        "admin",
+        "admin_proxy",
+        "egress",
+        "ipc",
+    }
+)
+_INSTANCE_NAME_MAX = 30
+_WORKSPACE_NAME_MAX = 32
+
+
+def _validate_name(name: str, *, kind: str, max_len: int) -> None:
+    """Apply the instance/workspace name regex + length + reserved-name rules.
+
+    Raises:
+        typer.BadParameter: ``name`` violates the rules; the message names the
+            specific failure mode so the user can correct it.
+    """
+    if not name:
+        raise typer.BadParameter(f"{kind} name must not be empty")
+    if len(name) > max_len:
+        raise typer.BadParameter(f"{kind} name {name!r} exceeds {max_len}-character cap")
+    if name.startswith(("-", "_")):
+        raise typer.BadParameter(f"{kind} name {name!r} must not start with '-' or '_'")
+    if not _NAME_REGEX.match(name):
+        raise typer.BadParameter(f"{kind} name {name!r} contains invalid characters; use [a-z0-9_-]")
+    if name in _RESERVED_NAMES:
+        raise typer.BadParameter(f"{kind} name {name!r} is reserved")
+
+
+def _parse_workspace_flags(
+    inst: str,
+    user_home: Path,
+    copy_specs: list[str],
+    empty_specs: list[str],
+) -> list[WorkspaceSpec]:
+    """Resolve --copy/--empty multi-flags into a list of :class:`WorkspaceSpec`.
+
+    Defaults to a single empty workspace named ``main`` when both lists are
+    empty. Raises :class:`typer.BadParameter` on duplicate names, malformed
+    ``--copy NAME=PATH`` values, or invalid workspace names.
+    """
+    if not copy_specs and not empty_specs:
+        empty_specs = ["main"]
+
+    specs: list[WorkspaceSpec] = []
+    seen: set[str] = set()
+    workspaces_root = user_home / "workspaces" / inst
+
+    for raw in copy_specs:
+        if "=" not in raw:
+            raise typer.BadParameter(f"--copy value {raw!r} must be NAME=PATH")
+        name, _, src = raw.partition("=")
+        if not name or not src:
+            raise typer.BadParameter(f"--copy value {raw!r} requires non-empty NAME and PATH")
+        _validate_name(name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+        if name in seen:
+            raise typer.BadParameter(f"workspace name {name!r} specified more than once")
+        seen.add(name)
+        specs.append(
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode="copy",
+                source=os.path.abspath(src),
+                path=str(workspaces_root / name),
+            )
+        )
+
+    for name in empty_specs:
+        _validate_name(name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+        if name in seen:
+            raise typer.BadParameter(f"workspace name {name!r} specified more than once")
+        seen.add(name)
+        specs.append(
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode="empty",
+                source=None,
+                path=str(workspaces_root / name),
+            )
+        )
+
+    return specs
+
+
+def _preflight_workspace_source(source: str, *, inst: str, user_home: Path) -> None:
+    """Validate a ``--copy`` source path before invoking rsync.
+
+    Checks: realpath resolution, source existence, source readability, walker
+    boundary list, cycle prevention (source must not be inside the orchestrator
+    workspaces tree for this instance), 5GB size warning.
+    """
+    realpath = os.path.realpath(source)
+    if not os.path.exists(realpath):
+        raise typer.BadParameter(f"--copy source {source!r} does not exist")
+    if not os.access(realpath, os.R_OK):
+        raise typer.BadParameter(f"--copy source {source!r} is not readable")
+    try:
+        walk_ancestors(realpath)
+    except WalkerBoundaryPathError as exc:
+        raise typer.BadParameter(f"--copy source {source!r} is in the walker boundary list") from exc
+    instance_workspaces = str((user_home / "workspaces" / inst).resolve())
+    if realpath.startswith(instance_workspaces + os.sep) or realpath == instance_workspaces:
+        raise typer.BadParameter(f"--copy source {source!r} is inside the destination workspaces tree (cycle)")
+    total = sum(
+        os.path.getsize(os.path.join(dp, f))
+        for dp, _dn, fns in os.walk(realpath, followlinks=False)
+        for f in fns
+        if not os.path.islink(os.path.join(dp, f))
+    )
+    if total > 5 * 1024 * 1024 * 1024:
+        console.print(
+            f"⚠ --copy source {source!r} is larger than 5 GB ({total // (1024 * 1024)} MB); rsync will take a while.",
+            style="yellow",
+        )
 
 
 def _resolve_sandbox_ai_home() -> str:
@@ -304,7 +438,10 @@ def _compute_ancestors(instance_dir: str) -> list[str]:
 
 
 def _acl_grant_plan(
-    instance_dir: str, host_user: str, user_project_root: str | None = None, dev_user: str | None = None
+    instance_dir: str,
+    host_user: str,
+    workspace_paths: list[str] | None = None,
+    dev_user: str | None = None,
 ) -> list[tuple[list[str], str]]:
     """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
 
@@ -379,42 +516,46 @@ def _acl_grant_plan(
     # rootless Docker daemon traverse + r/w access to the gofer-mounted /workspace.
     # Persistent shared-group state (chgrp/chmod/setgid + persistent default ACL
     # entries) is applied separately by _phase_workspace_shared_group.
-    if user_project_root is not None:
-        # Ancestor traverse on workspace path components above instance_dir's chain
-        ws_ancestors = _compute_workspace_ancestors(user_project_root)
-        for ancestor in ws_ancestors:
+    # Per-workspace fan-out with execution-side ancestor dedup.
+    if workspace_paths:
+        seen_ancestors: set[str] = set()
+        for ws_path in workspace_paths:
+            for ancestor in _compute_workspace_ancestors(ws_path):
+                if ancestor in seen_ancestors:
+                    continue
+                seen_ancestors.add(ancestor)
+                plan.append(
+                    (
+                        ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
+                        f"workspace ancestor traverse: {ancestor}",
+                    )
+                )
             plan.append(
                 (
-                    ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
-                    f"workspace ancestor traverse: {ancestor}",
+                    ["setfacl", "-m", f"u:{host_user}:rwx", ws_path],
+                    f"workspace named-ACL: {ws_path}",
                 )
             )
-        plan.append(
-            (
-                ["setfacl", "-m", f"u:{host_user}:rwx", user_project_root],
-                f"workspace named-ACL: {user_project_root}",
+            default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+            if dev_user:
+                default_entry += f",u:{dev_user}:rwx"
+            plan.append(
+                (
+                    ["setfacl", "-d", "-m", default_entry, ws_path],
+                    f"workspace default ACL: {ws_path}",
+                )
             )
-        )
-        default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
-        if dev_user:
-            default_entry += f",u:{dev_user}:rwx"
-        plan.append(
-            (
-                ["setfacl", "-d", "-m", default_entry, user_project_root],
-                f"workspace default ACL: {user_project_root}",
-            )
-        )
 
     return plan
 
 
-def _compute_workspace_ancestors(user_project_root: str) -> list[str]:
-    """Walk ancestors of ``user_project_root`` owned by the current uid.
+def _compute_workspace_ancestors(workspace_path: str) -> list[str]:
+    """Walk ancestors of ``workspace_path`` owned by the current uid.
 
-    Returns shallowest-first; excludes ``/`` and ``user_project_root`` itself.
+    Returns shallowest-first; excludes ``/`` and ``workspace_path`` itself.
     """
     current_uid = os.getuid()
-    abs_path = os.path.abspath(user_project_root)
+    abs_path = os.path.abspath(workspace_path)
     ancestors: list[str] = []
     parent = os.path.dirname(abs_path)
     while parent != "/":
@@ -431,7 +572,9 @@ def _compute_workspace_ancestors(user_project_root: str) -> list[str]:
 
 
 def _acl_revoke_plan(
-    instance_dir: str, host_user: str, user_project_root: str | None = None
+    instance_dir: str,
+    host_user: str,
+    workspace_paths: list[str] | None = None,
 ) -> list[tuple[list[str], str]]:
     """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
 
@@ -491,20 +634,21 @@ def _acl_revoke_plan(
 
     # Workspace named-ACL — both effective and default-entry revocation.
     # Persistent shared-group state (chgrp/chmod/setgid + g::rwx, u:dev:rwx
-    # default) is left intact (Decision 4).
-    if user_project_root is not None:
-        plan.append(
-            (
-                ["setfacl", "-x", f"u:{host_user}", user_project_root],
-                f"workspace named-ACL: {user_project_root}",
+    # default) is left intact (Decision 4). Per-workspace fan-out.
+    if workspace_paths:
+        for ws_path in workspace_paths:
+            plan.append(
+                (
+                    ["setfacl", "-x", f"u:{host_user}", ws_path],
+                    f"workspace named-ACL: {ws_path}",
+                )
             )
-        )
-        plan.append(
-            (
-                ["setfacl", "-d", "-x", f"u:{host_user}", user_project_root],
-                f"workspace default named entry: {user_project_root}",
+            plan.append(
+                (
+                    ["setfacl", "-d", "-x", f"u:{host_user}", ws_path],
+                    f"workspace default named entry: {ws_path}",
+                )
             )
-        )
 
     return plan
 
@@ -695,7 +839,7 @@ def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[
 
 
 def _workspace_shared_group_plan(
-    user_project_root: str, bridge_gid: int, dev_user: str | None, host_user: str
+    workspace_path: str, bridge_gid: int, dev_user: str | None, host_user: str
 ) -> list[tuple[str, str]]:
     """Return the (operation_summary, target) list for the workspace shared-group recipe.
 
@@ -705,19 +849,19 @@ def _workspace_shared_group_plan(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     return [
-        (f"chgrp {bridge_gid}", user_project_root),
-        ("chmod 2770", user_project_root),
-        (f"setfacl -m u:{host_user}:rwx", user_project_root),
-        (f"setfacl -d -m {default_entry}", user_project_root),
+        (f"chgrp {bridge_gid}", workspace_path),
+        ("chmod 2770", workspace_path),
+        (f"setfacl -m u:{host_user}:rwx", workspace_path),
+        (f"setfacl -d -m {default_entry}", workspace_path),
     ]
 
 
 def _phase_workspace_shared_group(
-    user_project_root: str,
+    workspace_path: str,
     host: HostSettings,
     dev_user: str | None = None,
 ) -> None:
-    """Phase 5e: chgrp + chmod 2770 + setfacl on user_project_root.
+    """Phase 5e: chgrp + chmod 2770 + setfacl on a single workspace tree.
 
     Drift-detects the workspace root: when not yet at setgid + bridge_gid,
     runs the recursive recipe (best-effort, per-file failures aggregated and
@@ -730,8 +874,8 @@ def _phase_workspace_shared_group(
     bridge_gid = workspace_bridge_gid(host)
     host_user = host.docker_unprivileged_user
 
-    if _workspace_needs_recursive_setup(user_project_root, bridge_gid):
-        failure_count, sample_paths = _workspace_shared_group_recursive(user_project_root, bridge_gid)
+    if _workspace_needs_recursive_setup(workspace_path, bridge_gid):
+        failure_count, sample_paths = _workspace_shared_group_recursive(workspace_path, bridge_gid)
         if failure_count:
             sample = ", ".join(sample_paths)
             console.print(
@@ -741,24 +885,24 @@ def _phase_workspace_shared_group(
 
     # Steady-state idempotent root setup
     try:
-        os.chown(user_project_root, -1, bridge_gid, follow_symlinks=False)
-        os.chmod(user_project_root, 0o2770)
+        os.chown(workspace_path, -1, bridge_gid, follow_symlinks=False)
+        os.chmod(workspace_path, 0o2770)
     except OSError as exc:
-        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {user_project_root}: {exc}") from exc
+        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {workspace_path}: {exc}") from exc
 
     default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     for args, label in (
-        (["setfacl", "-m", f"u:{host_user}:rwx", user_project_root], "effective"),
-        (["setfacl", "-d", "-m", default_entry, user_project_root], "default"),
+        (["setfacl", "-m", f"u:{host_user}:rwx", workspace_path], "effective"),
+        (["setfacl", "-d", "-m", default_entry, workspace_path], "default"),
     ):
         try:
             subprocess.run(args, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             raise SandboxExecutionError(
-                f"Workspace shared-group {label} ACL failed for {user_project_root}: {stderr}"
+                f"Workspace shared-group {label} ACL failed for {workspace_path}: {stderr}"
             ) from exc
 
 
@@ -811,7 +955,7 @@ def _phase_helper_mkdir_chown_cache_log(
 def _phase_acl_grant(
     instance_dir: str,
     host_user: str,
-    user_project_root: str | None = None,
+    workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
 ) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
@@ -820,7 +964,7 @@ def _phase_acl_grant(
     sentinel injection would corrupt the setfacl command, per I-1).
     CalledProcessError is wrapped in SandboxExecutionError (D6).
     """
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, user_project_root, dev_user):
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         try:
             subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
@@ -936,14 +1080,14 @@ def _compose_down(
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str, user_project_root: str | None = None) -> list[str]:
+def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] | None = None) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
     Iterates _acl_revoke_plan(). Uses check=False; failures are collected
     as warning strings, not raised. Returns list of warning messages.
     """
     warnings: list[str] = []
-    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, user_project_root):
+    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
         try:
             result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
             if result.returncode != 0:
@@ -1038,7 +1182,8 @@ def _dry_run_pipeline(install_root: str, project_dir: str) -> None:
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     dev_user = os.environ.get("USER")
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, config.instance.user_project_root, dev_user):
+    workspace_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
@@ -1058,13 +1203,12 @@ def _dry_run_pipeline(install_root: str, project_dir: str) -> None:
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
-    # Workspace shared-group plan
+    # Workspace shared-group plan — fanned out per workspace
     try:
         bridge_gid = workspace_bridge_gid(host_settings)
-        for op, target in _workspace_shared_group_plan(
-            config.instance.user_project_root, bridge_gid, os.environ.get("USER"), host_user
-        ):
-            console.print(f"    workspace: {op} {target}", style="dim")
+        for ws_path in workspace_paths:
+            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
+                console.print(f"    workspace: {op} {target}", style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
@@ -1258,8 +1402,15 @@ def _warn_legacy_cwd_files(project_dir: str, user_home: Path) -> None:
         )
 
 
+_COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
+_EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
+
+
 @app.command()
 def init(
+    inst: str = typer.Argument(..., help="Instance name (1-30 chars, [a-z0-9_-])"),
+    copy: list[str] = _COPY_FLAG,
+    empty: list[str] = _EMPTY_FLAG,
     machinectl_auth: str | None = typer.Option(
         None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
     ),
@@ -1267,22 +1418,24 @@ def init(
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
 ) -> None:
-    """Initialize a new sandbox instance for the current project."""
+    """Initialize a new sandbox instance with one or more workspaces."""
     install_root = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
+    _validate_name(inst, kind="instance", max_len=_INSTANCE_NAME_MAX)
 
     # Per-user tree creation (idempotent, mode 0700)
     user_home = sandbox_ai_home()
     ensure_per_user_state(user_home)
 
-    # Legacy CWD-local file detection (advisory)
-    _warn_legacy_cwd_files(project_dir, user_home)
+    # Legacy CWD-local file detection (advisory) — uses CWD only as a warning trigger.
+    _warn_legacy_cwd_files(os.path.abspath(os.getcwd()), user_home)
 
-    # Re-init guard (D-6)
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-    if instance_dir is not None:
+    # Resolve workspace specs (defaults to single empty `main` when no flags supplied).
+    workspace_specs = _parse_workspace_flags(inst, user_home, copy, empty)
+
+    # Re-init guard (D-6) — registry uniqueness on instance name (per-user).
+    if InstanceRegistry().get(inst) is not None:
         console.print(
-            "Instance already initialized for this directory. Run `sandbox destroy` first.",
+            f"Instance {inst!r} is already registered. Run `sandbox destroy {inst}` first.",
             style="red",
         )
         raise typer.Exit(code=1)
@@ -1373,30 +1526,44 @@ def init(
         if not git_email:
             git_email = detected_email
 
-    # Derive instance identity (transitional; group 5/6 retires the hash suffix).
-    instance_name = os.path.basename(os.path.abspath(project_dir))
-    _id_hash = hashlib.md5(os.path.abspath(project_dir).encode("utf-8")).hexdigest()[:6]
-    instance_id = f"{instance_name}-{_id_hash}"
+    # Pre-flight gates for every --copy source (boundary, exists, readable, cycle, size).
+    for ws in workspace_specs:
+        if ws.bootstrap_mode == "copy" and ws.source is not None:
+            _preflight_workspace_source(ws.source, inst=inst, user_home=user_home)
+
+    # Instance directory still lives under ``<install_root>/sandboxes`` for now;
+    # group 6 relocates it to ``<home>/instances/<inst>``. The on-disk basename
+    # keeps a hash suffix during the transition.
+    _id_hash = hashlib.md5(inst.encode("utf-8")).hexdigest()[:6]
+    instance_id = f"{inst}-{_id_hash}"
     instance_dir = os.path.join(install_root, "sandboxes", instance_id)
 
     if dry_run:
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
-        console.print(f"  Instance ID: {instance_id}")
+        console.print(f"  Instance: {inst}")
         console.print(f"  Directory: {instance_dir}")
         console.print(f"  User: {resolved_user}")
         console.print(f"  Git: {git_user} <{git_email}>")
-        console.print(f"  Project: {instance_name}")
+        for ws in workspace_specs:
+            origin = f"copy from {ws.source}" if ws.bootstrap_mode == "copy" else "empty"
+            console.print(f"  Workspace [{ws.name}]: {origin} → {ws.path}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
-    # S1: Directory tree
-    create_instance_dirs(instance_dir)
+    # S1: Directory tree (instance + per-workspace orchestrator-owned trees).
+    create_instance_dirs(instance_dir, workspace_specs)
+
+    # S1b: Populate --copy workspaces via the rsync recipe (default-excludes,
+    # safe-link refusal). --empty workspaces start as bare 0700 dev:dev dirs.
+    for ws in workspace_specs:
+        if ws.bootstrap_mode == "copy" and ws.source is not None:
+            copy_workspace(ws.source, ws.path)
 
     # S2: sandbox.toml
     write_sandbox_toml(
         instance_dir,
-        instance_name,
-        project_dir,
+        inst,
+        workspace_specs,
         git_user=git_user,
         git_email=git_email,
     )
@@ -1410,15 +1577,13 @@ def init(
         mcp_firecrawl=config.components.mcp_firecrawl,
     )
 
-    # S4: Default ACLs (Pattern B)
+    # S4: Default ACLs (Pattern B) — fanned out across the workspaces map.
     dev_user = os.environ.get("USER", "dev")
-    apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
+    apply_default_acls(instance_dir, [ws.path for ws in config.workspaces.values()], dev_user)
 
     # S5: Register — ensure registry seed exists, then register by name.
-    # Transitional: allow_overwrite preserves init's idempotent re-run behavior;
-    # the strict uniqueness gate moves to the new positional-<inst> flow in group 5.
     ensure_registry_seed(user_home)
-    InstanceRegistry().register(instance_name, instance_dir, allow_overwrite=True)
+    InstanceRegistry().register(inst, instance_dir)
 
     # S6: Secret prompting (non-TTY safe)
     required_secrets: list[tuple[str, str]] = [
@@ -1437,7 +1602,7 @@ def init(
     # S7: Sentinel
     write_initialized_sentinel(instance_dir)
 
-    console.print(f"Sandbox '{instance_name}' initialized. Run `sandbox start` to launch.")
+    console.print(f"Sandbox '{inst}' initialized. Run `sandbox start {inst}` to launch.")
 
 
 @app.command()
@@ -1551,10 +1716,11 @@ def start(
             raise typer.Exit(code=1) from None
         console.print("✓ Hydration — templates rendered")
 
-        # Phase 5: ACL grants (Pattern A)
+        # Phase 5: ACL grants (Pattern A) — fan out across [workspaces].
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         dev_user = os.environ.get("USER")
-        _phase_acl_grant(instance_dir, host_user, config.instance.user_project_root, dev_user)
+        ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 5c: helper-mkdir+chown for cache/log leaves
@@ -1565,8 +1731,9 @@ def start(
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
 
-        # Phase 5e: workspace shared-group recipe (chgrp + chmod 2770 + setfacl)
-        _phase_workspace_shared_group(config.instance.user_project_root, host_settings, dev_user)
+        # Phase 5e: workspace shared-group recipe — per-workspace fan-out.
+        for ws_path in ws_paths:
+            _phase_workspace_shared_group(ws_path, host_settings, dev_user)
         console.print("✓ Workspace — shared-group recipe applied")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
@@ -1582,7 +1749,7 @@ def start(
         # ACL on the workspace) are NOT reverted — they're persistent state
         # that survives intermediate stop/start cycles by design.
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
+            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
@@ -1631,8 +1798,9 @@ def stop(clean: bool = False) -> None:
     # Compose down
     _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
 
-    # ACL revocation (Pattern A) — fault-isolated (D5)
-    acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
+    # ACL revocation (Pattern A) — fault-isolated (D5), per-workspace fan-out
+    ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+    acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
     for w in acl_warnings:
         console.print(f"⚠ {w}", style="yellow")
 
@@ -1697,7 +1865,8 @@ def destroy(force: bool = False) -> None:
     # Phase 0: Confirmation
     if not force:
         console.print(f"WARNING: This permanently deletes sandbox '{name}' and all its state.")
-        console.print(f"         Your project at {config.instance.user_project_root} is NOT affected.")
+        ws_summary = ", ".join(sorted(config.workspaces.keys()))
+        console.print(f"         Workspaces affected: {ws_summary}")
         typed_name = typer.prompt("Type the sandbox name to confirm")
         if typed_name != name:
             console.print("Aborted.")
@@ -1713,8 +1882,9 @@ def destroy(force: bool = False) -> None:
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
-        # Phase 3: ACL revocation — fault-isolated (D5)
-        acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
+        # Phase 3: ACL revocation — fault-isolated (D5), per-workspace fan-out
+        ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+        acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
         for w in acl_warnings:
             console.print(f"⚠ {w}", style="yellow")
 
@@ -1831,12 +2001,13 @@ def status() -> None:
         border_color = "red"
 
     # Instance header panel
+    ws_summary = ", ".join(f"{n}={ws.path}" for n, ws in sorted(config.workspaces.items()))
     header_lines = [
-        f"[bold]Name:[/bold]    {name}",
-        f"[bold]ID:[/bold]      {instance_id}",
-        f"[bold]Path:[/bold]    {config.instance.user_project_root}",
-        f"[bold]User:[/bold]    {host_user}",
-        f"[bold]State:[/bold]   {state_label}",
+        f"[bold]Name:[/bold]        {name}",
+        f"[bold]ID:[/bold]          {instance_id}",
+        f"[bold]Workspaces:[/bold]  {ws_summary}",
+        f"[bold]User:[/bold]        {host_user}",
+        f"[bold]State:[/bold]       {state_label}",
     ]
     panel = Panel(
         "\n".join(header_lines),

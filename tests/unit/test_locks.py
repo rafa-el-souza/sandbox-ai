@@ -7,6 +7,7 @@ import fcntl
 import json
 import multiprocessing as mp
 import os
+from multiprocessing.synchronize import Event as MpEvent
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from core.locks import (
 )
 
 
-def _hold_lock(path: str, ready: object, release: object) -> None:
+def _hold_lock(path: str, ready: MpEvent, release: MpEvent) -> None:
     """Worker: open the lock, hold LOCK_EX, signal ready, wait for release."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR)
     fcntl.flock(fd, fcntl.LOCK_EX)
@@ -27,8 +28,8 @@ def _hold_lock(path: str, ready: object, release: object) -> None:
     os.lseek(fd, 0, os.SEEK_SET)
     started = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     os.write(fd, json.dumps({"pid": os.getpid(), "started_at_utc": started}).encode())
-    ready.set()  # type: ignore[attr-defined]
-    release.wait()  # type: ignore[attr-defined]
+    ready.set()
+    release.wait()
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
 

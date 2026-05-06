@@ -286,7 +286,7 @@ def test_workspace_named_acl_round_trip(tmp_path: Path) -> None:
     # Drive revocation through the production plan (just the workspace entries).
     # Match by description prefix, not substring — the tmp_path itself may
     # contain the word "workspace" via pytest's test-name dirs.
-    plan = _acl_revoke_plan(str(tmp_path / "fake_instance"), user, str(workspace))
+    plan = _acl_revoke_plan(str(tmp_path / "fake_instance"), user, [str(workspace)])
     workspace_revokes = [args for args, desc in plan if desc.startswith("workspace ")]
     assert workspace_revokes, "_acl_revoke_plan must emit workspace revocation entries"
     for args in workspace_revokes:

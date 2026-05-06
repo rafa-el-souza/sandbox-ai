@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.crypto import generate_credential
@@ -57,10 +58,20 @@ INSTANCE_SUBDIRS = [
 ]
 
 
-def create_instance_dirs(instance_dir: str) -> None:
-    """Create the full instance directory tree. Idempotent."""
+def create_instance_dirs(instance_dir: str, workspaces: list[WorkspaceSpec] | None = None) -> None:
+    """Create the full instance directory tree plus orchestrator-owned workspace
+    trees. Idempotent.
+
+    Each entry in ``workspaces`` produces ``<workspace.path>`` with mode 0700.
+    Per the ``instance-workspace-model`` spec the path is always under
+    ``<home>/workspaces/<inst>/<ws>/`` for the current bootstrap modes, but
+    consumers SHALL read ``workspace.path`` rather than re-derive it.
+    """
     for subdir in INSTANCE_SUBDIRS:
         os.makedirs(os.path.join(instance_dir, subdir), exist_ok=True)
+    if workspaces:
+        for ws in workspaces:
+            os.makedirs(ws.path, mode=0o700, exist_ok=True)
 
 
 # ─── S2: sandbox.toml ────────────────────────────────────────────────────────
@@ -72,9 +83,10 @@ _SANDBOX_TOML_TEMPLATE = """\
 
 [instance]
 name = "{name}"
-user_project_root = "{user_project_root}"
 host_uid = "{host_uid}"
 warmup_prompt = ""
+
+{workspaces_section}
 
 [core]
 shm_size = "2gb"
@@ -149,18 +161,45 @@ read_only_domains = [
 """
 
 
+@dataclass(frozen=True)
+class WorkspaceSpec:
+    """Resolved workspace request emitted by the CLI parser.
+
+    ``source`` is required for ``bootstrap_mode='copy'`` and ignored for
+    ``bootstrap_mode='empty'``. ``path`` is the orchestrator-owned workspace
+    tree (under ``<home>/workspaces/<inst>/<name>/``).
+    """
+
+    name: str
+    bootstrap_mode: str
+    source: str | None
+    path: str
+
+
+def _render_workspaces_section(workspaces: list[WorkspaceSpec]) -> str:
+    sections: list[str] = []
+    for ws in sorted(workspaces, key=lambda w: w.name):
+        sections.append(f"[workspaces.{ws.name}]")
+        sections.append(f'bootstrap_mode = "{ws.bootstrap_mode}"')
+        if ws.source is not None:
+            sections.append(f'source = "{ws.source}"')
+        sections.append(f'path = "{ws.path}"')
+        sections.append("")
+    return "\n".join(sections).rstrip() + "\n"
+
+
 def write_sandbox_toml(
     instance_dir: str,
     instance_name: str,
-    project_dir: str,
+    workspaces: list[WorkspaceSpec],
     git_user: str = "",
     git_email: str = "",
 ) -> None:
-    """Write sandbox.toml with auto-derived defaults."""
+    """Write sandbox.toml with auto-derived defaults and workspace entries."""
     content = _SANDBOX_TOML_TEMPLATE.format(
         name=instance_name,
-        user_project_root=os.path.abspath(project_dir),
         host_uid=str(os.getuid()),
+        workspaces_section=_render_workspaces_section(workspaces),
         git_user=git_user,
         git_email=git_email,
         core_base_image=IMAGE_REGISTRY["wolfi_base"].pinned,
@@ -250,13 +289,10 @@ def create_env_file(env_path: str, *, db_postgres: bool, mcp_firecrawl: bool) ->
 # ─── S4: Default ACLs ────────────────────────────────────────────────────────
 
 
-def apply_default_acls(instance_dir: str, user_project_root: str, dev_user: str) -> None:
+def apply_default_acls(instance_dir: str, workspace_paths: list[str], dev_user: str) -> None:
     """Apply default ACLs so dev can read container-created files (D-39)."""
-    for target in [
-        os.path.join(instance_dir, "log/"),
-        os.path.join(instance_dir, "cache/"),
-        user_project_root,
-    ]:
+    targets = [os.path.join(instance_dir, "log/"), os.path.join(instance_dir, "cache/"), *workspace_paths]
+    for target in targets:
         subprocess.run(
             ["setfacl", "-d", "-m", f"u:{dev_user}:rwx", target],
             check=True,

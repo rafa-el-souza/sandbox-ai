@@ -11,11 +11,12 @@ import logging
 import os
 import tomllib
 from dataclasses import dataclass as _dataclass
+from enum import StrEnum
 from importlib.resources import files as _resource_files
 from typing import Any
 
 import jinja2
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from core.host_config import HostSettings, in_container_gid_for_host_gid, workspace_bridge_gid
 from core.ipam import derive_static_ips, derive_subnets
@@ -95,11 +96,31 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
 
 
+class BootstrapMode(StrEnum):
+    """How a workspace tree was populated at init / workspace add time."""
+
+    COPY = "copy"
+    EMPTY = "empty"
+
+
+class WorkspaceConfig(BaseModel):
+    """A single ``[workspaces.<name>]`` entry in sandbox.toml."""
+
+    bootstrap_mode: BootstrapMode
+    source: str | None = None
+    path: str
+
+    @model_validator(mode="after")
+    def _check_copy_requires_source(self) -> WorkspaceConfig:
+        if self.bootstrap_mode == BootstrapMode.COPY and not self.source:
+            raise ValueError("bootstrap_mode=copy requires a non-empty 'source' field")
+        return self
+
+
 class SandboxInstanceSection(BaseModel):
     """[instance] section of sandbox.toml."""
 
     name: str
-    user_project_root: str
     host_uid: str
     warmup_prompt: str = ""
 
@@ -178,6 +199,7 @@ class InstanceConfig(BaseModel):
     """Top-level Pydantic model for sandbox.toml."""
 
     instance: SandboxInstanceSection
+    workspaces: dict[str, WorkspaceConfig] = Field(min_length=1)
     core: CoreConfig = CoreConfig()
     admin: AdminConfig = AdminConfig()
     runtimes: RuntimesConfig = RuntimesConfig()
@@ -197,6 +219,7 @@ class InstanceConfig(BaseModel):
         components_raw = raw.get("components", {})
         flat: dict[str, Any] = {
             "instance": raw.get("instance", {}),
+            "workspaces": raw.get("workspaces", {}),
             "core": raw.get("core", {}),
             "admin": raw.get("admin", {}),
             "runtimes": {k: v for k, v in raw.get("runtimes", {}).items() if k != "node"},
@@ -267,7 +290,15 @@ def build_jinja_context(
         "proxy_url_core": f"http://proxyuser:{proxy_password}@proxy:3128",
         # Paths
         "instance_dir": instance_dir,
-        "user_project_root": config.instance.user_project_root,
+        "workspaces": [
+            {
+                "name": name,
+                "path": ws.path,
+                "bootstrap_mode": ws.bootstrap_mode.value,
+                "source": ws.source,
+            }
+            for name, ws in sorted(config.workspaces.items())
+        ],
         "custom_config_core": "/home/agent/.sandbox/custom",
         "custom_config_admin": "/home/human/.sandbox/custom",
         "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",

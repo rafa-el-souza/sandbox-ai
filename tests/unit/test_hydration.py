@@ -23,9 +23,13 @@ from core.hydration import (
 VALID_TOML = """\
 [instance]
 name = "testproject"
-user_project_root = "/home/dev/testproject"
 host_uid = "1000"
 warmup_prompt = ""
+
+[workspaces.main]
+bootstrap_mode = "copy"
+source = "/home/dev/testproject"
+path = "/home/dev/testproject"
 
 [core]
 shm_size = "2gb"
@@ -77,7 +81,9 @@ class TestInstanceConfig:
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
         assert config.instance.name == "testproject"
-        assert config.instance.user_project_root == "/home/dev/testproject"
+        assert "main" in config.workspaces
+        assert config.workspaces["main"].path == "/home/dev/testproject"
+        assert config.workspaces["main"].source == "/home/dev/testproject"
         assert config.core.pids_limit == 400
         assert config.admin.base_distro_family == "debian"
         assert config.runtimes.python is True
@@ -92,6 +98,45 @@ class TestInstanceConfig:
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(broken)
         with pytest.raises(Exception):  # Pydantic ValidationError
+            InstanceConfig.from_toml(str(toml_path))
+
+
+class TestWorkspaceConfig:
+    """[workspaces.<name>] schema: bootstrap_mode + source + path validation."""
+
+    def test_copy_without_source_rejected(self) -> None:
+        from core.hydration import BootstrapMode, WorkspaceConfig
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            WorkspaceConfig(bootstrap_mode=BootstrapMode.COPY, source=None, path="/x")
+
+    def test_empty_with_source_allowed(self) -> None:
+        from core.hydration import BootstrapMode, WorkspaceConfig
+
+        ws = WorkspaceConfig(bootstrap_mode=BootstrapMode.EMPTY, source="/maybe", path="/x")
+        assert ws.bootstrap_mode == BootstrapMode.EMPTY
+
+    def test_path_required(self) -> None:
+        from core.hydration import WorkspaceConfig
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            WorkspaceConfig.model_validate({"bootstrap_mode": "empty"})
+
+    def test_instance_config_rejects_empty_workspaces(self, tmp_path: Path) -> None:
+        from pydantic import ValidationError
+
+        ws_block = (
+            "[workspaces.main]\n"
+            'bootstrap_mode = "copy"\n'
+            'source = "/home/dev/testproject"\n'
+            'path = "/home/dev/testproject"\n\n'
+        )
+        toml = VALID_TOML.replace(ws_block, "")
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(toml)
+        with pytest.raises(ValidationError):
             InstanceConfig.from_toml(str(toml_path))
 
 
@@ -150,7 +195,14 @@ class TestBuildJinjaContext:
         assert ctx["proxy_core_ip"] == "10.100.1.254"
         assert ctx["proxy_password"] == "secretpass"
         assert ctx["instance_dir"] == "/sandboxes/testproject-abc123"
-        assert ctx["user_project_root"] == "/home/dev/testproject"
+        assert ctx["workspaces"] == [
+            {
+                "name": "main",
+                "path": "/home/dev/testproject",
+                "bootstrap_mode": "copy",
+                "source": "/home/dev/testproject",
+            }
+        ]
         assert ctx["core_base_image"] == "cgr.dev/chainguard/wolfi-base:latest"
         assert ctx["admin_base_image"] == "debian:trixie-slim"
         assert ctx["host_uid"] == "1000"
@@ -346,14 +398,14 @@ class TestScaffoldTemplateResourceLimits:
 
     def test_scaffold_template_contains_resource_limits(self, tmp_path: Path) -> None:
         """Scaffold output contains mem_limit and cpus in both [core] and [admin]."""
-        from core.scaffold import write_sandbox_toml
+        from core.scaffold import WorkspaceSpec, write_sandbox_toml
 
         instance = tmp_path / "instance"
         instance.mkdir()
         write_sandbox_toml(
             str(instance),
             "testproject",
-            "/home/dev/test",
+            [WorkspaceSpec(name="main", bootstrap_mode="copy", source="/home/dev/test", path="/home/dev/test")],
         )
         content = (instance / "sandbox.toml").read_text()
 
@@ -752,7 +804,14 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     return {
         "instance_name": "testproject",
         "instance_dir": instance_dir,
-        "user_project_root": "/home/dev/testproject",
+        "workspaces": [
+            {
+                "name": "main",
+                "path": "/home/dev/testproject",
+                "bootstrap_mode": "copy",
+                "source": "/home/dev/testproject",
+            }
+        ],
         "isolated_subnet": isolated,
         "core_proxy_subnet": core_proxy,
         "dns_subnet": dns,

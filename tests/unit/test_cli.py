@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
@@ -36,9 +37,13 @@ HOST_USER = "sandbox"
 VALID_TOML_CONTENT = b"""
 [instance]
 name = "myproject"
-user_project_root = "/home/dev/myproject"
 host_uid = "1000"
 warmup_prompt = ""
+
+[workspaces.main]
+bootstrap_mode = "copy"
+source = "/home/dev/myproject"
+path = "/home/dev/myproject"
 
 [core]
 shm_size = "2gb"
@@ -185,9 +190,7 @@ def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
     inst = home / "sandboxes" / instance_id
     # New name-keyed shape: name = basename(project_dir).
     name = os.path.basename(os.path.abspath(project_dir))
-    reg.write_text(
-        json.dumps({name: {"instance_dir": str(inst), "created_at": "2026-01-01T00:00:00Z"}})
-    )
+    reg.write_text(json.dumps({name: {"instance_dir": str(inst), "created_at": "2026-01-01T00:00:00Z"}}))
     (inst / "docker" / "core").mkdir(parents=True)
     (inst / "docker" / "admin").mkdir(parents=True)
     (inst / "docker" / "extras").mkdir(parents=True)
@@ -1264,9 +1267,9 @@ class TestPhaseHydrateDirect:
             {
                 "instance": {
                     "name": "test",
-                    "user_project_root": "/home/dev/test",
                     "host_uid": "1000",
-                }
+                },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/home/dev/test"}},
             }
         )
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
@@ -1313,9 +1316,9 @@ class TestBuildComposeFiles:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": False},
             }
@@ -1331,9 +1334,9 @@ class TestBuildComposeFiles:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": True},
             }
@@ -1353,9 +1356,9 @@ class TestPhaseComposeUpDirect:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -1400,9 +1403,9 @@ class TestComposeDownDirect:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -1420,9 +1423,9 @@ class TestComposeDownDirect:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -1446,7 +1449,7 @@ class TestRevokeACLsDirect:
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
-            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
             assert mock_run.call_count == 7
             assert warnings == []
 
@@ -1464,7 +1467,7 @@ class TestRevokeACLsDirect:
             return subprocess.CompletedProcess([], 0, "", "")
 
         with patch("subprocess.run", side_effect=side_effect):
-            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
         assert call_count == 7
         assert len(warnings) == 1
@@ -1475,7 +1478,7 @@ class TestRevokeACLsDirect:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
-            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
         assert len(warnings) == 7
         assert all("setfacl not found" in w for w in warnings)
@@ -1495,9 +1498,9 @@ class TestInitScaffoldDirect:
             {
                 "instance": {
                     "name": "newproject",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
@@ -1515,7 +1518,7 @@ class TestInitScaffoldDirect:
             patch("cli.main.prompt_secrets") as mock_secrets,
             patch("cli.main.write_initialized_sentinel") as mock_sentinel,
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0
             mock_dirs.assert_called_once()
             mock_toml.assert_called_once()
@@ -1532,6 +1535,52 @@ class TestInitScaffoldDirect:
                 prompt_func=ANY,
             )
             mock_sentinel.assert_called_once()
+
+    def test_init_with_copy_invokes_preflight_and_rsync(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, tmp_path: Path
+    ) -> None:
+        """``--copy NAME=PATH`` triggers _preflight_workspace_source + copy_workspace."""
+        from cli.main import app
+        from core.hydration import InstanceConfig
+
+        home = mock_sandbox_ai_home
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "f").write_text("hi")
+
+        mock_config = InstanceConfig.model_validate(
+            {
+                "instance": {"name": "newproject", "host_uid": "1000"},
+                "workspaces": {
+                    "api": {
+                        "bootstrap_mode": "copy",
+                        "source": str(src),
+                        "path": str(home / "workspaces" / "newproject" / "api"),
+                    },
+                },
+            }
+        )
+
+        with (
+            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+            patch("cli.main._preflight_workspace_source") as mock_preflight,
+            patch("cli.main.copy_workspace") as mock_copy,
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--copy", f"api={src}"])
+            assert result.exit_code == 0, result.output
+            mock_preflight.assert_called_once()
+            mock_copy.assert_called_once()
+            assert mock_copy.call_args.args[0] == str(src)
 
 
 # ── Edge case tests for remaining coverage ───────────────────────────────────
@@ -1620,9 +1669,9 @@ class TestInitFirecrawl:
             {
                 "instance": {
                     "name": "fc-project",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
                 "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": True},
             }
@@ -1642,7 +1691,7 @@ class TestInitFirecrawl:
             patch("cli.main.prompt_secrets") as mock_prompt,
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "fc-project"])
             assert result.exit_code == 0
             # Verify firecrawl secret was included in prompt_secrets call
             call_args = mock_prompt.call_args[0]
@@ -1841,9 +1890,9 @@ class TestInitHappyPath:
             {
                 "instance": {
                     "name": "newproject",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
@@ -1861,7 +1910,7 @@ class TestInitHappyPath:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0, result.output
 
 
@@ -1899,9 +1948,9 @@ class TestInitPerUserTreeCreation:
             {
                 "instance": {
                     "name": "p",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
@@ -1919,7 +1968,7 @@ class TestInitPerUserTreeCreation:
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
         assert isolated_sandbox_ai_home.is_dir()
         assert (isolated_sandbox_ai_home / "config").is_dir()
@@ -1944,7 +1993,7 @@ class TestInitPerUserTreeCreation:
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
 
     def test_existing_registry_not_overwritten(
@@ -1968,7 +2017,7 @@ class TestInitPerUserTreeCreation:
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
         data = json.loads(registry.read_text())
         # Pre-existing entry preserved
@@ -1993,7 +2042,7 @@ class TestInitPerUserTreeCreation:
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
         assert custom_home.is_dir()
         assert (custom_home / "config").is_dir()
@@ -2015,7 +2064,7 @@ class TestInitReInitRejection:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
             patch("cli.main._resolve_project_dir", return_value=project_dir),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "myproject"])
             assert result.exit_code == 1
             assert "already initialized" in result.output.lower() or "destroy" in result.output.lower()
 
@@ -2035,7 +2084,7 @@ class TestInitDryRun:
             patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("", "")),
         ):
-            result = runner.invoke(app, ["init", "--dry-run"])
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
             assert result.exit_code == 0
 
         # Registry should be unmodified
@@ -2063,7 +2112,7 @@ class TestInitDoctorPreFlightFailure:
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 1
 
 
@@ -2082,9 +2131,9 @@ class TestInitNonTTY:
             {
                 "instance": {
                     "name": "newproject",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
@@ -2102,7 +2151,7 @@ class TestInitNonTTY:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0
 
 
@@ -2136,9 +2185,174 @@ class TestInitFlagRemoval:
     def test_user_flag_rejected(self, runner: CliRunner) -> None:
         from cli.main import app
 
-        result = runner.invoke(app, ["init", "--user", "sandbox"])
+        result = runner.invoke(app, ["init", "newproject", "--user", "sandbox"])
         assert result.exit_code != 0
         assert "no such option" in result.output.lower() or "--user" in result.output
+
+
+class TestValidateName:
+    """``_validate_name`` enforces the regex/length/leading-char/reserved rules."""
+
+    def test_empty_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("", kind="instance", max_len=30)
+
+    def test_too_long_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("a" * 31, kind="instance", max_len=30)
+
+    def test_leading_dash_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("-foo", kind="instance", max_len=30)
+
+    def test_leading_underscore_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("_foo", kind="instance", max_len=30)
+
+    def test_invalid_chars_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("Foo!", kind="instance", max_len=30)
+
+    @pytest.mark.parametrize("name", ["isolated", "all", "_backups", "default", "system"])
+    def test_reserved_rejected(self, name: str) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name(name, kind="workspace", max_len=32)
+
+    @pytest.mark.parametrize("name", ["main", "backend-api", "scratch_2", "p"])
+    def test_valid_name_accepted(self, name: str) -> None:
+        from cli.main import _validate_name
+
+        _validate_name(name, kind="workspace", max_len=32)
+
+
+class TestParseWorkspaceFlags:
+    """``_parse_workspace_flags`` builds WorkspaceSpec lists from CLI multi-flags."""
+
+    def test_default_creates_single_empty_main(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        specs = _parse_workspace_flags("inst", tmp_path, [], [])
+        assert len(specs) == 1
+        assert specs[0].name == "main"
+        assert specs[0].bootstrap_mode == "empty"
+        assert specs[0].source is None
+        assert specs[0].path == str(tmp_path / "workspaces" / "inst" / "main")
+
+    def test_copy_with_path(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        specs = _parse_workspace_flags("inst", tmp_path, ["api=/src/api"], [])
+        assert specs[0].name == "api"
+        assert specs[0].bootstrap_mode == "copy"
+        assert specs[0].source == "/src/api"
+
+    def test_copy_without_equals_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["nope"], [])
+
+    def test_copy_with_empty_name_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["=/path"], [])
+
+    def test_copy_with_empty_path_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["api="], [])
+
+    def test_duplicate_in_copy_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["api=/a", "api=/b"], [])
+
+    def test_duplicate_across_flags_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["api=/a"], ["api"])
+
+    def test_multiple_workspaces_collected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        specs = _parse_workspace_flags("inst", tmp_path, ["api=/a"], ["scratch", "logs"])
+        names = [s.name for s in specs]
+        assert names == ["api", "scratch", "logs"]
+
+
+class TestPreflightWorkspaceSource:
+    """``_preflight_workspace_source`` enforces source-side gates before rsync."""
+
+    def test_nonexistent_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        with pytest.raises(typer.BadParameter, match="does not exist"):
+            _preflight_workspace_source(str(tmp_path / "missing"), inst="i", user_home=tmp_path)
+
+    def test_unreadable_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        src = tmp_path / "src"
+        src.mkdir()
+        os.chmod(src, 0o000)
+        try:
+            with pytest.raises(typer.BadParameter, match="not readable"):
+                _preflight_workspace_source(str(src), inst="i", user_home=tmp_path)
+        finally:
+            os.chmod(src, 0o755)
+
+    def test_boundary_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        with pytest.raises(typer.BadParameter, match="walker boundary"):
+            _preflight_workspace_source("/etc", inst="i", user_home=tmp_path)
+
+    def test_cycle_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        ws_root = tmp_path / "workspaces" / "i"
+        nested = ws_root / "leak"
+        nested.mkdir(parents=True)
+        with pytest.raises(typer.BadParameter, match="cycle"):
+            _preflight_workspace_source(str(nested), inst="i", user_home=tmp_path)
+
+    def test_clean_source_passes(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hi")
+        # No exception raised.
+        _preflight_workspace_source(str(src), inst="i", user_home=tmp_path)
+
+    def test_size_warning_emitted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli import main as cli_main
+        from cli.main import _preflight_workspace_source
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "big").write_text("x")
+        monkeypatch.setattr("os.path.getsize", lambda _p: 6 * 1024 * 1024 * 1024)
+        warnings: list[str] = []
+        monkeypatch.setattr(cli_main.console, "print", lambda *a, **_kw: warnings.append(str(a[0])))
+        _preflight_workspace_source(str(src), inst="i", user_home=tmp_path)
+        assert any("larger than 5 GB" in w for w in warnings)
 
 
 class TestInitDryRunNoConfigFallback:
@@ -2153,7 +2367,7 @@ class TestInitDryRunNoConfigFallback:
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init", "--dry-run"])
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
         # dry-run path tolerates missing host config; auth defaults to sudo
         assert result.exit_code == 0, result.output
 
@@ -2171,7 +2385,7 @@ class TestInitNoConfigPostSeedFails:
             patch("cli.main._resolve_project_dir", return_value="/home/dev/missing"),
             patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
         assert result.exit_code == 1
         assert "no host config" in result.output.lower()
 
@@ -2216,7 +2430,10 @@ class TestInitHostConfigResolution:
             {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
         )
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "tomlproject", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "tomlproject", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
@@ -2234,7 +2451,7 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "tomlproject"])
             assert result.exit_code == 0
 
     def test_init_non_tty_without_config_fails_with_guidance(
@@ -2253,7 +2470,7 @@ class TestInitHostConfigResolution:
             patch("cli.main._seed_host_config_if_absent", wraps=_REAL_SEED_HOST_CONFIG),
             patch("cli.main._stdin_is_tty", return_value=False),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "tomlproject"])
         assert result.exit_code == 1, result.output
         assert "non-interactive" in result.output.lower()
         # Rich may line-wrap long paths; collapse newlines before substring check.
@@ -2271,7 +2488,10 @@ class TestInitHostConfigResolution:
 
         project_dir = "/home/dev/seedproj"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "seedproj", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "seedproj", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
@@ -2295,7 +2515,7 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "seedproj"])
         seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert seeded.exists(), f"output={result.output!r} exit={result.exit_code}"
         body = seeded.read_text()
@@ -2315,7 +2535,10 @@ class TestInitHostConfigResolution:
 
         project_dir = "/home/dev/empty"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "empty", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "empty", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
@@ -2339,7 +2562,7 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "empty"])
         assert result.exit_code == 0, result.output
         seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert 'docker_unprivileged_user = "sandbox"' in seeded.read_text()
@@ -2363,7 +2586,7 @@ class TestInitHostConfigResolution:
             patch("cli.main._stdin_is_tty", return_value=True),
             patch("cli.main.typer.prompt", side_effect=["sandbox", "weird"]),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "empty"])
         assert result.exit_code == 1
         assert "invalid machinectl_authentication" in result.output.lower()
 
@@ -2385,7 +2608,10 @@ class TestInitHostConfigResolution:
 
         project_dir = "/home/dev/preserve"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "preserve", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "preserve", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
@@ -2407,7 +2633,7 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "preserve"])
         assert result.exit_code == 0, result.output
         # No prompts issued because file existed
         mock_prompt.assert_not_called()
@@ -2426,7 +2652,10 @@ class TestInitAuthProbe:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/probeproject"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "probeproject", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "probeproject", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
@@ -2443,7 +2672,7 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 0
             # Verify the probe was called with sudo prefix
             probe_call = mock_run.call_args[0][0]
@@ -2464,7 +2693,7 @@ class TestInitAuthProbe:
                 return_value=subprocess.CompletedProcess([], 1, "", "permission denied"),
             ),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
@@ -2480,7 +2709,7 @@ class TestInitAuthProbe:
             patch("cli.main._resolve_project_dir", return_value="/home/dev/timeout"),
             patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="test", timeout=5)),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "timed out" in result.output.lower()
 
@@ -2492,7 +2721,10 @@ class TestInitAuthProbe:
         home = mock_sandbox_ai_home
         project_dir = "/home/dev/polkit"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "polkit", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "polkit", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
@@ -2509,7 +2741,7 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--machinectl-auth", "polkit"])
+            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 0
             probe_call = mock_run.call_args[0][0]
             assert "sudo" not in probe_call
@@ -2527,7 +2759,7 @@ class TestInitAuthProbe:
                 return_value=subprocess.CompletedProcess([], 1, "", "auth failed"),
             ),
         ):
-            result = runner.invoke(app, ["init", "--machinectl-auth", "polkit"])
+            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 1
             assert "polkit" in result.output.lower()
 
@@ -2539,7 +2771,7 @@ class TestInitAuthProbe:
             patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
             patch("cli.main._resolve_project_dir", return_value="/home/dev/badauth"),
         ):
-            result = runner.invoke(app, ["init", "--machinectl-auth", "invalid"])
+            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "invalid"])
             assert result.exit_code == 1
             assert "invalid" in result.output.lower()
 
@@ -2552,7 +2784,7 @@ class TestInitAuthProbe:
             patch("cli.main._resolve_project_dir", return_value="/home/dev/nobin"),
             patch("cli.main.subprocess.run", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "polkit"])
             assert result.exit_code == 1
             assert "command not found" in result.output.lower()
 
@@ -2570,7 +2802,10 @@ class TestResolveHostConfig:
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
         )
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "test", "user_project_root": "/tmp/test", "host_uid": "1000"}}
+            {
+                "instance": {"name": "test", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/tmp/test"}},
+            }
         )
 
         with patch("cli.main.HostConfig.from_toml", return_value=mock_project_config):
@@ -2844,9 +3079,9 @@ class TestContainerStatus:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -2882,9 +3117,9 @@ class TestContainerStatus:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -2909,9 +3144,9 @@ class TestContainerStatus:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -3228,7 +3463,7 @@ class TestACLPlanAsymmetry:
         ws = tmp_path / "myws"
         ws.mkdir()
 
-        plan = _acl_grant_plan(str(instance_dir), "sandbox", str(ws), dev_user="dev")
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws)], dev_user="dev")
         descriptions = [d for _, d in plan]
         assert any("workspace named-ACL" in d for d in descriptions)
         assert any("workspace default ACL" in d for d in descriptions)
@@ -3262,7 +3497,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
         ws = tmp_path / "myws"
 
-        plan = _acl_revoke_plan(str(instance_dir), "sandbox", str(ws))
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox", [str(ws)])
         descriptions = [d for _, d in plan]
         assert any("workspace named-ACL" in d for d in descriptions)
         assert any("workspace default named entry" in d for d in descriptions)
@@ -3291,7 +3526,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
 
         # Workspace under a nonexistent path → os.stat on the parent raises OSError.
-        plan = _acl_grant_plan(str(instance_dir), "sandbox", "/nonexistent-root/myproj", dev_user="dev")
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", ["/nonexistent-root/myproj"], dev_user="dev")
         # Should not have crashed; the workspace named-ACL is still queued.
         assert any("workspace named-ACL" in d for _, d in plan)
 
@@ -3308,6 +3543,24 @@ class TestACLPlanAsymmetry:
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
         descriptions = [d for _, d in plan]
         assert any("secrets dir traverse" in d for d in descriptions)
+
+    def test_grant_plan_dedups_shared_ancestor_across_workspaces(self, tmp_path: Path) -> None:
+        """Two workspaces under the same parent dir produce one ancestor-traverse entry per ancestor."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        ws_root = tmp_path / "shared-parent"
+        ws_root.mkdir()
+        ws_a = ws_root / "a"
+        ws_b = ws_root / "b"
+        ws_a.mkdir()
+        ws_b.mkdir()
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws_a), str(ws_b)], dev_user="dev")
+        ancestor_targets = [args[-1] for args, desc in plan if desc.startswith("workspace ancestor traverse: ")]
+        # Shared parent appears at most once even though both workspaces walk through it.
+        assert ancestor_targets.count(str(ws_root)) == 1
 
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
@@ -4124,9 +4377,9 @@ class TestContainerStatusEdgeCases:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": False},
             }
@@ -4149,9 +4402,9 @@ class TestContainerStatusEdgeCases:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": False},
             }
