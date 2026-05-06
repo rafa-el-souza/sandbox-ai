@@ -16,6 +16,7 @@ from core.locks import (
     BackupLockHeldError,
     acquire_backup_lock,
     backup_lock_path,
+    is_backup_lock_held,
     is_lock_stale,
 )
 
@@ -41,15 +42,13 @@ class TestBackupLockPath:
 
 
 class TestAcquireBackupLock:
-    def test_acquires_and_writes_metadata(self, isolated_sandbox_ai_home: Path) -> None:
-        del isolated_sandbox_ai_home
+    def test_acquires_and_writes_metadata(self) -> None:
         with acquire_backup_lock("myinst") as lock_path:
             content = json.loads(lock_path.read_bytes())
             assert content["pid"] == os.getpid()
             assert "started_at_utc" in content
 
-    def test_clears_metadata_on_exit(self, isolated_sandbox_ai_home: Path) -> None:
-        del isolated_sandbox_ai_home
+    def test_clears_metadata_on_exit(self) -> None:
         with acquire_backup_lock("myinst") as lock_path:
             assert lock_path.read_bytes()
         assert lock_path.read_bytes() == b""
@@ -110,11 +109,7 @@ class TestAcquireBackupLock:
             release.set()
             proc.join(timeout=5)
 
-    def test_oserror_other_than_eagain_propagates(
-        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        del isolated_sandbox_ai_home
-
+    def test_oserror_other_than_eagain_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def fake_flock(_fd: int, _flags: int) -> None:
             raise OSError(13, "permission denied")
 
@@ -170,3 +165,78 @@ class TestIsLockStale:
         )
         path.write_text(json.dumps({"pid": 1, "started_at_utc": old}))
         assert is_lock_stale(path)
+
+
+class TestIsBackupLockHeld:
+    """Probe used by lifecycle commands to refuse fast on backup contention."""
+
+    def test_missing_lockfile_returns_false(self) -> None:
+        assert is_backup_lock_held("never-locked") is False
+
+    def test_stale_lockfile_returns_false(self) -> None:
+        path = backup_lock_path("stale")
+        os.makedirs(path.parent, exist_ok=True)
+        old = (dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=STALE_GRACE_SECONDS + 5)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        path.write_text(json.dumps({"pid": 99999, "started_at_utc": old}))
+        assert is_backup_lock_held("stale") is False
+
+    def test_unheld_fresh_lockfile_returns_false(self) -> None:
+        # Fresh metadata but no flock holder: probe should succeed in acquiring
+        # LOCK_EX|LOCK_NB then release, returning False.
+        path = backup_lock_path("fresh")
+        os.makedirs(path.parent, exist_ok=True)
+        now_iso = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        path.write_text(json.dumps({"pid": 1, "started_at_utc": now_iso}))
+        assert is_backup_lock_held("fresh") is False
+
+    def test_held_lockfile_returns_true(self) -> None:
+        path = backup_lock_path("held")
+        os.makedirs(path.parent, exist_ok=True)
+        ctx = mp.get_context("fork")
+        ready = ctx.Event()
+        release = ctx.Event()
+        proc = ctx.Process(target=_hold_lock, args=(str(path), ready, release))
+        proc.start()
+        try:
+            assert ready.wait(timeout=5)
+            assert is_backup_lock_held("held") is True
+        finally:
+            release.set()
+            proc.join(timeout=5)
+
+    def test_toctou_open_after_unlink_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """File exists at exists() but is unlinked before os.open — race-safe."""
+        path = backup_lock_path("racy")
+        os.makedirs(path.parent, exist_ok=True)
+        now_iso = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        path.write_text(json.dumps({"pid": 1, "started_at_utc": now_iso}))
+
+        real_open = os.open
+
+        def fake_open(p: str | bytes | os.PathLike[str] | os.PathLike[bytes], flags: int) -> int:
+            if isinstance(p, (str, os.PathLike)) and str(p).endswith("racy.backup.lock"):
+                raise FileNotFoundError(str(p))
+            return real_open(p, flags)
+
+        monkeypatch.setattr("core.locks.os.open", fake_open)
+        assert is_backup_lock_held("racy") is False
+
+    def test_unrelated_oserror_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Permission errors on os.open propagate (not silently treated as 'free')."""
+        path = backup_lock_path("noperm")
+        os.makedirs(path.parent, exist_ok=True)
+        now_iso = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        path.write_text(json.dumps({"pid": 1, "started_at_utc": now_iso}))
+
+        real_open = os.open
+
+        def fake_open(p: str | bytes | os.PathLike[str] | os.PathLike[bytes], flags: int) -> int:
+            if isinstance(p, (str, os.PathLike)) and str(p).endswith("noperm.backup.lock"):
+                raise PermissionError(13, "denied")
+            return real_open(p, flags)
+
+        monkeypatch.setattr("core.locks.os.open", fake_open)
+        with pytest.raises(PermissionError):
+            is_backup_lock_held("noperm")

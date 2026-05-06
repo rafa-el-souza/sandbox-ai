@@ -7,7 +7,6 @@ All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json as _json
 import os
 import re
@@ -52,6 +51,7 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
+from core.locks import is_backup_lock_held
 from core.registry import InstanceRegistry
 from core.scaffold import (
     WorkspaceSpec,
@@ -221,29 +221,16 @@ def _preflight_workspace_source(source: str, *, inst: str, user_home: Path) -> N
         )
 
 
-def _resolve_sandbox_ai_home() -> str:
-    """Resolve SANDBOX_AI_HOME from the orchestrator source location."""
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def _resolve_project_dir() -> str:
-    """Resolve the project directory from CWD."""
-    return os.path.abspath(os.getcwd())
-
-
-def _resolve_instance(install_root: str, project_dir: str) -> tuple[str | None, str | None]:
-    """Look up instance from registry by basename of project_dir.
-
-    Returns ``(instance_dir, instance_id)`` where ``instance_id`` is the on-disk
-    directory's basename (still ``<name>-<hash>`` during the change-5 transition).
-    """
-    del install_root
-    name = os.path.basename(os.path.abspath(project_dir))
-    registry = InstanceRegistry()
-    entry = registry.get(name)
+def _lookup_instance_or_exit(inst: str) -> str:
+    """Look up ``inst`` in the registry; exit 1 with guidance when absent."""
+    entry = InstanceRegistry().get(inst)
     if entry is None:
-        return None, None
-    return entry.instance_dir, os.path.basename(entry.instance_dir)
+        console.print(
+            f"No sandbox instance named {inst!r}. Run `sandbox init {inst}` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+    return entry.instance_dir
 
 
 def _load_config(instance_dir: str) -> InstanceConfig:
@@ -360,11 +347,10 @@ def _release_lock(fd: int) -> None:
 # ─── Phase implementations ──────────────────────────────────────────────────
 
 
-def _phase_ipam(install_root: str, instance_id: str) -> int:
+def _phase_ipam(inst: str) -> int:
     """Phase 2: IPAM allocation. Returns base_index."""
-    del install_root
     ledger = IPAMLedger()
-    return ledger.allocate(instance_id)
+    return ledger.allocate(inst)
 
 
 def _phase_credentials(
@@ -393,7 +379,6 @@ def _phase_hydrate(
     config: InstanceConfig,
     base_index: int,
     proxy_password: str,
-    install_root: str,
     instance_dir: str,
     host: HostSettings,
 ) -> None:
@@ -1028,12 +1013,23 @@ def _phase_handover(
     host_user: str,
     warmup_prompt: str = "",
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    cwd_workspace: str | None = None,
 ) -> None:
-    """Phase 7: PTY handover — docker exec -it via machinectl."""
+    """Phase 7: PTY handover — docker exec -it via machinectl.
+
+    ``cwd_workspace`` is the runtime cwd selector: when supplied, ``-w
+    /workspaces/<ws>`` sets the in-container cwd at exec time per cli-attach.
+    ``attach`` always passes a value (resolved per the N=1 default / N>1 list
+    rule). ``start`` intentionally passes ``None`` — cli-start does NOT mandate
+    a runtime cwd, so the admin shell inherits whatever the entrypoint sets.
+    The Dockerfile WORKDIR is intentionally ignored for runtime cwd.
+    """
     executor = Executor()
     exec_args = ["exec"]
     if warmup_prompt:
         exec_args.extend(["-e", f"SANDBOX_WARMUP_PROMPT={warmup_prompt}"])
+    if cwd_workspace is not None:
+        exec_args.extend(["-w", f"/workspaces/{cwd_workspace}"])
     exec_args.extend(["-it", f"{name}-admin-1", "zsh"])
 
     executor.run(
@@ -1101,7 +1097,7 @@ def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] |
 # ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
 
 
-def _dry_run_pipeline(install_root: str, project_dir: str) -> None:
+def _dry_run_pipeline(inst: str) -> None:
     """Simulate the full start pipeline without side effects.
 
     Validates config parsing, IPAM allocation, template rendering, secret
@@ -1109,19 +1105,10 @@ def _dry_run_pipeline(install_root: str, project_dir: str) -> None:
     """
     console.print("\n[bold]Dry-run: sandbox start[/bold]\n")
 
-    # ── Instance resolution ──────────────────────────────────────────────
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-
-    if instance_dir is None or instance_id is None:
-        console.print(
-            "No sandbox instance found. Run `sandbox init` first.",
-            style="red",
-        )
-        raise typer.Exit(code=1)
-
-    console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
+    instance_dir = _lookup_instance_or_exit(inst)
+    console.print(f"  Instance: [green]{inst}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings(project_dir, config)
+    host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
 
@@ -1130,7 +1117,7 @@ def _dry_run_pipeline(install_root: str, project_dir: str) -> None:
     # ── IPAM preview ─────────────────────────────────────────────────────
     ledger = IPAMLedger()
     try:
-        slot, is_existing = ledger.peek_next_slot(instance_id)
+        slot, is_existing = ledger.peek_next_slot(inst)
         isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
         status = "existing" if is_existing else "preview — subject to concurrent changes"
         console.print(f"\n  IPAM slot: {slot} ({status})")
@@ -1256,19 +1243,18 @@ def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
     return missing
 
 
-def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str, MachinectlAuth]:
+def _resolve_host_config() -> tuple[str, MachinectlAuth]:
     """Resolve host_user and auth from per-host ``sandbox-ai.toml``.
 
     Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
-    settings = _resolve_host_settings(project_dir, config)
+    settings = _resolve_host_settings()
     return settings.docker_unprivileged_user, settings.machinectl_authentication
 
 
-def _resolve_host_settings(project_dir: str, config: InstanceConfig) -> HostSettings:
+def _resolve_host_settings() -> HostSettings:
     """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
-    del project_dir, config  # accepted for signature stability; host config is authoritative
     try:
         project_config = HostConfig.from_toml()
     except FileNotFoundError as exc:
@@ -1419,7 +1405,6 @@ def init(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
 ) -> None:
     """Initialize a new sandbox instance with one or more workspaces."""
-    install_root = _resolve_sandbox_ai_home()
     _validate_name(inst, kind="instance", max_len=_INSTANCE_NAME_MAX)
 
     # Per-user tree creation (idempotent, mode 0700)
@@ -1531,12 +1516,7 @@ def init(
         if ws.bootstrap_mode == "copy" and ws.source is not None:
             _preflight_workspace_source(ws.source, inst=inst, user_home=user_home)
 
-    # Instance directory still lives under ``<install_root>/sandboxes`` for now;
-    # group 6 relocates it to ``<home>/instances/<inst>``. The on-disk basename
-    # keeps a hash suffix during the transition.
-    _id_hash = hashlib.md5(inst.encode("utf-8")).hexdigest()[:6]
-    instance_id = f"{inst}-{_id_hash}"
-    instance_dir = os.path.join(install_root, "sandboxes", instance_id)
+    instance_dir = str(sandbox_ai_home() / "instances" / inst)
 
     if dry_run:
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
@@ -1607,49 +1587,42 @@ def init(
 
 @app.command()
 def start(
+    inst: str = typer.Argument(..., help="Instance name"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
 ) -> None:
     """Start the sandbox."""
     _require_per_user_state_initialized()
-    install_root = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
     if dry_run:
-        _dry_run_pipeline(install_root, project_dir)
+        _dry_run_pipeline(inst)
         return
 
     # Phase 0: Instance resolution
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-
-    if instance_dir is None or instance_id is None:
-        console.print(
-            "No sandbox instance found. Run `sandbox init` first.",
-            style="red",
-        )
-        raise typer.Exit(code=1)
+    instance_dir = _lookup_instance_or_exit(inst)
 
     # Sentinel check: verify init completed
     sentinel_path = os.path.join(instance_dir, ".initialized")
     if not os.path.exists(sentinel_path):
         console.print(
-            "Instance partially initialized. Run `sandbox destroy` then `sandbox init`.",
+            f"Instance partially initialized. Run `sandbox destroy {inst}` then `sandbox init {inst}`.",
             style="red",
         )
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_settings = _resolve_host_settings(project_dir, config)
+    host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
 
-    # Project name immutability check (sandbox-toml-schema spec)
-    # instance_id format: <instance_name>-<md5[:6]> — strip last 7 chars to recover original name
-    original_name = instance_id[:-7]
-    if name != original_name:
+    # Operator-edited TOML guard: ``instance.name`` should match the registry
+    # key (the typer arg). Divergence is harmless for compose-project-name
+    # correctness — that's derived from ``inst`` per Group 7 — but produces
+    # confusing operator-facing output (status panel, sandbox.toml display).
+    if name != inst:
         console.print(
-            "WARNING: instance.name has changed since init. "
-            "COMPOSE_PROJECT_NAME mismatch may orphan running containers.",
+            f"WARNING: sandbox.toml instance.name ({name!r}) differs from the registry "
+            f"key ({inst!r}). Edit sandbox.toml to set instance.name = {inst!r}.",
             style="yellow",
         )
 
@@ -1676,7 +1649,7 @@ def start(
 
     # Pre-lock warm check (D-52)
     if _warm_check(instance_dir, name, host_user, auth):
-        console.print(f"Sandbox '{name}' is already running. Use 'sandbox attach' to reconnect.")
+        console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
     # Phase 1: Locking
@@ -1690,10 +1663,20 @@ def start(
         )
         raise typer.Exit(code=1) from None
 
+    # Backup-lock check (after state.lock acquisition per cli-start spec).
+    if is_backup_lock_held(inst):
+        if lock_fd is not None:
+            _release_lock(lock_fd)
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
     acl_granted = False
     try:
         # Phase 2: IPAM
-        base_index = _phase_ipam(install_root, instance_id)
+        base_index = _phase_ipam(inst)
         console.print("✓ IPAM — network allocation complete")
 
         # Phase 3: Credentials (generation only)
@@ -1705,7 +1688,7 @@ def start(
 
         # Phase 4: Hydration
         try:
-            _phase_hydrate(config, base_index, proxy_password, install_root, instance_dir, host_settings)
+            _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -1765,24 +1748,21 @@ def start(
 
 
 @app.command()
-def stop(clean: bool = False) -> None:
+def stop(
+    inst: str = typer.Argument(..., help="Instance name"),
+    clean: bool = False,
+) -> None:
     """Stop the sandbox."""
     _require_per_user_state_initialized()
-    install_root = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
-        raise typer.Exit(code=1)
-
+    instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_user, auth = _resolve_host_config()
 
     # Warm check
     if not _warm_check(instance_dir, name, host_user, auth):
-        console.print(f"Sandbox '{name}' is not running. Nothing to stop.")
+        console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
     # Lock acquisition (D8)
@@ -1794,6 +1774,15 @@ def stop(clean: bool = False) -> None:
             style="red bold",
         )
         raise typer.Exit(code=1) from None
+
+    # Backup-lock check (after state.lock per cli-stop spec).
+    if is_backup_lock_held(inst):
+        _release_lock(lock_fd)
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
     # Compose down
     _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
@@ -1807,51 +1796,74 @@ def stop(clean: bool = False) -> None:
     _release_lock(lock_fd)
 
     if clean:
-        console.print(f"Sandbox '{name}' stopped. Named volumes destroyed — data unrecoverable.")
+        console.print(f"Sandbox '{inst}' stopped. Named volumes destroyed — data unrecoverable.")
     else:
-        console.print(f"Sandbox '{name}' stopped. Named volumes preserved.")
+        console.print(f"Sandbox '{inst}' stopped. Named volumes preserved.")
 
 
 @app.command()
-def attach() -> None:
+def attach(
+    inst: str = typer.Argument(..., help="Instance name"),
+    ws: str | None = typer.Argument(None, help="Workspace name (optional iff N=1)"),
+) -> None:
     """Attach to a running sandbox."""
     _require_per_user_state_initialized()
-    install_root = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
+    # Backup-lock check (cli-attach: refuse fast if held; attach holds no
+    # state.lock, so the only cleanup needed on this path is the exit).
+    if is_backup_lock_held(inst):
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
         raise typer.Exit(code=1)
 
+    instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_user, auth = _resolve_host_config()
+
+    # Workspace selection per cli-attach spec.
+    workspace_names = sorted(config.workspaces.keys())
+    if ws is None:
+        if len(workspace_names) == 1:
+            ws = workspace_names[0]
+        else:
+            joined = ", ".join(workspace_names)
+            console.print(
+                f"Multiple workspaces in {inst!r}. Pick one: {joined}.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+    elif ws not in config.workspaces:
+        console.print(
+            f"Workspace {ws!r} not found in instance {inst!r}. Available: {', '.join(workspace_names)}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
     # Warm check — reject if cold
     if not _warm_check(instance_dir, name, host_user, auth):
-        console.print(f"Sandbox '{name}' is not running. Use 'sandbox start' to launch.")
+        console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
     # Direct handover — no hydration, no credentials, no locking
-    _phase_handover(name, host_user, auth=auth)
+    _phase_handover(name, host_user, auth=auth, cwd_workspace=ws)
 
 
 @app.command()
-def destroy(force: bool = False) -> None:
+def destroy(
+    inst: str = typer.Argument(..., help="Instance name"),
+    force: bool = False,
+) -> None:
     """Permanently destroy a sandbox instance."""
     _require_per_user_state_initialized()
-    install_root = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
-        raise typer.Exit(code=1)
+    instance_dir = _lookup_instance_or_exit(inst)
 
-    # Prefix guard — before anything else
-    sandboxes_prefix = os.path.join(install_root, "sandboxes")
-    if not instance_dir.startswith(sandboxes_prefix):
+    # Prefix guard — before anything else.
+    instances_prefix = str(sandbox_ai_home() / "instances") + os.sep
+    if not instance_dir.startswith(instances_prefix):
         console.print(
             "[FATAL] Instance directory path fails prefix guard. Aborting.",
             style="red bold",
@@ -1860,20 +1872,29 @@ def destroy(force: bool = False) -> None:
 
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_user, auth = _resolve_host_config()
 
     # Phase 0: Confirmation
     if not force:
-        console.print(f"WARNING: This permanently deletes sandbox '{name}' and all its state.")
+        console.print(f"WARNING: This permanently deletes sandbox '{inst}' and all its state.")
         ws_summary = ", ".join(sorted(config.workspaces.keys()))
         console.print(f"         Workspaces affected: {ws_summary}")
         typed_name = typer.prompt("Type the sandbox name to confirm")
-        if typed_name != name:
+        if typed_name != inst:
             console.print("Aborted.")
             return
 
     # Phase 1: Locking
     lock_fd = _acquire_state_lock(instance_dir)
+
+    # Backup-lock check (after state.lock per cli-destroy concurrency matrix).
+    if is_backup_lock_held(inst):
+        _release_lock(lock_fd)
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
     try:
         # Phase 2: Container and volume teardown — fault-isolated (D12)
@@ -1898,14 +1919,13 @@ def destroy(force: bool = False) -> None:
         # Phase 5: State cleanup — IPAM — fault-isolated (D12)
         try:
             ledger = IPAMLedger()
-            ledger.release(instance_id)
+            ledger.release(inst)
         except Exception as e:
             console.print(f"⚠ IPAM release warning: {e}", style="yellow")
 
         # Phase 6: State cleanup — Registry — fault-isolated (D12)
         try:
-            registry = InstanceRegistry()
-            registry.remove(os.path.basename(os.path.abspath(project_dir)))
+            InstanceRegistry().remove(inst)
         except Exception as e:
             console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
 
@@ -1913,7 +1933,7 @@ def destroy(force: bool = False) -> None:
         # Close lock fd — safe after rmtree: kernel keeps inode alive while fd is open
         _release_lock(lock_fd)
 
-    console.print(f"Sandbox '{name}' permanently destroyed. IPAM slot freed for reuse.")
+    console.print(f"Sandbox '{inst}' permanently destroyed. IPAM slot freed for reuse.")
 
 
 @app.command()
@@ -1967,29 +1987,96 @@ def doctor(
         raise typer.Exit(code=1)
 
 
-@app.command()
-def status() -> None:
-    """Show sandbox instance status and diagnostics."""
-    _require_per_user_state_initialized()
-    install_root = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
+def _workspace_state_label(ws_path: str, host_settings: HostSettings) -> str:
+    """Return the per-cli-status state label for a single workspace path.
 
-    # Instance resolution
-    instance_dir, instance_id = _resolve_instance(install_root, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
-        raise typer.Exit(code=1)
+    `● ok`    — path exists, setgid + group ownership matches the bridge gid.
+    `⚠ drift` — path exists but bridge-group state is missing or wrong.
+    `✗ missing` — path does not exist on disk.
+    """
+    try:
+        st = os.stat(ws_path)
+    except FileNotFoundError:
+        return "[red]✗ missing[/red]"
+    try:
+        expected_gid = workspace_bridge_gid(host_settings)
+    except WorkspaceBridgeGroupMissingError:
+        return "[yellow]⚠ drift[/yellow]"
+    setgid_ok = bool(st.st_mode & 0o2000)
+    group_ok = st.st_gid == expected_gid
+    if setgid_ok and group_ok:
+        return "[green]● ok[/green]"
+    return "[yellow]⚠ drift[/yellow]"
 
+
+def _workspace_du_size(ws_path: str) -> str:
+    """Return a `du -sh`-style size string, or "—" when the path is unreadable."""
+    try:
+        result = subprocess.run(
+            ["du", "-sh", ws_path],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError:
+        return "—"
+    except subprocess.TimeoutExpired:
+        return "—"
+    except FileNotFoundError:
+        return "—"
+    return result.stdout.split()[0] if result.stdout.strip() else "—"
+
+
+def _render_status_summary() -> None:
+    """Render the all-instances summary table for ``sandbox status`` (no inst)."""
+    entries = InstanceRegistry().all()
+    if not entries:
+        console.print("No instances registered. Run `sandbox init <inst>` to create one.")
+        return
+
+    table = Table(title="Sandbox instances")
+    table.add_column("Name", style="cyan")
+    table.add_column("State")
+    table.add_column("Workspaces", justify="right")
+    table.add_column("IPAM slot", justify="right")
+
+    ledger = IPAMLedger()
+    for inst_name in sorted(entries):
+        entry = entries[inst_name]
+        try:
+            config = _load_config(entry.instance_dir)
+            ws_count = str(len(config.workspaces))
+        except Exception:
+            ws_count = "?"
+        slot_str = "—"
+        try:
+            slot, is_existing = ledger.peek_next_slot(inst_name)
+            if is_existing:
+                slot_str = str(slot)
+        except IPAMExhaustedError:
+            pass
+        # State is computed cheaply: "registered" only — exact running-state requires
+        # daemon round-trips which the summary view does not justify.
+        table.add_row(inst_name, "registered", ws_count, slot_str)
+
+    console.print(table)
+
+
+def _render_status_detailed(inst: str, *, detailed: bool) -> None:
+    """Render the per-instance detailed panel + workspaces + containers."""
+    instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
     name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    host_settings = _resolve_host_settings()
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     # Container status
     containers = _container_status(instance_dir, name, host_user, config, auth)
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
-    # Determine state
     if is_running and has_unhealthy:
         state_label = "⚠ degraded"
         border_color = "yellow"
@@ -2000,32 +2087,42 @@ def status() -> None:
         state_label = "○ stopped"
         border_color = "red"
 
-    # Instance header panel
-    ws_summary = ", ".join(f"{n}={ws.path}" for n, ws in sorted(config.workspaces.items()))
     header_lines = [
-        f"[bold]Name:[/bold]        {name}",
-        f"[bold]ID:[/bold]          {instance_id}",
-        f"[bold]Workspaces:[/bold]  {ws_summary}",
+        f"[bold]Name:[/bold]        {inst}",
+        f"[bold]Dir:[/bold]         {instance_dir}",
         f"[bold]User:[/bold]        {host_user}",
         f"[bold]State:[/bold]       {state_label}",
     ]
     panel = Panel(
         "\n".join(header_lines),
-        title=f"Sandbox: {name}",
+        title=f"Sandbox: {inst}",
         border_style=border_color,
     )
     console.print(panel)
 
-    # Container grid (running only)
+    # Workspaces table per cli-status spec.
+    ws_table = Table(title="Workspaces")
+    ws_table.add_column("Name", style="cyan")
+    ws_table.add_column("Mode")
+    ws_table.add_column("Path")
+    ws_table.add_column("State")
+    if detailed:
+        ws_table.add_column("Size", justify="right")
+    for ws_name, ws in sorted(config.workspaces.items()):
+        row = [ws_name, str(ws.bootstrap_mode.value), ws.path, _workspace_state_label(ws.path, host_settings)]
+        if detailed:
+            row.append(_workspace_du_size(ws.path))
+        ws_table.add_row(*row)
+    console.print(ws_table)
+
+    # Containers table (running only)
     if is_running:
-        # Derive static IPs for network column
         ledger = IPAMLedger()
         ip_map: dict[str, str] = {}
         try:
-            slot, _is_existing = ledger.peek_next_slot(instance_id)
-            if _is_existing:
+            slot, is_existing = ledger.peek_next_slot(inst)
+            if is_existing:
                 ips = derive_static_ips(slot)
-                # Map service names to IPs from IPAM
                 ip_map = {
                     "core": ips.get("agent_isolated_ip", ""),
                     "admin": ips.get("admin_admin_ip", ""),
@@ -2059,8 +2156,8 @@ def status() -> None:
     # IPAM display
     ledger = IPAMLedger()
     try:
-        slot, _is_existing = ledger.peek_next_slot(instance_id)
-        if _is_existing:
+        slot, is_existing = ledger.peek_next_slot(inst)
+        if is_existing:
             isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
             console.print(f"\n[bold]IPAM[/bold] slot {slot}")
             console.print(f"  Isolated:    {isolated}")
@@ -2081,6 +2178,22 @@ def status() -> None:
             console.print("\n[yellow bold]Warnings[/yellow bold]")
             for secret in missing:
                 console.print(f"  ⊘ Missing secret: {secret}", style="yellow")
+
+
+@app.command()
+def status(
+    inst: str | None = typer.Argument(None, help="Instance name (omit for all-instances summary)"),
+    detailed: bool = typer.Option(False, "--detailed", help="Include `du -sh` per workspace"),
+) -> None:
+    """Show sandbox instance status and diagnostics."""
+    _require_per_user_state_initialized()
+    if inst is None:
+        if detailed:
+            console.print("--detailed requires an explicit <inst> argument.", style="red")
+            raise typer.Exit(code=1)
+        _render_status_summary()
+        return
+    _render_status_detailed(inst, detailed=detailed)
 
 
 if __name__ == "__main__":

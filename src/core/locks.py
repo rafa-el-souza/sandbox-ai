@@ -44,7 +44,9 @@ def _read_lock_metadata(path: Path) -> dict[str, str] | None:
     try:
         with open(path) as f:
             data = json.load(f)
-    except FileNotFoundError, json.JSONDecodeError, OSError:
+    except OSError:
+        return None
+    except json.JSONDecodeError:
         return None
     if not isinstance(data, dict):
         return None
@@ -66,6 +68,38 @@ def is_lock_stale(path: Path, *, now: _dt.datetime | None = None) -> bool:
         return True
     current = now if now is not None else _utcnow()
     return (current - ts).total_seconds() > STALE_GRACE_SECONDS
+
+
+def is_backup_lock_held(instance_name: str) -> bool:
+    """Return True iff the per-instance backup lock is held by a live process.
+
+    Stale locks (per :func:`is_lock_stale`) and missing lockfiles return False.
+    Used by lifecycle commands (`start`, `stop`, `attach`, `destroy`) to refuse
+    fast when a backup is in flight on the same instance.
+
+    Other ``OSError`` subclasses raised by ``os.open``/``flock`` (EBADF, ENOLCK,
+    permission errors) propagate — they signal filesystem corruption, not lock
+    contention, and the caller should not silently treat them as "not held."
+    """
+    path = backup_lock_path(instance_name)
+    if not path.exists():
+        return False
+    if is_lock_stale(path):
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        # TOCTOU: lockfile removed between `path.exists()` and `os.open`.
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 @contextlib.contextmanager
