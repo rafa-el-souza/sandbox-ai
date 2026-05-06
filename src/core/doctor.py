@@ -623,6 +623,9 @@ _UNCONDITIONAL_FILES: list[str] = [
 ]
 
 
+_ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
+
+
 def check_acl_support(user: str, distro: str | None) -> CheckResult:
     """Check that the filesystem supports POSIX ACLs."""
     sandbox_home = _get_sandbox_ai_home()
@@ -639,18 +642,18 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
                 check=False,
                 capture_output=True,
             )
-        return CheckResult(
-            status="pass",
-            name="ACL support",
-            detail="Filesystem supports POSIX ACLs",
-        )
-    except subprocess.CalledProcessError, OSError:
+    except _ACL_PROBE_FAILURES:
         return CheckResult(
             status="fail",
             name="ACL support",
             detail="Filesystem does not support POSIX ACLs",
             remediation="Ensure the filesystem is mounted with ACL support (mount -o acl)",
         )
+    return CheckResult(
+        status="pass",
+        name="ACL support",
+        detail="Filesystem supports POSIX ACLs",
+    )
 
 
 def _has_acl_exec(directory: str, user: str) -> bool:
@@ -678,7 +681,9 @@ def _has_acl_exec(directory: str, user: str) -> bool:
                 perms = line[len(prefix) :]
                 if "x" in perms:
                     return True
-    except subprocess.TimeoutExpired, OSError:
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError:
         pass
     return False
 
@@ -946,7 +951,9 @@ def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> C
         try:
             recommended = autodetect_workspace_bridge_gid_recommendation(host_user)
             rec_str = str(recommended)
-        except NoSubgidRangeError, NoFreeGidInSubgidRangeError:
+        except NoSubgidRangeError:
+            rec_str = "<pick-a-gid-in-claude-sandbox-subgid-range>"
+        except NoFreeGidInSubgidRangeError:
             rec_str = "<pick-a-gid-in-claude-sandbox-subgid-range>"
         remediation = (
             f"sudo groupadd -g {rec_str} {host.workspace_bridge_group} && "
@@ -1058,6 +1065,7 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
     from core.hydration import IMAGE_REGISTRY
 
     image = IMAGE_REGISTRY["busybox_musl"].pinned
+    docker_inspect_failures: tuple[type[BaseException], ...] = (FileNotFoundError, subprocess.TimeoutExpired)
     try:
         result = subprocess.run(
             ["docker", "image", "inspect", image],
@@ -1065,7 +1073,7 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
             text=True,
             timeout=5,
         )
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except docker_inspect_failures:
         return CheckResult(
             status="warn",
             name="helper image cached",
@@ -1110,7 +1118,9 @@ def _scan_instance_dirs() -> list[str] | None:
     try:
         with open(state_path) as f:
             data = json.load(f)
-    except FileNotFoundError, json.JSONDecodeError:
+    except FileNotFoundError:
+        return []
+    except json.JSONDecodeError:
         return []
     instances = data.get("instances", {})
     if not isinstance(instances, dict) or not instances:

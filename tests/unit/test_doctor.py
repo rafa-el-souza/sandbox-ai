@@ -1848,6 +1848,28 @@ class TestCheckWorkspaceBridgeGroupExists:
         assert result.status == "fail"
         assert "<pick-a-gid" in (result.remediation or "")
 
+    def test_fail_when_recommendation_finds_no_free_gid(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
+    ) -> None:
+        from core.doctor import check_workspace_bridge_group_exists
+        from core.host_config import NoFreeGidInSubgidRangeError, WorkspaceBridgeGroupMissingError
+
+        config_dir = isolated_sandbox_ai_home / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+
+        def _raise(host: Any) -> int:
+            raise WorkspaceBridgeGroupMissingError("group missing")
+
+        def _raise_no_free(host_user: str, in_container_min: int = 1000) -> int:
+            raise NoFreeGidInSubgidRangeError("range exhausted")
+
+        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
+        monkeypatch.setattr("core.doctor.autodetect_workspace_bridge_gid_recommendation", _raise_no_free)
+        result = check_workspace_bridge_group_exists("claude-sandbox", None)
+        assert result.status == "fail"
+        assert "<pick-a-gid" in (result.remediation or "")
+
     def test_fail_when_gid_out_of_range(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import SubgidOutOfRangeError
