@@ -175,3 +175,32 @@ The system SHALL configure `extra_hosts` entries per container to resolve cross-
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected
 - **THEN** the firecrawl service's `extra_hosts` does NOT contain entries for `db-postgres` or `dns-sidecar` (unreachable after network move)
 
+### Requirement: IPAM Ledger Lock File
+
+The IPAM ledger SHALL be guarded by a dedicated lock file at `<sandbox_ai_home()>/state/ipam.json.lock`, distinct from the per-user `<sandbox_ai_home()>/state/state.lock`. `IPAMLedger.allocate` and any other IPAM mutation entry points SHALL acquire `fcntl.LOCK_EX | LOCK_NB` on this dedicated lock file and SHALL NOT touch `state.lock`. Read-only IPAM operations (e.g., `peek_next_slot`) SHALL NOT acquire any lock.
+
+The IPAM lock SHALL be acquirable while the per-user `state.lock` is already held by the same process, enabling `sandbox start` to call into IPAM mutation paths without self-deadlock.
+
+#### Scenario: IPAM acquires its own lock, not state.lock
+
+- **WHEN** `IPAMLedger.allocate(<inst>)` is invoked
+- **THEN** the implementation opens `<sandbox_ai_home()>/state/ipam.json.lock` (creating it lazily with `O_CREAT | O_RDWR`) and applies `fcntl.LOCK_EX | LOCK_NB` to that file descriptor; `state.lock` is not opened, locked, or otherwise touched by IPAM code
+
+#### Scenario: IPAM mutation succeeds while caller holds state.lock
+
+- **WHEN** a process holds an exclusive `flock` on `<sandbox_ai_home()>/state/state.lock` and then calls `IPAMLedger.allocate(<inst>)` on a fresh ledger
+- **THEN** the IPAM call acquires `<sandbox_ai_home()>/state/ipam.json.lock`, mutates the ledger, releases the IPAM lock, and returns the allocated `base_index` without raising `IPAMLockException` or `BlockingIOError`
+
+#### Scenario: Concurrent IPAM mutation across processes serializes on the IPAM lock
+
+- **WHEN** two `sandbox` invocations attempt simultaneous IPAM mutations under the same user
+- **THEN** they serialize on `<sandbox_ai_home()>/state/ipam.json.lock`; the second invocation either waits (if the first releases quickly) or raises `IPAMLockException` per the existing non-blocking acquisition semantics
+
+### Requirement: IPAM Lock Acquisition Order
+
+When a code path holds both the per-user `state.lock` and the IPAM lock, the per-user `state.lock` SHALL be acquired first. No code path SHALL acquire `state.lock` while already holding `ipam.json.lock`. This ordering rule SHALL be documented in `CLAUDE.md` alongside the existing "State and locking" guidance.
+
+#### Scenario: sandbox start acquires state.lock before invoking IPAM
+
+- **WHEN** `sandbox start <inst>` runs the provisioning sequence
+- **THEN** `state.lock` is acquired by the top-level `start` flow before `_phase_ipam` is invoked, and the IPAM lock acquired inside `_phase_ipam` is the only IPAM-related `flock` performed during the phase

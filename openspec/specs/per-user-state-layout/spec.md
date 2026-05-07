@@ -71,7 +71,9 @@ The system SHALL resolve the per-user orchestrator home root via a single helper
 
 ### Requirement: Per-User Subtree Layout
 
-The per-user home SHALL contain four subdirectories: `config/` (for `sandbox-ai.toml` and other host config files), `state/` (for `instances.json`, `ipam.json`, `state.lock`, and per-instance backup locks `<inst>.backup.lock`), `instances/` (per-instance dirs), and `workspaces/` (per-instance workspace parents plus `_backups/`). All four SHALL have mode `0700`. The home root itself SHALL have mode `0700`.
+The per-user home SHALL contain four subdirectories: `config/` (for `sandbox-ai.toml` and other host config files), `state/` (for `instances.json`, `ipam.json`, `state.lock`, `ipam.json.lock`, and per-instance backup locks `<inst>.backup.lock`), `instances/` (per-instance dirs), and `workspaces/` (per-instance workspace parents plus `_backups/`). All four SHALL have mode `0700`. The home root itself SHALL have mode `0700`.
+
+The `ipam.json.lock` file is owned by the IPAM ledger (per `orchestrator-networking`'s "IPAM Ledger Lock File" requirement) and is distinct from the per-user `state.lock`.
 
 #### Scenario: Subdirectories present after init
 - **WHEN** `sandbox init` completes for the first time on a clean host
@@ -79,7 +81,12 @@ The per-user home SHALL contain four subdirectories: `config/` (for `sandbox-ai.
 
 #### Scenario: Subdirectory contents
 - **WHEN** the per-user tree is populated after `sandbox init <inst>`
-- **THEN** `<home>/config/sandbox-ai.toml` exists; `<home>/state/instances.json` exists; `<home>/instances/<inst>/` exists with the scaffolded instance contents; `<home>/workspaces/<inst>/<ws>/` exists for each workspace. `<home>/state/ipam.json`, `<home>/state/state.lock`, `<home>/state/<inst>.backup.lock` (lazy), and `<home>/workspaces/_backups/` (lazy) are created on first need.
+- **THEN** `<home>/config/sandbox-ai.toml` exists; `<home>/state/instances.json` exists; `<home>/instances/<inst>/` exists with the scaffolded instance contents; `<home>/workspaces/<inst>/<ws>/` exists for each workspace. `<home>/state/ipam.json`, `<home>/state/ipam.json.lock`, `<home>/state/state.lock`, `<home>/state/<inst>.backup.lock` (lazy), and `<home>/workspaces/_backups/` (lazy) are created on first need.
+
+#### Scenario: ipam.json.lock created lazily on first IPAM acquisition
+
+- **WHEN** the per-user tree exists from a prior `sandbox init` but no `sandbox start` has yet been run, and `sandbox start <inst>` is invoked
+- **THEN** `<home>/state/ipam.json.lock` is created on first IPAM acquisition by `IPAMLedger.allocate`, distinct from `<home>/state/state.lock`; existing `<home>/state/ipam.json` ledgers from the redesign require no migration
 
 ### Requirement: Per-User Tree Creation Lifecycle
 

@@ -71,11 +71,18 @@ The system SHALL check whether the sandbox instance's containers are already run
 - **THEN** the warm state check is skipped and the system proceeds to dry-run validation regardless of container state
 
 ### Requirement: Concurrency Lock Acquisition
-The system SHALL acquire a per-instance `state.lock` (fcntl `LOCK_EX | LOCK_NB`) before modifying any instance state.
+The system SHALL acquire a per-user `state.lock` (fcntl `LOCK_EX | LOCK_NB`) at `<sandbox_ai_home()>/state/state.lock` before modifying any instance state. The per-user `state.lock` guards the provisioning sequence as a whole; finer-grained mutation locks (notably the IPAM ledger lock at `<sandbox_ai_home()>/state/ipam.json.lock`, per `orchestrator-networking`'s "IPAM Ledger Lock File" requirement) are acquired internally by the components they protect and are distinct from `state.lock`.
+
+The `start` command SHALL NOT pass its `state.lock` file descriptor into IPAM or any other component, and SHALL NOT re-open `state.lock` after the initial acquisition. IPAM mutation paths invoked while `state.lock` is held SHALL acquire only the IPAM lock and complete without raising `IPAMLockException` due to the outer `state.lock` holder.
 
 #### Scenario: Concurrent start rejected
 - **WHEN** a second `sandbox start` is invoked for the same instance while the first is still in progress
 - **THEN** the second invocation exits with: "Another sandbox start is already in progress for this instance."
+
+#### Scenario: IPAM phase succeeds while start holds state.lock
+
+- **WHEN** `sandbox start <inst>` has acquired the per-user `state.lock` and proceeds to `_phase_ipam`
+- **THEN** `IPAMLedger.allocate` acquires `<sandbox_ai_home()>/state/ipam.json.lock`, mutates the ledger, releases the IPAM lock, and returns; the start command continues to subsequent phases without raising `IPAMLockException` or `BlockingIOError`
 
 ### Requirement: IPAM Allocation Before Launch
 The system SHALL allocate seven consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
@@ -179,7 +186,7 @@ The system SHALL provide a diagnostic helper that identifies which specific ance
 - **THEN** the output includes the specific directory, the sandbox username, a fix command (`setfacl -m u:<user>:--x <dir>`), and a reference to `sandbox doctor`
 
 ### Requirement: Compose Environment File Flag
-The system SHALL pass `--env-file <instance_dir>/.sandbox.env` to all `docker compose` invocations to enable compose-level `${VAR}` interpolation.
+The system SHALL pass `--env-file <instance_dir>/.sandbox.env` to all `docker compose` invocations to enable compose-level `${VAR}` interpolation. The `compose up` shell command SHALL be constructed by a single helper (`_compose_up_cmd_plan` or equivalent in `src/cli/main.py`) that is the sole producer of the `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<project> docker compose <files> --ansi never --env-file <env> up -d --build --wait` string. Both the live execution path (`_phase_compose_up`) and the dry-run preview SHALL render their displayed/executed command from this helper; no parallel reconstruction of the compose `up` command is permitted.
 
 #### Scenario: --env-file on compose up
 - **WHEN** `_phase_compose_up` constructs the compose command
@@ -192,6 +199,16 @@ The system SHALL pass `--env-file <instance_dir>/.sandbox.env` to all `docker co
 #### Scenario: Compose file flags not double-wrapped
 - **WHEN** `_container_status` constructs the compose ps command with multiple compose files from `_build_compose_files()`
 - **THEN** each compose file appears exactly once in the `-f` flag list (flags are used directly from `_build_compose_files()` without re-wrapping)
+
+#### Scenario: Live and dry-run derive compose up from a shared plan helper
+
+- **WHEN** the dry-run preview and `_phase_compose_up` are invoked for the same `(instance_dir, project_name, config)` inputs
+- **THEN** both paths obtain the inner `bash -c` command string from the same `_compose_up_cmd_plan` helper; the dry-run displayed command and the string passed to `Executor.run` by `_phase_compose_up` are byte-identical for those inputs
+
+#### Scenario: Compose up command contains compose -f flags, not helper-cp filenames
+
+- **WHEN** the dry-run preview renders the compose up command for an instance whose hydration emits one or more helper-cp groups (e.g., `ipc_known_hosts`, `ipc_ssh_key`)
+- **THEN** the rendered command contains `docker compose -f <instance_dir>/docker/compose.yml [...]` and does NOT contain any helper-cp filename joined by `, ` in place of compose file flags
 
 ### Requirement: Phase Progress Output
 The system SHALL display progress for each provisioning phase using Rich formatted output. The IPC setup phase (Phase 5b) SHALL NOT appear in the output.

@@ -74,9 +74,21 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 ### Requirement: Command Preview
 The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately (named-ACL grants from `_acl_grant_plan`; cache/log mkdir+chown from `_helper_mkdir_chown_plan`; ro-file cp+chown from `_helper_cp_chown_plan`; per-workspace shared-group operations from `_workspace_shared_group_plan` — fanned out per workspace in `[workspaces]`).
 
+The `docker compose up` command displayed by the preview SHALL be obtained from the same `_compose_up_cmd_plan` helper that `_phase_compose_up` uses for live execution (per `cli-start`'s "Compose Environment File Flag" requirement). The displayed inner `bash -c` command string SHALL be byte-identical to what the live path would execute given the same `(instance_dir, project_name, config)` inputs. The preview SHALL NOT reconstruct the compose command from local variables in the dry-run helper-recipe loops; in particular, no inner-loop variable in the helper-mkdir or helper-cp preview blocks SHALL shadow the compose-files string.
+
 #### Scenario: Compose command displayed
 - **WHEN** dry-run completes validation
 - **THEN** the full `docker compose` command is displayed, including all `-f` flags for component-conditional extras
+
+#### Scenario: Compose command matches live execution byte-for-byte
+
+- **WHEN** `sandbox start <inst> --dry-run` is invoked and the compose up command is displayed, and `sandbox start <inst>` is invoked for the same instance and configuration with `_phase_compose_up`'s subprocess invocation captured
+- **THEN** the inner `bash -c` argument string rendered in the dry-run preview equals the inner `bash -c` argument string passed to `Executor.run` by `_phase_compose_up`, byte-for-byte
+
+#### Scenario: Helper-cp preview does not corrupt the compose preview
+
+- **WHEN** dry-run runs against an instance whose hydration emits one or more helper-cp groups (e.g., `ipc_known_hosts`, `ipc_ssh_key`)
+- **THEN** the rendered compose up command contains `docker compose -f <instance_dir>/docker/compose.yml [...]` and does NOT contain helper-cp filenames joined by `, ` in place of compose file flags
 
 #### Scenario: Handover command displayed (sudo mode)
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"sudo"`
