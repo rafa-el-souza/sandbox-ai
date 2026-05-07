@@ -1795,8 +1795,15 @@ class TestInitHappyPath:
             assert result.exit_code == 0, result.output
 
 
+@pytest.mark.no_seed_registry
 class TestInitPerUserTreeCreation:
-    """init creates `<home>/{config,state}/` with mode 0700 (idempotent)."""
+    """init creates `<home>/{config,state}/` with mode 0700 (idempotent).
+
+    Marked ``no_seed_registry`` so the cli/conftest.py autouse fixture
+    does NOT pre-create ``<home>/state/`` with default umask permissions —
+    these tests assert ``sandbox init`` builds the tree at mode 0700 from
+    a truly empty home.
+    """
 
     def _common_patches(
         self,
