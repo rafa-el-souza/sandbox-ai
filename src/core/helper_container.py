@@ -27,7 +27,12 @@ from core.executor import Executor
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-from core.host_config import MachinectlAuth, machinectl_cmd
+from core.host_config import (
+    MachinectlAuth,
+    in_container_gid_for_host_gid,
+    in_container_uid_for_host_uid,
+    machinectl_cmd,
+)
 from core.hydration import IMAGE_REGISTRY
 
 DEFAULT_HELPER_TIMEOUT_S = 30
@@ -80,13 +85,15 @@ def helper_chown_files(
     file_list = list(files)
     if not file_list:
         return
+    in_container_uid = in_container_uid_for_host_uid(owner_uid, host_user)
+    in_container_gid = in_container_gid_for_host_gid(owner_gid, host_user)
     image = IMAGE_REGISTRY["busybox_musl"].pinned
     mode_octal = format(mode, "04o")
     quoted_names = " ".join(shlex.quote(f) for f in file_list)
     inner = (
         f"set -e; for f in {quoted_names}; do "
         f'cp /p/"$f" /tmp/"$f" && '
-        f'chown {owner_uid}:{owner_gid} /tmp/"$f" && '
+        f'chown {in_container_uid}:{in_container_gid} /tmp/"$f" && '
         f'chmod {mode_octal} /tmp/"$f" && '
         f'mv /tmp/"$f" /p/"$f"; '
         "done"
@@ -120,9 +127,15 @@ def helper_mkdir_chown_dirs(
     leaf_list = list(leaves)
     if not leaf_list:
         return
+    in_container_uid = in_container_uid_for_host_uid(owner_uid, host_user)
+    in_container_gid = in_container_gid_for_host_gid(owner_gid, host_user)
     image = IMAGE_REGISTRY["busybox_musl"].pinned
     quoted_leaves = " ".join(shlex.quote(leaf) for leaf in leaf_list)
-    inner = f'set -e; for d in {quoted_leaves}; do mkdir -p /p/"$d" && chown {owner_uid}:{owner_gid} /p/"$d"; done'
+    inner = (
+        f'set -e; for d in {quoted_leaves}; do '
+        f'mkdir -p /p/"$d" && chown {in_container_uid}:{in_container_gid} /p/"$d"; '
+        "done"
+    )
     cmd = _hardened_docker_run(image, parent, inner)
     Executor().run(
         [*machinectl_cmd(host_user, machinectl_auth), "/bin/bash", "-c", cmd],

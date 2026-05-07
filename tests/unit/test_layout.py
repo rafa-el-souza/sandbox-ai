@@ -33,11 +33,6 @@ _LAYOUT_ALLOWLIST: dict[str, str] = {
     "core/exceptions.py": (
         "Trivial module — `SandboxExecutionError` class definition only, no logic to test."
     ),
-    "core/helper_container.py": (
-        "Tested via tests/unit/test_helper_container.py (flat); move to "
-        "tests/unit/core/ deferred per openspec/deferred.md while "
-        "fix-helper-container-userns is in flight."
-    ),
     # ── src/templates ──
     # (no tracked .py files — Jinja2 templates only)
 }
