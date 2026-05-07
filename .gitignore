@@ -13,6 +13,9 @@ sandbox-ai.toml
 .deprecated/
 temp/
 
+# Local-only deferred work log (per CLAUDE rule)
+openspec/deferred.md
+
 # Tooling
 .antigravityignore
 .agent/
