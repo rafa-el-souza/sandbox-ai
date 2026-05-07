@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import pydantic
 import typer
 
 if TYPE_CHECKING:
@@ -250,9 +251,23 @@ def _lookup_instance_or_exit(inst: str) -> str:
 
 
 def _load_config(instance_dir: str) -> InstanceConfig:
-    """Parse sandbox.toml from instance directory."""
+    """Parse sandbox.toml from instance directory.
+
+    Wraps Pydantic's ``ValidationError`` at this CLI boundary so all callers
+    surface schema failures as one ``Invalid <toml>: <field>: <reason>`` line
+    per error rather than a raw library traceback. Non-validation errors
+    (``FileNotFoundError``, ``OSError``, ``tomllib.TOMLDecodeError``)
+    propagate intact — the ``except`` matches ``pydantic.ValidationError``
+    specifically, never bare ``Exception``.
+    """
     toml_path = os.path.join(instance_dir, "sandbox.toml")
-    return InstanceConfig.from_toml(toml_path)
+    try:
+        return InstanceConfig.from_toml(toml_path)
+    except pydantic.ValidationError as exc:
+        for err in exc.errors():
+            field = ".".join(str(p) for p in err["loc"])
+            console.print(f"Invalid {toml_path}: {field}: {err['msg']}", style="red")
+        raise typer.Exit(1) from None
 
 
 # ─── Warm state check ───────────────────────────────────────────────────────
