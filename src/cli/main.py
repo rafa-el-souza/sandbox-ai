@@ -995,6 +995,26 @@ def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]
     return files
 
 
+def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> str:
+    """Return the inner ``bash -c`` command for ``docker compose up`` (no machinectl prefix).
+
+    Sole producer of the ``TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain
+    COMPOSE_PROJECT_NAME=<project> docker compose <files> --ansi never
+    --env-file <env> up -d --build --wait`` string. Consumed by
+    :func:`_phase_compose_up` (executed) and the dry-run preview (displayed)
+    so the two paths cannot drift — same single-source-of-truth pattern as
+    :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
+    :func:`_helper_cp_chown_plan`.
+    """
+    compose_files = _build_compose_files(instance_dir, config)
+    env_file = os.path.join(instance_dir, ".sandbox.env")
+    return (
+        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
+        f"COMPOSE_PROJECT_NAME={project_name} docker compose {' '.join(compose_files)} "
+        f"--ansi never --env-file {env_file} up -d --build --wait"
+    )
+
+
 def _phase_compose_up(
     instance_dir: str,
     project_name: str,
@@ -1009,14 +1029,7 @@ def _phase_compose_up(
     - --env-file injection for .sandbox.env (D14)
     - sentinel=True for exit code recovery (D1)
     """
-    compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(compose_files)
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    cmd = (
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
-        f"--ansi never --env-file {env_file} up -d --build --wait"
-    )
+    cmd = _compose_up_cmd_plan(instance_dir, project_name, config)
     executor = Executor()
     executor.run(
         [
@@ -1183,9 +1196,6 @@ def _dry_run_pipeline(inst: str) -> None:
             console.print(f"    ⊘ {secret}")
 
     # ── Command preview ──────────────────────────────────────────────────
-    compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(compose_files)
-
     console.print("\n  [bold]Commands that would execute:[/bold]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
@@ -1203,9 +1213,9 @@ def _dry_run_pipeline(inst: str) -> None:
                 style="dim",
             )
         for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
-            files_str = ", ".join(files)
+            helper_files_str = ", ".join(files)
             console.print(
-                f"    helper-cp+chown {parent_abs}/{{{files_str}}} → {owner_uid}:{owner_gid} {mode:o}",
+                f"    helper-cp+chown {parent_abs}/{{{helper_files_str}}} → {owner_uid}:{owner_gid} {mode:o}",
                 style="dim",
             )
     except SandboxExecutionError as exc:
@@ -1220,15 +1230,9 @@ def _dry_run_pipeline(inst: str) -> None:
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
-    # Compose up — match actual _phase_compose_up command
-    env_file = os.path.join(instance_dir, ".sandbox.env")
+    # Compose up — derived from the same plan helper _phase_compose_up uses
     machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
-    compose_cmd = (
-        f"{machinectl_prefix} /bin/bash -c "
-        f"'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
-        f"--ansi never --env-file {env_file} up -d --build --wait'"
-    )
+    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{_compose_up_cmd_plan(instance_dir, project_name, config)}'"
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
