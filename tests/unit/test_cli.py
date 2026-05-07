@@ -809,10 +809,16 @@ class TestDestroyConfirmation:
             patch("shutil.rmtree") as mock_rmtree,
         ):
             # User types correct name to confirm
-            result = runner.invoke(app, ["destroy", inst], input="myproject\n")
+            result = runner.invoke(
+                app,
+                ["destroy", inst, "--backup-workspaces=none"],
+                input="myproject\n",
+            )
             assert result.exit_code == 0
-            mock_down.assert_called_once()
-            mock_rmtree.assert_called_once()
+            # Phase order: D3 compose down (volumes=False) + D5 compose down -v.
+            assert mock_down.call_count == 2
+            # rmtree called for instance dir (D7) + each workspace tree (D8).
+            assert mock_rmtree.call_count >= 2
 
     def test_destroy_rejected_aborts_silently(self, runner: CliRunner) -> None:
         inst = "myproject"
@@ -839,9 +845,10 @@ class TestDestroyConfirmation:
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
-            mock_rmtree.assert_called_once()
+            # D7 instance dir + D8 per-workspace tree(s).
+            assert mock_rmtree.call_count >= 2
 
 
 class TestDestroyPrefixGuard:
@@ -878,7 +885,7 @@ class TestDestroyIPAMAndRegistryCleanup:
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
 
             # IPAM and registry both live under the per-user home in change-5.
@@ -906,9 +913,11 @@ class TestDestroyRmtree:
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
-            runner.invoke(app, ["destroy", inst, "--force"])
+            runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             expected_dir = str(_user_home() / "instances" / inst)
-            mock_rmtree.assert_called_once_with(expected_dir)
+            # D7 rmtrees the instance dir; D8 rmtrees each workspace tree.
+            calls = [c.args[0] for c in mock_rmtree.call_args_list]
+            assert expected_dir in calls
 
 
 # ── Helper function unit tests (coverage) ────────────────────────────────────
@@ -4032,10 +4041,10 @@ class TestDestroyFaultIsolation:
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
-            # rmtree still called despite compose failure
-            mock_rmtree.assert_called_once()
+            # rmtree still called despite compose failure (instance + workspace).
+            assert mock_rmtree.call_count >= 1
             # Warning emitted
             assert "warning" in result.output.lower() or "⚠" in result.output
 
@@ -4054,7 +4063,7 @@ class TestDestroyFaultIsolation:
             patch("cli.main._release_lock"),
             patch("shutil.rmtree", side_effect=FileNotFoundError("gone")),
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
 
 
@@ -4234,7 +4243,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
             assert "ACL warning" in result.output
 
@@ -4253,7 +4262,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("shutil.rmtree"),
             patch("cli.main.IPAMLedger.release", side_effect=RuntimeError("corrupt")),
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
             assert "IPAM release warning" in result.output
 
@@ -4273,9 +4282,170 @@ class TestDestroyFaultIsolationWarnings:
             patch("shutil.rmtree"),
             patch("cli.main.InstanceRegistry.remove", side_effect=KeyError("not found")),
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
             assert "Registry cleanup warning" in result.output
+
+
+class TestDestroyBackupWorkspacesSpec:
+    """Direct unit tests for `_resolve_backup_workspaces_spec`."""
+
+    def test_all_returns_sorted_workspaces(self) -> None:
+        from cli.main import _resolve_backup_workspaces_spec
+
+        assert _resolve_backup_workspaces_spec("all", {"b", "a", "c"}) == ["a", "b", "c"]
+
+    def test_none_returns_empty(self) -> None:
+        from cli.main import _resolve_backup_workspaces_spec
+
+        assert _resolve_backup_workspaces_spec("none", {"a", "b"}) == []
+
+    def test_csv_returns_listed(self) -> None:
+        from cli.main import _resolve_backup_workspaces_spec
+
+        assert _resolve_backup_workspaces_spec("a,c", {"a", "b", "c"}) == ["a", "c"]
+
+    def test_all_plus_named_rejected(self) -> None:
+        import typer as _typer
+        from cli.main import _resolve_backup_workspaces_spec
+
+        with pytest.raises(_typer.BadParameter, match="cannot combine 'all'"):
+            _resolve_backup_workspaces_spec("all,a", {"a"})
+
+    def test_none_plus_named_rejected(self) -> None:
+        import typer as _typer
+        from cli.main import _resolve_backup_workspaces_spec
+
+        with pytest.raises(_typer.BadParameter, match="cannot combine 'none'"):
+            _resolve_backup_workspaces_spec("none,a", {"a"})
+
+    def test_unknown_name_rejected(self) -> None:
+        import typer as _typer
+        from cli.main import _resolve_backup_workspaces_spec
+
+        with pytest.raises(_typer.BadParameter, match="not found"):
+            _resolve_backup_workspaces_spec("missing,also_missing", {"main"})
+
+
+class TestDestroyBackupFlows:
+    """Phase D4 backup loop (success + failure) and TTY no-flag prompt."""
+
+    def test_backup_workspaces_all_invokes_create_backup(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch("cli.main.create_backup") as mock_backup,
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=all"])
+            assert result.exit_code == 0, result.output
+            assert mock_backup.call_count == 1  # one workspace ("main")
+            assert mock_backup.call_args.kwargs["acquire_lock"] is False
+
+    def test_backup_failure_aborts_destroy(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.workspace_backups import BackupRsyncError
+
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down") as mock_down,
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree") as mock_rmtree,
+            patch("cli.main.create_backup", side_effect=BackupRsyncError("disk full")),
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=all"])
+            assert result.exit_code == 1
+            assert "destroy aborted" in result.output.lower()
+            # D3 compose down ran; D5 (compose down -v) and D7+ did NOT.
+            assert mock_down.call_count == 1
+            mock_rmtree.assert_not_called()
+
+    def test_non_tty_no_flag_refuses(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        # CliRunner is non-TTY by default; no --backup-workspaces flag.
+        result = runner.invoke(app, ["destroy", inst, "--force"])
+        assert result.exit_code == 1
+        assert "non-interactive mode requires --backup-workspaces" in result.output
+
+    def test_tty_no_flag_prompts_per_workspace(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        with (
+            patch("cli.main._stdin_is_tty", return_value=True),
+            patch("cli.main.typer.confirm", return_value=True) as mock_confirm,
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch("cli.main.create_backup") as mock_backup,
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force"])
+            assert result.exit_code == 0, result.output
+            # confirm called once per workspace (myproject has "main").
+            assert mock_confirm.call_count == 1
+            assert mock_backup.call_count == 1
+
+
+class TestDestroyLockContention:
+    """D2 gate-lock and D5 reacquire-lock BlockingIOError paths."""
+
+    def test_gate_lock_contention_exits(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        with patch("cli.main._acquire_state_lock", side_effect=BlockingIOError):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 1
+        assert "already in progress" in result.output
+
+    def test_reacquire_lock_contention_exits(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        # First acquire (gate) succeeds; second (D5 reacquire) raises.
+        with (
+            patch("cli.main._acquire_state_lock", side_effect=[99, BlockingIOError()]),
+            patch("cli.main._compose_down"),
+            patch("cli.main._release_lock"),
+            patch("cli.main.is_backup_lock_held", return_value=False),
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 1
+        assert "already in progress" in result.output
 
 
 class TestDiagnoseGroupExecBranch:
@@ -4576,7 +4746,7 @@ class TestLifecycleBackupLockRefusal:
             patch("cli.main._release_lock") as mock_release,
             patch("cli.main._compose_down") as mock_down,
         ):
-            result = runner.invoke(app, ["destroy", inst, "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 1
             assert "backup in progress" in result.output.lower()
             mock_release.assert_called_once()

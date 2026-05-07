@@ -53,7 +53,7 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
-from core.locks import is_backup_lock_held
+from core.locks import acquire_backup_lock, is_backup_lock_held
 from core.registry import InstanceRegistry
 from core.scaffold import (
     WorkspaceSpec,
@@ -1871,12 +1871,72 @@ def attach(
     _phase_handover(project_name, host_user, auth=auth, cwd_workspace=ws)
 
 
+def _resolve_backup_workspaces_spec(
+    spec: str,
+    available: set[str],
+) -> list[str]:
+    """Resolve the ``--backup-workspaces=<spec>`` value to a list of workspace
+    names to back up. Empty list means "back up nothing".
+
+    Forms: ``all`` | ``none`` | ``<csv>``. Rejects ``all,foo`` combinations
+    and unknown names in csv. Callers handle the no-flag case (``None``)
+    separately by routing into TTY/non-TTY paths.
+    """
+    parts = [p.strip() for p in spec.split(",")]
+    if "all" in parts and len(parts) > 1:
+        raise typer.BadParameter("cannot combine 'all' with named workspaces")
+    if parts == ["all"]:
+        return sorted(available)
+    if parts == ["none"]:
+        return []
+    if "none" in parts:
+        raise typer.BadParameter("cannot combine 'none' with named workspaces")
+    unknown = [p for p in parts if p not in available]
+    if unknown:
+        joined = ", ".join(unknown)
+        raise typer.BadParameter(f"workspace(s) not found in instance: {joined}")
+    return parts
+
+
+def _prompt_backup_selection(workspaces: list[str]) -> list[str]:
+    """TTY interactive: ask per-workspace whether to back up. Returns the
+    selected names. Implementation uses ``typer.confirm`` per workspace as a
+    portable substitute for the spec's "Rich toggleable list"."""
+    selected: list[str] = []
+    for name in workspaces:
+        if typer.confirm(f"Back up workspace {name!r}?", default=False):
+            selected.append(name)
+    return selected
+
+
 @app.command()
 def destroy(
     inst: str = typer.Argument(..., help="Instance name"),
     force: bool = False,
+    backup_workspaces: str | None = typer.Option(
+        None,
+        "--backup-workspaces",
+        help="Backup spec: 'all' | 'none' | comma-separated workspace names",
+    ),
 ) -> None:
-    """Permanently destroy a sandbox instance."""
+    """Permanently destroy a sandbox instance.
+
+    Phases (per `cli-destroy` "Phase Order Preserves Recoverability Through
+    Backup"). D5 onward is irreversible:
+
+    D1  confirmation (typed name) unless --force; backup-set selection
+    D2  acquire state.lock (briefly) + <inst>.backup.lock (held)
+    D3  compose down (REVERSIBLE)
+    D4  per-workspace backup (any failure aborts: partial retained, no
+        irreversible mutation)
+    D5  compose down -v (IRREVERSIBLE from here)
+    D6  ACL revoke (per workspace)
+    D7  rmtree(instances/<inst>/)
+    D8  rmtree(workspaces/<inst>/<ws>/) for ALL workspaces
+    D9  rmdir(workspaces/<inst>/) if empty
+    D10 IPAM release + registry remove
+    D11 release locks
+    """
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)
@@ -1893,67 +1953,133 @@ def destroy(
     config = _load_config(instance_dir)
     project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
+    available = set(config.workspaces.keys())
 
-    # Phase 0: Confirmation
+    # D1: Confirmation + backup-set selection.
     if not force:
-        console.print(f"WARNING: This permanently deletes sandbox '{inst}' and all its state.")
-        ws_summary = ", ".join(sorted(config.workspaces.keys()))
+        console.print(f"WARNING: This permanently deletes sandbox {inst!r} and all its state.")
+        ws_summary = ", ".join(sorted(available)) or "<none>"
         console.print(f"         Workspaces affected: {ws_summary}")
         typed_name = typer.prompt("Type the sandbox name to confirm")
         if typed_name != inst:
             console.print("Aborted.")
             return
 
-    # Phase 1: Locking
-    lock_fd = _acquire_state_lock(instance_dir)
+    if backup_workspaces is not None:
+        backup_set = _resolve_backup_workspaces_spec(backup_workspaces, available)
+    elif _stdin_is_tty():
+        backup_set = _prompt_backup_selection(sorted(available))
+    else:
+        console.print(
+            "destroy in non-interactive mode requires --backup-workspaces=...",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
-    # Backup-lock check (after state.lock per cli-destroy concurrency matrix).
+    # D2: Acquire state.lock briefly (gate); refuse if backup.lock held; then
+    # acquire backup.lock and release state.lock for the long phases.
+    try:
+        gate_lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
     if is_backup_lock_held(inst):
-        _release_lock(lock_fd)
+        _release_lock(gate_lock_fd)
         console.print(
             f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
             style="red",
         )
         raise typer.Exit(code=1)
 
-    try:
-        # Phase 2: Container and volume teardown — fault-isolated (D12)
+    with acquire_backup_lock(inst):
+        _release_lock(gate_lock_fd)
+
+        # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(instance_dir, project_name, host_user, config, volumes=True, auth=auth)
+            _compose_down(instance_dir, project_name, host_user, config, volumes=False, auth=auth)
         except SandboxExecutionError as e:
-            console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
+            console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
-        # Phase 3: ACL revocation — fault-isolated (D5), per-workspace fan-out
-        ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
-        acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
-        for w in acl_warnings:
-            console.print(f"⚠ {w}", style="yellow")
+        # D4: per-workspace backup. Abort destroy on any failure — instance
+        # remains recoverable via `sandbox start <inst>`.
+        for ws_name in backup_set:
+            target = config.workspaces[ws_name]
+            try:
+                create_backup(
+                    instance_name=inst,
+                    workspace_name=ws_name,
+                    source_path=target.path,
+                    source_bootstrap_mode=target.bootstrap_mode.value,
+                    dev_primary_gid=os.getgid(),
+                    acquire_lock=False,  # we already hold backup.lock
+                )
+            except BackupError as exc:
+                console.print(
+                    f"Backup of workspace {ws_name!r} failed: {exc}\n"
+                    f"Destroy aborted; partial retained for diagnosis. "
+                    f"Run `sandbox start {inst}` to resume or fix and retry.",
+                    style="red",
+                )
+                raise typer.Exit(code=1) from None
 
-        # Phase 4: Directory removal — fault-isolated (D12)
-        # FileNotFoundError silenced (idempotent); PermissionError propagates
+        # D5: compose down -v (IRREVERSIBLE).
         try:
-            shutil.rmtree(instance_dir)
-        except FileNotFoundError:
-            pass
+            lock_fd = _acquire_state_lock(instance_dir)
+        except BlockingIOError:
+            console.print(
+                "Another sandbox operation is already in progress for this instance.",
+                style="red",
+            )
+            raise typer.Exit(code=1) from None
 
-        # Phase 5: State cleanup — IPAM — fault-isolated (D12)
         try:
-            ledger = IPAMLedger()
-            ledger.release(inst)
-        except Exception as e:
-            console.print(f"⚠ IPAM release warning: {e}", style="yellow")
+            try:
+                _compose_down(instance_dir, project_name, host_user, config, volumes=True, auth=auth)
+            except SandboxExecutionError as e:
+                console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
-        # Phase 6: State cleanup — Registry — fault-isolated (D12)
-        try:
-            InstanceRegistry().remove(inst)
-        except Exception as e:
-            console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
+            # D6: ACL revocation — per-workspace fan-out, fault-isolated.
+            ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+            for w in _revoke_acls(instance_dir, host_user, ws_paths):
+                console.print(f"⚠ {w}", style="yellow")
 
-    finally:
-        # Close lock fd — safe after rmtree: kernel keeps inode alive while fd is open
-        _release_lock(lock_fd)
+            # D7: rmtree(instances/<inst>/).
+            try:
+                shutil.rmtree(instance_dir)
+            except FileNotFoundError:
+                pass
 
-    console.print(f"Sandbox '{inst}' permanently destroyed. IPAM slot freed for reuse.")
+            # D8: rmtree workspace trees (regardless of backup status).
+            for ws in config.workspaces.values():
+                try:
+                    shutil.rmtree(ws.path)
+                except FileNotFoundError:
+                    pass
+
+            # D9: rmdir workspaces/<inst>/ if empty.
+            inst_workspaces_dir = sandbox_ai_home() / "workspaces" / inst
+            try:
+                inst_workspaces_dir.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+
+            # D10: state cleanup — IPAM and registry, fault-isolated.
+            try:
+                IPAMLedger().release(inst)
+            except Exception as e:
+                console.print(f"⚠ IPAM release warning: {e}", style="yellow")
+            try:
+                InstanceRegistry().remove(inst)
+            except Exception as e:
+                console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
+        finally:
+            # D11: release state.lock; backup.lock context manager releases on exit.
+            _release_lock(lock_fd)
+
+    console.print(f"Sandbox {inst!r} permanently destroyed. IPAM slot freed for reuse.")
 
 
 @app.command()

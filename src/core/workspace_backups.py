@@ -266,16 +266,23 @@ def create_backup(
     excludes: tuple[str, ...] = COPY_DEFAULT_EXCLUDES,
     extra_excludes: tuple[str, ...] = (),
     now: _dt.datetime | None = None,
+    acquire_lock: bool = True,
 ) -> BackupInfo:
     """Create a backup of ``source_path`` for ``<instance>/<workspace>``.
 
-    Acquires ``<instance_name>.backup.lock`` for the duration of the rsync.
-    The caller is expected to release the per-user ``state.lock`` before
-    invoking this and reacquire it after, per D10's phase ordering.
+    By default acquires ``<instance_name>.backup.lock`` for the duration of
+    the rsync; the caller is expected to release the per-user ``state.lock``
+    before invoking this and reacquire it after, per D10's phase ordering.
+
+    ``acquire_lock=False`` is for callers that already hold the per-instance
+    backup lock externally — notably ``sandbox destroy``, which per the
+    concurrency interaction matrix (D10a) holds the backup lock across the
+    entire destroy phase, including multiple per-workspace backup invocations.
 
     Raises:
         BackupPathError: ``source_path`` is missing or not a directory.
-        BackupLockHeldError: another process holds the backup lock.
+        BackupLockHeldError: another process holds the backup lock
+            (only when ``acquire_lock=True``).
         BackupRsyncError: rsync exited non-zero.
     """
     src = os.path.realpath(source_path)
@@ -302,7 +309,7 @@ def create_backup(
         use_xattrs=use_xattrs,
     )
 
-    with acquire_backup_lock(instance_name):
+    def _do_backup() -> tuple[int, int]:
         os.makedirs(partial_dir, mode=0o700, exist_ok=True)
         executor = Executor()
         try:
@@ -310,7 +317,7 @@ def create_backup(
         except SandboxExecutionError as exc:
             raise BackupRsyncError(f"rsync failed for {instance_name}/{workspace_name}: {exc}") from exc
 
-        size_bytes, file_count = _tree_size_and_count(str(partial_dir))
+        size, files = _tree_size_and_count(str(partial_dir))
         _write_backup_info(
             partial_dir,
             source_instance=instance_name,
@@ -320,12 +327,19 @@ def create_backup(
             excludes_applied=excludes,
             stripped_unsafe_links_count=stripped_count,
             rsync_xattrs_supported=use_xattrs,
-            size_bytes=size_bytes,
-            file_count=file_count,
+            size_bytes=size,
+            file_count=files,
             timestamp=timestamp,
         )
 
         os.rename(partial_dir, final_dir)
+        return size, files
+
+    if acquire_lock:
+        with acquire_backup_lock(instance_name):
+            size_bytes, _file_count = _do_backup()
+    else:
+        size_bytes, _file_count = _do_backup()
 
     metadata = _read_backup_info(final_dir)
     return BackupInfo(

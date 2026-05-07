@@ -325,6 +325,25 @@ class TestCreateBackup:
         meta = json.loads((info.path / wb.BACKUP_INFO_FILENAME).read_text())
         assert meta["stripped_unsafe_links_count"] == 1
 
+    def test_acquire_lock_false_skips_lock(
+        self, fake_executor: _FakeExecutor, tmp_path: Path
+    ) -> None:
+        """acquire_lock=False is the destroy-orchestrated path: caller already
+        holds <inst>.backup.lock, so create_backup must not double-acquire."""
+        fake_executor.rsync_run = _populate_partial
+        os.makedirs(sandbox_ai_home() / "state", exist_ok=True)
+        # Pre-acquire the lock externally (simulating destroy's `with`).
+        with acquire_backup_lock("foo"):
+            info = wb.create_backup(
+                instance_name="foo",
+                workspace_name="main",
+                source_path=str(_make_source(tmp_path)),
+                source_bootstrap_mode="empty",
+                dev_primary_gid=1000,
+                acquire_lock=False,
+            )
+            assert info.path.is_dir()
+
     def test_lock_held_blocks_concurrent_create(
         self, fake_executor: _FakeExecutor, tmp_path: Path
     ) -> None:
