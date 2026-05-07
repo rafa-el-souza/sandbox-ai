@@ -422,7 +422,7 @@ class TestScaffoldTemplateResourceLimits:
 
 class TestRenderTemplates:
     @pytest.fixture
-    def tooling_and_instance(self, tmp_path: Path, monkeypatch: object) -> tuple[Path, Path]:
+    def tooling_and_instance(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
         """Create a minimal templates root + instance dir; redirect loader to it."""
         tooling = tmp_path / "tooling"
         instance = tmp_path / "instance"
@@ -916,7 +916,7 @@ class TestValidateTemplates:
         assert count > 0
         assert errors == [], f"UndefinedError with all components: {errors}"
 
-    def test_validate_missing_template(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_missing_template(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing template file produces TemplateNotFound error."""
         from core.hydration import validate_templates
 
@@ -931,7 +931,7 @@ class TestValidateTemplates:
         )
         assert any("Template not found" in e for e in errors)
 
-    def test_validate_undefined_variable(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_undefined_variable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Undefined variable in template produces UndefinedError."""
         from core.hydration import validate_templates
 
@@ -946,7 +946,7 @@ class TestValidateTemplates:
         )
         assert any("Undefined variable" in e for e in errors)
 
-    def test_validate_syntax_error(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_syntax_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Syntax error in template produces TemplateSyntaxError."""
         from core.hydration import validate_templates
 
@@ -961,7 +961,7 @@ class TestValidateTemplates:
         )
         assert any("Syntax error" in e for e in errors)
 
-    def test_validate_missing_static_file(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_missing_static_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing static file produces error."""
         from core.hydration import validate_templates
 
@@ -1061,22 +1061,21 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     return tooling
 
 
-def _patch_templates_root(monkeypatch: object, tooling: Path) -> None:
+def _patch_templates_root(monkeypatch: pytest.MonkeyPatch, tooling: Path) -> None:
     """Redirect hydration's PackageLoader and resource resolver to ``tooling``.
 
     Used by tests that mutate template files (delete/corrupt) to exercise
     the validate_templates error branches without touching the packaged
     templates module.
     """
-    import core.hydration as hydration
     import jinja2
 
-    monkeypatch.setattr(hydration, "_resource_files", lambda _name: tooling)  # type: ignore[attr-defined]
+    monkeypatch.setattr("core.hydration._resource_files", lambda _name: tooling)
 
     def _fake_package_loader(*_args: object, **_kwargs: object) -> jinja2.FileSystemLoader:
         return jinja2.FileSystemLoader(str(tooling))
 
-    monkeypatch.setattr(jinja2, "PackageLoader", _fake_package_loader)  # type: ignore[attr-defined]
+    monkeypatch.setattr("jinja2.PackageLoader", _fake_package_loader)
 
 
 class TestDbPostgresTemplateRendering:
@@ -1090,7 +1089,7 @@ class TestDbPostgresTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "db-postgres.yml"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "extras" / "db-postgres.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -1112,7 +1111,7 @@ class TestDbPostgresTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "db-postgres.yml"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "extras" / "db-postgres.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -1141,7 +1140,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "mcp-firecrawl.yml"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "extras" / "mcp-firecrawl.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -1162,7 +1161,7 @@ class TestMcpFirecrawlTemplateRendering:
 
         ctx = _build_test_context(str(tmp_path / "inst"))
         template_content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / "mcp-firecrawl.yml"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "extras" / "mcp-firecrawl.yml"
         ).read_text()
 
         env = jinja2.Environment(
@@ -1490,7 +1489,7 @@ class TestDnsdistTemplateContent:
     def test_dnsdist_wire_length_rule(self) -> None:
         """Template contains QNameWireLengthRule filter."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
         ).read_text()
         assert "QNameWireLengthRule(0, 65)" in content
         assert "DropAction()" in content
@@ -1498,28 +1497,28 @@ class TestDnsdistTemplateContent:
     def test_dnsdist_label_count_rule(self) -> None:
         """Template contains QNameLabelsCountRule filter."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
         ).read_text()
         assert "QNameLabelsCountRule(0, 7)" in content
 
     def test_dnsdist_set_local(self) -> None:
         """Template binds to 0.0.0.0:53."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
         ).read_text()
         assert 'setLocal("0.0.0.0:53")' in content
 
     def test_dnsdist_control_socket(self) -> None:
         """Template has localhost-only control socket."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
         ).read_text()
         assert 'controlSocket("127.0.0.1:5199")' in content
 
     def test_dnsdist_backend_coredns(self) -> None:
         """Template forwards to coredns via Jinja2 variable."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
         ).read_text()
         assert "{{ coredns_dns_ip }}" in content
         assert "newServer" in content
@@ -1531,7 +1530,7 @@ class TestSquidFirecrawlAcl:
     def test_firecrawl_src_acl(self) -> None:
         """squid.conf contains firecrawl_src source ACL."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
         ).read_text()
         assert "acl firecrawl_src src" in content
         assert "{{ mcp_firecrawl_proxy_ip }}" in content
@@ -1539,21 +1538,21 @@ class TestSquidFirecrawlAcl:
     def test_safe_methods_acl(self) -> None:
         """squid.conf contains safe_methods ACL."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
         ).read_text()
         assert "acl safe_methods method GET HEAD OPTIONS" in content
 
     def test_firecrawl_allow_rule(self) -> None:
         """squid.conf contains firecrawl allow rule with safe_methods."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
         ).read_text()
         assert "http_access allow firecrawl_src authenticated_users safe_methods whitelist" in content
 
     def test_firecrawl_after_agent_admin(self) -> None:
         """Firecrawl allow rule appears after agent/admin allows and before deny all."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
         ).read_text()
         agent_pos = content.index("http_access allow agent_src")
         admin_pos = content.index("http_access allow admin_src")
@@ -1568,7 +1567,7 @@ def _render_compose(tmp_path: Path) -> str:
 
     ctx = _build_test_context(str(tmp_path / "inst"))
     template_content = (
-        Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
+        Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
     ).read_text()
     env = jinja2.Environment(
         loader=jinja2.BaseLoader(),
@@ -1583,7 +1582,7 @@ def _render_extras(tmp_path: Path, filename: str) -> str:
 
     ctx = _build_test_context(str(tmp_path / "inst"))
     template_content = (
-        Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "extras" / filename
+        Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "extras" / filename
     ).read_text()
     env = jinja2.Environment(
         loader=jinja2.BaseLoader(),
@@ -1597,7 +1596,7 @@ class TestComposeSecurityBaseline:
 
     def test_baseline_anchor_defined(self, tmp_path: Path) -> None:
         """compose.yml source contains x-security-baseline anchor."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         assert "x-security-baseline:" in raw
         assert "&security-baseline" in raw
 
@@ -1606,7 +1605,7 @@ class TestComposeSecurityBaseline:
         tmp_path: Path,
     ) -> None:
         """Baseline has security_opt, cap_drop, ipc, init, read_only."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Find the baseline block (between x-security-baseline and networks:)
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
@@ -1623,7 +1622,7 @@ class TestComposeSecurityBaseline:
         tmp_path: Path,
     ) -> None:
         """Baseline does NOT contain cap_add, sysctls, or tmpfs."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
         block = raw[start:end]
@@ -1665,7 +1664,7 @@ class TestComposeNetworkDefinitions:
 
     def test_new_networks_internal(self, tmp_path: Path) -> None:
         """All 4 new networks have internal: true."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         for net_name in [
             "core_proxy_net:",
             "dns_net:",
@@ -1679,7 +1678,7 @@ class TestComposeNetworkDefinitions:
 
     def test_proxy_net_removed(self, tmp_path: Path) -> None:
         """Legacy proxy_net network is no longer defined."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Extract networks block only
         net_start = raw.index("networks:")
         svc_start = raw.index("services:")
@@ -2169,7 +2168,7 @@ class TestComposeIpcNetAndW4Hardening:
     # --- (c) ipc_net network definition ---
     def test_compose_ipc_net_definition(self, tmp_path: Path) -> None:
         """ipc_net network block contains internal: true and enable_ipv6: false."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         assert "ipc_net:" in raw
         idx = raw.index("ipc_net:")
         block = raw[idx : idx + 300]
@@ -2361,7 +2360,7 @@ class TestComposeIpcNetAndW4Hardening:
     # --- (x) baseline excludes list-valued properties ---
     def test_compose_baseline_excludes_list_valued(self, tmp_path: Path) -> None:
         """x-security-baseline block does NOT contain cap_add, sysctls, or tmpfs."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
         block = raw[start:end]
@@ -2534,8 +2533,13 @@ class TestImagePin:
         from dataclasses import FrozenInstanceError
 
         pin = IMAGE_REGISTRY["coredns"]
+        # Bind the attribute name so the call goes through the dataclass's
+        # __setattr__ (which raises FrozenInstanceError) without tripping
+        # mypy's static frozen-class check or ruff's B010 (which only fires
+        # on a literal constant attribute name).
+        attr = "digest"
         with pytest.raises(FrozenInstanceError):
-            pin.digest = "x"  # type: ignore[misc]
+            setattr(pin, attr, "x")
 
     def test_busybox_musl_entry(self) -> None:
         """busybox_musl has tag='1.36.1-musl' and ref='busybox'."""
@@ -2555,7 +2559,7 @@ class TestImagePin:
         """hydration.py source does NOT contain 'IMAGE_DIGESTS ='."""
         from pathlib import Path
 
-        source = Path(__file__).resolve().parents[2] / "src" / "core" / "hydration.py"
+        source = Path(__file__).resolve().parents[3] / "src" / "core" / "hydration.py"
         content = source.read_text()
         assert "IMAGE_DIGESTS =" not in content
 
@@ -2619,7 +2623,7 @@ class TestDownstreamConsumerMigration:
         """scaffold.py source contains IMAGE_REGISTRY import (not IMAGE_DIGESTS)."""
         from pathlib import Path
 
-        source = Path(__file__).resolve().parents[2] / "src" / "core" / "scaffold.py"
+        source = Path(__file__).resolve().parents[3] / "src" / "core" / "scaffold.py"
         content = source.read_text()
         assert "IMAGE_REGISTRY" in content
         assert "IMAGE_DIGESTS" not in content
@@ -2640,7 +2644,7 @@ def _build_default_context(tmp_path: Path) -> dict[str, object]:
 
 def _get_dockerfile_lines(rel_path: str) -> list[str]:
     """Read a Dockerfile from the templates package and return its lines."""
-    root = Path(__file__).resolve().parents[2] / "src" / "templates"
+    root = Path(__file__).resolve().parents[3] / "src" / "templates"
     return (root / rel_path).read_text().splitlines()
 
 
@@ -2900,13 +2904,13 @@ class TestHealthcheckFixes:
 
     def test_coredns_dockerfile_exists(self) -> None:
         """Dockerfile.coredns exists in templates/docker/coredns/."""
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         df = root / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns"
         assert df.exists(), "Dockerfile.coredns does not exist"
 
     def test_coredns_dockerfile_structure(self) -> None:
         """Dockerfile.coredns contains multi-stage build with probe stage."""
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         content = (root / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns").read_text()
         assert "FROM ${BUSYBOX_BASE} AS probe" in content
         assert "FROM ${CORE_BASE}" in content
@@ -2919,7 +2923,7 @@ class TestHealthcheckFixes:
 
     def test_compose_coredns_build_block(self) -> None:
         """compose.yml template has coredns with build: block (not image:)."""
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         content = (root / "src" / "templates" / "docker" / "compose.yml").read_text()
         assert "coredns:" in content
         coredns_idx = content.index("  coredns:")
@@ -2935,7 +2939,7 @@ class TestHealthcheckFixes:
 
     def test_coredns_healthcheck_no_cmd_shell(self) -> None:
         """CoreDNS healthcheck uses CMD (not CMD-SHELL) with /wget."""
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         content = (root / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Find the coredns healthcheck test line
         coredns_idx = content.index("coredns:")
@@ -2947,7 +2951,7 @@ class TestHealthcheckFixes:
 
     def test_proxy_healthcheck_tcp_probe(self) -> None:
         """Proxy healthcheck uses TCP probe (not squidclient)."""
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         content = (root / "src" / "templates" / "docker" / "compose.yml").read_text()
         # Find proxy service section
         proxy_idx = content.index("\n  proxy:")
@@ -2991,12 +2995,14 @@ class TestHydrationPipelineRegistration:
         rendered_df = instance / "docker" / "coredns" / "Dockerfile.coredns"
         assert rendered_df.exists(), "Dockerfile.coredns not copied to instance dir"
         source_df = (
-            Path(__file__).resolve().parents[2] / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns"
+            Path(__file__).resolve().parents[3] / "src" / "templates" / "docker" / "coredns" / "Dockerfile.coredns"
         )
         assert rendered_df.read_text() == source_df.read_text(), "Copied file differs from source"
         del tooling  # unused — render now uses packaged templates
 
-    def test_validate_templates_counts_coredns_dockerfile(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_templates_counts_coredns_dockerfile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """(c) validate_templates() includes Dockerfile.coredns in its validated total."""
         from core.hydration import validate_templates
 
@@ -3132,7 +3138,7 @@ class TestInfrastructureBugFixes:
     def test_dockerfile_user_lint_zero_violations(self) -> None:
         """(e) Dockerfile USER lint on both rendered Dockerfiles returns zero violations."""
         core_path = (
-            Path(__file__).resolve().parent.parent.parent
+            Path(__file__).resolve().parent.parent.parent.parent
             / "src"
             / "templates"
             / "docker"
@@ -3140,7 +3146,7 @@ class TestInfrastructureBugFixes:
             / "Dockerfile.core.wolfi"
         )
         admin_path = (
-            Path(__file__).resolve().parent.parent.parent
+            Path(__file__).resolve().parent.parent.parent.parent
             / "src"
             / "templates"
             / "docker"
@@ -3302,7 +3308,7 @@ class TestSecretsRemovalBindMounts:
 
     def test_compose_no_top_level_secrets(self, tmp_path: Path) -> None:
         """compose.yml template source has no top-level secrets: block."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # top-level secrets: is at column 0 (not indented)
         lines = raw.splitlines()
         top_level_secrets = [
@@ -3477,7 +3483,7 @@ class TestCoreCapAddSecurityOptTmpfs:
 
     def test_non_core_retain_no_new_privs_true(self, tmp_path: Path) -> None:
         """Non-core services (coredns, proxy, admin, dnsdist) retain no-new-privileges:true."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         # The baseline anchor must still have no-new-privileges:true
         start = raw.index("x-security-baseline:")
         end = raw.index("\nnetworks:")
@@ -3495,14 +3501,14 @@ class TestSshdPidFileEntrypoint:
     def test_sshd_config_pidfile_none(self) -> None:
         """sshd_config template contains PidFile none."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "core" / "sshd_config"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "core" / "sshd_config"
         ).read_text()
         assert "PidFile none" in content, "sshd_config must contain 'PidFile none' for non-root operation"
 
     def test_entrypoint_no_mkdir_run_sshd(self) -> None:
         """Core entrypoint.sh does NOT contain mkdir -p /run/sshd."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "core" / "entrypoint.sh"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "core" / "entrypoint.sh"
         ).read_text()
         assert "mkdir -p /run/sshd" not in content, (
             "Entrypoint must NOT contain 'mkdir -p /run/sshd' — PidFile none eliminates need"
@@ -3515,7 +3521,7 @@ def _render_squid_conf(tmp_path: Path) -> str:
 
     ctx = _build_test_context(str(tmp_path / "inst"))
     template_content = (
-        Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
+        Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
     ).read_text()
     env = jinja2.Environment(
         loader=jinja2.BaseLoader(),
@@ -3559,7 +3565,7 @@ class TestAdminRuntimeRunc:
 
     def test_admin_runtime_is_runc(self) -> None:
         """Admin service in compose.yml template has runtime: "runc"."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         admin_start = raw.index("\n  admin:")
         admin_block = raw[admin_start:]
         # Find runtime: line in admin block
@@ -3569,7 +3575,7 @@ class TestAdminRuntimeRunc:
 
     def test_admin_runtime_not_templated(self) -> None:
         """Admin service runtime is NOT the Jinja2 variable {{ runtime }}."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         admin_start = raw.index("\n  admin:")
         admin_block = raw[admin_start:]
         runtime_lines = [line.strip() for line in admin_block.splitlines() if line.strip().startswith("runtime:")]
@@ -3578,7 +3584,7 @@ class TestAdminRuntimeRunc:
 
     def test_core_retains_templated_runtime(self) -> None:
         """Core service retains runtime: "{{ runtime }}" (gVisor)."""
-        raw = (Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
+        raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         core_start = raw.index("\n  core:")
         admin_start = raw.index("\n  admin:")
         core_block = raw[core_start:admin_start]
@@ -3594,7 +3600,7 @@ class TestTmuxPluginPaths:
     def test_tmux_plugin_manager_path_set(self) -> None:
         """.tmux.conf contains TMUX_PLUGIN_MANAGER_PATH set to /usr/local/tmux-plugins."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
         ).read_text()
         assert "set-environment -g TMUX_PLUGIN_MANAGER_PATH '/usr/local/tmux-plugins'" in content, (
             ".tmux.conf must set TMUX_PLUGIN_MANAGER_PATH to /usr/local/tmux-plugins"
@@ -3603,7 +3609,7 @@ class TestTmuxPluginPaths:
     def test_catppuccin_run_path_correct(self) -> None:
         """Catppuccin run path is /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
         ).read_text()
         assert "run /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux" in content, (
             "Catppuccin run directive must reference /usr/local/tmux-plugins/"
@@ -3612,7 +3618,7 @@ class TestTmuxPluginPaths:
     def test_tpm_run_path_correct(self) -> None:
         """TPM run path is /usr/local/tmux-plugins/tpm/tpm."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
         ).read_text()
         assert "run /usr/local/tmux-plugins/tpm/tpm" in content, (
             "TPM run directive must reference /usr/local/tmux-plugins/"
@@ -3621,7 +3627,7 @@ class TestTmuxPluginPaths:
     def test_no_stale_home_config_plugin_paths(self) -> None:
         """.tmux.conf does NOT contain any ~/.config/tmux/plugins/ paths."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
         ).read_text()
         assert "~/.config/tmux/plugins/" not in content, (
             ".tmux.conf must NOT contain stale ~/.config/tmux/plugins/ paths"
@@ -3638,28 +3644,28 @@ class TestLocaleTermExport:
     def test_zshrc_lang_c_utf8(self) -> None:
         """.zshrc contains LANG=C.UTF-8."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
         ).read_text()
         assert "LANG=C.UTF-8" in content, ".zshrc must set LANG=C.UTF-8"
 
     def test_zshrc_lc_all_c_utf8(self) -> None:
         """.zshrc contains LC_ALL=C.UTF-8."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
         ).read_text()
         assert "LC_ALL=C.UTF-8" in content, ".zshrc must set LC_ALL=C.UTF-8"
 
     def test_zshrc_no_en_us_utf8(self) -> None:
         """.zshrc does NOT contain en_US.UTF-8."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
         ).read_text()
         assert "en_US.UTF-8" not in content, ".zshrc must NOT contain en_US.UTF-8 — locale is not installed in image"
 
     def test_entrypoint_term_export_before_tmux(self) -> None:
         """Admin entrypoint.sh contains TERM export before tmux new-session."""
         content = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "admin" / "entrypoint.sh"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "admin" / "entrypoint.sh"
         ).read_text()
         assert 'export TERM="${TERM:-xterm-256color}"' in content, (
             "Admin entrypoint must export TERM with xterm-256color default"
@@ -3719,7 +3725,7 @@ class TestRootlessHardeningPosture:
 
         # ── No secrets: blocks ────────────────────────────────────────────
         raw_template = (
-            Path(__file__).parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
         ).read_text()
         top_level_secrets = [
             line for line in raw_template.splitlines() if line.rstrip() == "secrets:" or line.startswith("secrets:")

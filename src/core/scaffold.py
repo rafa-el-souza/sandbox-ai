@@ -13,7 +13,11 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import tomlkit
+import tomlkit.exceptions
+
 from core.crypto import generate_credential
+from core.exceptions import SandboxExecutionError
 from core.hydration import IMAGE_REGISTRY
 
 if TYPE_CHECKING:
@@ -211,57 +215,66 @@ def write_sandbox_toml(
         f.write(content)
 
 
-def replace_workspaces_section(toml_text: str, workspaces: list[WorkspaceSpec]) -> str:
-    """Replace the ``[workspaces.*]`` block in ``toml_text`` with one rendered
-    from ``workspaces``. The block is identified as the contiguous run of
-    ``[workspaces.<name>]`` sections (and their key/value lines) starting at
-    the first such header; it ends at the next non-workspaces top-level
-    section header.
-
-    Operator hand-edits to other sections are preserved verbatim.
-    """
-    lines = toml_text.splitlines(keepends=True)
-    start: int | None = None
-    end: int | None = None
-    for idx, line in enumerate(lines):
-        stripped = line.lstrip()
-        if stripped.startswith("[workspaces."):
-            if start is None:
-                start = idx
-        elif stripped.startswith("[") and start is not None and not stripped.startswith("[workspaces."):
-            end = idx
-            break
-    if start is None:
-        # No existing block — append before any trailing whitespace.
-        rendered = "\n" + _render_workspaces_section(workspaces)
-        return toml_text.rstrip() + "\n" + rendered
-    if end is None:
-        end = len(lines)
-
-    # Trim trailing blank lines from the existing block so the rendered
-    # block sits flush with one separator before the next section.
-    block_end = end
-    while block_end > start and lines[block_end - 1].strip() == "":
-        block_end -= 1
-    head = "".join(lines[:start])
-    tail = "".join(lines[end:])
-    rendered = _render_workspaces_section(workspaces)
-    separator = "" if tail.startswith("\n") else "\n"
-    return head + rendered + separator + tail
-
-
 def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> None:
-    """Read ``<instance_dir>/sandbox.toml``, replace its ``[workspaces.*]``
-    block with ``workspaces`` (rendered sorted by name), write it back.
+    """Replace the ``[workspaces.*]`` table set in ``<instance_dir>/sandbox.toml``.
 
-    Used by ``workspace add``, ``workspace remove``, ``workspace rename``.
+    Uses ``tomlkit`` so comments and unrelated sections (``[instance]``,
+    ``[core]``, ``[host]``, ``[components.*]``, top-level operator
+    comments, etc.) round-trip across mutations. Non-contiguous workspace
+    placement is handled by the library; we don't detect or normalize it.
+
+    Blank-line counts in the gap immediately adjacent to the
+    ``[workspaces.*]`` region MAY change by ±1 across a rename or
+    add-then-remove sequence — see the change's design.md "Risks /
+    Trade-offs" for the accepted limitation.
+
+    Used by ``workspace add``, ``workspace remove``, ``workspace rename``,
+    and ``workspace restore``.
+
+    Raises:
+        SandboxExecutionError: If ``tomlkit.parse`` rejects the file. The
+            file on disk is left unmodified — the caller is pointed at
+            ``sandbox status`` for the schema-level diagnosis.
     """
     toml_path = os.path.join(instance_dir, "sandbox.toml")
     with open(toml_path) as f:
-        existing = f.read()
-    updated = replace_workspaces_section(existing, workspaces)
+        text = f.read()
+    try:
+        doc = tomlkit.parse(text)
+    except tomlkit.exceptions.ParseError as exc:
+        raise SandboxExecutionError(
+            f"Cannot mutate {toml_path}: {exc}. "
+            f"Re-run 'sandbox status {os.path.basename(instance_dir)}' to see the schema-level error."
+        ) from None
+
+    ws_table = doc.setdefault("workspaces", tomlkit.table())
+    new_by_name = {s.name: s for s in workspaces}
+
+    # Phase 1: drop entries no longer in the new set (preserves the position of survivors).
+    for name in list(ws_table.keys()):
+        if name not in new_by_name:
+            del ws_table[name]
+
+    # Phase 2: update survivors in place, then append new entries in deterministic order.
+    for spec in sorted(workspaces, key=lambda s: s.name):
+        if spec.name in ws_table:
+            sub = ws_table[spec.name]
+            sub["bootstrap_mode"] = spec.bootstrap_mode
+            if spec.source is not None:
+                sub["source"] = spec.source
+            elif "source" in sub:
+                del sub["source"]
+            sub["path"] = spec.path
+        else:
+            sub = tomlkit.table()
+            sub["bootstrap_mode"] = spec.bootstrap_mode
+            if spec.source is not None:
+                sub["source"] = spec.source
+            sub["path"] = spec.path
+            ws_table[spec.name] = sub
+
     with open(toml_path, "w") as f:
-        f.write(updated)
+        f.write(tomlkit.dumps(doc))
 
 
 def _detect_git_config() -> tuple[str, str]:

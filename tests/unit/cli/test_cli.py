@@ -949,8 +949,14 @@ class TestResolveHelpers:
         assert config.instance.name == "myproject"
 
 
+@pytest.mark.no_warm_mock
 class TestWarmCheckDirect:
-    """Direct tests for _warm_check — delegates to _container_status (D-3)."""
+    """Direct tests for _warm_check — delegates to _container_status (D-3).
+
+    Marked ``no_warm_mock`` so the cli/conftest.py autouse fixture's global
+    patch of ``cli.main._warm_check`` is skipped — these tests exercise the
+    real function.
+    """
 
     def test_warm_check_no_compose_file(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
@@ -1789,8 +1795,15 @@ class TestInitHappyPath:
             assert result.exit_code == 0, result.output
 
 
+@pytest.mark.no_seed_registry
 class TestInitPerUserTreeCreation:
-    """init creates `<home>/{config,state}/` with mode 0700 (idempotent)."""
+    """init creates `<home>/{config,state}/` with mode 0700 (idempotent).
+
+    Marked ``no_seed_registry`` so the cli/conftest.py autouse fixture
+    does NOT pre-create ``<home>/state/`` with default umask permissions —
+    these tests assert ``sandbox init`` builds the tree at mode 0700 from
+    a truly empty home.
+    """
 
     def _common_patches(
         self,

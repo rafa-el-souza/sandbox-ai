@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import pydantic
 import typer
 
 if TYPE_CHECKING:
@@ -82,6 +83,7 @@ from core.workspace_backups import (
 )
 from core.workspace_copy import copy_workspace
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -250,9 +252,23 @@ def _lookup_instance_or_exit(inst: str) -> str:
 
 
 def _load_config(instance_dir: str) -> InstanceConfig:
-    """Parse sandbox.toml from instance directory."""
+    """Parse sandbox.toml from instance directory.
+
+    Wraps Pydantic's ``ValidationError`` at this CLI boundary so all callers
+    surface schema failures as one ``Invalid <toml>: <field>: <reason>`` line
+    per error rather than a raw library traceback. Non-validation errors
+    (``FileNotFoundError``, ``OSError``, ``tomllib.TOMLDecodeError``)
+    propagate intact — the ``except`` matches ``pydantic.ValidationError``
+    specifically, never bare ``Exception``.
+    """
     toml_path = os.path.join(instance_dir, "sandbox.toml")
-    return InstanceConfig.from_toml(toml_path)
+    try:
+        return InstanceConfig.from_toml(toml_path)
+    except pydantic.ValidationError as exc:
+        for err in exc.errors():
+            field = ".".join(str(p) for p in err["loc"])
+            console.print(f"Invalid {toml_path}: {field}: {err['msg']}", style="red")
+        raise typer.Exit(1) from None
 
 
 # ─── Warm state check ───────────────────────────────────────────────────────
@@ -1354,6 +1370,7 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
             f"Create {config_path} with a [host] section containing docker_unprivileged_user "
             f"before running sandbox init.",
             style="red",
+            markup=False,
         )
         raise typer.Exit(code=1)
 
@@ -1534,7 +1551,7 @@ def init(
         console.print(f"  Git: {git_user} <{git_email}>")
         for ws in workspace_specs:
             origin = f"copy from {ws.source}" if ws.bootstrap_mode == "copy" else "empty"
-            console.print(f"  Workspace [{ws.name}]: {origin} → {ws.path}")
+            console.print(f"  Workspace [{rich_escape(ws.name)}]: {origin} → {ws.path}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
@@ -1701,6 +1718,7 @@ def start(
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
                 style="red bold",
+                markup=False,
             )
             if lock_fd is not None:
                 _release_lock(lock_fd)
@@ -1733,7 +1751,7 @@ def start(
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
-        console.print(f"[FATAL] {e}", style="red bold")
+        console.print(f"[FATAL] {e}", style="red bold", markup=False)
         # ACL cleanup on failure (Decision 4 of acl-ownership-recipes):
         # named-ACL grants from Phase 5 are revoked here. Helper-recipe
         # mutations (subuid chowns on cache/log/ro-files; chgrp+chmod+default
@@ -1935,6 +1953,7 @@ def destroy(
         console.print(
             "[FATAL] Instance directory path fails prefix guard. Aborting.",
             style="red bold",
+            markup=False,
         )
         raise typer.Exit(code=1)
 
@@ -2089,6 +2108,7 @@ def doctor(
             console.print(
                 "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
                 style="red",
+                markup=False,
             )
             raise typer.Exit(code=1)
         resolved_user = project_config.host.docker_unprivileged_user
@@ -2422,10 +2442,15 @@ def workspace_add(
         for ws in new_specs:
             os.makedirs(ws.path, mode=0o700, exist_ok=True)
 
-        # Populate --copy workspaces via the rsync recipe.
+        # Populate --copy workspaces via the rsync recipe, then normalize the
+        # workspace root mode to 0700. rsync `-a` preserves source mode, which
+        # would silently inherit a `0775` (group/world-readable) source onto the
+        # workspace and undermine the privacy default the `--empty` path enforces
+        # via `mkdir(..., mode=0o700)`.
         for ws in new_specs:
             if ws.bootstrap_mode == "copy" and ws.source is not None:
                 copy_workspace(ws.source, ws.path)
+                os.chmod(ws.path, 0o700)
 
         # Mutate sandbox.toml: append new entries to the [workspaces] block.
         merged = [
@@ -2464,6 +2489,21 @@ def workspace_remove(
         )
         raise typer.Exit(code=1)
 
+    # Refuse to leave the instance with zero workspaces. The check precedes
+    # the --backup/--purge branching so the refusal is identical regardless
+    # of mode (no backup directory, no rsync, no rmtree, no sandbox.toml
+    # mutation). Schema's min_length=1 invariant is preserved as a runtime
+    # contract — operators who want a "blank" instance use `sandbox destroy`.
+    if len(config.workspaces) == 1 and ws_name in config.workspaces:
+        console.print(
+            f"Cannot remove the last workspace from {inst!r}. "
+            f"Add a replacement workspace first "
+            f"('sandbox workspace add {inst} --empty <name>' or '--copy <name>=<path>'), "
+            f"or use 'sandbox destroy {inst}' to remove the instance entirely.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
     # Resolve mode in TTY/non-TTY contexts when neither flag is given.
     if not backup and not purge:
         if _stdin_is_tty():
@@ -2486,7 +2526,6 @@ def workspace_remove(
         _refuse_if_backup_in_progress(inst)
 
     target = config.workspaces[ws_name]
-    last_workspace = len(config.workspaces) == 1
 
     if backup:
         # Phase order: state.lock not held → backup acquires backup.lock and
@@ -2530,12 +2569,6 @@ def workspace_remove(
         _release_lock(lock_fd)
 
     console.print(f"Removed workspace {ws_name!r} from {inst!r}.")
-    if last_workspace:
-        console.print(
-            f"WARNING: {inst!r} now has zero workspaces; "
-            f"`sandbox start {inst}` will fail until you add one.",
-            style="yellow",
-        )
 
 
 @workspace_app.command("rename")

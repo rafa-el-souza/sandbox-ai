@@ -80,3 +80,30 @@ The system SHALL deliver an interactive shell session in the admin container to 
 #### Scenario: Warmup Prompt Injection
 - **WHEN** `sandbox.toml` declares a non-empty `instance.warmup_prompt`
 - **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this env var on init to invoke `claude -p "<value>" --dangerously-skip-permissions` before dropping to an interactive prompt
+
+### Requirement: Rich Markup Safety in Console Output
+
+The CLI SHALL NOT pass user-supplied or config-derived content (paths, workspace names, instance names, section names like `[host]` / `[workspaces]`, environment values, error message fragments sourced from external libraries) through Rich's markup parser unescaped. Any `console.print(...)` call whose message contains literal `[<token>]` or `[/<token>]` characters where `<token>` is not a Rich style token (color name, style keyword, or composition thereof) SHALL either:
+
+- pass `markup=False` as a keyword argument to suppress markup parsing for that call entirely; OR
+- wrap the user/config-derived fragment in `rich.markup.escape(...)` before interpolation.
+
+This requirement applies to all `console.print` invocations across `src/cli/` and `src/core/`, including those nested inside f-strings and `Text(...)` constructions. The convention exists because Rich's markup parser silently consumes unrecognized `[token]` sequences as style tags, producing messages with missing words and double-spacing — a defect class that historically corrupted operator-facing diagnostic messages (e.g., `[host]`, `[workspaces]` references in error text).
+
+The codebase SHALL include a regression test (e.g., `tests/unit/cli/test_markup_safety.py`) that walks `src/cli/` and `src/core/` Python source via the `ast` module, identifies every `console.print` call, extracts string-literal arguments (including `Constant` strings and `JoinedStr`/f-string component literals), greps each for `\[([a-zA-Z_][\w]*( [a-zA-Z_][\w]*)*|/[a-zA-Z_]*)\]` matches, and asserts each match is either (a) a token in an enumerated allowlist of Rich style tokens, or (b) accompanied by a `markup=False` keyword argument on the same `console.print` call. The allowlist SHALL be defined in the test file as a module-level frozenset and SHALL initially contain at least: standard Rich color names (`red`, `green`, `yellow`, `blue`, `cyan`, `magenta`, `white`, `black`, `bright_red`, `bright_green`, `bright_yellow`); style keywords (`bold`, `dim`, `italic`, `underline`, `reverse`, `blink`); observed combinations (`red bold`, `green bold`, `yellow bold`); and closing forms (`/`, `/red`, `/green`, `/yellow`, `/bold`, `/dim`). The allowlist MAY be extended as new styles enter the codebase (one-line additions reviewed in the same PR that introduces the style).
+
+#### Scenario: Literal section name in error message uses markup=False
+- **WHEN** a `console.print` call emits a message containing the literal `[host]` (e.g., diagnostic text referencing the `[host]` section of `sandbox-ai.toml`)
+- **THEN** the call passes `markup=False`, OR the bracketed fragment is wrapped via `rich.markup.escape("[host]")`; the user sees the literal `[host]` rendered, not a missing token
+
+#### Scenario: User-supplied workspace name interpolation uses escape
+- **WHEN** a `console.print` f-string interpolates a workspace name that may contain characters Rich treats as style tokens (e.g., `f"Workspace [{ws.name}]: ..."`)
+- **THEN** either `ws.name` is passed through `rich.markup.escape(ws.name)` before interpolation, OR the call passes `markup=False`
+
+#### Scenario: Markup-safety regression test catches new offenders
+- **WHEN** a developer adds a new `console.print(f"some text [{user_value}] more text")` call to `src/cli/` or `src/core/` without `markup=False` and without `rich.markup.escape`
+- **THEN** the markup-safety test fails, identifying the file, line, and offending bracket token; the test passes only after the developer either escapes the value, passes `markup=False`, or adds the token to the allowlist with reviewer approval
+
+#### Scenario: Allowlist covers genuine style tokens
+- **WHEN** `console.print` calls use Rich style markup like `[red]`, `[bold]`, `[/red]`, `[green bold]`
+- **THEN** the markup-safety test passes for these calls because the bracketed tokens are in the enumerated allowlist; no `markup=False` is required for genuine style usage
