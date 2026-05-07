@@ -458,7 +458,7 @@ def _acl_grant_plan(
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
     - secrets/: dir-level ``rX`` traverse
-    - workspace named-ACL: effective ``rwx`` plus default with named entry on user_project_root
+    - per-workspace named-ACL: effective ``rwx`` plus default with named entry on each ``workspace.path``
 
     Cache/log Option-B grants are intentionally absent — replaced by the
     helper-mkdir+chown phase (acl-ownership-recipes Decision 1).
