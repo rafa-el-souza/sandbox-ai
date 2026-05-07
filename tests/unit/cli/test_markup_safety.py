@@ -17,6 +17,10 @@ Dynamically-constructed strings (``console.print(get_msg())``,
 literal to grep. This is acceptable because the bug class we are fixing
 is literal ``[token]`` in source; runtime-built strings would require
 runtime instrumentation to catch and are out of scope.
+
+**Scan root:** the entire ``src/`` tree (every top-level package). New
+packages added under ``src/`` are covered automatically without editing
+this test.
 """
 
 from __future__ import annotations
@@ -61,7 +65,9 @@ _BRACKET_TOKEN_RE = re.compile(
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_SCAN_ROOTS = (_REPO_ROOT / "src" / "cli", _REPO_ROOT / "src" / "core")
+# Walk the entire `src/` tree so future top-level packages (e.g.
+# `src/orchestrator/`) are auto-covered without editing this scan.
+_SCAN_ROOTS = (_REPO_ROOT / "src",)
 
 
 def _is_console_print(call: ast.Call) -> bool:

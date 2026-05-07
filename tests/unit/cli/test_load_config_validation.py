@@ -13,7 +13,7 @@ Output is captured via Rich's ``capture()`` since the CLI prints through
 the module-level ``console``, not stdout directly.
 """
 
-import os
+import errno
 import tomllib
 from pathlib import Path
 
@@ -122,7 +122,7 @@ class TestNonValidationExceptionsPropagate:
         with pytest.raises((FileNotFoundError, OSError)) as exc_info:
             _load_config(str(nonexistent))
         # FileNotFoundError points at sandbox.toml, not swallowed
-        assert "sandbox.toml" in str(exc_info.value) or exc_info.value.errno == os.errno.ENOENT  # type: ignore[attr-defined]
+        assert "sandbox.toml" in str(exc_info.value) or exc_info.value.errno == errno.ENOENT
 
     def test_invalid_toml_syntax_raises_tomldecodeerror(self, tmp_path: Path) -> None:
         toml_path = _write_toml(

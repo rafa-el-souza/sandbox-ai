@@ -10,6 +10,7 @@ Maximum concurrent instances: 5,705 (base_index 0-5704).
 import fcntl
 import json
 import os
+from typing import cast
 
 from core.host_config import ipam_lock_path, sandbox_ai_home
 
@@ -150,7 +151,7 @@ def derive_subnets(base_index: int) -> tuple[str, str, str, str, str, str, str]:
         raise ValueError(f"base_index {base_index} exceeds MAX_SLOTS ({MAX_SLOTS})")
     g = base_index * 7
     subnets = tuple(f"10.{100 + (g + i) // 256}.{(g + i) % 256}.0/24" for i in range(7))
-    return subnets  # type: ignore[return-value]
+    return cast("tuple[str, str, str, str, str, str, str]", subnets)
 
 
 def derive_static_ips(base_index: int) -> dict[str, str]:

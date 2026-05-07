@@ -422,7 +422,7 @@ class TestScaffoldTemplateResourceLimits:
 
 class TestRenderTemplates:
     @pytest.fixture
-    def tooling_and_instance(self, tmp_path: Path, monkeypatch: object) -> tuple[Path, Path]:
+    def tooling_and_instance(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
         """Create a minimal templates root + instance dir; redirect loader to it."""
         tooling = tmp_path / "tooling"
         instance = tmp_path / "instance"
@@ -916,7 +916,7 @@ class TestValidateTemplates:
         assert count > 0
         assert errors == [], f"UndefinedError with all components: {errors}"
 
-    def test_validate_missing_template(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_missing_template(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing template file produces TemplateNotFound error."""
         from core.hydration import validate_templates
 
@@ -931,7 +931,7 @@ class TestValidateTemplates:
         )
         assert any("Template not found" in e for e in errors)
 
-    def test_validate_undefined_variable(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_undefined_variable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Undefined variable in template produces UndefinedError."""
         from core.hydration import validate_templates
 
@@ -946,7 +946,7 @@ class TestValidateTemplates:
         )
         assert any("Undefined variable" in e for e in errors)
 
-    def test_validate_syntax_error(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_syntax_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Syntax error in template produces TemplateSyntaxError."""
         from core.hydration import validate_templates
 
@@ -961,7 +961,7 @@ class TestValidateTemplates:
         )
         assert any("Syntax error" in e for e in errors)
 
-    def test_validate_missing_static_file(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_missing_static_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing static file produces error."""
         from core.hydration import validate_templates
 
@@ -1061,22 +1061,21 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     return tooling
 
 
-def _patch_templates_root(monkeypatch: object, tooling: Path) -> None:
+def _patch_templates_root(monkeypatch: pytest.MonkeyPatch, tooling: Path) -> None:
     """Redirect hydration's PackageLoader and resource resolver to ``tooling``.
 
     Used by tests that mutate template files (delete/corrupt) to exercise
     the validate_templates error branches without touching the packaged
     templates module.
     """
-    import core.hydration as hydration
     import jinja2
 
-    monkeypatch.setattr(hydration, "_resource_files", lambda _name: tooling)  # type: ignore[attr-defined]
+    monkeypatch.setattr("core.hydration._resource_files", lambda _name: tooling)
 
     def _fake_package_loader(*_args: object, **_kwargs: object) -> jinja2.FileSystemLoader:
         return jinja2.FileSystemLoader(str(tooling))
 
-    monkeypatch.setattr(jinja2, "PackageLoader", _fake_package_loader)  # type: ignore[attr-defined]
+    monkeypatch.setattr("jinja2.PackageLoader", _fake_package_loader)
 
 
 class TestDbPostgresTemplateRendering:
@@ -2534,8 +2533,13 @@ class TestImagePin:
         from dataclasses import FrozenInstanceError
 
         pin = IMAGE_REGISTRY["coredns"]
+        # Bind the attribute name so the call goes through the dataclass's
+        # __setattr__ (which raises FrozenInstanceError) without tripping
+        # mypy's static frozen-class check or ruff's B010 (which only fires
+        # on a literal constant attribute name).
+        attr = "digest"
         with pytest.raises(FrozenInstanceError):
-            pin.digest = "x"  # type: ignore[misc]
+            setattr(pin, attr, "x")
 
     def test_busybox_musl_entry(self) -> None:
         """busybox_musl has tag='1.36.1-musl' and ref='busybox'."""
@@ -2996,7 +3000,9 @@ class TestHydrationPipelineRegistration:
         assert rendered_df.read_text() == source_df.read_text(), "Copied file differs from source"
         del tooling  # unused — render now uses packaged templates
 
-    def test_validate_templates_counts_coredns_dockerfile(self, tmp_path: Path, monkeypatch: object) -> None:
+    def test_validate_templates_counts_coredns_dockerfile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """(c) validate_templates() includes Dockerfile.coredns in its validated total."""
         from core.hydration import validate_templates
 
