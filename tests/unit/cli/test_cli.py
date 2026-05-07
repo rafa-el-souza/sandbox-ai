@@ -949,8 +949,14 @@ class TestResolveHelpers:
         assert config.instance.name == "myproject"
 
 
+@pytest.mark.no_warm_mock
 class TestWarmCheckDirect:
-    """Direct tests for _warm_check — delegates to _container_status (D-3)."""
+    """Direct tests for _warm_check — delegates to _container_status (D-3).
+
+    Marked ``no_warm_mock`` so the cli/conftest.py autouse fixture's global
+    patch of ``cli.main._warm_check`` is skipped — these tests exercise the
+    real function.
+    """
 
     def test_warm_check_no_compose_file(self, tmp_path: Path) -> None:
         from cli.main import _warm_check

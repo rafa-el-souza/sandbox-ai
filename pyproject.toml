@@ -55,6 +55,8 @@ packages = ["core", "cli"]
 testpaths = ["tests/unit"]
 markers = [
     "integration: subprocess-level CLI tests (run with `make test-integration`)",
+    "no_warm_mock: opt out of cli/conftest.py's autouse `_warm_check` patch (for tests that exercise the real function)",
+    "no_host_config_mock: opt out of cli/conftest.py's autouse `HostConfig.from_toml` patch (for tests that exercise the real loader)",
 ]
 
 [tool.coverage.report]
