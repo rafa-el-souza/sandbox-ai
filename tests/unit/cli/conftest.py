@@ -1,15 +1,16 @@
 """Shared fixtures and helpers for `tests/unit/cli/`.
 
-Centralizes: the canonical `sandbox.toml` template used to register
-fixture instances, the per-user-home / registry / instance-dir helpers,
-the autouse `_warm_check` and `HostConfig.from_toml` patches, and the
+Centralizes: the per-user-home / registry / instance-dir helpers, the
+autouse `_warm_check` and `HostConfig.from_toml` patches, and the
 `CliRunner` fixture. Every CLI unit test file under this directory picks
 these up automatically — no per-file copies.
 
-The `_TOML_TEMPLATE` here is a deliberate test fixture, not a production
-artifact; the production analogue lives in `core.scaffold` (rendered via
-`write_sandbox_toml`). See task 5.5 in the originating change for the
-follow-up that replaces this template with the production builder.
+The instance ``sandbox.toml`` is built via the production
+``core.scaffold.write_sandbox_toml`` rather than a test-local template.
+This keeps "what a valid `sandbox.toml` looks like" anchored to the
+production code path: schema additions can't drift past the test suite,
+and an `IMAGE_REGISTRY` rotation reaches every fixture-built instance
+automatically.
 """
 
 from __future__ import annotations
@@ -20,54 +21,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from core.scaffold import WorkspaceSpec, write_sandbox_toml
 from typer.testing import CliRunner
-
-_TOML_TEMPLATE = """\
-[instance]
-name = "{name}"
-host_uid = "1000"
-warmup_prompt = ""
-
-{workspaces}
-
-[core]
-shm_size = "2gb"
-pids_limit = 400
-base_image = "cgr.dev/chainguard/wolfi-base:latest"
-base_distro_family = "wolfi"
-git_user = ""
-git_email = ""
-
-[admin]
-shm_size = "2gb"
-pids_limit = 400
-base_image = "debian:trixie-slim"
-base_distro_family = "debian"
-
-[runtimes]
-python = true
-typescript = true
-rust = true
-go = false
-
-[runtimes.node]
-version = "20.12.2"
-nvm_version = "0.39.7"
-
-[components]
-mcp_firecrawl = false
-mcp_puppeteer = false
-
-[components.db_postgres]
-enabled = false
-expose_host_ports = [5432]
-
-[components.ingress]
-web_ports = [3000, 8080]
-
-[proxy.whitelist]
-domains = [".github.com"]
-"""
 
 
 def _user_home() -> Path:
@@ -87,6 +42,8 @@ def _register(inst: str, *, workspaces: list[tuple[str, str, str | None]]) -> Pa
 
     ``workspaces`` is a list of ``(name, bootstrap_mode, source_or_None)``.
     Each workspace path is created at ``<home>/workspaces/<inst>/<name>``.
+    The on-disk ``sandbox.toml`` is rendered through the production
+    ``write_sandbox_toml`` so test fixtures track schema reality.
     """
     home = _user_home()
     state_dir = home / "state"
@@ -98,19 +55,13 @@ def _register(inst: str, *, workspaces: list[tuple[str, str, str | None]]) -> Pa
     existing[inst] = {"instance_dir": str(instance_dir), "created_at": "2026-01-01T00:00:00Z"}
     reg.write_text(json.dumps(existing))
 
-    sections: list[str] = []
+    specs: list[WorkspaceSpec] = []
     for name, mode, source in workspaces:
         ws_path = home / "workspaces" / inst / name
         ws_path.mkdir(parents=True, exist_ok=True)
-        sections.append(f"[workspaces.{name}]")
-        sections.append(f'bootstrap_mode = "{mode}"')
-        if source is not None:
-            sections.append(f'source = "{source}"')
-        sections.append(f'path = "{ws_path}"')
-        sections.append("")
-    rendered = "\n".join(sections).rstrip() + "\n"
+        specs.append(WorkspaceSpec(name=name, bootstrap_mode=mode, source=source, path=str(ws_path)))
 
-    (instance_dir / "sandbox.toml").write_text(_TOML_TEMPLATE.format(name=inst, workspaces=rendered))
+    write_sandbox_toml(str(instance_dir), inst, specs)
     (instance_dir / ".initialized").write_text("")
     return instance_dir
 
