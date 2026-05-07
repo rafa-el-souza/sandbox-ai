@@ -129,11 +129,6 @@ def get_install_cmd(distro: str | None, package: str) -> str:
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 
-def _get_sandbox_ai_home() -> str:
-    """Resolve SANDBOX_AI_HOME from the doctor module location."""
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 # ─── Section 3: Binary Availability Checks ──────────────────────────────────
 
 _BINARY_PACKAGES: dict[str, str] = {
@@ -628,7 +623,7 @@ _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcess
 
 def check_acl_support(user: str, distro: str | None) -> CheckResult:
     """Check that the filesystem supports POSIX ACLs."""
-    sandbox_home = _get_sandbox_ai_home()
+    sandbox_home = str(sandbox_ai_home())
     try:
         with tempfile.NamedTemporaryFile(dir=sandbox_home, delete=True) as tmp:
             subprocess.run(
@@ -700,9 +695,9 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
     import pwd
     import stat
 
-    sandbox_home = _get_sandbox_ai_home()
-    sandboxes_dir = os.path.join(sandbox_home, "sandboxes")
-    abs_path = os.path.abspath(sandboxes_dir)
+    sandbox_home = sandbox_ai_home()
+    instances_dir = sandbox_home / "instances"
+    abs_path = os.path.abspath(instances_dir)
 
     # Resolve the user
     try:
@@ -727,7 +722,7 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
     components.reverse()
 
     # Symlink divergence check
-    real_path = os.path.realpath(sandboxes_dir)
+    real_path = os.path.realpath(instances_dir)
     symlink_warning = ""
     if abs_path != real_path:
         symlink_warning = (

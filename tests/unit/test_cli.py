@@ -2288,22 +2288,6 @@ class TestStdinIsTty:
         assert isinstance(_stdin_is_tty(), bool)
 
 
-class TestWarnLegacyCwdFiles:
-    def test_warns_on_legacy_toml_and_state(self, tmp_path: Path, captured_console: object) -> None:
-        from cli import main as cli_main
-        from cli.main import _warn_legacy_cwd_files
-
-        (tmp_path / "sandbox-ai.toml").write_text("")
-        (tmp_path / ".state").mkdir()
-
-        with patch.object(cli_main, "console", captured_console.console):  # type: ignore[attr-defined]
-            _warn_legacy_cwd_files(str(tmp_path), tmp_path / ".sandbox-ai")
-        out = captured_console.plain_output  # type: ignore[attr-defined]
-        assert "legacy" in out.lower()
-        assert "sandbox-ai.toml" in out
-        assert ".state" in out
-
-
 class TestInitHostConfigResolution:
     """Tasks 3.8-3.9: init user resolution via sandbox-ai.toml."""
 

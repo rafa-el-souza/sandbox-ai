@@ -1384,31 +1384,6 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
     )
 
 
-def _warn_legacy_cwd_files(project_dir: str, user_home: Path) -> None:
-    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exists.
-
-    The legacy path tokens in this docstring are intentional and load-bearing:
-    they preserve the exact strings users may grep for during migration.
-    Per the per-user-config-and-state-relocation change (task 14.7), do not
-    remove them in future cleanups.
-    """
-    legacy_toml = os.path.join(project_dir, "sandbox-ai.toml")
-    if os.path.exists(legacy_toml):
-        console.print(
-            f"Found legacy {legacy_toml}. Per-host config now lives at "
-            f"{user_home / 'config' / 'sandbox-ai.toml'}. "
-            "Migrate manually or delete the legacy file.",
-            style="yellow",
-        )
-    legacy_state = os.path.join(project_dir, ".state")
-    if os.path.isdir(legacy_state):
-        console.print(
-            f"Found legacy {legacy_state}. Orchestrator state now lives at "
-            f"{user_home / 'state'}. Migrate manually or delete the legacy directory.",
-            style="yellow",
-        )
-
-
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
 
@@ -1431,9 +1406,6 @@ def init(
     # Per-user tree creation (idempotent, mode 0700)
     user_home = sandbox_ai_home()
     ensure_per_user_state(user_home)
-
-    # Legacy CWD-local file detection (advisory) — uses CWD only as a warning trigger.
-    _warn_legacy_cwd_files(os.path.abspath(os.getcwd()), user_home)
 
     # Resolve workspace specs (defaults to single empty `main` when no flags supplied).
     workspace_specs = _parse_workspace_flags(inst, user_home, copy, empty)

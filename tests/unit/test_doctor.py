@@ -10,14 +10,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from tests.unit.conftest import CapturedConsole
 
 # ── Section 1: Data Types ────────────────────────────────────────────────────
@@ -1107,7 +1106,7 @@ class TestCheckAncestorTraverse:
         traversable = _make_stat(uid=0, gid=0, mode=0o755)
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", return_value=traversable),
         ):
@@ -1120,7 +1119,7 @@ class TestCheckAncestorTraverse:
         from core.doctor import check_ancestor_traverse
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", side_effect=KeyError("nonexistent")),
         ):
             result = check_ancestor_traverse("nonexistent_user_xyz", None)
@@ -1141,7 +1140,7 @@ class TestCheckAncestorTraverse:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1210,7 +1209,7 @@ class TestAncestorTraverseEdgeCases:
         traversable = _make_stat(uid=0, gid=0, mode=0o755)
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", return_value=traversable),
             # Force realpath to return something different from abspath
@@ -1232,7 +1231,7 @@ class TestAncestorTraverseEdgeCases:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1256,7 +1255,7 @@ class TestAncestorTraverseEdgeCases:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox", uid=2000, gid=2000)),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1278,7 +1277,7 @@ class TestAncestorTraverseEdgeCases:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox", uid=2000, gid=2000)),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1371,7 +1370,7 @@ class TestAncestorTraverseWithAclFallback:
             return mock_getfacl
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
             patch("subprocess.run", side_effect=controlled_run),
@@ -1396,7 +1395,7 @@ class TestAncestorTraverseWithAclFallback:
         mock_getfacl = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
             patch("subprocess.run", return_value=mock_getfacl),
