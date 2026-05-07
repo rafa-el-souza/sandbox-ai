@@ -1153,7 +1153,18 @@ def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> 
     )
 
 
-def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> CheckResult:
+def _default_uid_for_path(path: str) -> int:
+    """Return ``os.stat(path).st_uid``. Default ownership resolver injected
+    into ``check_pre_existing_instance_layout``. Raises ``OSError`` for
+    missing paths (the absent-leaf branch in the check relies on this)."""
+    return os.stat(path).st_uid
+
+
+def check_pre_existing_instance_layout(
+    host_user: str,
+    distro: str | None,
+    uid_for_path: Callable[[str], int] | None = None,
+) -> CheckResult:
     """Warn-only: detect cache/log leaves whose ownership is inconsistent with the
     post-Change-D scaffold-vs-helper boundary.
 
@@ -1175,8 +1186,15 @@ def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> Ch
     The remediation is per-leaf so a mixed-state instance (some leaves
     helper-owned, some still dev-owned from legacy state) reports only the
     affected leaves, not the entire inventory.
+
+    The per-leaf ownership lookup is supplied via ``uid_for_path`` (default:
+    ``_default_uid_for_path``, which wraps ``os.stat``). Tests inject a
+    deterministic resolver to avoid monkeypatching ``os.stat`` — the resolver
+    MUST raise ``OSError`` for absent paths so the absent-leaf branch is
+    reached as in the production path.
     """
     del distro
+    resolver = uid_for_path if uid_for_path is not None else _default_uid_for_path
     # Cache/log leaf inventory per orchestrator-volumes' "Cache/Log Leaf
     # Inventory" requirement. Stays in sync with that spec.
     cache_log_leaves = (
@@ -1201,12 +1219,12 @@ def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> Ch
         for leaf in cache_log_leaves:
             leaf_path = os.path.join(inst, leaf)
             try:
-                st = os.stat(leaf_path)
+                leaf_uid = resolver(leaf_path)
             except OSError:
                 # Leaf absent — the expected post-Change-D state for an
                 # instance that has not yet been started. Pass silently.
                 continue
-            if st.st_uid == consumer_subuid:
+            if leaf_uid == consumer_subuid:
                 # Helper recipe ran successfully on a prior start. Pass silently.
                 continue
             # Leaf present but not consumer-owned — typically dev-owned from

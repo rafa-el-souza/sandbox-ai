@@ -2127,7 +2127,11 @@ class TestCheckPreExistingInstanceLayout:
         assert "destroy" not in remediation
 
     def test_mixed_state_reports_only_stale_leaves(self, tmp_path: Any, monkeypatch: Any) -> None:
-        """State (d): one leaf consumer-owned, one dev-owned → only the dev-owned leaf is flagged."""
+        """State (d): one leaf consumer-owned, one dev-owned → only the dev-owned leaf is flagged.
+
+        Uses the injectable ``uid_for_path`` resolver to make per-leaf ownership
+        deterministic without monkeypatching ``os.stat``.
+        """
         import os
 
         from core.doctor import check_pre_existing_instance_layout
@@ -2138,40 +2142,21 @@ class TestCheckPreExistingInstanceLayout:
         consumer_leaf.mkdir(parents=True)
         legacy_leaf.mkdir(parents=True)
 
-        # Override legacy_leaf to be visibly different by mocking the consumer
-        # subuid lookup to match consumer_leaf's owner; legacy_leaf will then
-        # appear stale because it shares that same uid (we cannot chown in the
-        # test). Instead invert: pretend consumer subuid is something else,
-        # making BOTH leaves stale, then assert by selectively mocking
-        # ``os.stat`` on the consumer leaf to return the consumer subuid.
-        # Simpler: set the mocked consumer subuid to legacy_leaf's owner, and
-        # use a stat-side-effect to pretend consumer_leaf is consumer-owned.
-        real_stat = os.stat
+        consumer_subuid = 777777
+        legacy_uid = 1000  # any uid that is not the consumer subuid
 
-        def fake_stat(path: str | os.PathLike[str], *args: Any, **kwargs: Any) -> Any:
-            st = real_stat(path, *args, **kwargs)
-            if str(path) == str(consumer_leaf):
-                # Construct a stat_result with st_uid set to a value matching
-                # the mocked consumer subuid (777777 below). os.stat_result is
-                # immutable; build a new one via the 10-tuple constructor.
-                return os.stat_result((
-                    st.st_mode,
-                    st.st_ino,
-                    st.st_dev,
-                    st.st_nlink,
-                    777777,  # st_uid — pretend it's the consumer subuid
-                    st.st_gid,
-                    st.st_size,
-                    st.st_atime,
-                    st.st_mtime,
-                    st.st_ctime,
-                ))
-            return st
+        def resolver(path: str) -> int:
+            # Mirror os.stat: raise OSError for absent paths so the absent-leaf
+            # branch is reached for the two leaves we did not create.
+            if not os.path.exists(path):
+                raise FileNotFoundError(path)
+            if path == str(consumer_leaf):
+                return consumer_subuid
+            return legacy_uid
 
-        monkeypatch.setattr("core.doctor.os.stat", fake_stat)
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 777777)
+        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: consumer_subuid)
         monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
-        result = check_pre_existing_instance_layout("u", None)
+        result = check_pre_existing_instance_layout("u", None, uid_for_path=resolver)
         assert result.status == "warn"
         # Only the legacy leaf is flagged; the consumer-owned one passes silently.
         assert "1 cache/log leaf(s)" in result.detail
