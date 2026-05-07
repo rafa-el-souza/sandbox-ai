@@ -12,10 +12,9 @@ import subprocess
 from dataclasses import dataclass
 
 # Default-excludes shared by ``--copy`` and the workspace backup recipe.
-# Aligned with cli-workspace's "Copy Default-Excludes List".
+# Source of truth: cli-workspace's "Copy Default-Excludes List".
+# `.git/` is intentionally NOT excluded (portable history).
 COPY_DEFAULT_EXCLUDES: tuple[str, ...] = (
-    # VCS
-    ".git",
     # Node
     "node_modules",
     ".pnpm-store",
@@ -24,28 +23,39 @@ COPY_DEFAULT_EXCLUDES: tuple[str, ...] = (
     # Python
     ".venv",
     "venv",
+    "env",
     "__pycache__",
     "*.pyc",
-    ".mypy_cache",
     ".pytest_cache",
+    ".mypy_cache",
     ".ruff_cache",
     ".tox",
-    # Rust / Go / Java / Ruby / PHP
+    # Build outputs (multi-language)
     "target",
-    ".cargo/registry",
-    "vendor",
+    "bin",
+    "dist",
     "build",
-    ".gradle",
+    "out",
+    ".next",
+    ".nuxt",
+    ".tsbuildinfo",
+    ".turbo",
+    # Ruby / PHP / vendored deps
+    "vendor",
+    "vendor/bundle",
     ".bundle",
-    # IDE / editor
+    # Java / C++
+    ".gradle",
+    "cmake-build-*",
+    # IDE / editor / OS
     ".idea",
     ".vscode",
-    # OS
     ".DS_Store",
-    # General build outputs
-    "dist",
-    ".next",
-    ".turbo",
+    "*.swp",
+    "*.log",
+    # Coverage / cache
+    "coverage",
+    ".nyc_output",
     ".cache",
 )
 
