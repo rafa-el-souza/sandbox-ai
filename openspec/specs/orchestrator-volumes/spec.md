@@ -4,9 +4,49 @@ This specification governs the absolute filesystem boundary constraints separati
 
 ## Requirements
 
+### Requirement: Multi-Workspace Bind Mount Layout
+
+The compose template SHALL emit one read-write bind mount per workspace, sourced from `<workspace.path>` and targeting `/workspaces/<workspace-name>:rw` on each agent service (core and admin). The bind-mount loop iterates `[workspaces]` (sorted by name lexicographically) for render determinism. The legacy single `/workspace` mount SHALL NOT be present.
+
+#### Scenario: One bind mount per workspace per service
+- **WHEN** the compose template is rendered for an instance with N workspaces
+- **THEN** core and admin services each contain exactly N bind-mount entries of the form `<workspace.path>:/workspaces/<workspace-name>:rw`
+
+#### Scenario: Render determinism via lexicographic sort
+- **WHEN** the same instance's compose template is rendered twice
+- **THEN** the resulting volume entries appear in identical order (sorted by workspace name)
+
+#### Scenario: Legacy /workspace mount absent
+- **WHEN** the rendered compose.yml is inspected
+- **THEN** there is NO bind mount of any source to `/workspace` (singular) on any service
+
+### Requirement: _backups Tree Excluded from ACL/Recipe Planning
+
+The `~/.sandbox-ai/workspaces/_backups/` tree SHALL be excluded from any ACL grant plan, helper recipe phase, or shared-group recipe planning. Backup trees are dev-owned plain trees (mode 0700 dev:dev, no ACLs); the orchestrator does not apply runtime recipe state to them.
+
+#### Scenario: _backups path absent from ACL grant plan
+- **WHEN** `_acl_grant_plan()` is called for any instance
+- **THEN** the returned plan contains NO entries for paths under `~/.sandbox-ai/workspaces/_backups/`
+
+#### Scenario: _backups path absent from shared-group plan
+- **WHEN** `_workspace_shared_group_plan()` is called
+- **THEN** the returned plan contains NO entries for paths under `~/.sandbox-ai/workspaces/_backups/`
+
+### Requirement: Walker Safety Rules Apply to All Ancestor Planning
+
+The ACL ancestor walker SHALL apply the seven safety rules defined in the `instance-workspace-model` capability's "Walker Safety Rules" requirement (resolve realpath first, boundary stop list, reject targets in boundary, bound walk depth, lstat throughout, fault-isolated grant at execution, per-target walk with execution-side dedup). The walker is invoked once per workspace path (and once for the instance root); deduplication of overlapping ancestor chains happens at execution.
+
+#### Scenario: Per-workspace walk emits independent plans
+- **WHEN** the walker is invoked for instance `foo` with workspaces `main` and `scratch`
+- **THEN** two walks occur (one per workspace path); the per-walk plans are merged with deduplication at execution
+
+#### Scenario: Boundary path never granted
+- **WHEN** any walk's ancestor chain would require a grant on `~/`, `/home`, or any other boundary-list path
+- **THEN** the walker emits NO grant for that path; the situation is surfaced as a doctor failure
+
 ### Requirement: UID Paradox ACL Default Overrides
 
-The system SHALL govern the `dev`/`<host_unprivileged_user>` filesystem boundary using a two-axis taxonomy: a **lifecycle** axis describing when an operation is applied and reversed, and a **mechanism** axis describing what host operation is performed. Each mount class is assigned a (lifecycle, mechanism) pair (or pairs, when a single mount carries multiple). The mapping is the source of truth for `_acl_grant_plan`, `_acl_revoke_plan`, and the new helper-recipe phases.
+The system SHALL govern the `dev`/`<host_unprivileged_user>` filesystem boundary using a two-axis taxonomy: a **lifecycle** axis describing when an operation is applied and reversed, and a **mechanism** axis describing what host operation is performed. Each mount class is assigned a (lifecycle, mechanism) pair (or pairs, when a single mount carries multiple). The mapping is the source of truth for `_acl_grant_plan`, `_acl_revoke_plan`, and the helper-recipe phases.
 
 **Lifecycle axis values:**
 - `granted-at-start, revoked-at-stop` — operation applied during `sandbox start` Phase 5 and reversed during `sandbox stop` / `sandbox destroy` revocation.
@@ -24,26 +64,27 @@ The system SHALL govern the `dev`/`<host_unprivileged_user>` filesystem boundary
 | Mount class | Lifecycle | Mechanism |
 | --- | --- | --- |
 | Instance root, `docker/` (recursive), `config/` (dir-level traverse), `secrets/` (dir-level traverse), `.sandbox.env` | granted-at-start, revoked-at-stop | named-acl |
-| Ancestor traverse `--x` chain (above the instance dir, walking up to the ownership boundary) | granted-once, persistent | named-acl |
+| Ancestor traverse `--x` chain (above the instance dir AND each workspace path, walking up to the ownership boundary; deduplicated at execution) | granted-once, persistent | named-acl |
 | Cache/log dir leaves (`cache/<svc>/...`, `log/<svc>/...` per the bind-mount inventory) | applied-on-every-start, idempotent, never-revoked | subuid-chown + parent default ACL `u:dev:rwx` |
 | Ro single-files (Corefile, dnsdist conf, all 5 proxy files, core/admin dotfiles, sshd_config) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0640) |
 | Secrets (authorized_keys, ipc_*) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0600) |
-| Workspace named ACL on `user_project_root` (effective AND default-ACL named entries) | granted-at-start, revoked-at-stop | named-acl |
-| Workspace shared-group state on `user_project_root` (chgrp, chmod 2770+setgid, persistent default ACL portion `u::rwx,g::rwx,o::---,m::rwx,u:dev:rwx`) | granted-once, persistent | shared-group |
+| **Each workspace's** named ACL on its `path` (effective AND default-ACL named entries) | granted-at-start, revoked-at-stop | named-acl |
+| **Each workspace's** shared-group state on its `path` (chgrp, chmod 2770+setgid, persistent default ACL portion `u::rwx,g::rwx,o::---,m::rwx,u:dev:rwx`) | granted-once, persistent | shared-group |
+| `_backups/` tree (lazy-created on first backup, dev-owned mode 0700) | none | none (excluded from ACL/recipe planning per "_backups Tree Excluded" requirement) |
 
-A single mount may carry multiple (lifecycle, mechanism) pairs. The workspace is the load-bearing example: its named ACL is granted-at-start/revoked-at-stop, while its group/mode/persistent-default-ACL is granted-once/persistent. Each pair is independently planned and executed.
+A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace is the load-bearing example: its named ACL is granted-at-start/revoked-at-stop, while its group/mode/persistent-default-ACL is granted-once/persistent.
 
 #### Scenario: Lifecycle × mechanism taxonomy is the spec's source of truth
 - **WHEN** any new mount class is added to the orchestrator
 - **THEN** the spec assigns it one or more (lifecycle, mechanism) pairs from the table; ad-hoc mechanisms outside the taxonomy are NOT introduced
 
-#### Scenario: Named-ACL grants — Pattern A class — applied at start
-- **WHEN** `sandbox start` reaches Phase 5 (ACL grants)
-- **THEN** `setfacl -R -m u:<host_unprivileged_user>:rX` is applied to `sandboxes/<id>/docker/`; `setfacl -m u:<host_unprivileged_user>:rX` to `sandboxes/<id>/config/` (dir-level — individual files inside are chowned per the consumer-uid-0-chown class); `setfacl -m u:<host_unprivileged_user>:r-x` to `sandboxes/<id>/`; `setfacl -m u:<host_unprivileged_user>:r` to `sandboxes/<id>/.sandbox.env`
+#### Scenario: Named-ACL grants — instance dirs — applied at start
+- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
+- **THEN** `setfacl -R -m u:<host_unprivileged_user>:rX` is applied to `instances/<inst>/docker/`; `setfacl -m u:<host_unprivileged_user>:rX` to `instances/<inst>/config/` (dir-level — individual files inside are chowned per the consumer-uid-0-chown class); `setfacl -m u:<host_unprivileged_user>:r-x` to `instances/<inst>/`; `setfacl -m u:<host_unprivileged_user>:r` to `instances/<inst>/.sandbox.env`
 
-#### Scenario: Named-ACL grants — Pattern A class — revoked at stop
-- **WHEN** `sandbox stop` or `sandbox destroy` executes ACL revocation
-- **THEN** `setfacl -x u:<host_unprivileged_user>` is applied to `sandboxes/<id>/docker/`, `sandboxes/<id>/config/`, `sandboxes/<id>/`, and `sandboxes/<id>/.sandbox.env`, using fault-isolated revocation (per the existing "Fault-Isolated ACL Revocation" requirement)
+#### Scenario: Named-ACL grants — instance dirs — revoked at stop
+- **WHEN** `sandbox stop <inst>` or `sandbox destroy <inst>` executes ACL revocation
+- **THEN** `setfacl -x u:<host_unprivileged_user>` is applied to `instances/<inst>/docker/`, `instances/<inst>/config/`, `instances/<inst>/`, and `instances/<inst>/.sandbox.env`, using fault-isolated revocation
 
 #### Scenario: Cache/log subuid-chown recipe — applied every start
 - **WHEN** `sandbox start` reaches the cache/log helper-recipe phase (after Phase 5 ACL grants)
@@ -71,101 +112,106 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. The workspace is
   | `secrets/{authorized_keys,ipc_host_key}` | 1000 | 0600 |
   | `secrets/{ipc_known_hosts,ipc_ssh_key}` | 1000 | 0600 |
 
-#### Scenario: Workspace named-ACL — applied at start, revoked at stop
-- **WHEN** `sandbox start` reaches Phase 5 (ACL grants)
-- **THEN** `setfacl -m u:<host_unprivileged_user>:rwx <user_project_root>` is applied (effective ACL); `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_unprivileged_user>:rwx,u:dev:rwx <user_project_root>` is applied (default ACL containing the host_user named entry)
+#### Scenario: Per-workspace named-ACL — applied at start
+- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants) for an instance with workspaces `main` and `scratch`
+- **THEN** for EACH workspace: `setfacl -m u:<host_unprivileged_user>:rwx <ws.path>` is applied (effective ACL); `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_unprivileged_user>:rwx,u:dev:rwx <ws.path>` is applied (default ACL containing the host_user named entry)
 
-#### Scenario: Workspace named-ACL revocation includes default ACL host_user entry
-- **WHEN** `sandbox stop` or `sandbox destroy` executes ACL revocation on the workspace
-- **THEN** `setfacl -x u:<host_unprivileged_user> <user_project_root>` removes the effective named entry AND `setfacl -d -x u:<host_unprivileged_user> <user_project_root>` removes the default-ACL named entry (symmetric revocation per Decision 4); the persistent portion of the default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is preserved
+#### Scenario: Per-workspace named-ACL revocation includes default ACL host_user entry
+- **WHEN** `sandbox stop <inst>` or `sandbox destroy <inst>` executes ACL revocation
+- **THEN** for EACH workspace: `setfacl -x u:<host_unprivileged_user> <ws.path>` removes the effective named entry AND `setfacl -d -x u:<host_unprivileged_user> <ws.path>` removes the default-ACL named entry (symmetric revocation per change 4 Decision 4); the persistent portion of each workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is preserved
 
-#### Scenario: Workspace shared-group state — applied once, persistent
-- **WHEN** `sandbox start` reaches the workspace shared-group phase (after Phase 5 ACL grants) and `<user_project_root>` does NOT have setgid+correct-group state (drift detection per Decision 17)
-- **THEN** `chgrp -R <bridge-group> <user_project_root>` (best-effort, dev-owned files only); `find <user_project_root> -type d -exec chmod 2770 {} +`; `find <user_project_root> -type f -exec chmod 0660 {} +`; the persistent portion of the default ACL is set
+#### Scenario: Per-workspace shared-group state — applied once, persistent
+- **WHEN** `sandbox start <inst>` reaches `_phase_workspace_shared_group` and a workspace's root does NOT have setgid+correct-group state (drift detection per change 4 Decision 17)
+- **THEN** `chgrp -R <bridge-group> <ws.path>` (best-effort, dev-owned files only); `find <ws.path> -type d -exec chmod 2770 {} +`; `find <ws.path> -type f -exec chmod 0660 {} +`; the persistent portion of the default ACL is set on `<ws.path>`
 
-#### Scenario: Workspace shared-group state — steady-state idempotency
-- **WHEN** `sandbox start` reaches the workspace shared-group phase and `<user_project_root>` already has setgid+correct-group on the root
-- **THEN** the recursive operation is skipped; only root-state idempotent assertions run (one stat call cost)
+#### Scenario: Per-workspace shared-group state — steady-state idempotency
+- **WHEN** `sandbox start <inst>` reaches the shared-group phase and a workspace's root already has setgid+correct-group
+- **THEN** the recursive operation is skipped for that workspace; only root-state idempotent assertions run (one stat call cost)
 
-#### Scenario: Workspace shared-group state — never revoked
-- **WHEN** `sandbox stop` or `sandbox destroy` executes
-- **THEN** chgrp, chmod 2770, setgid bit, and the persistent portion of the default ACL on `<user_project_root>` are NOT touched (per Decision 4: persistent identity properties)
+#### Scenario: Per-workspace shared-group state — never revoked
+- **WHEN** `sandbox stop <inst>` or `sandbox destroy <inst>` executes
+- **THEN** chgrp, chmod 2770, setgid bit, and the persistent portion of the default ACL on EACH `<ws.path>` are NOT touched (per change 4 Decision 4: persistent identity properties)
 
 ### Requirement: Ancestor Directory Traverse ACLs
-The system SHALL grant execute-only (`--x`) ACLs on user-owned ancestor directories so the sandbox user can traverse from `/` to the instance directory and to the workspace directory. Ancestor ACLs are in the `granted-once, persistent` lifecycle: they are NOT revoked on stop or destroy (per the "UID Paradox ACL Default Overrides" requirement's lifecycle taxonomy).
+
+The system SHALL grant execute-only (`--x`) ACLs on user-owned ancestor directories so the sandbox user can traverse from `/` to the instance directory and to each workspace directory. Ancestor ACLs are in the `granted-once, persistent` lifecycle: they are NOT revoked on stop or destroy. The walker applies the safety rules from `instance-workspace-model` (resolve realpath first, boundary stop list, depth bound, lstat throughout). Per-workspace walks are deduplicated at execution.
 
 #### Scenario: Ancestor traverse granted at start
-- **WHEN** `sandbox start` reaches Phase 5 (ACL grants)
-- **THEN** `setfacl -m u:<host_unprivileged_user>:--x` is applied to each directory in the ancestor chain from the instance directory up to (but not including) the first directory not owned by the orchestrator UID or `/`
+- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
+- **THEN** `setfacl -m u:<host_unprivileged_user>:--x` is applied to each directory in the ancestor chain from the instance directory up to (but not including) the first directory not owned by the orchestrator UID, the first directory in the walker boundary list (per `instance-workspace-model`), or `/`
 
-#### Scenario: Ancestor traverse granted on workspace path components
-- **WHEN** `sandbox start` reaches Phase 5 (ACL grants) and `<user_project_root>` is in a different ancestor chain than the instance directory
-- **THEN** `setfacl -m u:<host_unprivileged_user>:--x` is also applied to each directory in the ancestor chain from `<user_project_root>` up to (but not including) the first directory not owned by the orchestrator UID or `/`
+#### Scenario: Ancestor traverse granted on each workspace path
+- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants) for an instance with multiple workspaces
+- **THEN** `setfacl -m u:<host_unprivileged_user>:--x` is applied to each directory in the ancestor chain from EACH `workspace.path` up to (but not including) the first non-orchestrator-owned dir, the first boundary-list entry, or `/`. Overlapping chains across workspaces are deduplicated at execution.
 
 #### Scenario: Ownership boundary stops ancestor walk
 - **WHEN** the ancestor walk encounters a directory owned by a UID other than the current process UID (e.g., root-owned `/home/`)
 - **THEN** the walk stops and no ACL is applied to that directory or any of its ancestors
+
+#### Scenario: Boundary list stops ancestor walk
+- **WHEN** the ancestor walk would need to grant on a path in the walker boundary list (`/`, `/etc`, `/usr`, `/var`, `/tmp`, `/proc`, `/sys`, `/dev`, `/boot`, `/run`, `/home`, `/root`, `~/`)
+- **THEN** the walk stops and no ACL is applied to that path; the situation surfaces as a doctor failure with operator-resolvable remediation
 
 #### Scenario: Root directory excluded
 - **WHEN** the ancestor walk reaches `/`
 - **THEN** no ACL is applied to `/`
 
 #### Scenario: Ancestor ACLs not revoked on stop
-- **WHEN** `sandbox stop` executes ACL revocation
+- **WHEN** `sandbox stop <inst>` executes ACL revocation
 - **THEN** ancestor directory `--x` ACLs are NOT included in the revocation set
 
 #### Scenario: Ancestor ACLs not revoked on destroy
-- **WHEN** `sandbox destroy` executes ACL revocation
-- **THEN** ancestor directory `--x` ACLs are NOT included in the revocation set
+- **WHEN** `sandbox destroy <inst>` executes ACL revocation
+- **THEN** ancestor directory `--x` ACLs are NOT included in the revocation set; cleanup happens transitively when `rmdir(workspaces/<inst>/)` succeeds at end of destroy
 
 #### Scenario: Concurrent ancestor grants are idempotent
 - **WHEN** two instances grant `--x` on the same ancestor directory simultaneously
 - **THEN** both `setfacl` calls succeed without error (idempotent — same ACL entry applied twice)
 
 ### Requirement: Instance Root Read-Execute ACL
-The system SHALL grant read-execute (`r-x`) ACL on the instance root directory so the sandbox user can list its contents for compose file resolution.
+The system SHALL grant read-execute (`r-x`) ACL on the instance root directory so the sandbox user can list its contents for compose file resolution. The instance root is `<sandbox_ai_home()>/instances/<inst>/`.
 
 #### Scenario: Instance root ACL granted at start
-- **WHEN** `sandbox start` reaches Phase 5 (ACL grants)
-- **THEN** `setfacl -m u:<host_unprivileged_user>:r-x <instance_dir>` is applied
+- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
+- **THEN** `setfacl -m u:<host_unprivileged_user>:r-x <sandbox_ai_home()>/instances/<inst>/` is applied
 
 #### Scenario: Instance root ACL revoked at stop
-- **WHEN** `sandbox stop` executes ACL revocation
-- **THEN** `setfacl -x u:<host_unprivileged_user> <instance_dir>` is applied
+- **WHEN** `sandbox stop <inst>` executes ACL revocation
+- **THEN** `setfacl -x u:<host_unprivileged_user> <sandbox_ai_home()>/instances/<inst>/` is applied
 
 ### Requirement: Environment File Read ACL
-The system SHALL grant read-only ACL on `.sandbox.env` so the sandbox user's `docker compose` process can parse `env_file:` directives and `--env-file` interpolation.
+The system SHALL grant read-only ACL on `.sandbox.env` so the sandbox user's `docker compose` process can parse `env_file:` directives and `--env-file` interpolation. The `.sandbox.env` lives at `<sandbox_ai_home()>/instances/<inst>/.sandbox.env`.
 
 #### Scenario: .sandbox.env ACL granted at start
-- **WHEN** `sandbox start` reaches Phase 5 (ACL grants)
-- **THEN** `setfacl -m u:<host_unprivileged_user>:r <instance_dir>/.sandbox.env` is applied
+- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
+- **THEN** `setfacl -m u:<host_unprivileged_user>:r <sandbox_ai_home()>/instances/<inst>/.sandbox.env` is applied
 
 #### Scenario: .sandbox.env ACL revoked at stop
-- **WHEN** `sandbox stop` executes ACL revocation
-- **THEN** `setfacl -x u:<host_unprivileged_user> <instance_dir>/.sandbox.env` is applied
+- **WHEN** `sandbox stop <inst>` executes ACL revocation
+- **THEN** `setfacl -x u:<host_unprivileged_user> <sandbox_ai_home()>/instances/<inst>/.sandbox.env` is applied
 
 #### Scenario: Missing .sandbox.env fails explicitly
 - **WHEN** `.sandbox.env` does not exist at Phase 5
 - **THEN** `setfacl` fails and the error is surfaced as a `SandboxExecutionError` indicating instance corruption (no silent skip)
 
 ### Requirement: ACL Grant Plan as Single Source of Truth
-The system SHALL define ACL grant targets in a single function (`_acl_grant_plan`) consumed by both the execution path and the dry-run preview. The grant plan SHALL include named-acl operations only; helper-recipe phases (subuid-chown, consumer-uid-0-chown, shared-group) are separate phases with their own plans (`_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan`). Each plan is its own single source of truth for its mechanism.
+The system SHALL define ACL grant targets in a single function (`_acl_grant_plan`) consumed by both the execution path and the dry-run preview. The grant plan SHALL include named-acl operations only; helper-recipe phases (subuid-chown, consumer-uid-0-chown, shared-group) are separate phases with their own plans (`_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan`). Each plan is its own single source of truth for its mechanism. Plans iterate `[workspaces]` (sorted by name) where applicable.
 
 #### Scenario: Grant plan consumed by execution
 - **WHEN** `_phase_acl_grant` executes Phase 5
-- **THEN** it iterates over the output of `_acl_grant_plan()` to apply each named-acl operation
+- **THEN** it iterates over the output of `_acl_grant_plan()` to apply each named-acl operation, including per-workspace effective + default-ACL grants
 
 #### Scenario: Grant plan consumed by dry-run preview
 - **WHEN** `_dry_run_pipeline` previews the start sequence
-- **THEN** it iterates over the output of `_acl_grant_plan()` to display each ACL command, AND iterates over the helper-recipe plans to display each helper invocation
+- **THEN** it iterates over the output of `_acl_grant_plan()` to display each ACL command, AND iterates over the helper-recipe plans to display each helper invocation, with per-workspace fan-out for shared-group operations
 
 #### Scenario: Helper-recipe plans are separate functions
 - **WHEN** the orchestrator code is inspected
-- **THEN** there are distinct `_helper_mkdir_chown_plan()`, `_helper_cp_chown_plan()`, and `_workspace_shared_group_plan()` functions; each is the single source of truth for its mechanism
+- **THEN** there are distinct `_helper_mkdir_chown_plan()`, `_helper_cp_chown_plan()`, and `_workspace_shared_group_plan()` functions; each is the single source of truth for its mechanism; `_workspace_shared_group_plan()` returns per-workspace operations
 
 #### Scenario: Revoke plan excludes ancestors and persistent ops
 - **WHEN** `_acl_revoke_plan()` is called
-- **THEN** the returned target set includes named-acl entries on instance root, docker/, config/ (dir-level), secrets/ (dir-level), .sandbox.env, AND named-acl entries on the workspace root (effective + default ACL host_user portion); it does NOT include ancestor directories or any chown/chmod operation
+- **THEN** the returned target set includes named-acl entries on instance root, docker/, config/ (dir-level), secrets/ (dir-level), .sandbox.env, AND named-acl entries on EACH workspace.path (effective + default ACL host_user portion); it does NOT include ancestor directories or any chown/chmod operation, NOR any path under `_backups/`
 
 ### Requirement: Fault-Isolated ACL Revocation
 The system SHALL execute each ACL revocation independently with `check=False`. Failures SHALL be collected and reported as warnings. All targets SHALL be attempted regardless of individual failures.
@@ -239,34 +285,42 @@ The workspace shared-group recipe SHALL detect whether the workspace tree needs 
 - **THEN** the chgrp for that specific file fails with EPERM; the failure is logged and counted; the rest of the recursive operation continues; the doctor's post-run report includes the count of skipped files
 
 ### Requirement: Topographical File Isolation Boundaries
-The system SHALL enforce separation between the immutable tooling plane (the packaged `templates` Python module containing `templates/docker/` and `templates/config/`) and the mutable per-instance plane (`sandboxes/<id>/`).
+The system SHALL enforce separation between the immutable tooling plane (the packaged `templates` Python module containing `templates/docker/` and `templates/config/`) and the mutable per-instance plane (`<sandbox_ai_home()>/instances/<inst>/`).
 
 #### Scenario: The Immutable Tooling Plane (`templates/docker/` and `templates/config/`)
 - **WHEN** the orchestrator configures infrastructure for an instance
 - **THEN** template sources under `templates/docker/` and `templates/config/` (read via `importlib.resources.files("templates")`) are read-only inputs to the hydration pipeline; they are never written to at runtime
 
-#### Scenario: The Mutable Instance Plane (`sandboxes/<id>/`)
+#### Scenario: The Mutable Instance Plane
 - **WHEN** the hydration pipeline runs
-- **THEN** all rendered artifacts are written exclusively under `SANDBOX_AI_HOME/sandboxes/<id>/`, which is owned by `dev` and scoped to the instance
+- **THEN** all rendered artifacts are written exclusively under `<sandbox_ai_home()>/instances/<inst>/`, which is owned by `dev` and scoped to the instance
+
+#### Scenario: Workspace Plane Separate From Instance Plane
+- **WHEN** the orchestrator scaffolds a workspace
+- **THEN** the workspace tree is written exclusively under `<sandbox_ai_home()>/workspaces/<inst>/<ws>/`, which is dev-owned at scaffold and transitions to `<bridge-group>`-grouped on first start; this plane is distinct from the instance plane
+
+#### Scenario: Backup Plane Separate From Instance and Workspace Planes
+- **WHEN** the backup mechanism creates a backup tree
+- **THEN** the backup tree is written exclusively under `<sandbox_ai_home()>/workspaces/_backups/<inst>/<ws>/<ts>/`, which is dev-owned with mode 0700 and no ACL state; this plane is distinct from both the instance plane and the live workspace plane
 
 #### Scenario: Shell History Isolation via Directory Mount
 - **WHEN** the admin and core containers are started
-- **THEN** the bind mounts for shell history are at the **directory** level (`sandboxes/<id>/log/admin/` and `sandboxes/<id>/log/core/`), and the `HISTFILE` environment variable inside each container points to a specific path within that mounted directory
+- **THEN** the bind mounts for shell history are at the **directory** level (`<sandbox_ai_home()>/instances/<inst>/log/admin/` and `<sandbox_ai_home()>/instances/<inst>/log/core/`), and the `HISTFILE` environment variable inside each container points to a specific path within that mounted directory
 
 #### Scenario: SSH Credentials in Secrets Directory
 - **WHEN** the hydration pipeline runs
-- **THEN** SSH keypair files are written exclusively under `SANDBOX_AI_HOME/sandboxes/<id>/secrets/`
+- **THEN** SSH keypair files are written exclusively under `<sandbox_ai_home()>/instances/<inst>/secrets/`
 
 ### Requirement: Deep VFS Annihilation
 The system SHALL support volume removal on explicit operator request, scoped strictly to Docker named volumes owned by the instance.
 
 #### Scenario: The `--clean` Flag Termination Sequence
-- **WHEN** the human operator executes `sandbox stop --clean`
-- **THEN** the orchestrator executes `docker compose down -v`, removing all named Docker volumes for the instance (e.g., Postgres data), while leaving `sandboxes/<id>/log/` and `sandboxes/<id>/cache/` on the host filesystem intact
+- **WHEN** the human operator executes `sandbox stop <inst> --clean`
+- **THEN** the orchestrator executes `docker compose down -v`, removing all named Docker volumes for the instance (e.g., Postgres data), while leaving `<sandbox_ai_home()>/instances/<inst>/log/`, `<sandbox_ai_home()>/instances/<inst>/cache/`, and all `<sandbox_ai_home()>/workspaces/<inst>/<ws>/` trees on the host filesystem intact
 
 #### Scenario: The `destroy` Full Annihilation
-- **WHEN** the human operator confirms `sandbox destroy`
-- **THEN** `docker compose down -v` removes all named Docker volumes, after which `shutil.rmtree(sandboxes/<id>/)` removes the entire instance directory including logs, cache, and secrets
+- **WHEN** the human operator confirms `sandbox destroy <inst>` (per `cli-destroy`'s phase order)
+- **THEN** `docker compose down -v` removes all named Docker volumes; `shutil.rmtree(<sandbox_ai_home()>/instances/<inst>/)` removes the entire instance directory; AND `shutil.rmtree(<sandbox_ai_home()>/workspaces/<inst>/<ws>/)` is invoked for each workspace; `_backups/` trees are preserved (separate plane)
 
 #### Scenario: admin-ipc_vol absent from volumes
 - **WHEN** the rendered `compose.yml` is inspected
@@ -299,15 +353,15 @@ The rendered `compose.yml` SHALL include a read-write bind mount for the tmux re
 - **THEN** it contains a volume entry `{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw`
 
 ### Requirement: Container-Namespaced Cache Directory
-The `cache/` subtree SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`).
+The `cache/` subtree under each instance dir SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`). Paths are relative to the instance dir at `<sandbox_ai_home()>/instances/<inst>/`.
 
 #### Scenario: Scaffold creates namespaced cache directory
 - **WHEN** scaffold creates a new instance via `INSTANCE_SUBDIRS`
-- **THEN** `sandboxes/<id>/cache/core/.claude` is created (not `sandboxes/<id>/cache/.claude`)
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/core/.claude` is created (not `cache/.claude`)
 
 #### Scenario: Scaffold creates tmux resurrect cache directory
 - **WHEN** scaffold creates a new instance via `INSTANCE_SUBDIRS`
-- **THEN** `sandboxes/<id>/cache/admin/tmux_resurrect` is created
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/admin/tmux_resurrect` is created
 
 #### Scenario: Compose mount references namespaced cache path
 - **WHEN** the rendered `compose.yml` is inspected for the core service

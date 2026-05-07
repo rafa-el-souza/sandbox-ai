@@ -38,8 +38,8 @@ The system SHALL resolve all template variable defaults in `build_jinja_context(
 - **THEN** `jinja2.StrictUndefined` raises `UndefinedError` during both `render_templates()` and `validate_templates()`
 
 ### Requirement: Post-Render Marker Scan
-The system's unit test suite SHALL include a test that scans all files in the rendered instance directory for unresolved `{{ }}` markers after `render_templates()` completes. This tests the invariant "no rendered instance should contain template syntax" rather than the mechanism "this file is in the correct list".
+The system's unit test suite SHALL include a test that scans all files in the rendered instance directory for unresolved `{{ }}` markers after `render_templates()` completes. This tests the invariant "no rendered instance should contain template syntax" rather than the mechanism "this file is in the correct list". The instance directory is at `<sandbox_ai_home()>/instances/<inst>/`.
 
 #### Scenario: No unresolved Jinja2 markers in rendered output
 - **WHEN** `render_templates()` completes with all components enabled
-- **THEN** no file under `sandboxes/<id>/` contains a literal `{{` string
+- **THEN** no file under `<sandbox_ai_home()>/instances/<inst>/` contains a literal `{{` string

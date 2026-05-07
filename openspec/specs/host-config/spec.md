@@ -76,11 +76,16 @@ The system SHALL provide a `machinectl_cmd(user, auth)` function that returns th
 - **THEN** it returns `["machinectl", "shell", "sandbox@.host"]`
 
 ### Requirement: Module Location
-The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, and `machinectl_cmd` function SHALL reside in `core/host_config.py`.
+
+The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. The legacy `_resolve_sandbox_ai_home()` helper is removed.
 
 #### Scenario: Import path
-- **WHEN** other modules need host config or machinectl prefix building
+- **WHEN** other modules need host config, machinectl prefix building, subuid resolution, or bridge-group resolution
 - **THEN** they import from `core.host_config`
+
+#### Scenario: Legacy resolver absent
+- **WHEN** `core.host_config` is inspected
+- **THEN** there is NO `_resolve_sandbox_ai_home()` symbol; callers use `sandbox_ai_home()` from the `per-user-state-layout` capability
 
 ### Requirement: Subuid/Subgid Range Parsers
 

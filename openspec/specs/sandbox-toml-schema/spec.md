@@ -4,12 +4,40 @@ This specification defines the `sandbox.toml` configuration file schema, governi
 
 ## Requirements
 
+### Requirement: Workspaces Map-of-Tables
+
+The `sandbox.toml` schema SHALL include a `[workspaces]` map-of-tables section. Each entry's value is a `WorkspaceConfig` Pydantic model with three fields: `bootstrap_mode: BootstrapMode`, `source: str | None`, `path: str`. The `BootstrapMode` enum has two members: `COPY = "copy"` and `EMPTY = "empty"`. The map-of-tables shape (`[workspaces.<name>]`) ensures TOML-parser-enforced uniqueness of workspace names within the instance.
+
+#### Scenario: Workspaces map parses
+- **WHEN** sandbox.toml contains `[workspaces.main]` with `bootstrap_mode = "copy"`, `source = "/p"`, `path = "/q"`
+- **THEN** `SandboxInstanceSection.workspaces["main"]` is a `WorkspaceConfig` with those values
+
+#### Scenario: BootstrapMode enum rejects unknown values
+- **WHEN** sandbox.toml contains `bootstrap_mode = "clone"` (or any other unknown value)
+- **THEN** Pydantic validation raises a structured error identifying the invalid enum value
+
+#### Scenario: Empty workspaces map is rejected
+- **WHEN** sandbox.toml contains an empty `[workspaces]` section (no nested entries)
+- **THEN** Pydantic validation raises an error (an instance must have at least one workspace)
+
+#### Scenario: Source field optional and conditional
+- **WHEN** sandbox.toml contains `bootstrap_mode = "empty"` without a `source` field
+- **THEN** `WorkspaceConfig.source` is `None`; validation passes
+
+#### Scenario: Source required for copy mode
+- **WHEN** sandbox.toml contains `bootstrap_mode = "copy"` without a `source` field
+- **THEN** Pydantic validation raises an error
+
+#### Scenario: Path field always required
+- **WHEN** sandbox.toml contains a `[workspaces.<ws>]` entry without a `path` field
+- **THEN** Pydantic validation raises an error
+
 ### Requirement: Schema Generation on Scaffold
-The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[instance]` section SHALL NOT include `host_unprivileged_user` — this field is sourced from per-host config (`sandbox-ai.toml`). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
+The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[instance]` section SHALL NOT include `host_unprivileged_user` or `user_project_root`. The `[workspaces]` section SHALL include one entry per workspace specified at `sandbox init` time (defaulting to a single `[workspaces.main]` with `bootstrap_mode = "empty"` when no `--copy`/`--empty` flags are supplied). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
 
 #### Scenario: Auto-derived instance name
-- **WHEN** no `instance_name` override is present in an existing `sandbox.toml`
-- **THEN** the `instance.name` field is set to `basename(abs(instance_dir))`
+- **WHEN** scaffold writes a new `sandbox.toml`
+- **THEN** the `instance.name` field is set to the `<inst>` argument supplied to `sandbox init`
 
 #### Scenario: Auto-detected host UID
 - **WHEN** scaffold writes a new `sandbox.toml`
@@ -18,6 +46,18 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 #### Scenario: host_unprivileged_user absent from scaffold output
 - **WHEN** scaffold writes a new `sandbox.toml`
 - **THEN** the `[instance]` section does NOT contain a `host_unprivileged_user` field
+
+#### Scenario: user_project_root absent from scaffold output
+- **WHEN** scaffold writes a new `sandbox.toml`
+- **THEN** the `[instance]` section does NOT contain a `user_project_root` field
+
+#### Scenario: Default workspace named main
+- **WHEN** `sandbox init <inst>` is invoked with no `--copy`/`--empty` flags
+- **THEN** the scaffolded `sandbox.toml` contains exactly one workspace `[workspaces.main]` with `bootstrap_mode = "empty"`, no `source` field, and `path` set to `~/.sandbox-ai/workspaces/<inst>/main`
+
+#### Scenario: Multiple workspaces from CLI flags
+- **WHEN** `sandbox init foo --copy a=/p1 --empty b --copy c=/p2` is invoked
+- **THEN** the scaffolded `sandbox.toml` contains three workspaces (`a`, `b`, `c`) with the appropriate `bootstrap_mode`/`source`/`path` values
 
 #### Scenario: Database config defaults include pg_user, pg_db, and image
 - **WHEN** scaffold writes a new `sandbox.toml` with `components.db_postgres.enabled = true`
@@ -40,10 +80,10 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 - **THEN** Pydantic applies defaults without validation errors — the fields are optional with defaults
 
 ### Requirement: Pydantic Schema Validation
-The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[instance]` section's Pydantic model class SHALL be named `SandboxInstanceSection` to disambiguate from the per-host `HostConfig` model. The `SandboxInstanceSection` model SHALL NOT contain `host_unprivileged_user`. The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
+The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[instance]` section's Pydantic model class SHALL be named `SandboxInstanceSection` to disambiguate from the per-host `HostConfig` model. The `SandboxInstanceSection` model SHALL NOT contain `host_unprivileged_user` or `user_project_root` (the latter removed in change 5; replaced by `[workspaces]`). The `SandboxInstanceSection` model SHALL contain `workspaces: dict[str, WorkspaceConfig]` (non-empty dict). The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
 
 #### Scenario: Missing required field
-- **WHEN** `sandbox.toml` is missing a required field (e.g., `instance.user_project_root`)
+- **WHEN** `sandbox.toml` is missing a required field (e.g., a workspace's `path` or `bootstrap_mode`)
 - **THEN** the CLI exits with a Pydantic `ValidationError` identifying the field and the reason before any state changes occur
 
 #### Scenario: Unknown field rejection
@@ -61,6 +101,10 @@ The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecy
 #### Scenario: AdminConfig validates mem_limit and cpus
 - **WHEN** `sandbox.toml` includes `[admin]` with `mem_limit` or `cpus` fields
 - **THEN** the Pydantic model validates `mem_limit` as a string and `cpus` as a float, applying defaults (`"8gb"`, `4.0`) if absent
+
+#### Scenario: Workspaces map required
+- **WHEN** `sandbox.toml` lacks a `[workspaces]` section entirely OR contains an empty `[workspaces]` section
+- **THEN** Pydantic raises a validation error (instances must have at least one workspace)
 
 #### Scenario: Backward compatibility with existing sandbox.toml
 - **WHEN** an existing `sandbox.toml` omits `mem_limit` and `cpus` from `[core]` and `[admin]`

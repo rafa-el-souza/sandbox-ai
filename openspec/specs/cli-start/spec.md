@@ -4,23 +4,70 @@ This specification defines the `sandbox start` command lifecycle, governing pre-
 
 ## Requirements
 
+### Requirement: Explicit Instance Argument
+
+`sandbox start <inst>` SHALL require the instance name as a positional argument. CWD-based instance discovery is removed; the command does NOT inspect the current working directory.
+
+#### Scenario: Instance argument required
+- **WHEN** `sandbox start` is invoked without an `<inst>` argument
+- **THEN** the CLI exits with a typer "missing argument" error
+
+#### Scenario: CWD has no role in resolution
+- **WHEN** `sandbox start <inst>` is invoked from any working directory
+- **THEN** the instance is looked up by name in `~/.sandbox-ai/state/instances.json` regardless of CWD
+
+### Requirement: Per-Instance Backup Lock Check
+
+`sandbox start <inst>` SHALL check `~/.sandbox-ai/state/<inst>.backup.lock` after acquiring `state.lock` and refuse fast if held. Operator guidance: wait for the backup to complete or run `sandbox doctor` to inspect.
+
+#### Scenario: Concurrent backup blocks start
+- **WHEN** `sandbox start <inst>` is invoked while `<inst>.backup.lock` is held by a backup operation
+- **THEN** start exits with: "Backup in progress for <inst>; wait or `sandbox doctor` to inspect." and exit code 1
+
+### Requirement: Workspace Shared-Group Phase Iterates Workspaces
+
+The system SHALL provide `_phase_workspace_shared_group` that, after `_phase_helper_cp_chown_ro_files`, iterates `[workspaces]` (sorted by name) and applies the shared-group recipe to each `workspace.path` per the drift-detection contract from change 4 (`orchestrator-volumes` capability).
+
+For each workspace:
+- Drift detection: `os.stat(ws.path)` checks setgid bit + group ownership against `workspace_bridge_gid(host)`.
+- First-run / drift: recursive `chgrp -h -R <bridge-group> <ws.path>` (best-effort), `find ... -type d -exec chmod 2770`, `find ... -type f -exec chmod 0660`, `setfacl -R -P` (physical/no-follow) operations.
+- Steady-state: only ensures root state is correct (idempotent operations on the workspace root only).
+
+The phase SHALL fail-fast if `workspace_bridge_gid(host)` raises (group missing or out of subgid range), surfacing the doctor remediation.
+
+#### Scenario: Phase iterates all workspaces
+- **WHEN** the phase runs for an instance with N workspaces
+- **THEN** drift detection runs N times (once per workspace); first-run setup runs only on workspaces whose drift detection signals it
+
+#### Scenario: First-run on a fresh workspace triggers recursive setup
+- **WHEN** a workspace's root has no setgid bit set (typical: just-scaffolded workspace)
+- **THEN** the phase runs the recursive `chgrp -h -R`, mode-bit setting, and setfacl operations
+
+#### Scenario: Steady-state skips recursion
+- **WHEN** a workspace's root already has setgid + correct group
+- **THEN** the phase only ensures root state is correct (idempotent) and skips recursive operations for that workspace
+
+#### Scenario: Bridge-group missing fails fast
+- **WHEN** the phase calls `workspace_bridge_gid(host)` and it raises `WorkspaceBridgeGroupMissingError`
+- **THEN** the phase aborts with a clear error directing the operator to `sandbox doctor`
+
 ### Requirement: Pre-Lock Warm State Detection
-The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. The container status query SHALL use the configured machinectl authentication mode. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation. The system SHALL require a prior `sandbox init` and reject start if no instance is registered.
+The system SHALL check whether the sandbox instance's containers are already running before acquiring any concurrency locks. The container status query SHALL use the configured machinectl authentication mode. When `--dry-run` is passed, the system SHALL skip the warm state check and proceed directly to pipeline validation. The system SHALL require a prior `sandbox init <inst>` and reject start if `<inst>` is not registered.
 
 #### Scenario: No instance found — error with guidance
-- **WHEN** `sandbox start` is invoked and no instance is registered for the current project directory
-- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init` first." and exit code 1
+- **WHEN** `sandbox start <inst>` is invoked and `<inst>` is not present in the registry
+- **THEN** the CLI exits with "No sandbox instance named '<inst>'. Run `sandbox init <inst>` first." and exit code 1
 
 #### Scenario: Partial init detected
-- **WHEN** `sandbox start` is invoked and the registry contains an entry but `.initialized` sentinel is missing
-- **THEN** the CLI exits with "Instance partially initialized. Run `sandbox destroy` then `sandbox init`." and exit code 1
+- **WHEN** `sandbox start <inst>` is invoked and the registry contains an entry but `.initialized` sentinel is missing
+- **THEN** the CLI exits with "Instance partially initialized. Run `sandbox destroy <inst>` then `sandbox init <inst>`." and exit code 1
 
 #### Scenario: Already-running instance exits without lock contention
-- **WHEN** `sandbox start` is invoked and `docker compose ps -q` returns non-empty output
-- **THEN** the CLI exits with "Sandbox '<name>' is already running. Use 'sandbox attach' to reconnect." before acquiring `state.lock` or the IPAM lock
+- **WHEN** `sandbox start <inst>` is invoked and `docker compose ps -q` returns non-empty output
+- **THEN** the CLI exits with "Sandbox '<inst>' is already running. Use 'sandbox attach <inst> [<ws>]' to reconnect." before acquiring `state.lock` or the IPAM lock
 
 #### Scenario: Dry-run bypasses warm state check
-- **WHEN** `sandbox start --dry-run` is invoked
+- **WHEN** `sandbox start <inst> --dry-run` is invoked
 - **THEN** the warm state check is skipped and the system proceeds to dry-run validation regardless of container state
 
 ### Requirement: Concurrency Lock Acquisition
@@ -174,7 +221,7 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 - **THEN** the error output includes the traverse failure diagnostic (if applicable) followed by the ACL cleanup status
 
 ### Requirement: ACL Grants for rw Bind-Mount Sources
-The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unprivileged_user` on rw bind-mount source subdirectories during Phase 5. These grants — formerly Pattern B / Option B — are empirically dead under runsc (named ACLs are stripped at the gofer/directfs boundary per `temp/bug-tracker/2026-05-04.md` finding 1) and are replaced by the cache/log helper-recipe phase (subuid-chown + parent default ACL `u:dev:rwx`) for `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`. The workspace mount (`user_project_root`) is handled by the workspace shared-group phase plus a granted/revoked named-ACL.
+The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unprivileged_user` on rw bind-mount source subdirectories during Phase 5. These grants — formerly Pattern B / Option B — are empirically dead under runsc (named ACLs are stripped at the gofer/directfs boundary per `temp/bug-tracker/2026-05-04.md` finding 1) and are replaced by the cache/log helper-recipe phase (subuid-chown + parent default ACL `u:dev:rwx`) for `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`. Each workspace's bind-mount source (every `workspace.path` in `[workspaces]`) is handled by the per-workspace shared-group phase plus a granted/revoked named-ACL applied per-workspace.
 
 #### Scenario: rw bind-mount source directories do NOT receive the prior effective ACLs
 - **WHEN** `_acl_grant_plan()` is called for an instance
@@ -188,53 +235,53 @@ The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unpriv
 - **WHEN** `sandbox start` reaches `_phase_helper_mkdir_chown_cache_log`
 - **THEN** the cache/log leaves are chowned to the consumer subuid; the in-container agent reads/writes via owner check (runsc-compatible); dev reads via the parent's inherited `u:dev:rwx`
 
-#### Scenario: Workspace access is provided by the workspace shared-group + named-ACL phases
-- **WHEN** `sandbox start` reaches the workspace phases
-- **THEN** the workspace mount has `chgrp <bridge-group>`, `chmod 2770`, the persistent default ACL portion, and the granted-at-start named ACL `u:<host_user>:rwx`; the in-container agent reads/writes via group bits (sb-ws supplementary gid); dev reads/writes via group bits (dev's sb-ws membership)
+#### Scenario: Workspace access is provided by per-workspace shared-group + named-ACL phases
+- **WHEN** `sandbox start <inst>` reaches the workspace phases for an instance with workspaces `main` and `scratch`
+- **THEN** EACH workspace.path has `chgrp <bridge-group>`, `chmod 2770`, the persistent default ACL portion, and the granted-at-start named ACL `u:<host_user>:rwx`; the in-container agent reads/writes via group bits (sb-ws supplementary gid); dev reads/writes via group bits (dev's sb-ws membership)
 
 #### Scenario: Non-bind-mounted log directories excluded from grants
 - **WHEN** `_acl_grant_plan()` is called for an instance
-- **THEN** the returned plan does NOT include entries for `log/proxy` or `log/orchestrator` (these directories are not bind-mounted into containers); this exclusion remains correct post-change-4 even though the rw bind-mount entries are also absent for a different reason
+- **THEN** the returned plan does NOT include entries for `log/proxy` or `log/orchestrator` (these directories are not bind-mounted into containers)
 
 #### Scenario: rw bind-mount ACLs absent from dry-run preview
-- **WHEN** `sandbox start --dry-run` is invoked
-- **THEN** the command preview does NOT include the prior rw bind-mount source ACL entries; instead, the preview shows the helper-recipe phase plans
+- **WHEN** `sandbox start <inst> --dry-run` is invoked
+- **THEN** the command preview does NOT include the prior rw bind-mount source ACL entries; instead, the preview shows the helper-recipe phase plans and per-workspace shared-group plans
 
 ### Requirement: Phase Order Includes Helper-Recipe Phases
 
-`sandbox start` SHALL execute provisioning phases in the order: `_phase_ipam → _phase_credentials → _phase_hydrate → _phase_acl_grant → _phase_helper_mkdir_chown_cache_log → _phase_helper_cp_chown_ro_files → _phase_workspace_shared_group → _phase_compose_up`. The three helper-recipe phases between `_phase_acl_grant` and `_phase_compose_up` are new in this change; together they replace the dropped Option-B grants (per `orchestrator-volumes`).
+`sandbox start <inst>` SHALL execute provisioning phases in the order: `_phase_ipam → _phase_credentials → _phase_hydrate → _phase_acl_grant → _phase_helper_mkdir_chown_cache_log → _phase_helper_cp_chown_ro_files → _phase_workspace_shared_group → _phase_compose_up`. The three helper-recipe phases between `_phase_acl_grant` and `_phase_compose_up` are inherited from change 4. Change 5 modifies `_phase_workspace_shared_group` to iterate workspaces (per the "Workspace Shared-Group Phase Iterates Workspaces" requirement).
 
 #### Scenario: Helper-recipe phases run after ACL grants and before compose up
-- **WHEN** `sandbox start` proceeds past Phase 5 (ACL grants)
+- **WHEN** `sandbox start <inst>` proceeds past Phase 5 (ACL grants)
 - **THEN** `_phase_helper_mkdir_chown_cache_log` runs, then `_phase_helper_cp_chown_ro_files`, then `_phase_workspace_shared_group`, then `_phase_compose_up`
 
 #### Scenario: Each helper phase is independently traceable in dry-run output
-- **WHEN** `sandbox start --dry-run` is invoked
-- **THEN** the preview output enumerates each helper-recipe phase's planned operations separately (per `orchestrator-volumes`'s "ACL Grant Plan as Single Source of Truth")
+- **WHEN** `sandbox start <inst> --dry-run` is invoked
+- **THEN** the preview output enumerates each helper-recipe phase's planned operations separately, with per-workspace fan-out for `_phase_workspace_shared_group`
 
 ### Requirement: Phase 5 Plan Drops Option-B Grants on rw Mount Sources
 
-The Phase-5 ACL grant plan (`_acl_grant_plan`) SHALL NOT include the recursive `u:<host_unprivileged_user>:rwX` grants (effective or default) on rw mount sources (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`, `user_project_root`). These grants were "Option B" in the prior model; they are empirically dead under runsc (per `temp/bug-tracker/2026-05-04.md`) and are replaced by helper-recipe phases.
+The Phase-5 ACL grant plan (`_acl_grant_plan`) SHALL NOT include the recursive `u:<host_unprivileged_user>:rwX` grants (effective or default) on rw mount sources (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`, OR any workspace path from `[workspaces]`). These grants were "Option B" in the prior model; they are empirically dead under runsc and are replaced by helper-recipe phases (cache/log) and the per-workspace shared-group phase (workspace paths).
 
 #### Scenario: rw bind-mount source dirs absent from grant plan
 - **WHEN** `_acl_grant_plan()` is called
-- **THEN** the returned plan does NOT include `setfacl -R -m u:host_user:rwX` entries for any of `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`, or `user_project_root`
+- **THEN** the returned plan does NOT include `setfacl -R -m u:host_user:rwX` entries for any of `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`, or any `workspace.path` from `[workspaces]`
 
 #### Scenario: rw bind-mount source dirs absent from default-ACL grant plan
 - **WHEN** `_acl_grant_plan()` is called
 - **THEN** the returned plan does NOT include `setfacl -R -d -m u:host_user:rwX` entries for the same paths
 
-### Requirement: Phase 5 Plan Includes Workspace Named-ACL Grants
+### Requirement: Phase 5 Plan Includes Per-Workspace Named-ACL Grants
 
-The Phase-5 ACL grant plan SHALL include the workspace named-ACL grants (effective and default-ACL named-entry portion). These are part of the named-acl mechanism per `orchestrator-volumes`'s lifecycle table.
+The Phase-5 ACL grant plan SHALL include the per-workspace named-ACL grants (effective and default-ACL named-entry portion) for EACH workspace in `[workspaces]`. Plans iterate the workspaces map sorted by name for render determinism.
 
-#### Scenario: Workspace effective named-ACL granted
-- **WHEN** `_acl_grant_plan()` is called
-- **THEN** the returned plan includes `setfacl -m u:<host_unprivileged_user>:rwx <user_project_root>`
+#### Scenario: Per-workspace effective named-ACL granted
+- **WHEN** `_acl_grant_plan()` is called for an instance with workspaces `main` and `scratch`
+- **THEN** the returned plan includes `setfacl -m u:<host_unprivileged_user>:rwx <main.path>` AND `setfacl -m u:<host_unprivileged_user>:rwx <scratch.path>`
 
-#### Scenario: Workspace default-ACL with named entry granted
-- **WHEN** `_acl_grant_plan()` is called
-- **THEN** the returned plan includes `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_unprivileged_user>:rwx,u:dev:rwx <user_project_root>`
+#### Scenario: Per-workspace default-ACL with named entry granted
+- **WHEN** `_acl_grant_plan()` is called for the same instance
+- **THEN** the returned plan includes `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_unprivileged_user>:rwx,u:dev:rwx <main.path>` AND the equivalent for `<scratch.path>`
 
 ### Requirement: Cache/Log Helper-Recipe Phase
 
@@ -267,26 +314,6 @@ The system SHALL provide `_phase_helper_cp_chown_ro_files` that, after `_phase_h
 #### Scenario: Ro-files phase is idempotent
 - **WHEN** the phase runs and the files already have correct ownership/mode
 - **THEN** `helper_chown_files` returns successfully without changing any state
-
-### Requirement: Workspace Shared-Group Phase
-
-The system SHALL provide `_phase_workspace_shared_group` that, after `_phase_helper_cp_chown_ro_files`, applies the shared-group recipe to `<user_project_root>` per the drift-detection contract in `orchestrator-volumes`'s "Workspace Recursive Setup via Drift Detection".
-
-#### Scenario: Drift detection on workspace root
-- **WHEN** the phase runs
-- **THEN** it calls `os.stat(<user_project_root>)` and compares the result against `(setgid bit set, group == workspace_bridge_gid(host))`
-
-#### Scenario: First-run / drift triggers recursive setup
-- **WHEN** drift is detected
-- **THEN** the phase runs `chgrp -R <bridge-group> <user_project_root>` (best-effort; logs per-file failures), `find ... -type d -exec chmod 2770`, `find ... -type f -exec chmod 0660`, and the workspace setfacl operations
-
-#### Scenario: Steady-state skips recursion
-- **WHEN** drift is NOT detected (workspace root already has setgid + correct group)
-- **THEN** the phase only ensures root state via idempotent operations (`chmod 2770`, `chgrp`, `setfacl` on root only); recursive operations are skipped
-
-#### Scenario: Phase fails fast if bridge-group preconditions are unmet
-- **WHEN** the phase calls `workspace_bridge_gid(host)` and the function raises `WorkspaceBridgeGroupMissingError` (group does not exist) or `SubgidOutOfRangeError` (group's gid is outside the daemon user's subgid range)
-- **THEN** the phase aborts with a clear error directing the operator to `sandbox doctor`
 
 ### Requirement: ACL Cleanup on Start Failure Includes Helper-Recipe Phases
 
