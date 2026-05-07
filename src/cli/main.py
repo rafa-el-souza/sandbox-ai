@@ -6,6 +6,7 @@ All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json as _json
 import os
@@ -61,18 +62,22 @@ from core.scaffold import (
     create_env_file,
     create_instance_dirs,
     ensure_registry_seed,
+    mutate_workspaces,
     prompt_secrets,
     write_initialized_sentinel,
     write_sandbox_toml,
 )
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
+from core.workspace_backups import BackupError, create_backup
 from core.workspace_copy import copy_workspace
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 app = typer.Typer()
+workspace_app = typer.Typer(help="Workspace lifecycle commands")
+app.add_typer(workspace_app, name="workspace")
 console = Console()
 
 
@@ -2200,6 +2205,296 @@ def status(
         _render_status_summary()
         return
     _render_status_detailed(inst, detailed=detailed)
+
+
+# ─── workspace subcommands ──────────────────────────────────────────────────
+
+
+_WORKSPACE_COPY_FLAG = typer.Option(
+    [],
+    "--copy",
+    help="Copy a workspace from a host path: --copy NAME=PATH",
+)
+_WORKSPACE_EMPTY_FLAG = typer.Option(
+    [],
+    "--empty",
+    help="Create an empty workspace: --empty NAME",
+)
+
+
+def _require_instance_stopped(inst: str, instance_dir: str) -> None:
+    """Refuse if any container for ``inst`` is running.
+
+    Workspace mutations (add/remove/rename/restore) require the instance to
+    be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
+    """
+    project_name = compose_project_name(inst)
+    host_user, auth = _resolve_host_config()
+    if _warm_check(instance_dir, project_name, host_user, auth):
+        console.print(
+            f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+
+def _refuse_if_backup_in_progress(inst: str) -> None:
+    if is_backup_lock_held(inst):
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+
+@workspace_app.command("add")
+def workspace_add(
+    inst: str = typer.Argument(..., help="Instance name"),
+    copy: list[str] = _WORKSPACE_COPY_FLAG,
+    empty: list[str] = _WORKSPACE_EMPTY_FLAG,
+) -> None:
+    """Add one or more workspaces to a stopped instance."""
+    _require_per_user_state_initialized()
+    if not copy and not empty:
+        console.print("Specify at least one --copy or --empty flag.", style="red")
+        raise typer.Exit(code=1)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+    existing_names = set(config.workspaces.keys())
+
+    # Parse flags (will not autofill `main` because at least one is non-empty).
+    user_home = sandbox_ai_home()
+    new_specs = _parse_workspace_flags(inst, user_home, copy, empty)
+
+    # Reject collisions with existing workspaces.
+    for ws in new_specs:
+        if ws.name in existing_names:
+            console.print(
+                f"Workspace {ws.name!r} already exists in instance {inst!r}.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+
+    # Pre-flight every --copy source.
+    for ws in new_specs:
+        if ws.bootstrap_mode == "copy" and ws.source is not None:
+            _preflight_workspace_source(ws.source, inst=inst, user_home=user_home)
+
+    _require_instance_stopped(inst, instance_dir)
+    _refuse_if_backup_in_progress(inst)
+
+    # Acquire state.lock for the duration of the mutation.
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        # Create workspace dirs (orchestrator-owned, mode 0700).
+        for ws in new_specs:
+            os.makedirs(ws.path, mode=0o700, exist_ok=True)
+
+        # Populate --copy workspaces via the rsync recipe.
+        for ws in new_specs:
+            if ws.bootstrap_mode == "copy" and ws.source is not None:
+                copy_workspace(ws.source, ws.path)
+
+        # Mutate sandbox.toml: append new entries to the [workspaces] block.
+        merged = [
+            WorkspaceSpec(name=name, bootstrap_mode=ws.bootstrap_mode, source=ws.source, path=ws.path)
+            for name, ws in config.workspaces.items()
+        ] + list(new_specs)
+        mutate_workspaces(instance_dir, merged)
+    finally:
+        _release_lock(lock_fd)
+
+    added = ", ".join(ws.name for ws in new_specs)
+    console.print(f"Added workspace(s) to {inst!r}: {added}.")
+
+
+@workspace_app.command("remove")
+def workspace_remove(
+    inst: str = typer.Argument(..., help="Instance name"),
+    ws_name: str = typer.Argument(..., help="Workspace name"),
+    backup: bool = typer.Option(False, "--backup", help="Back up the workspace before removal"),
+    purge: bool = typer.Option(False, "--purge", help="Remove without backup"),
+) -> None:
+    """Remove a workspace from a stopped instance."""
+    _require_per_user_state_initialized()
+
+    if backup and purge:
+        console.print("--backup and --purge are mutually exclusive.", style="red")
+        raise typer.Exit(code=1)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+    if ws_name not in config.workspaces:
+        names = ", ".join(sorted(config.workspaces.keys())) or "<none>"
+        console.print(
+            f"Workspace {ws_name!r} not found in instance {inst!r}. Available: {names}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Resolve mode in TTY/non-TTY contexts when neither flag is given.
+    if not backup and not purge:
+        if _stdin_is_tty():
+            response = typer.prompt(
+                f"Backup workspace {ws_name!r} before removing? [Y/n]",
+                default="Y",
+                show_default=False,
+            )
+            backup = response.strip().lower() not in ("n", "no")
+            purge = not backup
+        else:
+            console.print(
+                "Use --backup or --purge to specify removal mode in non-interactive contexts.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+
+    _require_instance_stopped(inst, instance_dir)
+    if not backup:
+        _refuse_if_backup_in_progress(inst)
+
+    target = config.workspaces[ws_name]
+    last_workspace = len(config.workspaces) == 1
+
+    if backup:
+        # Phase order: state.lock not held → backup acquires backup.lock and
+        # runs rsync → returns → state.lock acquired below for rmtree +
+        # sandbox.toml mutation.
+        try:
+            create_backup(
+                instance_name=inst,
+                workspace_name=ws_name,
+                source_path=target.path,
+                source_bootstrap_mode=target.bootstrap_mode.value,
+                dev_primary_gid=os.getgid(),
+            )
+        except BackupError as exc:
+            console.print(f"Backup failed: {exc}", style="red")
+            raise typer.Exit(code=1) from exc
+
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        shutil.rmtree(target.path, ignore_errors=False)
+        remaining = [
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode=ws.bootstrap_mode.value,
+                source=ws.source,
+                path=ws.path,
+            )
+            for name, ws in config.workspaces.items()
+            if name != ws_name
+        ]
+        mutate_workspaces(instance_dir, remaining)
+    finally:
+        _release_lock(lock_fd)
+
+    console.print(f"Removed workspace {ws_name!r} from {inst!r}.")
+    if last_workspace:
+        console.print(
+            f"WARNING: {inst!r} now has zero workspaces; "
+            f"`sandbox start {inst}` will fail until you add one.",
+            style="yellow",
+        )
+
+
+@workspace_app.command("rename")
+def workspace_rename(
+    inst: str = typer.Argument(..., help="Instance name"),
+    old: str = typer.Argument(..., help="Existing workspace name"),
+    new: str = typer.Argument(..., help="New workspace name"),
+) -> None:
+    """Rename a workspace in a stopped instance (atomic, ACL-preserving)."""
+    _require_per_user_state_initialized()
+
+    if old == new:
+        console.print(
+            f"Old and new workspace names are identical ({old!r}); refusing no-op rename.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    _validate_name(new, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+
+    if old not in config.workspaces:
+        names = ", ".join(sorted(config.workspaces.keys())) or "<none>"
+        console.print(
+            f"Workspace {old!r} not found in instance {inst!r}. Available: {names}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+    if new in config.workspaces:
+        console.print(
+            f"Workspace {new!r} already exists in instance {inst!r}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    _require_instance_stopped(inst, instance_dir)
+    _refuse_if_backup_in_progress(inst)
+
+    old_spec = config.workspaces[old]
+    new_path = str(sandbox_ai_home() / "workspaces" / inst / new)
+
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        # R2: atomic same-fs rename. ACL/setgid/xattrs preserved by inode.
+        try:
+            os.rename(old_spec.path, new_path)
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                console.print(
+                    f"Cross-filesystem rename not supported "
+                    f"({old_spec.path!r} → {new_path!r}). "
+                    "See doctor's `workspace_home_single_filesystem` check.",
+                    style="red",
+                )
+                raise typer.Exit(code=1) from None
+            raise
+
+        # R3: rewrite [workspaces.<old>] → [workspaces.<new>] + path field.
+        renamed = [
+            WorkspaceSpec(
+                name=(new if name == old else name),
+                bootstrap_mode=ws.bootstrap_mode.value,
+                source=ws.source,
+                path=(new_path if name == old else ws.path),
+            )
+            for name, ws in config.workspaces.items()
+        ]
+        mutate_workspaces(instance_dir, renamed)
+    finally:
+        _release_lock(lock_fd)
+
+    console.print(f"Renamed workspace {old!r} → {new!r} in {inst!r}.")
 
 
 if __name__ == "__main__":

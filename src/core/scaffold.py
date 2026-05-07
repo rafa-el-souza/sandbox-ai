@@ -211,6 +211,59 @@ def write_sandbox_toml(
         f.write(content)
 
 
+def replace_workspaces_section(toml_text: str, workspaces: list[WorkspaceSpec]) -> str:
+    """Replace the ``[workspaces.*]`` block in ``toml_text`` with one rendered
+    from ``workspaces``. The block is identified as the contiguous run of
+    ``[workspaces.<name>]`` sections (and their key/value lines) starting at
+    the first such header; it ends at the next non-workspaces top-level
+    section header.
+
+    Operator hand-edits to other sections are preserved verbatim.
+    """
+    lines = toml_text.splitlines(keepends=True)
+    start: int | None = None
+    end: int | None = None
+    for idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("[workspaces."):
+            if start is None:
+                start = idx
+        elif stripped.startswith("[") and start is not None and not stripped.startswith("[workspaces."):
+            end = idx
+            break
+    if start is None:
+        # No existing block — append before any trailing whitespace.
+        rendered = "\n" + _render_workspaces_section(workspaces)
+        return toml_text.rstrip() + "\n" + rendered
+    if end is None:
+        end = len(lines)
+
+    # Trim trailing blank lines from the existing block so the rendered
+    # block sits flush with one separator before the next section.
+    block_end = end
+    while block_end > start and lines[block_end - 1].strip() == "":
+        block_end -= 1
+    head = "".join(lines[:start])
+    tail = "".join(lines[end:])
+    rendered = _render_workspaces_section(workspaces)
+    separator = "" if tail.startswith("\n") else "\n"
+    return head + rendered + separator + tail
+
+
+def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> None:
+    """Read ``<instance_dir>/sandbox.toml``, replace its ``[workspaces.*]``
+    block with ``workspaces`` (rendered sorted by name), write it back.
+
+    Used by ``workspace add``, ``workspace remove``, ``workspace rename``.
+    """
+    toml_path = os.path.join(instance_dir, "sandbox.toml")
+    with open(toml_path) as f:
+        existing = f.read()
+    updated = replace_workspaces_section(existing, workspaces)
+    with open(toml_path, "w") as f:
+        f.write(updated)
+
+
 def _detect_git_config() -> tuple[str, str]:
     """Auto-detect git user.name and user.email from global config.
 
