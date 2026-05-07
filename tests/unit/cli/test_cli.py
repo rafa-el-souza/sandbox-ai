@@ -1085,6 +1085,7 @@ class TestHelperCpChownRoFiles:
         from cli.main import _helper_cp_chown_plan
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         owners = {p[2]: (p[0], p[1], p[4]) for p in plan}
         # Each consumer uid is mapped via subuid resolver
@@ -1100,30 +1101,62 @@ class TestHelperCpChownRoFiles:
         assert 0o640 in modes_by_uid[100000 + 65532]  # coredns ro
         # Secrets at 0600 for the 1000-consumer
         assert 0o600 in modes_by_uid[100000 + 1000]
-        # gid is always 0
+        # gid pairs with the consumer's host subgid (D6: literal-0 was removed).
         for entry in plan:
-            assert entry[3] == 0
+            owner_uid = entry[2]
+            owner_gid = entry[3]
+            consumer_n = owner_uid - 100000
+            assert owner_gid == 200000 + consumer_n
 
     def test_plan_includes_legacy_ipc_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The four IPC SSH secrets continue to land at 1000:0 0600 via the standard recipe."""
+        """The four IPC SSH secrets continue to land at 0600 via the standard recipe."""
         from cli.main import _helper_cp_chown_plan
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1000 if n == 1000 else 0)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2000 if n == 1000 else 0)
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         secrets_files: set[str] = set()
         for parent, files, owner_uid, owner_gid, mode in plan:
             if parent.endswith("/secrets"):
                 assert owner_uid == 1000
-                assert owner_gid == 0
+                # gid is the consumer's host subgid (D6), not literal 0.
+                assert owner_gid == 2000
                 assert mode == 0o600
                 secrets_files.update(files)
         assert {"ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"} <= secrets_files
+
+    def test_plan_uid_and_gid_both_in_subid_range(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Regression guard for D6: every (uid, gid) pair from `_helper_cp_chown_plan`
+        must round-trip through the inverse resolvers without raising. Catches
+        any reintroduction of the literal-0 gid pattern (which lies outside the
+        subgid range and would raise SubgidOutOfRangeError on every helper-cp).
+        """
+        from cli.main import _helper_cp_chown_plan
+        from core.host_config import in_container_gid_for_host_gid, in_container_uid_for_host_uid
+
+        subuid = tmp_path / "subuid"
+        subuid.write_text("claude-sandbox:165536:65536\n")
+        monkeypatch.setattr("core.host_config._SUBUID_PATH", subuid)
+        subgid = tmp_path / "subgid"
+        subgid.write_text("claude-sandbox:165536:65536\n")
+        monkeypatch.setattr("core.host_config._SUBGID_PATH", subgid)
+
+        plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
+        assert plan, "plan should be non-empty"
+        for entry in plan:
+            owner_uid, owner_gid = entry[2], entry[3]
+            # Both must resolve back to in-container values without raising.
+            in_uid = in_container_uid_for_host_uid(owner_uid, "claude-sandbox")
+            in_gid = in_container_gid_for_host_gid(owner_gid, "claude-sandbox")
+            assert in_uid >= 1
+            assert in_gid >= 1
 
     def test_phase_invokes_helper_per_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files
         from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
         invocations: list[tuple[str, ...]] = []
 
         def _fake(
@@ -1149,6 +1182,7 @@ class TestHelperCpChownRoFiles:
         from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
+        monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
 
         def _raise(*a: object, **kw: object) -> None:
             raise SandboxExecutionError("helper failed")

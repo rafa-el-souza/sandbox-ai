@@ -799,16 +799,18 @@ def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[st
 def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int, int]]:
     """Return ``[(parent_abs, files, owner_uid, owner_gid, mode), ...]`` for ro files.
 
-    Owner uid is mapped via :func:`core.host_config.host_id_for_in_container`;
-    owner gid is always 0 (in-container root) so root-running parsers can read
-    the file before dropping privileges.
+    Owner uid and gid are both mapped via the host_config forward resolvers:
+    owner gid matches the consumer's host subgid; in-container root reads via
+    ``cap_dac_override`` (in the helper's cap-add baseline), not via group
+    ownership. The literal-0 prior pattern was redundant and incompatible with
+    the host-absolute helper API.
     """
     return [
         (
             os.path.join(instance_dir, parent),
             files,
             host_id_for_in_container(consumer_uid, host_user),
-            0,
+            host_gid_for_in_container(consumer_uid, host_user),
             mode,
         )
         for parent, files, consumer_uid, mode in RO_FILE_RECIPES

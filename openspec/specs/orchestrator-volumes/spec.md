@@ -56,7 +56,7 @@ The system SHALL govern the `dev`/`<host_unprivileged_user>` filesystem boundary
 **Mechanism axis values:**
 - `named-acl` — `setfacl -m u:<user>:<perms>` and its reverse `setfacl -x`.
 - `subuid-chown` — chown to the in-container consumer's host subuid (via `helper_mkdir_chown_dirs`).
-- `consumer-uid-0-chown` — chown to `<consumer-uid>:0` mode `<mode>` (via `helper_chown_files`).
+- `consumer-uid-0-chown` — chown to `<consumer-uid>:<consumer-gid>` mode `<mode>` (via `helper_chown_files`). The mechanism name preserves the historic literal-0 gid reference for continuity; in practice the gid is the consumer's host subgid, paired with the consumer's host subuid that the recipe already produces. In-container root reads the resulting file via `cap_dac_override` (in the helper's cap-add baseline, equally available to a consumer-container entrypoint that starts as root before dropping privileges) — not via group ownership. The literal-0 gid pattern was incompatible with the host-absolute helper API contract (it falls outside any subgid range) and provided no protection that `cap_dac_override` doesn't already grant.
 - `shared-group` — `chgrp <bridge-group> + chmod 2770 + setgid + persistent default ACL portion`.
 
 **Per-mount-class recipe table** (the spec's source of truth):
@@ -100,7 +100,7 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
 
 #### Scenario: Ro single-files mapping table
 - **WHEN** the consumer-uid-0-chown recipe is executed
-- **THEN** files are chowned per this table (consumer in-container uid resolved via `host_id_for_in_container`):
+- **THEN** files are chowned per this table (consumer in-container uid resolved via `host_id_for_in_container`; consumer in-container gid resolved via `host_gid_for_in_container` against the same in-container value):
 
   | File group | In-container uid | Mode |
   | --- | --- | --- |
@@ -111,6 +111,10 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
   | `config/admin/{.zshrc,.tmux.conf,.gitconfig,gitmux.conf,starship.toml}` | 1000 | 0640 |
   | `secrets/{authorized_keys,ipc_host_key}` | 1000 | 0600 |
   | `secrets/{ipc_known_hosts,ipc_ssh_key}` | 1000 | 0600 |
+
+#### Scenario: Ro single-files on-disk gid matches consumer's host subgid
+- **WHEN** any file in the consumer-uid-0-chown recipe table has been chowned by `helper_chown_files`
+- **THEN** the resulting on-disk gid is `host_gid_for_in_container(<in-container uid from table>, host_user)` — i.e., the consumer's host subgid paired with the consumer's host subuid; it is NOT the daemon user's primary gid (the historic literal-0 pattern was removed because it was incompatible with the host-absolute helper API and provided no protection that `cap_dac_override` doesn't already grant)
 
 #### Scenario: Per-workspace named-ACL — applied at start
 - **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants) for an instance with workspaces `main` and `scratch`

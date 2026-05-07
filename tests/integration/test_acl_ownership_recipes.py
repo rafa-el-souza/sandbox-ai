@@ -70,8 +70,15 @@ def _docker_unprivileged_user_configured() -> bool:
 # ─── Helper container hardening (always-on; no root or docker required) ─────
 
 
-def test_helper_container_hardening_flags() -> None:
-    """Stub Executor.run via patch.object — assert hardening flags on every invocation."""
+def test_helper_container_hardening_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Argv-shape only: assert the hardening flag set + image pin appear in every helper payload.
+
+    End-to-end ownership semantics (the chown actually landing on the
+    host-absolute target after userns translation) are exercised in
+    ``tests/integration/test_helper_container_userns.py``; this test is
+    deliberately mock-bound so it can run on any host (no docker / subuid /
+    machinectl required).
+    """
     from unittest.mock import patch
 
     sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -82,19 +89,29 @@ def test_helper_container_hardening_flags() -> None:
     finally:
         sys.path.pop(0)
 
+    # Hermetic /etc/subuid + /etc/subgid fixture so the helpers' inverse
+    # resolvers translate without requiring real subid entries on the host.
+    subuid = tmp_path / "subuid"
+    subuid.write_text("claude-sandbox:100000:65536\n")
+    monkeypatch.setattr("core.host_config._SUBUID_PATH", subuid)
+    subgid = tmp_path / "subgid"
+    subgid.write_text("claude-sandbox:200000:65536\n")
+    monkeypatch.setattr("core.host_config._SUBGID_PATH", subgid)
+
     captured: list[str] = []
 
     def _capture(self: Executor, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         captured.append(cmd[-1])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
+    # argv-shape mock; ownership exercised in tests/integration/test_helper_container_userns.py
     with patch.object(Executor, "run", autospec=True, side_effect=_capture):
         helper_chown_files(
             "claude-sandbox",
             "/inst/secrets",
             ["ipc_host_key"],
             owner_uid=100999,
-            owner_gid=0,
+            owner_gid=200999,
             mode=0o600,
             machinectl_auth=MachinectlAuth.SUDO,
         )
@@ -121,7 +138,12 @@ def test_helper_container_hardening_flags() -> None:
             "--security-opt no-new-privileges:true",
         ]:
             assert flag in payload, f"missing {flag} in helper payload"
+        # --userns=host MUST NOT appear (D1: translation, not bypass).
+        assert "--userns=host" not in payload, "helper must inherit the daemon's userns map"
         assert "@sha256:" in payload, "helper image must be digest-pinned"
+        # Translated in-container values, not host-absolute. owner_uid 100999
+        # → in-container 1000 (= 100999 - 100000 + 1); owner_gid 200999 → 1000.
+        assert "chown 1000:1000" in payload
 
 
 # ─── End-to-end recipe verifications (require root + configured docker) ────

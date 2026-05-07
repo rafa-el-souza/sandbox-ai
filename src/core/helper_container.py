@@ -5,8 +5,12 @@ the privilege boundary (via ``machinectl shell <docker_user>@.host``) to
 perform host-side ownership operations that survive the runsc gofer's
 named-ACL stripping. Two primitives are exposed:
 
-- :func:`helper_chown_files` — for read-only single files: copy → chown →
-  chmod → atomic rename, idempotent across re-invocations.
+- :func:`helper_chown_files` — for read-only single files: copy → chmod →
+  chown → atomic rename, idempotent across re-invocations. chmod precedes
+  chown because, post-userns-translation, the chown lands the file on a
+  non-root in-container uid; the helper baseline omits CAP_FOWNER, so a
+  chmod by in-container root on a foreign-owned file would EPERM (see
+  fix-helper-container-userns design D7).
 - :func:`helper_mkdir_chown_dirs` — for cache/log directory leaves:
   ``mkdir -p`` then ``chown`` (no chmod, see Decision 14 in the
   acl-ownership-recipes design).
@@ -27,7 +31,12 @@ from core.executor import Executor
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-from core.host_config import MachinectlAuth, machinectl_cmd
+from core.host_config import (
+    MachinectlAuth,
+    in_container_gid_for_host_gid,
+    in_container_uid_for_host_uid,
+    machinectl_cmd,
+)
 from core.hydration import IMAGE_REGISTRY
 
 DEFAULT_HELPER_TIMEOUT_S = 30
@@ -67,7 +76,7 @@ def helper_chown_files(
     machinectl_auth: MachinectlAuth,
     timeout: float = DEFAULT_HELPER_TIMEOUT_S,
 ) -> None:
-    """Copy → chown → chmod → atomic rename each file under ``parent``.
+    """Copy → chmod → chown → atomic rename each file under ``parent``.
 
     Empty ``files`` is a no-op (no helper container is launched).
 
@@ -80,14 +89,16 @@ def helper_chown_files(
     file_list = list(files)
     if not file_list:
         return
+    in_container_uid = in_container_uid_for_host_uid(owner_uid, host_user)
+    in_container_gid = in_container_gid_for_host_gid(owner_gid, host_user)
     image = IMAGE_REGISTRY["busybox_musl"].pinned
     mode_octal = format(mode, "04o")
     quoted_names = " ".join(shlex.quote(f) for f in file_list)
     inner = (
         f"set -e; for f in {quoted_names}; do "
         f'cp /p/"$f" /tmp/"$f" && '
-        f'chown {owner_uid}:{owner_gid} /tmp/"$f" && '
         f'chmod {mode_octal} /tmp/"$f" && '
+        f'chown {in_container_uid}:{in_container_gid} /tmp/"$f" && '
         f'mv /tmp/"$f" /p/"$f"; '
         "done"
     )
@@ -120,9 +131,15 @@ def helper_mkdir_chown_dirs(
     leaf_list = list(leaves)
     if not leaf_list:
         return
+    in_container_uid = in_container_uid_for_host_uid(owner_uid, host_user)
+    in_container_gid = in_container_gid_for_host_gid(owner_gid, host_user)
     image = IMAGE_REGISTRY["busybox_musl"].pinned
     quoted_leaves = " ".join(shlex.quote(leaf) for leaf in leaf_list)
-    inner = f'set -e; for d in {quoted_leaves}; do mkdir -p /p/"$d" && chown {owner_uid}:{owner_gid} /p/"$d"; done'
+    inner = (
+        f'set -e; for d in {quoted_leaves}; do '
+        f'mkdir -p /p/"$d" && chown {in_container_uid}:{in_container_gid} /p/"$d"; '
+        "done"
+    )
     cmd = _hardened_docker_run(image, parent, inner)
     Executor().run(
         [*machinectl_cmd(host_user, machinectl_auth), "/bin/bash", "-c", cmd],
