@@ -35,6 +35,18 @@ def state_lock_path() -> Path:
     return sandbox_ai_home() / "state" / "state.lock"
 
 
+def ipam_lock_path() -> Path:
+    """Dedicated fcntl lock target guarding IPAM ledger mutations.
+
+    Distinct from :func:`state_lock_path`: the per-user ``state.lock`` guards
+    the provisioning sequence as a whole, while ``ipam.json.lock`` is the
+    finer-grained mutation lock acquired internally by :class:`IPAMLedger`.
+    Lock acquisition order, when both are held by the same caller, is
+    ``state.lock`` outer, ``ipam.json.lock`` inner — never the reverse.
+    """
+    return sandbox_ai_home() / "state" / "ipam.json.lock"
+
+
 def ensure_per_user_state(home: Path) -> None:
     """Create the per-user state tree with mode ``0700``.
 
