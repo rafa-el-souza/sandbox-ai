@@ -143,7 +143,6 @@ class TestBuildRsyncCmd:
         defaults: dict[str, Any] = {
             "excludes": ("node_modules",),
             "extra_excludes": (),
-            "dev_primary_gid": 1000,
             "safe_links": False,
             "use_xattrs": True,
         }
@@ -170,8 +169,8 @@ class TestBuildRsyncCmd:
 
     def test_no_group_set_via_rsync_flags(self) -> None:
         """rsync 3.x has no --group=GID flag; the recipe relies on
-        ``--no-owner --no-group`` plus the chmod recipe instead."""
-        cmd = self._build(dev_primary_gid=4242)
+        ``--no-owner --no-group`` plus a post-rsync chown walk instead."""
+        cmd = self._build()
         # No --group=... flag in any form.
         assert not any(arg.startswith("--group=") for arg in cmd)
         assert "--no-group" in cmd
@@ -183,7 +182,6 @@ class TestBuildRsyncCmd:
             "/dest.partial",
             excludes=("a", "b"),
             extra_excludes=("c", "d"),
-            dev_primary_gid=1000,
             safe_links=False,
             use_xattrs=False,
         )
@@ -547,6 +545,54 @@ class TestRestoreBackup:
 
 
 # ── tree size + count ─────────────────────────────────────────────────────
+
+
+class TestForceGroup:
+    def test_chowns_root_and_every_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "file").write_text("x")
+        (tmp_path / "top").write_text("y")
+
+        calls: list[tuple[str, int, int]] = []
+
+        def fake_chown(path: Any, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+            calls.append((str(path), uid, gid))
+
+        monkeypatch.setattr("core.workspace_backups.os.chown", fake_chown)
+        wb._force_group(tmp_path, 4242)
+        # Root + dirs + files all chowned with uid=-1 and gid=4242.
+        assert (str(tmp_path), -1, 4242) in calls
+        assert any(p.endswith("/sub") and g == 4242 and u == -1 for p, u, g in calls)
+        assert any(p.endswith("/sub/file") for p, _u, _g in calls)
+        assert any(p.endswith("/top") for p, _u, _g in calls)
+
+    def test_root_chown_oserror_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "child").write_text("x")
+
+        def boom(path: Any, *_a: Any, **_kw: Any) -> None:
+            if str(path) == str(tmp_path):
+                raise PermissionError("denied")
+
+        monkeypatch.setattr("core.workspace_backups.os.chown", boom)
+        # Should not raise; the child chown still runs.
+        wb._force_group(tmp_path, 4242)
+
+    def test_child_chown_oserror_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "child").write_text("x")
+
+        def boom(path: Any, *_a: Any, **_kw: Any) -> None:
+            if str(path).endswith("/child"):
+                raise PermissionError("denied")
+
+        monkeypatch.setattr("core.workspace_backups.os.chown", boom)
+        # Should not raise; failures inside the walk are skipped.
+        wb._force_group(tmp_path, 4242)
 
 
 class TestTreeSizeAndCount:

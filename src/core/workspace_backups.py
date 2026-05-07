@@ -166,7 +166,6 @@ def _build_rsync_cmd(
     *,
     excludes: tuple[str, ...],
     extra_excludes: tuple[str, ...],
-    dev_primary_gid: int,
     safe_links: bool,
     use_xattrs: bool,
 ) -> list[str]:
@@ -176,13 +175,10 @@ def _build_rsync_cmd(
     ``rsync -aHXS --no-owner --no-group --chmod=...
     [<excludes>] <src>/ <dest>.partial/``.
 
-    ``dev_primary_gid`` is retained as a parameter for
-    ``.backup-info.json`` provenance, but is not passed to rsync — rsync 3.x
-    has no ``--group=GID`` flag (the original spec draft was wrong); with
-    ``--no-owner --no-group`` the destination naturally inherits the rsync
-    invoker's identity, which is the dev user.
+    Group ownership is enforced by a post-rsync chown walk in the calling
+    ``_do_backup``, not by an rsync flag. The original spec draft used
+    ``--group=<gid>`` which rsync 3.x does not accept.
     """
-    del dev_primary_gid  # provenance only; see docstring
     flags = ["rsync", "-aHS"]
     if use_xattrs:
         flags.append("-X")
@@ -201,6 +197,24 @@ def _build_rsync_cmd(
         flags.extend(["--exclude", exc])
     flags.extend([f"{source.rstrip('/')}/", f"{dest_partial.rstrip('/')}/"])
     return flags
+
+
+def _force_group(root: Path, gid: int) -> None:
+    """``os.chown`` every entry under ``root`` to ``(uid=-1, gid=gid)``.
+
+    Defensive replacement for the phantom rsync ``--group=GID`` flag. Skips
+    entries whose chown raises (rare race during concurrent rmtree).
+    """
+    try:
+        os.chown(root, -1, gid, follow_symlinks=False)
+    except OSError:
+        pass
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in dirnames + filenames:
+            try:
+                os.chown(os.path.join(dirpath, name), -1, gid, follow_symlinks=False)
+            except OSError:
+                continue
 
 
 def _tree_size_and_count(root: str) -> tuple[int, int]:
@@ -310,7 +324,6 @@ def create_backup(
         str(partial_dir),
         excludes=excludes,
         extra_excludes=extra_excludes,
-        dev_primary_gid=dev_primary_gid,
         safe_links=stripped_count > 0,
         use_xattrs=use_xattrs,
     )
@@ -322,6 +335,12 @@ def create_backup(
             executor.run(cmd, sentinel=False)
         except SandboxExecutionError as exc:
             raise BackupRsyncError(f"rsync failed for {instance_name}/{workspace_name}: {exc}") from exc
+
+        # Force gid to dev_primary_gid (defensive against the corner case where
+        # the rsync invoker's primary group is the bridge group). Walks the
+        # partial dir before the metadata write so the size walk and the
+        # atomic rename see the post-chown state.
+        _force_group(partial_dir, dev_primary_gid)
 
         size, files = _tree_size_and_count(str(partial_dir))
         _write_backup_info(

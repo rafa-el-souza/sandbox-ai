@@ -79,7 +79,6 @@ def test_recipe_includes_x_flag_iff_probe_passes(
         "/dest.partial",
         excludes=(),
         extra_excludes=(),
-        dev_primary_gid=os.getgid(),
         safe_links=False,
         use_xattrs=use_xattrs,
     )
