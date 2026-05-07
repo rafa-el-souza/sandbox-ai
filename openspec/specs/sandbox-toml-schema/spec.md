@@ -82,9 +82,25 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 ### Requirement: Pydantic Schema Validation
 The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[instance]` section's Pydantic model class SHALL be named `SandboxInstanceSection` to disambiguate from the per-host `HostConfig` model. The `SandboxInstanceSection` model SHALL NOT contain `host_unprivileged_user` or `user_project_root` (the latter removed in change 5; replaced by `[workspaces]`). The `SandboxInstanceSection` model SHALL contain `workspaces: dict[str, WorkspaceConfig]` (non-empty dict). The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
 
+When `_load_config` (or any other CLI-side TOML loader for `sandbox.toml`) catches a `pydantic.ValidationError`, the CLI SHALL emit one user-facing message per error, formatted as a single line: `Invalid <toml-path>: <field-path>: <error-message>`, where `<toml-path>` is the absolute path to the offending `sandbox.toml`, `<field-path>` is the dotted location of the failing field (joining the entries of `error["loc"]` with `.`), and `<error-message>` is the Pydantic-supplied message. The CLI SHALL NOT display Pydantic's default `__str__` representation (which includes library internals, line numbers, and JSON URLs); the raw exception SHALL be suppressed (e.g., `raise typer.Exit(1) from None`). The wrap point SHALL be `_load_config` itself, so all callers benefit without per-command boilerplate.
+
+The `try`/`except` clause SHALL match `pydantic.ValidationError` specifically and SHALL NOT match bare `Exception`. Other exceptions raised during TOML loading or validation (e.g., `FileNotFoundError`, `OSError`, `tomllib.TOMLDecodeError`) SHALL propagate to the caller with their full traceback intact, unmodified by `_load_config`. This narrow-catch contract guarantees that the friendly-formatting path applies only to schema validation failures and does not over-suppress unrelated error classes.
+
 #### Scenario: Missing required field
 - **WHEN** `sandbox.toml` is missing a required field (e.g., a workspace's `path` or `bootstrap_mode`)
-- **THEN** the CLI exits with a Pydantic `ValidationError` identifying the field and the reason before any state changes occur
+- **THEN** the CLI emits a single line of the form `Invalid <abs-path-to-sandbox.toml>: workspaces.<ws>.path: Field required` and exits with code 1; the Pydantic traceback is not displayed
+
+#### Scenario: Multiple validation errors emit multiple lines
+- **WHEN** `sandbox.toml` has more than one validation failure (e.g., missing `path` AND invalid `cpus` type)
+- **THEN** the CLI emits one `Invalid <abs-path>: <field>: <reason>` line per error in the order Pydantic reports them, then exits with code 1; no Pydantic traceback is displayed
+
+#### Scenario: Empty workspaces map produces formatted error
+- **WHEN** an externally hand-edited `sandbox.toml` has an empty `[workspaces]` section, and any command that calls `_load_config` is invoked
+- **THEN** the CLI emits `Invalid <abs-path>: workspaces: Dictionary should have at least 1 item after validation, not 0` (or the equivalent Pydantic-supplied message) and exits with code 1; the Pydantic traceback is not displayed
+
+#### Scenario: Non-validation exceptions propagate with full traceback
+- **WHEN** `_load_config` is invoked against an instance whose `sandbox.toml` does not exist (raising `FileNotFoundError`/`OSError`) or contains a TOML syntax error (raising `tomllib.TOMLDecodeError`)
+- **THEN** the exception propagates to the caller unmodified, with its original traceback intact; the `_load_config` `try`/`except` does NOT catch it, NOT format it, and NOT suppress its chain
 
 #### Scenario: Unknown field rejection
 - **WHEN** `sandbox.toml` contains a field not present in the Pydantic model

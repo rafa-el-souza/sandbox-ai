@@ -13,7 +13,7 @@ The system SHALL provide `scripts/rotate_digests.py` as a developer-facing CLI t
 
 #### Scenario: Drift detected and patched
 - **WHEN** `scripts/rotate_digests.py` runs and one or more pinned digests differ from their current tag resolution
-- **THEN** the script resolves the new manifest-list digests, patches the `ImagePin` entries in `hydration.py`, and runs `pytest tests/unit/test_hydration.py` to verify
+- **THEN** the script resolves the new manifest-list digests, patches the `ImagePin` entries in `hydration.py`, and runs `pytest tests/unit/core/test_hydration.py` to verify
 
 #### Scenario: Dry-run mode
 - **WHEN** `scripts/rotate_digests.py --dry-run` runs

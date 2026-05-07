@@ -73,7 +73,8 @@ For each workspace flag, the system SHALL execute the per-workspace scaffold ste
 
 1. `mkdir -p ~/.sandbox-ai/workspaces/<inst>/<ws>/` mode `0700` dev:dev.
 2. For `--copy NAME=PATH`: execute the rsync recipe per the `--copy` semantics (default-excludes from this capability's "Copy Default-Excludes" requirement; pre-copy symlink scan with refuse-by-default, `--strip-unsafe-links` opt-in; rsync `-a --no-owner --no-group <excludes...> [--safe-links] <src>/ <ws-dir>/`). For `--empty NAME`: no-op (W1's mkdir is sufficient).
-3. Add a corresponding `[workspaces.<ws>]` entry to `sandbox.toml` with `bootstrap_mode`, `source` (for `copy` only), and `path` set to the resolved workspace dir.
+3. After step 2, for `--copy NAME=PATH` workspaces only, the system SHALL `chmod 0700` the workspace root to normalize the directory mode regardless of source mode. This step runs after rsync and before any ACL grant phase (whether at scaffold time or on the next `sandbox start`).
+4. Add a corresponding `[workspaces.<ws>]` entry to `sandbox.toml` with `bootstrap_mode`, `source` (for `copy` only), and `path` set to the resolved workspace dir.
 
 The next `sandbox start <inst>` picks up the new workspace via re-hydration; the change-4 shared-group recipe's drift detection triggers recursive setup on the new tree.
 
@@ -84,6 +85,14 @@ The next `sandbox start <inst>` picks up the new workspace via re-hydration; the
 #### Scenario: --copy invokes rsync recipe
 - **WHEN** a `--copy NAME=PATH` flag is processed
 - **THEN** rsync runs with the default-exclude list, ownership-stripping flags (`--no-owner --no-group`), and (conditionally) `--safe-links` per this capability's "Copy Symlink Security" requirement
+
+#### Scenario: --copy normalizes workspace mode to 0700 regardless of source mode
+- **WHEN** `workspace add <inst> --copy main=/path` is invoked and the source path is at mode `0775` (group/other readable)
+- **THEN** after the rsync phase completes, the workspace root at `~/.sandbox-ai/workspaces/<inst>/main/` is at mode `0700`; the source mode is not inherited
+
+#### Scenario: --empty workspace mode unchanged at 0700
+- **WHEN** `workspace add <inst> --empty main` is invoked
+- **THEN** the workspace root is at mode `0700` (the W1 mkdir mode); no additional chmod step is required because no copy occurred
 
 #### Scenario: sandbox.toml gains workspace entry
 - **WHEN** scaffold completes for `<ws>` with bootstrap mode `copy` and source `<src>`
@@ -151,7 +160,9 @@ This refuse-by-default posture forces a conscious operator decision rather than 
 
 Backup failure (rsync error, disk full, etc.) SHALL abort the remove. The `<ts>.partial/` backup directory is retained for diagnosis. `sandbox.toml` is NOT mutated. The command is idempotent on retry.
 
-After successful removal, `sandbox.toml` drops the `[workspaces.<ws>]` entry. If no workspaces remain in the instance, the command emits a warning that `sandbox start <inst>` will fail without a workspace; the operation does not block.
+After successful removal, `sandbox.toml` drops the `[workspaces.<ws>]` entry.
+
+The command SHALL refuse to remove the last workspace from an instance. Before any state mutation (no rsync, no rmtree, no `sandbox.toml` edit), the system SHALL count workspaces in the loaded `InstanceConfig` and exit with code 1 if removal would leave the instance with zero workspaces. The error message SHALL be: `Cannot remove the last workspace from '<inst>'. Add a replacement workspace first ('sandbox workspace add <inst> --empty <name>' or '--copy <name>=<path>'), or use 'sandbox destroy <inst>' to remove the instance entirely.` The message MUST surface both supported replacement paths (add-then-remove for swap workflows; destroy for instance removal) so scripted users have a documented alternative. There is no `--allow-empty` opt-in.
 
 #### Scenario: --backup and --purge mutually exclusive
 - **WHEN** `workspace remove foo bar --backup --purge` is invoked
@@ -173,9 +184,13 @@ After successful removal, `sandbox.toml` drops the `[workspaces.<ws>]` entry. If
 - **WHEN** `workspace remove foo bar --purge` completes successfully
 - **THEN** `sandbox.toml` no longer contains `[workspaces.bar]`; `~/.sandbox-ai/workspaces/foo/bar/` no longer exists
 
-#### Scenario: Last workspace removal warns
-- **WHEN** `workspace remove foo bar` completes and `bar` was the only workspace in `foo`
-- **THEN** the CLI emits a warning that `sandbox start foo` will fail until a workspace is added
+#### Scenario: Last workspace removal refused
+- **WHEN** `workspace remove foo bar --purge` (or `--backup`) is invoked and `bar` is the only workspace in `foo`
+- **THEN** the CLI exits with: `Cannot remove the last workspace from 'foo'. Add a replacement workspace first ('sandbox workspace add foo --empty <name>' or '--copy <name>=<path>'), or use 'sandbox destroy foo' to remove the instance entirely.` and exit code 1, before any backup, rmtree, or `sandbox.toml` mutation
+
+#### Scenario: Refusal precedes backup execution
+- **WHEN** `workspace remove foo bar --backup` is invoked and `bar` is the only workspace in `foo`
+- **THEN** no backup directory is created (refusal precedes the backup recipe); the instance state is unchanged
 
 ### Requirement: workspace rename Command
 
@@ -494,3 +509,29 @@ The system SHALL NOT automatically garbage-collect backups. Retention is the ope
 #### Scenario: Backups accumulate without auto-GC
 - **WHEN** repeated backup operations create multiple backups for the same workspace
 - **THEN** all backups are retained; sandbox-ai does NOT delete older entries automatically
+
+### Requirement: Mutator Preserves Operator Hand-Edits Outside [workspaces]
+
+The workspace mutator (`core.scaffold.mutate_workspaces`, used by `workspace add`, `workspace remove`, `workspace rename`, and `workspace restore`) SHALL preserve `sandbox.toml` content outside the `[workspaces.*]` table set across mutations. Specifically: every comment in the input SHALL survive verbatim in the output; every non-blank, non-`[workspaces.*]` line in the input SHALL appear in the output in the same relative order; the order of unrelated sections (`[instance]`, `[core]`, `[admin]`, `[components.*]`, `[host]`, `[proxy]`, etc.) SHALL be preserved relative to surviving workspace tables. Blank-line counts in the gap immediately adjacent to the `[workspaces.*]` region MAY change by ±1 across a rename or add-then-remove sequence — this is an accepted cosmetic side effect of the comment-and-whitespace-aware TOML round-trip and is not visible in any orchestrator-rendered output (operators only see it via direct file inspection or `git diff`). The mutator SHALL be implemented via a comment-and-whitespace-aware TOML round-trip (e.g., `tomlkit`); re-emitting the document from the Pydantic model is forbidden because Pydantic does not carry comments or whitespace.
+
+The mutator MAY freely re-order, add, or remove sub-tables under `[workspaces]` (that is its job). Non-contiguous workspace placement (e.g., `[workspaces.a]` followed by an unrelated section followed by `[workspaces.b]`) SHALL be tolerated by the mutator without normalization.
+
+#### Scenario: Top-level comment preserved across rename
+- **WHEN** `sandbox.toml` contains `# OPERATOR EDIT: do not remove` immediately before `[core]` and `workspace rename <inst> a a2` is invoked
+- **THEN** after the operation, `sandbox.toml` still contains `# OPERATOR EDIT: do not remove` in the same position relative to `[core]`; `[workspaces.a]` is renamed to `[workspaces.a2]`; the on-disk dir rename succeeds
+
+#### Scenario: Inter-section whitespace preserved across remove
+- **WHEN** `sandbox.toml` contains a blank line and a `# section comment` between `[instance]` and `[core]`, and `workspace remove <inst> <ws>` is invoked
+- **THEN** the blank line and the section comment remain in place; only the `[workspaces.<ws>]` sub-table is removed
+
+#### Scenario: Non-contiguous workspaces tolerated
+- **WHEN** `sandbox.toml` has `[workspaces.a]` followed by `[core]` followed by `[workspaces.b]`, and any mutator operation runs
+- **THEN** the mutator does not require, normalize, or reject the non-contiguous layout; unrelated section order is preserved relative to whichever workspace tables remain
+
+#### Scenario: Mutator does not re-emit from Pydantic model
+- **WHEN** `core.scaffold.mutate_workspaces` is invoked
+- **THEN** the implementation parses `sandbox.toml` via a comment-preserving TOML library (tomlkit), mutates the in-memory document's `workspaces` table directly, and serializes via the same library; the InstanceConfig Pydantic model is NOT used to produce output text
+
+#### Scenario: Mutator refuses cleanly on parse error without corrupting the file
+- **WHEN** `core.scaffold.mutate_workspaces` is invoked against a `sandbox.toml` whose contents the comment-preserving parser rejects (e.g., truncated mid-section, corrupted from an external editor)
+- **THEN** the mutator raises `SandboxExecutionError` with the message `Cannot mutate <toml-path>: <parse-error-message>. Re-run 'sandbox status <inst>' to see the schema-level error.`; the file on disk is unmodified; no partial write or rename occurs
