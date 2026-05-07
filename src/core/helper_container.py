@@ -5,8 +5,12 @@ the privilege boundary (via ``machinectl shell <docker_user>@.host``) to
 perform host-side ownership operations that survive the runsc gofer's
 named-ACL stripping. Two primitives are exposed:
 
-- :func:`helper_chown_files` — for read-only single files: copy → chown →
-  chmod → atomic rename, idempotent across re-invocations.
+- :func:`helper_chown_files` — for read-only single files: copy → chmod →
+  chown → atomic rename, idempotent across re-invocations. chmod precedes
+  chown because, post-userns-translation, the chown lands the file on a
+  non-root in-container uid; the helper baseline omits CAP_FOWNER, so a
+  chmod by in-container root on a foreign-owned file would EPERM (see
+  fix-helper-container-userns design D7).
 - :func:`helper_mkdir_chown_dirs` — for cache/log directory leaves:
   ``mkdir -p`` then ``chown`` (no chmod, see Decision 14 in the
   acl-ownership-recipes design).
@@ -72,7 +76,7 @@ def helper_chown_files(
     machinectl_auth: MachinectlAuth,
     timeout: float = DEFAULT_HELPER_TIMEOUT_S,
 ) -> None:
-    """Copy → chown → chmod → atomic rename each file under ``parent``.
+    """Copy → chmod → chown → atomic rename each file under ``parent``.
 
     Empty ``files`` is a no-op (no helper container is launched).
 
