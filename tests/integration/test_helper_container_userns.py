@@ -152,10 +152,13 @@ def cross_boundary_tmpdir() -> Iterator[Path]:
     resolves to an empty directory inside the helper container — assertions
     against the dev-side path then see nothing.
 
-    Use a tmpdir under the user's home instead; both privilege contexts share
-    that filesystem view.
+    Use the repo-rooted ``temp/integration-test-tmp/`` instead. Both privilege
+    contexts see the repo on the same filesystem; the ``temp/`` dir is
+    already established as the project's scratch area (gitignored). Keeping
+    test fixtures inside the repo means stragglers show up in ``git status``
+    if cleanup ever fails — a small audit safety net.
     """
-    base = Path.home() / ".cache" / "sandbox-ai-tests"
+    base = REPO_ROOT / "temp" / "integration-test-tmp"
     base.mkdir(parents=True, exist_ok=True)
     d = Path(tempfile.mkdtemp(dir=str(base)))
     try:
