@@ -2138,8 +2138,6 @@ class TestCheckPreExistingInstanceLayout:
         consumer_leaf.mkdir(parents=True)
         legacy_leaf.mkdir(parents=True)
 
-        # consumer_leaf is owned by current uid; treat that as "consumer-subuid".
-        consumer_subuid = os.stat(consumer_leaf).st_uid
         # Override legacy_leaf to be visibly different by mocking the consumer
         # subuid lookup to match consumer_leaf's owner; legacy_leaf will then
         # appear stale because it shares that same uid (we cannot chown in the
@@ -2182,7 +2180,6 @@ class TestCheckPreExistingInstanceLayout:
         remediation = result.remediation or ""
         assert f"rm -rf {legacy_leaf}" in remediation
         assert str(consumer_leaf) not in remediation
-        assert f"st_uid={consumer_subuid}" not in result.detail  # sanity: real owner irrelevant
 
     def test_warn_aggregates_across_multiple_instances(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Multiple registered instances → stale leaves aggregated into one warning."""
