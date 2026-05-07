@@ -252,6 +252,38 @@ def in_container_gid_for_host_gid(host_gid: int, host_user: str) -> int:
     raise SubgidOutOfRangeError(f"Host gid {host_gid} is not within any /etc/subgid range allocated to {host_user!r}")
 
 
+def in_container_uid_for_host_uid(host_uid: int, host_user: str) -> int:
+    """Inverse map: host uid → in-container uid.
+
+    Structural inverse of :func:`host_id_for_in_container`, parallel to
+    :func:`in_container_gid_for_host_gid`. Walks ``/etc/subuid`` ranges in
+    file order; for the matching range returns
+    ``accumulated_offset + (host_uid - first_allocated) + 1``, where
+    ``accumulated_offset`` sums prior ranges' ``count``.
+
+    Asymmetry note: :func:`host_id_for_in_container` returns ``host_user``'s
+    primary uid for ``N == 0``. The inverse intentionally does NOT special-case
+    ``host_uid == pwd.getpwnam(host_user).pw_uid``: the daemon user's primary
+    uid lies outside the subuid range and raises :class:`SubuidOutOfRangeError`.
+    Helper callers chown to subuid-range values, never to the daemon's primary
+    uid; surfacing the mismatch is preferable to silently returning ``0``
+    (which would chown to in-container root).
+
+    Raises:
+        NoSubuidRangeError: ``host_user`` has no /etc/subuid entry.
+        SubuidOutOfRangeError: ``host_uid`` is not in any allocated range.
+    """
+    ranges = parse_subuid_for_user(host_user)
+    if not ranges:
+        raise NoSubuidRangeError(f"User {host_user!r} has no /etc/subuid entry; cannot map host uid {host_uid}")
+    accumulated = 0
+    for first, count in ranges:
+        if first <= host_uid < first + count:
+            return accumulated + (host_uid - first) + 1
+        accumulated += count
+    raise SubuidOutOfRangeError(f"Host uid {host_uid} is not within any /etc/subuid range allocated to {host_user!r}")
+
+
 def workspace_bridge_gid(host: HostSettings) -> int:
     """Resolve ``host.workspace_bridge_group`` to its host gid.
 
