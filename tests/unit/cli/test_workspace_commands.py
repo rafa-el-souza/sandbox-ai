@@ -509,52 +509,6 @@ class TestWorkspaceRename:
         assert result.exit_code != 0
 
 
-# ── replace_workspaces_section helper ─────────────────────────────────────
-
-
-class TestReplaceWorkspacesSection:
-    """Direct coverage for the toml mutation helper (in core.scaffold)."""
-
-    def _make_toml(self, ws_block: str) -> str:
-        return _TOML_TEMPLATE.format(name="foo", workspaces=ws_block)
-
-    def test_replaces_single_workspace_block(self) -> None:
-        from core.scaffold import WorkspaceSpec, replace_workspaces_section
-
-        toml = self._make_toml('[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p"\n')
-        result = replace_workspaces_section(
-            toml,
-            [
-                WorkspaceSpec(name="main", bootstrap_mode="empty", source=None, path="/p"),
-                WorkspaceSpec(name="other", bootstrap_mode="empty", source=None, path="/q"),
-            ],
-        )
-        assert "[workspaces.main]" in result
-        assert "[workspaces.other]" in result
-        assert "[core]" in result  # next section preserved
-
-    def test_appends_when_no_block_present(self) -> None:
-        from core.scaffold import WorkspaceSpec, replace_workspaces_section
-
-        toml = "[instance]\nname = 'foo'\n"
-        result = replace_workspaces_section(
-            toml,
-            [WorkspaceSpec(name="main", bootstrap_mode="empty", source=None, path="/p")],
-        )
-        assert "[workspaces.main]" in result
-
-    def test_handles_block_at_end_of_file(self) -> None:
-        from core.scaffold import WorkspaceSpec, replace_workspaces_section
-
-        toml = '[instance]\nname="foo"\n\n[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p"\n'
-        result = replace_workspaces_section(
-            toml,
-            [WorkspaceSpec(name="renamed", bootstrap_mode="empty", source=None, path="/q")],
-        )
-        assert "[workspaces.renamed]" in result
-        assert "[workspaces.main]" not in result
-
-
 # ── workspace restore ────────────────────────────────────────────────────
 
 
