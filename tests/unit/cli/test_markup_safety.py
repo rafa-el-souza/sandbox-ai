@@ -1,4 +1,4 @@
-"""AST-based regression test for Rich markup safety in `console.print` literals.
+"""Tests for Rich markup safety — AST regression scan over `console.print` literals.
 
 Per the `orchestrator-cli` capability's "Rich Markup Safety in Console Output"
 requirement: any `console.print(...)` call whose message contains literal

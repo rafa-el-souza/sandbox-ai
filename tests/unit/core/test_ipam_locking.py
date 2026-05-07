@@ -1,4 +1,4 @@
-"""Regression tests for the IPAM lock topology.
+"""Tests for `core.ipam` lock topology — regression guards for the lock layout.
 
 Guards two invariants:
 

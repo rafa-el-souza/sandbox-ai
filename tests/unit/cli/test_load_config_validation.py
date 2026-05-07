@@ -1,4 +1,4 @@
-"""Tests for the `_load_config` CLI-boundary `ValidationError` wrap.
+"""Tests for `_load_config` — pins the `ValidationError` wrap at the CLI boundary.
 
 Pins D4's contract:
 

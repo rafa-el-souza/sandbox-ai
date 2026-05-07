@@ -1,4 +1,4 @@
-"""Round-trip tests for `core.scaffold.mutate_workspaces`.
+"""Tests for `core.scaffold.mutate_workspaces` — round-trip and parse-error guards.
 
 Pins the design's "tomlkit cosmetic changes" risk in two layers:
 
