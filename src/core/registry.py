@@ -2,7 +2,10 @@
 
 Keyed by ``instance_name`` (globally unique per-user). Values record the
 absolute ``instance_dir`` and a UTC ``created_at`` timestamp. Concurrent
-access is serialized via the per-user ``state.lock`` (fcntl LOCK_EX).
+access is serialized via the dedicated ``instances.json.lock``
+(fcntl LOCK_EX), distinct from ``state.lock`` so registry mutations
+called from inside a held ``state.lock`` context (e.g. ``sandbox destroy``)
+do not self-deadlock on a second FD aliasing the same lock file.
 Persisted as JSON at ``<sandbox_ai_home()>/state/instances.json``.
 """
 
@@ -14,7 +17,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 
-from core.host_config import sandbox_ai_home, state_lock_path
+from core.host_config import registry_lock_path, sandbox_ai_home
 
 
 def _utcnow_iso() -> str:
@@ -69,7 +72,7 @@ class InstanceRegistry:
         return {k: v for k, v in data.items() if isinstance(v, dict)}
 
     def _open_lock(self) -> int:
-        lock_path = str(state_lock_path())
+        lock_path = str(registry_lock_path())
         os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
         return os.open(lock_path, os.O_CREAT | os.O_RDWR)
 
