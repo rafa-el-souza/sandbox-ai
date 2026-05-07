@@ -1848,9 +1848,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         assert result.status == "fail"
         assert "<pick-a-gid" in (result.remediation or "")
 
-    def test_fail_when_recommendation_finds_no_free_gid(
-        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_fail_when_recommendation_finds_no_free_gid(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import NoFreeGidInSubgidRangeError, WorkspaceBridgeGroupMissingError
 
