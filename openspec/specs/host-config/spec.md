@@ -125,7 +125,9 @@ The system SHALL provide `host_id_for_in_container(N: int, host_user: str) -> in
 
 ### Requirement: Inverse Userns Mapping
 
-The system SHALL provide `in_container_gid_for_host_gid(host_gid: int, host_user: str) -> int` in `core.host_config`. It iterates `parse_subgid_for_user(host_user)` ranges; if `host_gid` falls in some range `[first_allocated, first_allocated + count)`, it returns `host_gid - first_allocated + 1`. Otherwise it raises `SubgidOutOfRangeError`.
+The system SHALL provide both `in_container_gid_for_host_gid(host_gid: int, host_user: str) -> int` and `in_container_uid_for_host_uid(host_uid: int, host_user: str) -> int` in `core.host_config`. Each iterates the corresponding parsed range list (`parse_subgid_for_user(host_user)` for gids, `parse_subuid_for_user(host_user)` for uids); if the input host id falls in some range `[first_allocated, first_allocated + count)`, the function returns `accumulated_offset + (host_id - first_allocated) + 1`, where `accumulated_offset` is the sum of `count` over all preceding ranges. Otherwise the function raises `SubgidOutOfRangeError` (gid path) or `SubuidOutOfRangeError` (uid path).
+
+The uid resolver SHALL deliberately NOT special-case `host_uid == pwd.getpwnam(host_user).pw_uid` (the daemon user's primary uid). The inverse is asymmetric with `host_id_for_in_container`, which returns the user's primary uid for `N == 0`: the inverse raises `SubuidOutOfRangeError` for the daemon user's primary uid, surfacing the unexpected use case rather than silently translating to in-container `0` (which would chown to in-container root, an entirely different semantic). This asymmetry SHALL be documented in the function's docstring.
 
 #### Scenario: Host gid in subgid range inverse-maps correctly
 - **WHEN** `/etc/subgid` has `claude-sandbox:165536:65536` and `in_container_gid_for_host_gid(201665, "claude-sandbox")` is called
@@ -137,7 +139,27 @@ The system SHALL provide `in_container_gid_for_host_gid(host_gid: int, host_user
 
 #### Scenario: Multi-range subgid: matches the range containing the gid
 - **WHEN** `/etc/subgid` has two ranges for the user and the host gid falls in the second
-- **THEN** the inverse map is computed against the second range's `first_allocated`
+- **THEN** the inverse map is computed against the second range's `first_allocated`, with `accumulated_offset` set to the first range's `count`
+
+#### Scenario: Host uid in subuid range inverse-maps correctly
+- **WHEN** `/etc/subuid` has `claude-sandbox:165536:65536` and `in_container_uid_for_host_uid(166535, "claude-sandbox")` is called
+- **THEN** the result is `1000` (= 166535 - 165536 + 1)
+
+#### Scenario: Host uid outside subuid range raises
+- **WHEN** `in_container_uid_for_host_uid(100, "claude-sandbox")` is called (uid below the subuid range)
+- **THEN** `SubuidOutOfRangeError` is raised, listing the searched ranges
+
+#### Scenario: Daemon user's primary uid is rejected by inverse
+- **WHEN** `in_container_uid_for_host_uid(N, "claude-sandbox")` is called and `N == pwd.getpwnam("claude-sandbox").pw_uid` (the daemon user's primary uid, which lies outside the subuid range)
+- **THEN** `SubuidOutOfRangeError` is raised; the function does NOT return `0` despite `host_id_for_in_container(0, "claude-sandbox")` returning that primary uid
+
+#### Scenario: Multi-range subuid: matches the range containing the uid
+- **WHEN** `/etc/subuid` has two ranges for the user and the host uid falls in the second
+- **THEN** the inverse map is computed against the second range's `first_allocated`, with `accumulated_offset` set to the first range's `count`
+
+#### Scenario: User without /etc/subuid entry raises
+- **WHEN** `in_container_uid_for_host_uid(166535, "no-such-user")` is called
+- **THEN** `NoSubuidRangeError` is raised
 
 ### Requirement: Workspace Bridge Group Configuration
 
