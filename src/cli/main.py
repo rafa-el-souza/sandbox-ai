@@ -25,6 +25,7 @@ from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
+    check_compose_project_name_collision,
     detect_distro,
     render_results,
     run_check_subset,
@@ -1521,6 +1522,17 @@ def init(
         has_failures = any(r.status == "fail" for r in preflight_results)
         if has_failures:
             render_results(preflight_results, console=console)
+            raise typer.Exit(code=1)
+
+        # Compose-project-name collision pre-flight (per cli-doctor's
+        # "Init pre-flight includes compose_project_name_collision"). The
+        # auth probe above proved machinectl_reachable; call the check
+        # directly and surface failure.
+        collision_result = check_compose_project_name_collision(
+            resolved_user, distro, auth_mode=resolved_auth
+        )
+        if collision_result.status == "fail":
+            render_results([collision_result], console=console)
             raise typer.Exit(code=1)
 
     # Git config auto-detection (D-8)

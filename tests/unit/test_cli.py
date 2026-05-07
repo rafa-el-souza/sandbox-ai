@@ -1970,6 +1970,48 @@ class TestInitDoctorPreFlightFailure:
             result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 1
 
+    def test_init_aborts_on_compose_project_name_collision(self, runner: CliRunner) -> None:
+        """12.11: init pre-flight runs compose_project_name_collision; fails on collision."""
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        collision = CheckResult(
+            status="fail",
+            name="compose project name collision",
+            detail="daemon project already exists",
+            remediation="destroy the colliding instance",
+            category="Privilege Boundary",
+        )
+        with (
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision", return_value=collision),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["init", "newproject"])
+            assert result.exit_code == 1
+
+    def test_init_proceeds_on_compose_collision_pass(self, runner: CliRunner) -> None:
+        """12.11: init pre-flight passes through when collision check passes."""
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        ok = CheckResult(
+            status="pass",
+            name="compose project name collision",
+            detail="no collision",
+            category="Privilege Boundary",
+        )
+        with (
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision", return_value=ok),
+        ):
+            result = runner.invoke(app, ["init", "newinst"])
+            # Init proceeds past pre-flight (may fail later for other reasons,
+            # but collision check did not abort).
+            assert "compose project name collision" not in result.output
+
 
 class TestInitNonTTY:
     """Task 3.1: sandbox init in non-TTY environment."""
