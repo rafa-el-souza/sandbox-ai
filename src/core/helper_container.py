@@ -93,8 +93,8 @@ def helper_chown_files(
     inner = (
         f"set -e; for f in {quoted_names}; do "
         f'cp /p/"$f" /tmp/"$f" && '
-        f'chown {in_container_uid}:{in_container_gid} /tmp/"$f" && '
         f'chmod {mode_octal} /tmp/"$f" && '
+        f'chown {in_container_uid}:{in_container_gid} /tmp/"$f" && '
         f'mv /tmp/"$f" /p/"$f"; '
         "done"
     )
