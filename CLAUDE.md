@@ -50,8 +50,9 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 ### State and locking
 
-- Mutable orchestrator state lives under `<sandbox_ai_home()>/state/` (default `~/.sandbox-ai/state/`): `instances.json`, `ipam.json`, `state.lock`. The directory is created with mode `0700` by `sandbox init`.
+- Mutable orchestrator state lives under `<sandbox_ai_home()>/state/` (default `~/.sandbox-ai/state/`): `instances.json`, `ipam.json`, `state.lock`, `ipam.json.lock`, and lazy per-instance `<inst>.backup.lock` files. The directory is created with mode `0700` by `sandbox init`.
 - `state.lock` is now **per-user** (not per-CWD): all `sandbox` invocations under the same user serialize on the same lock during provisioning, regardless of which working directory they were launched from.
+- `ipam.json.lock` is the dedicated mutation lock for the IPAM ledger (`core.host_config.ipam_lock_path()`), distinct from `state.lock`. `IPAMLedger.allocate` / `IPAMLedger.release` acquire only `ipam.json.lock`; they never touch `state.lock`. **Lock acquisition order: `state.lock` outer, `ipam.json.lock` inner — never the reverse.** No code path may acquire `state.lock` while already holding `ipam.json.lock`.
 - `state.lock` is **transient** — held only during provisioning, released for the runtime lifetime of a sandbox. Don't add long-lived locks.
 - Lifecycle commands (`start`, `stop`, `destroy`, `status`, `attach`) hard-fail with a "run sandbox init first" error when `<home>/state/instances.json` is absent.
 
