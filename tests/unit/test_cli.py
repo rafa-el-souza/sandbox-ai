@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
@@ -36,9 +37,13 @@ HOST_USER = "sandbox"
 VALID_TOML_CONTENT = b"""
 [instance]
 name = "myproject"
-user_project_root = "/home/dev/myproject"
 host_uid = "1000"
 warmup_prompt = ""
+
+[workspaces.main]
+bootstrap_mode = "copy"
+source = "/home/dev/myproject"
+path = "/home/dev/myproject"
 
 [core]
 shm_size = "2gb"
@@ -164,8 +169,8 @@ def mock_sandbox_ai_home(tmp_path: Path) -> Path:
 
 
 def _user_home() -> Path:
-    """Resolve the per-user home from SANDBOX_AI_USER_HOME (autouse fixture sets it)."""
-    return Path(os.environ["SANDBOX_AI_USER_HOME"])
+    """Resolve the per-user home from SANDBOX_AI_HOME (autouse fixture sets it)."""
+    return Path(os.environ["SANDBOX_AI_HOME"])
 
 
 def _seed_registry(home: Path) -> None:
@@ -177,37 +182,41 @@ def _seed_registry(home: Path) -> None:
         registry.write_text("{}")
 
 
-def _register_instance(home: Path, project_dir: str, instance_id: str) -> Path:
-    """Helper: register an instance and create its directory structure."""
+def _register_instance(inst: str) -> Path:
+    """Register ``inst`` in the per-user registry and scaffold its instance dir.
+
+    The instance dir is ``<user_home>/instances/<inst>/`` per the change-5
+    layout. Existing registry entries are preserved; the new entry is merged
+    in. Returns the instance dir as a ``Path``.
+    """
     state_dir = _user_home() / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     reg = state_dir / "instances.json"
-    reg.write_text(json.dumps({project_dir: instance_id}))
-    inst = home / "sandboxes" / instance_id
-    (inst / "docker" / "core").mkdir(parents=True)
-    (inst / "docker" / "admin").mkdir(parents=True)
-    (inst / "docker" / "extras").mkdir(parents=True)
-    (inst / "config" / "proxy").mkdir(parents=True)
-    (inst / "config" / "admin").mkdir(parents=True)
-    (inst / "config" / "core").mkdir(parents=True)
-    (inst / "config" / "coredns").mkdir(parents=True)
-    (inst / "config" / "dnsdist").mkdir(parents=True)
-    (inst / "log" / "orchestrator").mkdir(parents=True)
-    # Write sandbox.toml
-    (inst / "sandbox.toml").write_bytes(VALID_TOML_CONTENT)
-    # Write .sandbox.env
-    (inst / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY="test"')
-    # Write .initialized sentinel
-    (inst / ".initialized").write_text("")
-    return inst
+    existing: dict[str, dict[str, str]] = json.loads(reg.read_text()) if reg.exists() else {}
+    instance_dir = _user_home() / "instances" / inst
+    existing[inst] = {"instance_dir": str(instance_dir), "created_at": "2026-01-01T00:00:00Z"}
+    reg.write_text(json.dumps(existing))
+    (instance_dir / "docker" / "core").mkdir(parents=True)
+    (instance_dir / "docker" / "admin").mkdir(parents=True)
+    (instance_dir / "docker" / "extras").mkdir(parents=True)
+    (instance_dir / "config" / "proxy").mkdir(parents=True)
+    (instance_dir / "config" / "admin").mkdir(parents=True)
+    (instance_dir / "config" / "core").mkdir(parents=True)
+    (instance_dir / "config" / "coredns").mkdir(parents=True)
+    (instance_dir / "config" / "dnsdist").mkdir(parents=True)
+    (instance_dir / "log" / "orchestrator").mkdir(parents=True)
+    (instance_dir / "sandbox.toml").write_bytes(VALID_TOML_CONTENT)
+    (instance_dir / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY="test"')
+    (instance_dir / ".initialized").write_text("")
+    return instance_dir
 
 
-def _write_ipam(instance_id: str, base_index: int) -> None:
-    """Helper: write an IPAM entry to ``<user_home>/state/ipam.json``."""
+def _write_ipam(inst: str, base_index: int) -> None:
+    """Write a single IPAM entry to ``<user_home>/state/ipam.json``."""
     state_dir = _user_home() / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     ipam = state_dir / "ipam.json"
-    ipam.write_text(json.dumps({instance_id: base_index}))
+    ipam.write_text(json.dumps({inst: base_index}))
 
 
 # ── sandbox start ────────────────────────────────────────────────────────────
@@ -216,19 +225,15 @@ def _write_ipam(instance_id: str, base_index: int) -> None:
 class TestStartHappyPath:
     """Task 8.2: sandbox start happy path — all phases sequenced correctly."""
 
-    def test_start_existing_instance_full_sequence(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_existing_instance_full_sequence(self, runner: CliRunner) -> None:
         """Existing instance: full start sequence (registry hit -> compose -> handover)."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -244,61 +249,44 @@ class TestStartHappyPath:
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             mock_hydrate.assert_called_once()
             mock_acl.assert_called_once()
             mock_compose.assert_called_once()
             mock_handover.assert_called_once()
 
-    def test_start_no_init_errors(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_no_init_errors(self, runner: CliRunner) -> None:
         """New project: registry miss → error with init guidance."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/newproject"
-
         from cli.main import app
 
         _seed_registry(_user_home())
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start"])
-            assert result.exit_code == 1
-            assert "sandbox init" in result.output.lower()
+        result = runner.invoke(app, ["start", "newproject"])
+        assert result.exit_code == 1
+        assert "sandbox init" in result.output.lower()
 
-    def test_start_partial_init_errors(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_partial_init_errors(self, runner: CliRunner) -> None:
         """Instance registered but .initialized sentinel missing → error."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        inst = _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
         # Remove the sentinel
-        (inst / ".initialized").unlink()
+        (instance_dir / ".initialized").unlink()
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start"])
-            assert result.exit_code == 1
-            assert "partially initialized" in result.output.lower() or "destroy" in result.output.lower()
+        result = runner.invoke(app, ["start", inst])
+        assert result.exit_code == 1
+        assert "partially initialized" in result.output.lower() or "destroy" in result.output.lower()
 
-    def test_start_progress_output(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_progress_output(self, runner: CliRunner) -> None:
         """Start shows phase progress indicators."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -314,26 +302,22 @@ class TestStartHappyPath:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             # Should show progress indicators
             assert "ipam" in out or "network" in out
             assert "compose" in out or "containers" in out
 
-    def test_start_handover_indication(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_handover_indication(self, runner: CliRunner) -> None:
         """Start shows handover indication before PTY exec."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -349,7 +333,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             assert "handing over" in out or "handover" in out or "admin shell" in out
@@ -358,24 +342,20 @@ class TestStartHappyPath:
 class TestStartSecretCompletenessGate:
     """Task 4.4a: secret completeness gate — must run before _acquire_state_lock."""
 
-    def test_start_exits_on_missing_secrets(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_exits_on_missing_secrets(self, runner: CliRunner) -> None:
         """start exits code 1 when _check_secrets returns missing secrets."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=["PG_PASSWORD"]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock") as mock_lock,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             assert "pg_password" in result.output.lower()
             # Gate must fire BEFORE lock acquisition
@@ -385,14 +365,12 @@ class TestStartSecretCompletenessGate:
 class TestStartDoctorChain1PreFlight:
     """Task 4.5a: doctor Chain 1 (Privilege Boundary) pre-flight in start."""
 
-    def test_start_exits_on_doctor_chain1_failure(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_exits_on_doctor_chain1_failure(self, runner: CliRunner) -> None:
         """start exits code 1 when run_check_subset returns fail for Privilege Boundary."""
         from core.doctor import CheckResult
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        _register_instance(inst)
 
         failed_results = [
             CheckResult(status="fail", name="machinectl", detail="not configured", remediation="fix sudoers"),
@@ -401,14 +379,12 @@ class TestStartDoctorChain1PreFlight:
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results") as mock_render,
             patch("cli.main._warm_check") as mock_warm,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_render.assert_called_once()
             # Gate must fire BEFORE warm check
@@ -418,19 +394,15 @@ class TestStartDoctorChain1PreFlight:
 class TestStartComposeSpinner:
     """Task 4.6a: console.status() spinner during compose-up phase."""
 
-    def test_start_uses_console_status_for_compose(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_uses_console_status_for_compose(self, runner: CliRunner) -> None:
         """start uses console.status() context manager during compose-up."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -450,7 +422,7 @@ class TestStartComposeSpinner:
                 "status",
             ) as mock_status,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             mock_status.assert_called_once()
             # Verify __enter__ was called (context manager was used)
@@ -460,22 +432,19 @@ class TestStartComposeSpinner:
 class TestStartWarmExit:
     """Task 8.2: pre-lock warm-exit — no locks acquired."""
 
-    def test_warm_instance_exits_before_locking(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_warm_instance_exits_before_locking(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._acquire_state_lock") as mock_lock,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             assert "already running" in result.output.lower()
             mock_lock.assert_not_called()
@@ -484,22 +453,19 @@ class TestStartWarmExit:
 class TestStartLockContention:
     """Task 8.2: lock contention exit."""
 
-    def test_lock_contention_exits_with_message(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_lock_contention_exits_with_message(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", side_effect=BlockingIOError("locked")),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             assert "already in progress" in result.output.lower()
 
@@ -507,17 +473,14 @@ class TestStartLockContention:
 class TestStartIPAMExhausted:
     """Task 8.2: IPAM exhausted exit."""
 
-    def test_ipam_exhausted_releases_lock_and_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_ipam_exhausted_releases_lock_and_exits(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.ipam import IPAMExhaustedError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -525,7 +488,7 @@ class TestStartIPAMExhausted:
             patch("cli.main._phase_ipam", side_effect=IPAMExhaustedError("full")),
             patch("cli.main._release_lock") as mock_release,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_release.assert_called_once()
 
@@ -533,17 +496,14 @@ class TestStartIPAMExhausted:
 class TestStartWorkspaceBridgeMissing:
     """Task 5.2: hydration aborts when workspace bridge group is missing."""
 
-    def test_start_aborts_with_remediation_hint(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_start_aborts_with_remediation_hint(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.host_config import WorkspaceBridgeGroupMissingError
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -556,7 +516,7 @@ class TestStartWorkspaceBridgeMissing:
             ),
             patch("cli.main._release_lock") as mock_release,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             assert "sb-ws" in result.output
             assert "sandbox doctor" in result.output
@@ -567,20 +527,18 @@ class TestStartWorkspaceBridgeMissing:
         from core.host_config import WorkspaceBridgeGroupMissingError
 
         home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
         _create_tooling_plane(home)
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch(
                 "cli.main.build_jinja_context",
                 side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
             ),
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
             assert result.exit_code == 1
             assert "sb-ws" in result.output
             assert "sandbox doctor" in result.output
@@ -589,17 +547,14 @@ class TestStartWorkspaceBridgeMissing:
 class TestStartComposeUnhealthy:
     """Task 8.2: compose unhealthy exit."""
 
-    def test_unhealthy_compose_releases_lock_and_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_unhealthy_compose_releases_lock_and_exits(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -614,7 +569,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_release.assert_called_once()
 
@@ -656,27 +611,31 @@ class TestStartSshKeypairGeneration:
         assert len(secrets_entries) >= 1
 
 
-class TestStartInstanceNameImmutabilityWarning:
-    """Spec: sandbox-toml-schema — instance.name immutability warning."""
+class TestStartInstanceNameMatchesRegistry:
+    """Operator-edited sandbox.toml guard: instance.name should match the registry key.
 
-    def test_divergent_name_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        """WHEN instance.name differs from instance_id name component, THEN warning is emitted."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        inst = _register_instance(home, project_dir, instance_id)
+    Post-change-5, COMPOSE_PROJECT_NAME is derived from the typer ``inst`` arg
+    (per Group 7's <dev>-<inst> prefix), not from ``config.instance.name``, so
+    mismatch is no longer a correctness hazard. It remains a UX hazard
+    (operator-facing displays surface ``instance.name``); start emits a warning.
+    """
+
+    def test_divergent_name_emits_warning(self, runner: CliRunner) -> None:
+        """instance.name differs from the registry key → warning emitted."""
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
         # Overwrite sandbox.toml with renamed instance.name
-        (inst / "sandbox.toml").write_bytes(RENAMED_TOML_CONTENT)
+        (instance_dir / "sandbox.toml").write_bytes(RENAMED_TOML_CONTENT)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main.is_backup_lock_held", return_value=False),
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
@@ -688,28 +647,25 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
-            assert "instance.name has changed" in result.output
-            assert "COMPOSE_PROJECT_NAME" in result.output
+            assert "instance.name" in result.output
+            assert "renamed-instance" in result.output
 
-    def test_matching_name_no_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        """WHEN instance.name matches instance_id name component, THEN no warning."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+    def test_matching_name_no_warning(self, runner: CliRunner) -> None:
+        """instance.name matches the registry key → no warning."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main.is_backup_lock_held", return_value=False),
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
@@ -721,9 +677,9 @@ class TestStartInstanceNameImmutabilityWarning:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
-            assert "instance.name has changed" not in result.output
+            assert "instance.name" not in result.output
 
 
 # ── sandbox stop ─────────────────────────────────────────────────────────────
@@ -735,20 +691,17 @@ class TestStopWarm:
     def test_stop_warm_instance_composes_down_and_revokes_acl(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls") as mock_revoke,
         ):
-            result = runner.invoke(app, ["stop"])
+            result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
             mock_down.assert_called_once()
             # Verify -v flag NOT passed (plain stop)
@@ -760,20 +713,17 @@ class TestStopWarm:
 class TestStopCold:
     """Task 8.2: sandbox stop — cold instance."""
 
-    def test_stop_cold_instance_warns_and_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_stop_cold_instance_warns_and_exits(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._compose_down") as mock_down,
         ):
-            result = runner.invoke(app, ["stop"])
+            result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
             assert "not running" in result.output.lower()
             mock_down.assert_not_called()
@@ -782,21 +732,18 @@ class TestStopCold:
 class TestStopClean:
     """Task 8.2: sandbox stop --clean removes volumes."""
 
-    def test_stop_clean_passes_volume_flag(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_stop_clean_passes_volume_flag(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls"),
         ):
-            result = runner.invoke(app, ["stop", "--clean"])
+            result = runner.invoke(app, ["stop", inst, "--clean"])
             assert result.exit_code == 0
             mock_down.assert_called_once()
             down_call = mock_down.call_args
@@ -809,20 +756,17 @@ class TestStopClean:
 class TestAttachWarm:
     """Task 8.2: sandbox attach — warm pass."""
 
-    def test_attach_warm_instance_hands_over_terminal(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_attach_warm_instance_hands_over_terminal(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._phase_handover") as mock_handover,
         ):
-            result = runner.invoke(app, ["attach"])
+            result = runner.invoke(app, ["attach", inst])
             assert result.exit_code == 0
             mock_handover.assert_called_once()
 
@@ -830,19 +774,16 @@ class TestAttachWarm:
 class TestAttachCold:
     """Task 8.2: sandbox attach — cold reject."""
 
-    def test_attach_cold_instance_rejects(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_attach_cold_instance_rejects(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=False),
         ):
-            result = runner.invoke(app, ["attach"])
+            result = runner.invoke(app, ["attach", inst])
             assert result.exit_code == 1
             assert "not running" in result.output.lower()
 
@@ -853,18 +794,14 @@ class TestAttachCold:
 class TestDestroyConfirmation:
     """Task 8.2: sandbox destroy — confirmation accepted/rejected."""
 
-    def test_destroy_accepted_performs_full_teardown(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+    def test_destroy_accepted_performs_full_teardown(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls"),
@@ -872,70 +809,61 @@ class TestDestroyConfirmation:
             patch("shutil.rmtree") as mock_rmtree,
         ):
             # User types correct name to confirm
-            result = runner.invoke(app, ["destroy"], input="myproject\n")
+            result = runner.invoke(
+                app,
+                ["destroy", inst, "--backup-workspaces=none"],
+                input="myproject\n",
+            )
             assert result.exit_code == 0
-            mock_down.assert_called_once()
-            mock_rmtree.assert_called_once()
+            # Phase order: D3 compose down (volumes=False) + D5 compose down -v.
+            assert mock_down.call_count == 2
+            # rmtree called for instance dir (D7) + each workspace tree (D8).
+            assert mock_rmtree.call_count >= 2
 
-    def test_destroy_rejected_aborts_silently(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+    def test_destroy_rejected_aborts_silently(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("shutil.rmtree") as mock_rmtree,
-        ):
-            result = runner.invoke(app, ["destroy"], input="wrong-name\n")
+        with patch("shutil.rmtree") as mock_rmtree:
+            result = runner.invoke(app, ["destroy", inst], input="wrong-name\n")
             assert result.exit_code == 0
             mock_rmtree.assert_not_called()
 
-    def test_destroy_force_bypasses_confirmation(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+    def test_destroy_force_bypasses_confirmation(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
-            mock_rmtree.assert_called_once()
+            # D7 instance dir + D8 per-workspace tree(s).
+            assert mock_rmtree.call_count >= 2
 
 
 class TestDestroyPrefixGuard:
     """Task 8.2: sandbox destroy — prefix guard triggered."""
 
-    def test_destroy_rejects_path_outside_sandboxes(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        # Manually write a corrupted registry pointing outside sandboxes/
-        reg = home / ".state" / "instances.json"
-        reg.write_text(json.dumps({project_dir: "../../../etc"}))
-        _write_ipam("../../../etc", 0)
-
+    def test_destroy_rejects_path_outside_instances_root(self, runner: CliRunner) -> None:
         from cli.main import app
+        from core.registry import InstanceRegistry
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("shutil.rmtree") as mock_rmtree,
-        ):
-            result = runner.invoke(app, ["destroy", "--force"])
+        _seed_registry(_user_home())
+        # Register an instance whose dir lives OUTSIDE <user_home>/instances/.
+        bad_path = str(_user_home() / "somewhere_else" / "evil")
+        InstanceRegistry().register("evil", bad_path)
+        with patch("shutil.rmtree") as mock_rmtree:
+            result = runner.invoke(app, ["destroy", "evil", "--force"])
             assert result.exit_code == 1
             mock_rmtree.assert_not_called()
 
@@ -943,105 +871,81 @@ class TestDestroyPrefixGuard:
 class TestDestroyIPAMAndRegistryCleanup:
     """Task 8.2: IPAM+registry cleared after destroy."""
 
-    def test_destroy_clears_ipam_and_registry(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 5)
+    def test_destroy_clears_ipam_and_registry(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 5)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
 
-            # Verify IPAM entry removed
-            ipam_data = json.loads((home / ".state" / "ipam.json").read_text())
-            assert instance_id not in ipam_data
+            # IPAM and registry both live under the per-user home in change-5.
+            ipam_data = json.loads((_user_home() / "state" / "ipam.json").read_text())
+            assert inst not in ipam_data
 
-            # Verify registry entry removed
-            reg_data = json.loads((home / ".state" / "instances.json").read_text())
-            assert project_dir not in reg_data
+            reg_data = json.loads((_user_home() / "state" / "instances.json").read_text())
+            assert inst not in reg_data
 
 
 class TestDestroyRmtree:
     """Task 8.2: shutil.rmtree called on instance_dir."""
 
-    def test_destroy_removes_instance_directory(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+    def test_destroy_removes_instance_directory(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
-            runner.invoke(app, ["destroy", "--force"])
-            expected_dir = str(home / "sandboxes" / instance_id)
-            mock_rmtree.assert_called_once_with(expected_dir)
+            runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+            expected_dir = str(_user_home() / "instances" / inst)
+            # D7 rmtrees the instance dir; D8 rmtrees each workspace tree.
+            calls = [c.args[0] for c in mock_rmtree.call_args_list]
+            assert expected_dir in calls
 
 
 # ── Helper function unit tests (coverage) ────────────────────────────────────
 
 
 class TestResolveHelpers:
-    """Direct tests for _resolve_sandbox_ai_home and _resolve_project_dir."""
+    """Direct tests for the surviving cli.main resolution helpers."""
 
-    def test_resolve_sandbox_ai_home_returns_repo_root(self) -> None:
-        from cli.main import _resolve_sandbox_ai_home
+    def test_lookup_instance_or_exit_returns_dir_for_registered_instance(self) -> None:
+        from cli.main import _lookup_instance_or_exit
 
-        result = _resolve_sandbox_ai_home()
-        assert os.path.isabs(result)
-        # Should be the repo root (parent of src/)
-        assert os.path.isdir(os.path.join(result, "src", "cli"))
+        _register_instance("foo")
+        instance_dir = _lookup_instance_or_exit("foo")
+        assert instance_dir.endswith("/instances/foo")
 
-    def test_resolve_project_dir_returns_cwd(self) -> None:
-        from cli.main import _resolve_project_dir
+    def test_lookup_instance_or_exit_exits_when_missing(self) -> None:
+        from cli.main import _lookup_instance_or_exit
 
-        result = _resolve_project_dir()
-        assert result == os.path.abspath(os.getcwd())
+        _seed_registry(_user_home())
+        with pytest.raises(typer.Exit) as exc_info:
+            _lookup_instance_or_exit("does-not-exist")
+        assert exc_info.value.exit_code == 1
 
-    def test_resolve_instance_found(self, mock_sandbox_ai_home: Path) -> None:
-        from cli.main import _resolve_instance
-
-        home = mock_sandbox_ai_home
-        _register_instance(home, "/some/dir", "inst-abc")
-        idir, iid = _resolve_instance(str(home), "/some/dir")
-        assert iid == "inst-abc"
-        assert idir is not None
-        assert idir.endswith("sandboxes/inst-abc")
-
-    def test_resolve_instance_not_found(self, mock_sandbox_ai_home: Path) -> None:
-        from cli.main import _resolve_instance
-
-        idir, iid = _resolve_instance(str(mock_sandbox_ai_home), "/nonexistent")
-        assert idir is None
-        assert iid is None
-
-    def test_load_config(self, mock_sandbox_ai_home: Path) -> None:
+    def test_load_config(self) -> None:
         from cli.main import _load_config
 
-        home = mock_sandbox_ai_home
-        inst = _register_instance(home, "/some/dir", "inst-abc")
-        config = _load_config(str(inst))
+        instance_dir = _register_instance("myproject")
+        config = _load_config(str(instance_dir))
         assert config.instance.name == "myproject"
 
 
@@ -1107,7 +1011,7 @@ class TestLockingDirect:
         assert isinstance(fd, int)
         _release_lock(fd)
 
-    def test_acquire_contention(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_acquire_contention(self, isolated_sandbox_ai_home: Path) -> None:
         import fcntl as _fcntl
 
         from cli.main import _acquire_state_lock
@@ -1119,7 +1023,7 @@ class TestLockingDirect:
         _fcntl.flock(held_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         try:
             with pytest.raises(BlockingIOError):
-                _acquire_state_lock(str(isolated_sandbox_ai_user_home))
+                _acquire_state_lock(str(isolated_sandbox_ai_home))
         finally:
             _fcntl.flock(held_fd, _fcntl.LOCK_UN)
             os.close(held_fd)
@@ -1134,10 +1038,10 @@ class TestLockingDirect:
 class TestPhaseIPAMDirect:
     """Direct test for _phase_ipam."""
 
-    def test_phase_ipam_allocates(self, mock_sandbox_ai_home: Path) -> None:
+    def test_phase_ipam_allocates(self) -> None:
         from cli.main import _phase_ipam
 
-        idx = _phase_ipam(str(mock_sandbox_ai_home), "test-instance")
+        idx = _phase_ipam("test-instance")
         assert idx == 0
 
 
@@ -1260,9 +1164,9 @@ class TestPhaseHydrateDirect:
             {
                 "instance": {
                     "name": "test",
-                    "user_project_root": "/home/dev/test",
                     "host_uid": "1000",
-                }
+                },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/home/dev/test"}},
             }
         )
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
@@ -1271,7 +1175,7 @@ class TestPhaseHydrateDirect:
             patch("cli.main.build_jinja_context", return_value={}) as mock_ctx,
             patch("cli.main.render_templates") as mock_render,
         ):
-            _phase_hydrate(mock_config, 0, "pass", "/home", "/inst", host)
+            _phase_hydrate(mock_config, 0, "pass", "/inst", host)
             mock_ctx.assert_called_once()
             mock_render.assert_called_once()
 
@@ -1309,9 +1213,9 @@ class TestBuildComposeFiles:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": False},
             }
@@ -1327,9 +1231,9 @@ class TestBuildComposeFiles:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": True},
             }
@@ -1349,9 +1253,9 @@ class TestPhaseComposeUpDirect:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -1396,9 +1300,9 @@ class TestComposeDownDirect:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -1416,9 +1320,9 @@ class TestComposeDownDirect:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -1442,7 +1346,7 @@ class TestRevokeACLsDirect:
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
-            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
             assert mock_run.call_count == 7
             assert warnings == []
 
@@ -1460,7 +1364,7 @@ class TestRevokeACLsDirect:
             return subprocess.CompletedProcess([], 0, "", "")
 
         with patch("subprocess.run", side_effect=side_effect):
-            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
         assert call_count == 7
         assert len(warnings) == 1
@@ -1471,7 +1375,7 @@ class TestRevokeACLsDirect:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
-            warnings = _revoke_acls("/inst", "sandbox", "/home/dev/proj")
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
         assert len(warnings) == 7
         assert all("setfacl not found" in w for w in warnings)
@@ -1480,26 +1384,23 @@ class TestRevokeACLsDirect:
 class TestInitScaffoldDirect:
     """Task 9.1: init command creates full instance (migrated from _scaffold_instance)."""
 
-    def test_init_creates_full_instance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_creates_full_instance(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {
                     "name": "newproject",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
@@ -1511,7 +1412,7 @@ class TestInitScaffoldDirect:
             patch("cli.main.prompt_secrets") as mock_secrets,
             patch("cli.main.write_initialized_sentinel") as mock_sentinel,
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0
             mock_dirs.assert_called_once()
             mock_toml.assert_called_once()
@@ -1529,6 +1430,51 @@ class TestInitScaffoldDirect:
             )
             mock_sentinel.assert_called_once()
 
+    def test_init_with_copy_invokes_preflight_and_rsync(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, tmp_path: Path
+    ) -> None:
+        """``--copy NAME=PATH`` triggers _preflight_workspace_source + copy_workspace."""
+        from cli.main import app
+        from core.hydration import InstanceConfig
+
+        home = mock_sandbox_ai_home
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "f").write_text("hi")
+
+        mock_config = InstanceConfig.model_validate(
+            {
+                "instance": {"name": "newproject", "host_uid": "1000"},
+                "workspaces": {
+                    "api": {
+                        "bootstrap_mode": "copy",
+                        "source": str(src),
+                        "path": str(home / "workspaces" / "newproject" / "api"),
+                    },
+                },
+            }
+        )
+
+        with (
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+            patch("cli.main._preflight_workspace_source") as mock_preflight,
+            patch("cli.main.copy_workspace") as mock_copy,
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--copy", f"api={src}"])
+            assert result.exit_code == 0, result.output
+            mock_preflight.assert_called_once()
+            mock_copy.assert_called_once()
+            assert mock_copy.call_args.args[0] == str(src)
+
 
 # ── Edge case tests for remaining coverage ───────────────────────────────────
 
@@ -1536,68 +1482,56 @@ class TestInitScaffoldDirect:
 class TestStopNoInstance:
     """Cover stop with unregistered instance."""
 
-    def test_stop_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_stop_no_instance_exits(self, runner: CliRunner) -> None:
         from cli.main import app
 
         _seed_registry(_user_home())
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
-        ):
-            result = runner.invoke(app, ["stop"])
-            assert result.exit_code == 1
-            assert "no sandbox" in result.output.lower()
+        result = runner.invoke(app, ["stop", "missing"])
+        assert result.exit_code == 1
+        assert "no sandbox" in result.output.lower()
 
 
 class TestAttachNoInstance:
     """Cover attach with unregistered instance."""
 
-    def test_attach_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_attach_no_instance_exits(self, runner: CliRunner) -> None:
         from cli.main import app
 
         _seed_registry(_user_home())
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
-        ):
-            result = runner.invoke(app, ["attach"])
-            assert result.exit_code == 1
-            assert "no sandbox" in result.output.lower()
+        result = runner.invoke(app, ["attach", "missing"])
+        assert result.exit_code == 1
+        assert "no sandbox" in result.output.lower()
 
 
 class TestDestroyNoInstance:
     """Cover destroy with unregistered instance."""
 
-    def test_destroy_no_instance_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_destroy_no_instance_exits(self, runner: CliRunner) -> None:
         from cli.main import app
 
         _seed_registry(_user_home())
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
-        ):
-            result = runner.invoke(app, ["destroy", "--force"])
-            assert result.exit_code == 1
-            assert "no sandbox" in result.output.lower()
+        result = runner.invoke(app, ["destroy", "missing", "--force"])
+        assert result.exit_code == 1
+        assert "no sandbox" in result.output.lower()
 
 
 class TestDestroyPrefixGuardInternal:
     """Cover the internal prefix guard path (not mocked)."""
 
-    def test_prefix_guard_rejects_bad_path(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
+    def test_prefix_guard_rejects_bad_path(self, runner: CliRunner) -> None:
 
         from cli.main import app
+        from core.registry import InstanceRegistry
 
         _seed_registry(_user_home())
-        # Mock _resolve_instance to return a path outside sandboxes/
-        bad_path = str(home / "somewhere_else" / "evil")
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/some/dir"),
-            patch("cli.main._resolve_instance", return_value=(bad_path, "evil")),
-        ):
-            result = runner.invoke(app, ["destroy", "--force"])
+        # Register an instance whose dir lives OUTSIDE <home>/instances/ — the
+        # destroy prefix guard MUST reject it.
+        bad_path = str(_user_home() / "somewhere_else" / "evil")
+        InstanceRegistry().register("evil", bad_path)
+        with patch("cli.main._load_config") as mock_load:
+            mock_load.return_value.instance.name = "evil"
+            mock_load.return_value.workspaces = {}
+            result = runner.invoke(app, ["destroy", "evil", "--force"])
             assert result.exit_code == 1
             assert "prefix guard" in result.output.lower()
 
@@ -1605,28 +1539,25 @@ class TestDestroyPrefixGuardInternal:
 class TestInitFirecrawl:
     """Task 9.1: init command's firecrawl branch (migrated from _scaffold_instance)."""
 
-    def test_init_with_firecrawl_includes_secret(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_with_firecrawl_includes_secret(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/fc-project"
 
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {
                     "name": "fc-project",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
                 "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": True},
             }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
@@ -1638,7 +1569,7 @@ class TestInitFirecrawl:
             patch("cli.main.prompt_secrets") as mock_prompt,
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "fc-project"])
             assert result.exit_code == 0
             # Verify firecrawl secret was included in prompt_secrets call
             call_args = mock_prompt.call_args[0]
@@ -1672,7 +1603,7 @@ class TestDoctorAllPass:
 class TestDoctorPerUserHomeDisplay:
     """Doctor output displays the resolved per-user home (env var visibility)."""
 
-    def test_displays_resolved_home(self, runner: CliRunner, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_displays_resolved_home(self, runner: CliRunner, isolated_sandbox_ai_home: Path) -> None:
         from cli.main import app
         from core.doctor import CheckResult
 
@@ -1685,7 +1616,7 @@ class TestDoctorPerUserHomeDisplay:
             result = runner.invoke(app, ["doctor", "--user", "sandbox"])
         assert result.exit_code == 0
         assert "Per-user home:" in result.output
-        assert str(isolated_sandbox_ai_user_home) in result.output
+        assert str(isolated_sandbox_ai_home) in result.output
 
 
 class TestDoctorAnyFail:
@@ -1825,9 +1756,8 @@ class TestDoctorRunnerInvoked:
 class TestInitHappyPath:
     """Task 3.1: sandbox init --user — happy path scaffold."""
 
-    def test_init_creates_instance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_creates_instance(self, runner: CliRunner) -> None:
         """init scaffolds a new instance successfully."""
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
         from cli.main import app
@@ -1837,15 +1767,13 @@ class TestInitHappyPath:
             {
                 "instance": {
                     "name": "newproject",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
@@ -1857,7 +1785,7 @@ class TestInitHappyPath:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0, result.output
 
 
@@ -1871,8 +1799,6 @@ class TestInitPerUserTreeCreation:
         mock_config: object,
     ) -> list[typing.Any]:
         return [
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch(
@@ -1895,9 +1821,9 @@ class TestInitPerUserTreeCreation:
             {
                 "instance": {
                     "name": "p",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
@@ -1905,9 +1831,9 @@ class TestInitPerUserTreeCreation:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
-        """init on a clean host creates <home>/, <home>/config/, <home>/state/."""
+        """init on a clean host creates the full per-user tree (config/state/instances/workspaces)."""
         from cli.main import app
 
         project_dir = "/home/dev/p"
@@ -1915,77 +1841,81 @@ class TestInitPerUserTreeCreation:
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
-        assert isolated_sandbox_ai_user_home.is_dir()
-        assert (isolated_sandbox_ai_user_home / "config").is_dir()
-        assert (isolated_sandbox_ai_user_home / "state").is_dir()
-        assert stat.S_IMODE(isolated_sandbox_ai_user_home.stat().st_mode) == 0o700
+        assert isolated_sandbox_ai_home.is_dir()
+        assert (isolated_sandbox_ai_home / "config").is_dir()
+        assert (isolated_sandbox_ai_home / "state").is_dir()
+        assert (isolated_sandbox_ai_home / "instances").is_dir()
+        assert (isolated_sandbox_ai_home / "workspaces").is_dir()
+        assert stat.S_IMODE(isolated_sandbox_ai_home.stat().st_mode) == 0o700
 
     def test_idempotent_on_existing_tree(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """Re-running init against an existing tree does not error."""
         from cli.main import app
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        ensure_per_user_state(isolated_sandbox_ai_home)
         project_dir = "/home/dev/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
 
     def test_existing_registry_not_overwritten(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """A pre-populated registry is preserved; init only ensures presence."""
         from cli.main import app
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
-        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
-        registry.write_text('{"/x": "x-aaa"}')
+        ensure_per_user_state(isolated_sandbox_ai_home)
+        registry = isolated_sandbox_ai_home / "state" / "instances.json"
+        registry.write_text(
+            json.dumps({"existing": {"instance_dir": "/x/sandboxes/existing", "created_at": "2026-01-01T00:00:00Z"}})
+        )
 
         project_dir = "/home/dev/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
-        # Pre-existing entry preserved
         data = json.loads(registry.read_text())
-        assert data["/x"] == "x-aaa"
-        # New entry added too
-        assert project_dir in data
+        # Pre-existing entry preserved
+        assert "existing" in data
+        # New entry added too, keyed by basename
+        assert "p" in data
 
-    def test_sandbox_ai_user_home_redirect(
+    def test_sandbox_ai_home_redirect(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Setting SANDBOX_AI_USER_HOME redirects creation to that path."""
+        """Setting SANDBOX_AI_HOME redirects creation to that path."""
         from cli.main import app
 
         custom_home = tmp_path / "alt-home"
-        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(custom_home))
         project_dir = "/home/dev/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
                 es.enter_context(p)
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "p"])
         assert result.exit_code == 0, result.output
         assert custom_home.is_dir()
         assert (custom_home / "config").is_dir()
@@ -1995,76 +1925,99 @@ class TestInitPerUserTreeCreation:
 class TestInitReInitRejection:
     """Task 3.1: sandbox init — re-init rejected."""
 
-    def test_reinit_rejected(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_reinit_rejected(self, runner: CliRunner) -> None:
         """init errors when instance already exists."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["init"])
-            assert result.exit_code == 1
-            assert "already initialized" in result.output.lower() or "destroy" in result.output.lower()
+        result = runner.invoke(app, ["init", "myproject"])
+        assert result.exit_code == 1
+        assert "already initialized" in result.output.lower() or "destroy" in result.output.lower()
 
 
 class TestInitDryRun:
     """Task 3.1: sandbox init --dry-run previews without writing."""
 
-    def test_init_dry_run_no_state(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_dry_run_no_state(self, runner: CliRunner) -> None:
         """init --dry-run does not create any files or registry entries."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/newproject"
-
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-            patch("cli.main._detect_git_config", return_value=("", "")),
-        ):
-            result = runner.invoke(app, ["init", "--dry-run"])
+        with patch("cli.main._detect_git_config", return_value=("", "")):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
             assert result.exit_code == 0
 
-        # Registry should be unmodified
-        reg_data = json.loads((home / ".state" / "instances.json").read_text())
-        assert project_dir not in reg_data
+        # Registry should be unmodified — per-user state lives under SANDBOX_AI_HOME.
+        registry_path = _user_home() / "state" / "instances.json"
+        assert not registry_path.exists() or "newproject" not in json.loads(registry_path.read_text())
 
 
 class TestInitDoctorPreFlightFailure:
     """Task 3.1: sandbox init — doctor pre-flight failure aborts."""
 
-    def test_init_aborts_on_doctor_failure(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_aborts_on_doctor_failure(self, runner: CliRunner) -> None:
         """init aborts when doctor pre-flight checks fail."""
-        from core.doctor import CheckResult
-
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/newproject"
-
         from cli.main import app
+        from core.doctor import CheckResult
 
         failed_results = [CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")]
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 1
+
+    def test_init_aborts_on_compose_project_name_collision(self, runner: CliRunner) -> None:
+        """12.11: init pre-flight runs compose_project_name_collision; fails on collision."""
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        collision = CheckResult(
+            status="fail",
+            name="compose project name collision",
+            detail="daemon project already exists",
+            remediation="destroy the colliding instance",
+            category="Privilege Boundary",
+        )
+        with (
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision", return_value=collision),
+            patch("cli.main.render_results"),
+        ):
+            result = runner.invoke(app, ["init", "newproject"])
+            assert result.exit_code == 1
+
+    def test_init_proceeds_on_compose_collision_pass(self, runner: CliRunner) -> None:
+        """12.11: init pre-flight passes through when collision check passes."""
+        from cli.main import app
+        from core.doctor import CheckResult
+
+        ok = CheckResult(
+            status="pass",
+            name="compose project name collision",
+            detail="no collision",
+            category="Privilege Boundary",
+        )
+        with (
+            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision", return_value=ok),
+        ):
+            result = runner.invoke(app, ["init", "newinst"])
+            # Init proceeds past pre-flight (may fail later for other reasons,
+            # but collision check did not abort).
+            assert "compose project name collision" not in result.output
 
 
 class TestInitNonTTY:
     """Task 3.1: sandbox init in non-TTY environment."""
 
-    def test_init_non_tty_completes(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_non_tty_completes(self, runner: CliRunner) -> None:
         """init completes in non-TTY mode (prompt_secrets skips)."""
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/newproject"
 
         from cli.main import app
@@ -2074,15 +2027,13 @@ class TestInitNonTTY:
             {
                 "instance": {
                     "name": "newproject",
-                    "user_project_root": project_dir,
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
@@ -2094,7 +2045,7 @@ class TestInitNonTTY:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0
 
 
@@ -2103,22 +2054,22 @@ class TestRequirePerUserStateInitialized:
 
     @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])
     def test_command_fails_when_uninitialized(
-        self, runner: CliRunner, command: str, isolated_sandbox_ai_user_home: Path
+        self, runner: CliRunner, command: str, isolated_sandbox_ai_home: Path
     ) -> None:
         from cli.main import app
 
         # Ensure registry seed file is absent
-        registry = isolated_sandbox_ai_user_home / "state" / "instances.json"
+        registry = isolated_sandbox_ai_home / "state" / "instances.json"
         if registry.exists():
             registry.unlink()
 
-        args = [command]
+        args = [command, "any-inst"]
         if command == "destroy":
             args.append("--force")
         result = runner.invoke(app, args)
         assert result.exit_code == 1
         assert "per-user state not initialized" in result.output.lower()
-        assert str(isolated_sandbox_ai_user_home) in result.output
+        assert str(isolated_sandbox_ai_home) in result.output
         assert "sandbox init" in result.output.lower()
 
 
@@ -2128,24 +2079,187 @@ class TestInitFlagRemoval:
     def test_user_flag_rejected(self, runner: CliRunner) -> None:
         from cli.main import app
 
-        result = runner.invoke(app, ["init", "--user", "sandbox"])
+        result = runner.invoke(app, ["init", "newproject", "--user", "sandbox"])
         assert result.exit_code != 0
         assert "no such option" in result.output.lower() or "--user" in result.output
+
+
+class TestValidateName:
+    """``_validate_name`` enforces the regex/length/leading-char/reserved rules."""
+
+    def test_empty_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("", kind="instance", max_len=30)
+
+    def test_too_long_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("a" * 31, kind="instance", max_len=30)
+
+    def test_leading_dash_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("-foo", kind="instance", max_len=30)
+
+    def test_leading_underscore_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("_foo", kind="instance", max_len=30)
+
+    def test_invalid_chars_rejected(self) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name("Foo!", kind="instance", max_len=30)
+
+    @pytest.mark.parametrize("name", ["isolated", "all", "_backups", "default", "system"])
+    def test_reserved_rejected(self, name: str) -> None:
+        from cli.main import _validate_name
+
+        with pytest.raises(typer.BadParameter):
+            _validate_name(name, kind="workspace", max_len=32)
+
+    @pytest.mark.parametrize("name", ["main", "backend-api", "scratch_2", "p"])
+    def test_valid_name_accepted(self, name: str) -> None:
+        from cli.main import _validate_name
+
+        _validate_name(name, kind="workspace", max_len=32)
+
+
+class TestParseWorkspaceFlags:
+    """``_parse_workspace_flags`` builds WorkspaceSpec lists from CLI multi-flags."""
+
+    def test_default_creates_single_empty_main(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        specs = _parse_workspace_flags("inst", tmp_path, [], [])
+        assert len(specs) == 1
+        assert specs[0].name == "main"
+        assert specs[0].bootstrap_mode == "empty"
+        assert specs[0].source is None
+        assert specs[0].path == str(tmp_path / "workspaces" / "inst" / "main")
+
+    def test_copy_with_path(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        specs = _parse_workspace_flags("inst", tmp_path, ["api=/src/api"], [])
+        assert specs[0].name == "api"
+        assert specs[0].bootstrap_mode == "copy"
+        assert specs[0].source == "/src/api"
+
+    def test_copy_without_equals_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["nope"], [])
+
+    def test_copy_with_empty_name_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["=/path"], [])
+
+    def test_copy_with_empty_path_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["api="], [])
+
+    def test_duplicate_in_copy_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["api=/a", "api=/b"], [])
+
+    def test_duplicate_across_flags_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        with pytest.raises(typer.BadParameter):
+            _parse_workspace_flags("inst", tmp_path, ["api=/a"], ["api"])
+
+    def test_multiple_workspaces_collected(self, tmp_path: Path) -> None:
+        from cli.main import _parse_workspace_flags
+
+        specs = _parse_workspace_flags("inst", tmp_path, ["api=/a"], ["scratch", "logs"])
+        names = [s.name for s in specs]
+        assert names == ["api", "scratch", "logs"]
+
+
+class TestPreflightWorkspaceSource:
+    """``_preflight_workspace_source`` enforces source-side gates before rsync."""
+
+    def test_nonexistent_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        with pytest.raises(typer.BadParameter, match="does not exist"):
+            _preflight_workspace_source(str(tmp_path / "missing"), inst="i", user_home=tmp_path)
+
+    def test_unreadable_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        src = tmp_path / "src"
+        src.mkdir()
+        os.chmod(src, 0o000)
+        try:
+            with pytest.raises(typer.BadParameter, match="not readable"):
+                _preflight_workspace_source(str(src), inst="i", user_home=tmp_path)
+        finally:
+            os.chmod(src, 0o755)
+
+    def test_boundary_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        with pytest.raises(typer.BadParameter, match="walker boundary"):
+            _preflight_workspace_source("/etc", inst="i", user_home=tmp_path)
+
+    def test_cycle_source_rejected(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        ws_root = tmp_path / "workspaces" / "i"
+        nested = ws_root / "leak"
+        nested.mkdir(parents=True)
+        with pytest.raises(typer.BadParameter, match="cycle"):
+            _preflight_workspace_source(str(nested), inst="i", user_home=tmp_path)
+
+    def test_clean_source_passes(self, tmp_path: Path) -> None:
+        from cli.main import _preflight_workspace_source
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hi")
+        # No exception raised.
+        _preflight_workspace_source(str(src), inst="i", user_home=tmp_path)
+
+    def test_size_warning_emitted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli import main as cli_main
+        from cli.main import _preflight_workspace_source
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "big").write_text("x")
+        monkeypatch.setattr("os.path.getsize", lambda _p: 6 * 1024 * 1024 * 1024)
+        warnings: list[str] = []
+        monkeypatch.setattr(cli_main.console, "print", lambda *a, **_kw: warnings.append(str(a[0])))
+        _preflight_workspace_source(str(src), inst="i", user_home=tmp_path)
+        assert any("larger than 5 GB" in w for w in warnings)
 
 
 class TestInitDryRunNoConfigFallback:
     """Dry-run with absent host config falls back to placeholder values."""
 
-    def test_dry_run_without_config_uses_dry_run_user(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_dry_run_without_config_uses_dry_run_user(self, runner: CliRunner) -> None:
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/dryrunfallback"),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init", "--dry-run"])
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
         # dry-run path tolerates missing host config; auth defaults to sudo
         assert result.exit_code == 0, result.output
 
@@ -2159,11 +2273,9 @@ class TestInitNoConfigPostSeedFails:
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/missing"),
             patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "newproject"])
         assert result.exit_code == 1
         assert "no host config" in result.output.lower()
 
@@ -2176,44 +2288,28 @@ class TestStdinIsTty:
         assert isinstance(_stdin_is_tty(), bool)
 
 
-class TestWarnLegacyCwdFiles:
-    def test_warns_on_legacy_toml_and_state(self, tmp_path: Path, captured_console: object) -> None:
-        from cli import main as cli_main
-        from cli.main import _warn_legacy_cwd_files
-
-        (tmp_path / "sandbox-ai.toml").write_text("")
-        (tmp_path / ".state").mkdir()
-
-        with patch.object(cli_main, "console", captured_console.console):  # type: ignore[attr-defined]
-            _warn_legacy_cwd_files(str(tmp_path), tmp_path / ".sandbox-ai")
-        out = captured_console.plain_output  # type: ignore[attr-defined]
-        assert "legacy" in out.lower()
-        assert "sandbox-ai.toml" in out
-        assert ".state" in out
-
-
 class TestInitHostConfigResolution:
     """Tasks 3.8-3.9: init user resolution via sandbox-ai.toml."""
 
-    def test_init_with_project_config_no_user_flag(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_init_with_project_config_no_user_flag(self, runner: CliRunner) -> None:
         """init succeeds without --user when sandbox-ai.toml provides docker_unprivileged_user."""
         from cli.main import app
         from core.host_config import HostConfig
         from core.hydration import InstanceConfig
 
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/tomlproject"
 
         mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
         )
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "tomlproject", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "tomlproject", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.HostConfig.from_toml", return_value=mock_project_config),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
             patch("cli.main._detect_git_config", return_value=("", "")),
@@ -2226,35 +2322,34 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "tomlproject"])
             assert result.exit_code == 0
 
     def test_init_non_tty_without_config_fails_with_guidance(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """init in non-TTY mode without canonical host config exits with guidance."""
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/noconfig"),
             # Disable the autouse no-op so the real seeder runs.
             patch("cli.main._seed_host_config_if_absent", wraps=_REAL_SEED_HOST_CONFIG),
             patch("cli.main._stdin_is_tty", return_value=False),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "tomlproject"])
         assert result.exit_code == 1, result.output
         assert "non-interactive" in result.output.lower()
-        assert "sandbox-ai.toml" in result.output
+        # Rich may line-wrap long paths; collapse newlines before substring check.
+        assert "sandbox-ai.toml" in result.output.replace("\n", "")
 
     def test_init_tty_seeds_host_config(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """init in TTY mode prompts and writes <home>/config/sandbox-ai.toml when absent."""
         from cli.main import app
@@ -2262,12 +2357,13 @@ class TestInitHostConfigResolution:
 
         project_dir = "/home/dev/seedproj"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "seedproj", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "seedproj", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             # Run the real seeder
             patch(
                 "cli.main._seed_host_config_if_absent",
@@ -2286,8 +2382,8 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
-        seeded = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+            result = runner.invoke(app, ["init", "seedproj"])
+        seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert seeded.exists(), f"output={result.output!r} exit={result.exit_code}"
         body = seeded.read_text()
         assert 'docker_unprivileged_user = "sandbox-user"' in body
@@ -2298,7 +2394,7 @@ class TestInitHostConfigResolution:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """Empty docker_unprivileged_user is re-prompted until non-empty."""
         from cli.main import app
@@ -2306,12 +2402,13 @@ class TestInitHostConfigResolution:
 
         project_dir = "/home/dev/empty"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "empty", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "empty", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch(
                 "cli.main._seed_host_config_if_absent",
                 wraps=_REAL_SEED_HOST_CONFIG,
@@ -2330,23 +2427,21 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "empty"])
         assert result.exit_code == 0, result.output
-        seeded = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert 'docker_unprivileged_user = "sandbox"' in seeded.read_text()
 
     def test_init_tty_rejects_invalid_auth_value(
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """Invalid machinectl_authentication value is rejected."""
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/badauth"),
             patch(
                 "cli.main._seed_host_config_if_absent",
                 wraps=_REAL_SEED_HOST_CONFIG,
@@ -2354,7 +2449,7 @@ class TestInitHostConfigResolution:
             patch("cli.main._stdin_is_tty", return_value=True),
             patch("cli.main.typer.prompt", side_effect=["sandbox", "weird"]),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "empty"])
         assert result.exit_code == 1
         assert "invalid machinectl_authentication" in result.output.lower()
 
@@ -2362,26 +2457,27 @@ class TestInitHostConfigResolution:
         self,
         runner: CliRunner,
         mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_user_home: Path,
+        isolated_sandbox_ai_home: Path,
     ) -> None:
         """When the canonical host config exists, init does not prompt and does not overwrite."""
         from cli.main import app
+        from core.host_config import ensure_per_user_state
         from core.hydration import InstanceConfig
-        from core.scaffold import ensure_per_user_tree
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        ensure_per_user_state(isolated_sandbox_ai_home)
         existing_body = '[host]\ndocker_unprivileged_user = "preserved"\nmachinectl_authentication = "polkit"\n'
-        cfg_path = isolated_sandbox_ai_user_home / "config" / "sandbox-ai.toml"
+        cfg_path = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         cfg_path.write_text(existing_body)
 
         project_dir = "/home/dev/preserve"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "preserve", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "preserve", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch(
                 "cli.main._seed_host_config_if_absent",
                 wraps=_REAL_SEED_HOST_CONFIG,
@@ -2398,7 +2494,7 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "preserve"])
         assert result.exit_code == 0, result.output
         # No prompts issued because file existed
         mock_prompt.assert_not_called()
@@ -2409,20 +2505,20 @@ class TestInitHostConfigResolution:
 class TestInitAuthProbe:
     """Task 3.10: init-time auth mode probe tests."""
 
-    def test_probe_success_sudo(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_probe_success_sudo(self, runner: CliRunner) -> None:
         """Probe succeeds with sudo mode — init proceeds."""
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/probeproject"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "probeproject", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "probeproject", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2434,61 +2530,53 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 0
             # Verify the probe was called with sudo prefix
             probe_call = mock_run.call_args[0][0]
             assert "sudo" in probe_call
             assert "machinectl" in probe_call
 
-    def test_probe_failure_exits_with_remediation(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_probe_failure_exits_with_remediation(self, runner: CliRunner) -> None:
         """Probe failure exits with error and remediation guidance."""
         from cli.main import app
 
-        home = mock_sandbox_ai_home
-
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/failprobe"),
             patch(
                 "cli.main.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 1, "", "permission denied"),
             ),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
 
-    def test_probe_timeout_exits_with_error(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_probe_timeout_exits_with_error(self, runner: CliRunner) -> None:
         """Probe timeout exits with error."""
         from cli.main import app
 
-        home = mock_sandbox_ai_home
-
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/timeout"),
             patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="test", timeout=5)),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "timed out" in result.output.lower()
 
-    def test_probe_polkit_mode_no_sudo(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_probe_polkit_mode_no_sudo(self, runner: CliRunner) -> None:
         """Polkit mode probe does not include sudo in command."""
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        home = mock_sandbox_ai_home
         project_dir = "/home/dev/polkit"
         mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "polkit", "user_project_root": project_dir, "host_uid": "1000"}}
+            {
+                "instance": {"name": "polkit", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
         )
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -2500,50 +2588,42 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "--machinectl-auth", "polkit"])
+            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 0
             probe_call = mock_run.call_args[0][0]
             assert "sudo" not in probe_call
             assert "machinectl" in probe_call
 
-    def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner) -> None:
         """Polkit probe failure shows polkit-specific remediation."""
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/polkitfail"),
             patch(
                 "cli.main.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 1, "", "auth failed"),
             ),
         ):
-            result = runner.invoke(app, ["init", "--machinectl-auth", "polkit"])
+            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 1
             assert "polkit" in result.output.lower()
 
-    def test_invalid_machinectl_auth_value(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_invalid_machinectl_auth_value(self, runner: CliRunner) -> None:
         """Invalid --machinectl-auth value exits with error."""
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/badauth"),
-        ):
-            result = runner.invoke(app, ["init", "--machinectl-auth", "invalid"])
-            assert result.exit_code == 1
-            assert "invalid" in result.output.lower()
+        result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "invalid"])
+        assert result.exit_code == 1
+        assert "invalid" in result.output.lower()
 
-    def test_probe_file_not_found_exits_with_error(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_probe_file_not_found_exits_with_error(self, runner: CliRunner) -> None:
         """Probe FileNotFoundError (command not on PATH) exits with error."""
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/nobin"),
             patch("cli.main.subprocess.run", side_effect=FileNotFoundError),
         ):
-            result = runner.invoke(app, ["init"])
+            result = runner.invoke(app, ["init", "polkit"])
             assert result.exit_code == 1
             assert "command not found" in result.output.lower()
 
@@ -2555,17 +2635,13 @@ class TestResolveHostConfig:
         """_resolve_host_config returns values from HostConfig when present."""
         from cli.main import _resolve_host_config
         from core.host_config import HostConfig, MachinectlAuth
-        from core.hydration import InstanceConfig
 
         mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
         )
-        mock_config = InstanceConfig.model_validate(
-            {"instance": {"name": "test", "user_project_root": "/tmp/test", "host_uid": "1000"}}
-        )
 
         with patch("cli.main.HostConfig.from_toml", return_value=mock_project_config):
-            user, auth = _resolve_host_config("/tmp/test", mock_config)
+            user, auth = _resolve_host_config()
             assert user == "fromtoml"
             assert auth == MachinectlAuth.POLKIT
 
@@ -2576,77 +2652,59 @@ class TestDryRunExistingInstance:
 
     def test_dry_run_skips_warm_check(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Warm state check is skipped when --dry-run is set."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         # Create tooling plane files for template validation
-        _create_tooling_plane(home)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check") as mock_warm,
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
             mock_warm.assert_not_called()
             assert result.exit_code == 0
 
     def test_dry_run_existing_instance_exit_0(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Existing instance dry-run passes with exit code 0."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert result.exit_code == 0
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert result.exit_code == 0
 
     def test_dry_run_shows_ipam_preview(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """IPAM slot is previewed with 'subject to concurrent changes' note."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 5)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 5)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert result.exit_code == 0
-            # Should mention the IPAM slot
-            assert "5" in result.output or "slot" in result.output.lower()
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert result.exit_code == 0
+        # Should mention the IPAM slot
+        assert "5" in result.output or "slot" in result.output.lower()
 
     def test_dry_run_shows_compose_command(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Compose command is displayed in dry-run output."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
 
     def test_dry_run_template_error_exits_1(
         self, runner: CliRunner, mock_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -2656,9 +2714,9 @@ class TestDryRunExistingInstance:
         import jinja2
 
         home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
         _create_tooling_plane(home)
         # Build a broken templates root and redirect the packaged loader to it
         templates_root = home / "broken_templates"
@@ -2673,52 +2731,37 @@ class TestDryRunExistingInstance:
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert result.exit_code == 1
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert result.exit_code == 1
 
     def test_dry_run_missing_env_keys_reported(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Missing .sandbox.env keys are reported in dry-run."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        inst = _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
         # Write empty env file — secrets missing
-        (inst / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""')
+        (instance_dir / ".sandbox.env").write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""')
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            # Should mention missing secrets
-            out = result.output.lower()
-            assert "missing" in out or "secret" in out or "empty" in out
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        # Should mention missing secrets
+        out = result.output.lower()
+        assert "missing" in out or "secret" in out or "empty" in out
 
 
 class TestDryRunNewInstance:
     """Task 5.1: --dry-run with no existing instance → error with guidance."""
 
-    def test_dry_run_no_instance_errors_with_guidance(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_dry_run_no_instance_errors_with_guidance(self, runner: CliRunner) -> None:
         """No-instance dry-run errors with init guidance message."""
-        home = mock_sandbox_ai_home
-
         from cli.main import app
 
         _seed_registry(_user_home())
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value="/home/dev/newproject"),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            assert result.exit_code == 1
-            assert "sandbox init" in result.output.lower()
+        result = runner.invoke(app, ["start", "missing", "--dry-run"])
+        assert result.exit_code == 1
+        assert "sandbox init" in result.output.lower()
 
 
 def _create_tooling_plane(home: Path) -> None:
@@ -2765,23 +2808,20 @@ class TestDryRunIpamExhausted:
         """IPAM exhaustion during dry-run exits with code 1."""
         from core.ipam import IPAMExhaustedError
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch.object(
                 __import__("core.ipam", fromlist=["IPAMLedger"]).IPAMLedger,
                 "peek_next_slot",
                 side_effect=IPAMExhaustedError("All slots consumed"),
             ),
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
             assert result.exit_code == 1
 
 
@@ -2792,15 +2832,15 @@ class TestCheckSecretsFirecrawl:
     def test_check_secrets_firecrawl_missing(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Firecrawl secret reported when mcp_firecrawl=true."""
         home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        inst = _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam("myproject", 0)
         _create_tooling_plane(home)
 
         # Write a sandbox.toml with mcp_firecrawl=true
-        firecrawl_toml = (inst / "sandbox.toml").read_bytes().decode()
+        firecrawl_toml = (instance_dir / "sandbox.toml").read_bytes().decode()
         firecrawl_toml = firecrawl_toml.replace("mcp_firecrawl = false", "mcp_firecrawl = true")
-        (inst / "sandbox.toml").write_text(firecrawl_toml)
+        (instance_dir / "sandbox.toml").write_text(firecrawl_toml)
 
         # Also need mcp-firecrawl.yml in tooling plane
         extras = home / ".docker" / "extras"
@@ -2809,13 +2849,9 @@ class TestCheckSecretsFirecrawl:
 
         from cli.main import app
 
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
-        ):
-            result = runner.invoke(app, ["start", "--dry-run"])
-            out = result.output.lower()
-            assert "firecrawl" in out or "missing" in out or "secret" in out
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        out = result.output.lower()
+        assert "firecrawl" in out or "missing" in out or "secret" in out
 
 
 # ── Container Status Function ────────────────────────────────────────────────
@@ -2835,9 +2871,9 @@ class TestContainerStatus:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -2873,9 +2909,9 @@ class TestContainerStatus:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -2900,9 +2936,9 @@ class TestContainerStatus:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
             }
         )
 
@@ -2923,27 +2959,22 @@ class TestContainerStatus:
 class TestStatusNoInstance:
     """Task 7.1: sandbox status — no instance error."""
 
-    def test_status_no_instance_exits_1(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_status_no_instance_exits_1(self, runner: CliRunner) -> None:
         from cli.main import app
 
         _seed_registry(_user_home())
-        with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(mock_sandbox_ai_home)),
-            patch("cli.main._resolve_project_dir", return_value="/nonexistent"),
-        ):
-            result = runner.invoke(app, ["status"])
-            assert result.exit_code == 1
-            assert "no sandbox" in result.output.lower()
+        result = runner.invoke(app, ["status", "missing"])
+        assert result.exit_code == 1
+        assert "no sandbox" in result.output.lower()
 
 
 class TestStatusRunning:
     """Task 7.1: sandbox status — running instance."""
 
-    def test_status_running_shows_state(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+    def test_status_running_shows_state(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         from cli.main import ContainerInfo, app
 
@@ -2953,11 +2984,9 @@ class TestStatusRunning:
         ]
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._container_status", return_value=containers),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             assert "running" in out
@@ -2971,20 +3000,17 @@ class TestStatusRunning:
 class TestStatusStopped:
     """Task 7.1: sandbox status — stopped instance."""
 
-    def test_status_stopped_shows_state(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+    def test_status_stopped_shows_state(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._container_status", return_value=[]),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             assert "stopped" in out
@@ -2993,11 +3019,10 @@ class TestStatusStopped:
 class TestStatusDegraded:
     """Task 7.1: sandbox status — degraded state."""
 
-    def test_status_degraded_shows_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+    def test_status_degraded_shows_warning(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         from cli.main import ContainerInfo, app
 
@@ -3007,11 +3032,9 @@ class TestStatusDegraded:
         ]
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._container_status", return_value=containers),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             assert "degraded" in out
@@ -3020,20 +3043,17 @@ class TestStatusDegraded:
 class TestStatusIPAM:
     """Task 7.1: sandbox status — IPAM display."""
 
-    def test_status_shows_ipam_subnets(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 3)
+    def test_status_shows_ipam_subnets(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 3)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._container_status", return_value=[]),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
             assert result.exit_code == 0
             out = result.output
             # Should display IPAM slot and subnets
@@ -3044,25 +3064,21 @@ class TestStatusIPAM:
 class TestStatusConfigWarnings:
     """Task 9.2: status output shows ⊘ and missing secret names."""
 
-    def test_status_warns_on_missing_secrets(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+    def test_status_warns_on_missing_secrets(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         # Write env file with empty PG_PASSWORD
-        inst_dir = home / "sandboxes" / "myproject-abc123"
-        env_path = inst_dir / ".sandbox.env"
+        env_path = instance_dir / ".sandbox.env"
         env_path.write_text("CORE_ANTHROPIC_API_KEY=sk-123\nPG_PASSWORD=\n")
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._container_status", return_value=[]),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
             assert result.exit_code == 0
             assert "⊘" in result.output
             assert "PG_PASSWORD" in result.output
@@ -3219,7 +3235,7 @@ class TestACLPlanAsymmetry:
         ws = tmp_path / "myws"
         ws.mkdir()
 
-        plan = _acl_grant_plan(str(instance_dir), "sandbox", str(ws), dev_user="dev")
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws)], dev_user="dev")
         descriptions = [d for _, d in plan]
         assert any("workspace named-ACL" in d for d in descriptions)
         assert any("workspace default ACL" in d for d in descriptions)
@@ -3253,7 +3269,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
         ws = tmp_path / "myws"
 
-        plan = _acl_revoke_plan(str(instance_dir), "sandbox", str(ws))
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox", [str(ws)])
         descriptions = [d for _, d in plan]
         assert any("workspace named-ACL" in d for d in descriptions)
         assert any("workspace default named entry" in d for d in descriptions)
@@ -3282,7 +3298,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
 
         # Workspace under a nonexistent path → os.stat on the parent raises OSError.
-        plan = _acl_grant_plan(str(instance_dir), "sandbox", "/nonexistent-root/myproj", dev_user="dev")
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", ["/nonexistent-root/myproj"], dev_user="dev")
         # Should not have crashed; the workspace named-ACL is still queued.
         assert any("workspace named-ACL" in d for _, d in plan)
 
@@ -3300,6 +3316,24 @@ class TestACLPlanAsymmetry:
         descriptions = [d for _, d in plan]
         assert any("secrets dir traverse" in d for d in descriptions)
 
+    def test_grant_plan_dedups_shared_ancestor_across_workspaces(self, tmp_path: Path) -> None:
+        """Two workspaces under the same parent dir produce one ancestor-traverse entry per ancestor."""
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        ws_root = tmp_path / "shared-parent"
+        ws_root.mkdir()
+        ws_a = ws_root / "a"
+        ws_b = ws_root / "b"
+        ws_a.mkdir()
+        ws_b.mkdir()
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws_a), str(ws_b)], dev_user="dev")
+        ancestor_targets = [args[-1] for args, desc in plan if desc.startswith("workspace ancestor traverse: ")]
+        # Shared parent appears at most once even though both workspaces walk through it.
+        assert ancestor_targets.count(str(ws_root)) == 1
+
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunHelperMkdirPlanFallback:
@@ -3309,21 +3343,18 @@ class TestDryRunHelperMkdirPlanFallback:
         from cli.main import app
         from core.host_config import NoSubuidRangeError
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch(
                 "cli.main.host_id_for_in_container",
                 side_effect=NoSubuidRangeError("no entry for 'sandbox'"),
             ),
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
             # Dry-run does not crash; reports the unavailability.
             assert "helper-mkdir plan unavailable" in result.output
 
@@ -3561,25 +3592,22 @@ class TestDryRunWorkspaceSharedGroupFallback:
         from cli.main import app
         from core.host_config import NoSubgidRangeError
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         # build_jinja_context's bridge_gid lookup goes through
         # core.hydration.workspace_bridge_gid (mocked to 200000 by the autouse
         # fixture). The dry-run preview's workspace plan uses the cli.main
         # reference; making it raise here exercises the fallback branch.
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch(
                 "cli.main.workspace_bridge_gid",
                 side_effect=NoSubgidRangeError("no subgid for sandbox"),
             ),
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
             assert "shared-group plan unavailable" in result.output
 
 
@@ -3800,13 +3828,11 @@ class TestDiagnoseTraverseFailure:
 class TestStartPipelineOrdering:
     """Task 2.1 RED: _phase_credential_ownership called after ACL grants, before compose up."""
 
-    def test_ownership_after_acl_before_compose(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_ownership_after_acl_before_compose(self, runner: CliRunner) -> None:
         """Integration: phase ordering is ACL → ownership → compose."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
@@ -3822,8 +3848,6 @@ class TestStartPipelineOrdering:
             call_order.append("compose_up")
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -3839,7 +3863,7 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             assert call_order == ["acl_grant", "credential_ownership", "compose_up"], (
                 f"Expected ACL → ownership → compose, got: {call_order}"
@@ -3849,19 +3873,15 @@ class TestStartPipelineOrdering:
 class TestStartErrorHandlerACLCleanup:
     """Task 5.7: start error handler — ACL cleanup conditional on acl_granted."""
 
-    def test_compose_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_compose_failure_triggers_revoke(self, runner: CliRunner) -> None:
         """WHEN Phase 6 fails, THEN _revoke_acls is called (acl_granted=True)."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -3877,23 +3897,19 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
-    def test_phase_5b_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_phase_5b_failure_triggers_revoke(self, runner: CliRunner) -> None:
         """WHEN Phase 5b (_phase_credential_ownership) fails, THEN _revoke_acls is called."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -3906,22 +3922,19 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
-    def test_helper_mkdir_chown_failure_triggers_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_helper_mkdir_chown_failure_triggers_revoke(self, runner: CliRunner) -> None:
         """Section 10: cache/log helper-mkdir+chown failure → ACL cleanup runs."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -3937,7 +3950,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
@@ -3945,16 +3958,13 @@ class TestStartErrorHandlerACLCleanup:
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
         """Section 10: workspace shared-group failure → ACL cleanup runs."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -3972,22 +3982,19 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
-    def test_ipam_failure_does_not_trigger_revoke(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_ipam_failure_does_not_trigger_revoke(self, runner: CliRunner) -> None:
         """WHEN IPAM fails (pre-Phase-5), THEN _revoke_acls is NOT called."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
         from core.ipam import IPAMExhaustedError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main._warm_check", return_value=False),
@@ -3996,7 +4003,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._revoke_acls") as mock_revoke,
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["start"])
+            result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_revoke.assert_not_called()
 
@@ -4004,44 +4011,38 @@ class TestStartErrorHandlerACLCleanup:
 class TestStopLock:
     """Task 7.3: stop lock — acquired on success, BlockingIOError fails fast."""
 
-    def test_stop_acquires_lock(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_stop_acquires_lock(self, runner: CliRunner) -> None:
         """WHEN stop succeeds, THEN lock is acquired and released."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._acquire_state_lock", return_value=99) as mock_lock,
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
             patch("cli.main._release_lock") as mock_release,
         ):
-            result = runner.invoke(app, ["stop"])
+            result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
             mock_lock.assert_called_once()
             mock_release.assert_called_once()
 
-    def test_stop_lock_contention_exits(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_stop_lock_contention_exits(self, runner: CliRunner) -> None:
         """WHEN BlockingIOError raised, THEN exit code 1."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._acquire_state_lock", side_effect=BlockingIOError("locked")),
             patch("cli.main._compose_down") as mock_down,
         ):
-            result = runner.invoke(app, ["stop"])
+            result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 1
             assert "already in progress" in result.output.lower()
             mock_down.assert_not_called()
@@ -4050,53 +4051,45 @@ class TestStopLock:
 class TestDestroyFaultIsolation:
     """Task 8.6: destroy fault isolation — each phase independently handled."""
 
-    def test_compose_down_failure_continues(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_compose_down_failure_continues(self, runner: CliRunner) -> None:
         """WHEN compose-down fails, THEN destroy continues to rmtree/IPAM/registry."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
         from core.exceptions import SandboxExecutionError
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down", side_effect=SandboxExecutionError("timeout")),
             patch("cli.main._revoke_acls", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
-            # rmtree still called despite compose failure
-            mock_rmtree.assert_called_once()
+            # rmtree still called despite compose failure (instance + workspace).
+            assert mock_rmtree.call_count >= 1
             # Warning emitted
             assert "warning" in result.output.lower() or "⚠" in result.output
 
-    def test_rmtree_file_not_found_silenced(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_rmtree_file_not_found_silenced(self, runner: CliRunner) -> None:
         """WHEN rmtree raises FileNotFoundError, THEN silenced (idempotent)."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree", side_effect=FileNotFoundError("gone")),
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
 
 
@@ -4115,9 +4108,9 @@ class TestContainerStatusEdgeCases:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": False},
             }
@@ -4140,9 +4133,9 @@ class TestContainerStatusEdgeCases:
             {
                 "instance": {
                     "name": "t",
-                    "user_project_root": "/x",
                     "host_uid": "1000",
                 },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
                 "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
                 "components_db_postgres": {"enabled": False},
             }
@@ -4240,23 +4233,20 @@ class TestDiagnoseTraverseFailureEdgeCases:
 class TestStopACLWarningEmission:
     """Cover L947: stop command emits ACL revoke warnings."""
 
-    def test_stop_emits_acl_warnings(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
+    def test_stop_emits_acl_warnings(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=["ACL revoke warning for test: fail"]),
             patch("cli.main._release_lock"),
         ):
-            result = runner.invoke(app, ["stop"])
+            result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
             assert "ACL revoke warning" in result.output
 
@@ -4264,41 +4254,33 @@ class TestStopACLWarningEmission:
 class TestDestroyFaultIsolationWarnings:
     """Cover L1027, L1041-1042, L1049-1050: destroy ACL/IPAM/registry warnings."""
 
-    def test_destroy_emits_acl_warnings(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_destroy_emits_acl_warnings(self, runner: CliRunner) -> None:
         """L1027: ACL revoke warnings emitted during destroy."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=["ACL warning: test"]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
             assert "ACL warning" in result.output
 
-    def test_destroy_ipam_failure_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_destroy_ipam_failure_emits_warning(self, runner: CliRunner) -> None:
         """L1041-1042: IPAM release failure emits warning, doesn't abort."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
@@ -4306,23 +4288,19 @@ class TestDestroyFaultIsolationWarnings:
             patch("shutil.rmtree"),
             patch("cli.main.IPAMLedger.release", side_effect=RuntimeError("corrupt")),
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
             assert "IPAM release warning" in result.output
 
-    def test_destroy_registry_failure_emits_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_destroy_registry_failure_emits_warning(self, runner: CliRunner) -> None:
         """L1049-1050: Registry cleanup failure emits warning, doesn't abort."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
-        _write_ipam(instance_id, 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
 
         from cli.main import app
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
@@ -4330,9 +4308,170 @@ class TestDestroyFaultIsolationWarnings:
             patch("shutil.rmtree"),
             patch("cli.main.InstanceRegistry.remove", side_effect=KeyError("not found")),
         ):
-            result = runner.invoke(app, ["destroy", "--force"])
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
             assert result.exit_code == 0
             assert "Registry cleanup warning" in result.output
+
+
+class TestDestroyBackupWorkspacesSpec:
+    """Direct unit tests for `_resolve_backup_workspaces_spec`."""
+
+    def test_all_returns_sorted_workspaces(self) -> None:
+        from cli.main import _resolve_backup_workspaces_spec
+
+        assert _resolve_backup_workspaces_spec("all", {"b", "a", "c"}) == ["a", "b", "c"]
+
+    def test_none_returns_empty(self) -> None:
+        from cli.main import _resolve_backup_workspaces_spec
+
+        assert _resolve_backup_workspaces_spec("none", {"a", "b"}) == []
+
+    def test_csv_returns_listed(self) -> None:
+        from cli.main import _resolve_backup_workspaces_spec
+
+        assert _resolve_backup_workspaces_spec("a,c", {"a", "b", "c"}) == ["a", "c"]
+
+    def test_all_plus_named_rejected(self) -> None:
+        import typer as _typer
+        from cli.main import _resolve_backup_workspaces_spec
+
+        with pytest.raises(_typer.BadParameter, match="cannot combine 'all'"):
+            _resolve_backup_workspaces_spec("all,a", {"a"})
+
+    def test_none_plus_named_rejected(self) -> None:
+        import typer as _typer
+        from cli.main import _resolve_backup_workspaces_spec
+
+        with pytest.raises(_typer.BadParameter, match="cannot combine 'none'"):
+            _resolve_backup_workspaces_spec("none,a", {"a"})
+
+    def test_unknown_name_rejected(self) -> None:
+        import typer as _typer
+        from cli.main import _resolve_backup_workspaces_spec
+
+        with pytest.raises(_typer.BadParameter, match="not found"):
+            _resolve_backup_workspaces_spec("missing,also_missing", {"main"})
+
+
+class TestDestroyBackupFlows:
+    """Phase D4 backup loop (success + failure) and TTY no-flag prompt."""
+
+    def test_backup_workspaces_all_invokes_create_backup(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch("cli.main.create_backup") as mock_backup,
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=all"])
+            assert result.exit_code == 0, result.output
+            assert mock_backup.call_count == 1  # one workspace ("main")
+            assert mock_backup.call_args.kwargs["acquire_lock"] is False
+
+    def test_backup_failure_aborts_destroy(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.workspace_backups import BackupRsyncError
+
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down") as mock_down,
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree") as mock_rmtree,
+            patch("cli.main.create_backup", side_effect=BackupRsyncError("disk full")),
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=all"])
+            assert result.exit_code == 1
+            assert "destroy aborted" in result.output.lower()
+            # D3 compose down ran; D5 (compose down -v) and D7+ did NOT.
+            assert mock_down.call_count == 1
+            mock_rmtree.assert_not_called()
+
+    def test_non_tty_no_flag_refuses(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        # CliRunner is non-TTY by default; no --backup-workspaces flag.
+        result = runner.invoke(app, ["destroy", inst, "--force"])
+        assert result.exit_code == 1
+        assert "non-interactive mode requires --backup-workspaces" in result.output
+
+    def test_tty_no_flag_prompts_per_workspace(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        with (
+            patch("cli.main._stdin_is_tty", return_value=True),
+            patch("cli.main.typer.confirm", return_value=True) as mock_confirm,
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch("cli.main.create_backup") as mock_backup,
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force"])
+            assert result.exit_code == 0, result.output
+            # confirm called once per workspace (myproject has "main").
+            assert mock_confirm.call_count == 1
+            assert mock_backup.call_count == 1
+
+
+class TestDestroyLockContention:
+    """D2 gate-lock and D5 reacquire-lock BlockingIOError paths."""
+
+    def test_gate_lock_contention_exits(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        with patch("cli.main._acquire_state_lock", side_effect=BlockingIOError):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 1
+        assert "already in progress" in result.output
+
+    def test_reacquire_lock_contention_exits(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        inst = "myproject"
+        _register_instance(inst)
+        # First acquire (gate) succeeds; second (D5 reacquire) raises.
+        with (
+            patch("cli.main._acquire_state_lock", side_effect=[99, BlockingIOError()]),
+            patch("cli.main._compose_down"),
+            patch("cli.main._release_lock"),
+            patch("cli.main.is_backup_lock_held", return_value=False),
+            patch("cli.main.acquire_backup_lock") as mock_acquire,
+        ):
+            mock_acquire.return_value.__enter__ = lambda self: None
+            mock_acquire.return_value.__exit__ = lambda self, *a: None
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 1
+        assert "already in progress" in result.output
 
 
 class TestDiagnoseGroupExecBranch:
@@ -4380,12 +4519,10 @@ class TestDiagnoseGroupExecBranch:
 class TestStatusIPAMExhausted:
     """Cover L1139-1140, L1171-1172: status IPAMExhaustedError passthrough."""
 
-    def test_status_ipam_exhausted_continues(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+    def test_status_ipam_exhausted_continues(self, runner: CliRunner) -> None:
         """WHEN IPAM is exhausted, THEN status still renders (no crash)."""
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        instance_id = "myproject-abc123"
-        _register_instance(home, project_dir, instance_id)
+        inst = "myproject"
+        _register_instance(inst)
 
         from cli.main import ContainerInfo, app
         from core.ipam import IPAMExhaustedError
@@ -4401,15 +4538,13 @@ class TestStatusIPAMExhausted:
         ]
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main._container_status", return_value=containers),
             patch(
                 "cli.main.IPAMLedger.peek_next_slot",
                 side_effect=IPAMExhaustedError("full"),
             ),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
             assert result.exit_code == 0
             # Status renders despite IPAM exhaustion
             assert "running" in result.output.lower() or "core" in result.output.lower()
@@ -4425,21 +4560,18 @@ class TestDryRunAuthModePreview:
     def test_dry_run_preview_shows_polkit_command_without_sudo(
         self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
     ) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
         polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
 
         assert result.exit_code == 0
         # The previewed compose/handover commands must NOT include sudo
@@ -4454,21 +4586,18 @@ class TestDryRunAuthModePreview:
     def test_dry_run_preview_shows_sudo_prefix_in_sudo_mode(
         self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
     ) -> None:
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
-        _create_tooling_plane(home)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
 
         from cli.main import app
 
         sudo_cfg = project_config_factory(user="sandbox", auth="sudo")
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.HostConfig.from_toml", return_value=sudo_cfg),
         ):
-            result = runner.invoke(app, ["start", "--dry-run"])
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
 
         assert result.exit_code == 0
         assert "sudo machinectl shell sandbox@.host" in result.output
@@ -4487,10 +4616,9 @@ class TestPolkitEndToEnd:
         from cli.main import app
         from core.host_config import MachinectlAuth
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
         captured: dict[str, object] = {}
@@ -4507,12 +4635,10 @@ class TestPolkitEndToEnd:
             return []
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
             patch("cli.main._container_status", side_effect=fake_container_status),
         ):
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["status", inst])
 
         assert result.exit_code == 0
         assert captured["host_user"] == "sandbox"
@@ -4534,23 +4660,399 @@ class TestPostInitMissingHostConfig:
     ) -> None:
         from cli.main import app
 
-        home = mock_sandbox_ai_home
-        project_dir = "/home/dev/myproject"
-        _register_instance(home, project_dir, "myproject-abc123")
-        _write_ipam("myproject-abc123", 0)
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
 
         with (
-            patch("cli.main._resolve_sandbox_ai_home", return_value=str(home)),
-            patch("cli.main._resolve_project_dir", return_value=project_dir),
             patch(
                 "cli.main.HostConfig.from_toml",
                 side_effect=FileNotFoundError("No sandbox-ai.toml found. Run sandbox init."),
             ),
         ):
-            args = [command]
+            args = [command, inst]
             if command == "destroy":
                 args.append("--force")
             result = runner.invoke(app, args)
 
         assert result.exit_code == 1, f"{command} should exit 1 without sandbox-ai.toml"
         assert "sandbox-ai.toml" in result.output
+
+
+# ── Group 6 coverage: handover cwd, backup-lock check, attach ws selection, status views ──
+
+
+class TestPhaseHandoverCwdWorkspace:
+    """`_phase_handover(cwd_workspace=...)` adds ``-w /workspaces/<ws>`` to docker exec."""
+
+    def test_handover_with_cwd_workspace(self) -> None:
+        from cli.main import _phase_handover
+
+        with patch("cli.main.Executor") as MockExec:
+            _phase_handover("myproj", "sandbox", cwd_workspace="api")
+            cmd = MockExec.return_value.run.call_args[0][0]
+            joined = " ".join(cmd)
+            assert "-w" in cmd
+            assert "/workspaces/api" in joined
+
+    def test_handover_without_cwd_workspace_omits_w(self) -> None:
+        from cli.main import _phase_handover
+
+        with patch("cli.main.Executor") as MockExec:
+            _phase_handover("myproj", "sandbox")
+            cmd = MockExec.return_value.run.call_args[0][0]
+            assert "-w" not in cmd
+
+
+class TestLifecycleBackupLockRefusal:
+    """`start`, `stop`, `attach`, `destroy` refuse fast when ``<inst>.backup.lock`` is held."""
+
+    def test_start_refuses_when_backup_lock_held(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main.is_backup_lock_held", return_value=True),
+            patch("cli.main._release_lock") as mock_release,
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 1
+            assert "backup in progress" in result.output.lower()
+            mock_release.assert_called_once()
+
+    def test_stop_refuses_when_backup_lock_held(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main.is_backup_lock_held", return_value=True),
+            patch("cli.main._release_lock") as mock_release,
+            patch("cli.main._compose_down") as mock_down,
+        ):
+            result = runner.invoke(app, ["stop", inst])
+            assert result.exit_code == 1
+            assert "backup in progress" in result.output.lower()
+            mock_release.assert_called_once()
+            mock_down.assert_not_called()
+
+    def test_attach_refuses_when_backup_lock_held(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main.is_backup_lock_held", return_value=True),
+            patch("cli.main._phase_handover") as mock_handover,
+        ):
+            result = runner.invoke(app, ["attach", inst])
+            assert result.exit_code == 1
+            assert "backup in progress" in result.output.lower()
+            mock_handover.assert_not_called()
+
+    def test_destroy_refuses_when_backup_lock_held(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main.is_backup_lock_held", return_value=True),
+            patch("cli.main._release_lock") as mock_release,
+            patch("cli.main._compose_down") as mock_down,
+        ):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+            assert result.exit_code == 1
+            assert "backup in progress" in result.output.lower()
+            mock_release.assert_called_once()
+            mock_down.assert_not_called()
+
+
+_TWO_WORKSPACE_TOML = VALID_TOML_CONTENT.replace(
+    b"""[workspaces.main]
+bootstrap_mode = "copy"
+source = "/home/dev/myproject"
+path = "/home/dev/myproject"
+""",
+    b"""[workspaces.main]
+bootstrap_mode = "empty"
+path = "/home/dev/.sandbox-ai/workspaces/myproject/main"
+
+[workspaces.scratch]
+bootstrap_mode = "empty"
+path = "/home/dev/.sandbox-ai/workspaces/myproject/scratch"
+""",
+)
+
+
+class TestAttachWorkspaceSelection:
+    """cli-attach: optional ``<ws>``; N=1 default, N>1 list with exit 1, unknown ws rejected."""
+
+    def test_n1_omitted_defaults_to_only_workspace(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main.is_backup_lock_held", return_value=False),
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._phase_handover") as mock_handover,
+        ):
+            result = runner.invoke(app, ["attach", inst])
+            assert result.exit_code == 0
+            kwargs = mock_handover.call_args.kwargs
+            assert kwargs.get("cwd_workspace") == "main"
+
+    def test_n_greater_than_one_omitted_lists_and_exits(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        (instance_dir / "sandbox.toml").write_bytes(_TWO_WORKSPACE_TOML)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main.is_backup_lock_held", return_value=False),
+            patch("cli.main._phase_handover") as mock_handover,
+        ):
+            result = runner.invoke(app, ["attach", inst])
+            assert result.exit_code == 1
+            assert "main" in result.output and "scratch" in result.output
+            mock_handover.assert_not_called()
+
+    def test_unknown_workspace_rejected(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        (instance_dir / "sandbox.toml").write_bytes(_TWO_WORKSPACE_TOML)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main.is_backup_lock_held", return_value=False),
+            patch("cli.main._phase_handover") as mock_handover,
+        ):
+            result = runner.invoke(app, ["attach", inst, "nonexistent"])
+            assert result.exit_code == 1
+            assert "nonexistent" in result.output.lower() or "not found" in result.output.lower()
+            mock_handover.assert_not_called()
+
+    def test_explicit_workspace_passes_through(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        (instance_dir / "sandbox.toml").write_bytes(_TWO_WORKSPACE_TOML)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main.is_backup_lock_held", return_value=False),
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._phase_handover") as mock_handover,
+        ):
+            result = runner.invoke(app, ["attach", inst, "scratch"])
+            assert result.exit_code == 0
+            assert mock_handover.call_args.kwargs.get("cwd_workspace") == "scratch"
+
+
+class TestWorkspaceStateLabel:
+    """`_workspace_state_label` returns the cli-status state column value."""
+
+    def test_missing_path_returns_missing(self, tmp_path: Path) -> None:
+        from cli.main import _workspace_state_label
+        from core.host_config import HostSettings
+
+        host = HostSettings(docker_unprivileged_user="sandbox")
+        label = _workspace_state_label(str(tmp_path / "does-not-exist"), host)
+        assert "missing" in label
+
+    def test_correct_setgid_and_group_returns_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _workspace_state_label
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        ws.chmod(0o2770)
+        st = os.stat(ws)
+        host = HostSettings(docker_unprivileged_user="sandbox")
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda _h: st.st_gid)
+        label = _workspace_state_label(str(ws), host)
+        assert "ok" in label
+
+    def test_missing_setgid_returns_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _workspace_state_label
+        from core.host_config import HostSettings
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        ws.chmod(0o0770)
+        st = os.stat(ws)
+        host = HostSettings(docker_unprivileged_user="sandbox")
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", lambda _h: st.st_gid)
+        label = _workspace_state_label(str(ws), host)
+        assert "drift" in label
+
+    def test_missing_bridge_group_returns_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cli.main import _workspace_state_label
+        from core.host_config import HostSettings, WorkspaceBridgeGroupMissingError
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        host = HostSettings(docker_unprivileged_user="sandbox")
+
+        def _raise(_h: HostSettings) -> int:
+            raise WorkspaceBridgeGroupMissingError("group missing")
+
+        monkeypatch.setattr("cli.main.workspace_bridge_gid", _raise)
+        label = _workspace_state_label(str(ws), host)
+        assert "drift" in label
+
+
+class TestWorkspaceDuSize:
+    """`_workspace_du_size` returns the first whitespace-delimited token from `du -sh`."""
+
+    def test_success_returns_size(self) -> None:
+        from cli.main import _workspace_du_size
+
+        completed = subprocess.CompletedProcess([], 0, "12K\t/some/path\n", "")
+        with patch("cli.main.subprocess.run", return_value=completed):
+            assert _workspace_du_size("/some/path") == "12K"
+
+    def test_empty_stdout_returns_dash(self) -> None:
+        from cli.main import _workspace_du_size
+
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("cli.main.subprocess.run", return_value=completed):
+            assert _workspace_du_size("/p") == "—"
+
+    def test_called_process_error_returns_dash(self) -> None:
+        from cli.main import _workspace_du_size
+
+        with patch("cli.main.subprocess.run", side_effect=subprocess.CalledProcessError(1, "du")):
+            assert _workspace_du_size("/p") == "—"
+
+    def test_timeout_returns_dash(self) -> None:
+        from cli.main import _workspace_du_size
+
+        with patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired("du", 30)):
+            assert _workspace_du_size("/p") == "—"
+
+    def test_du_not_on_path_returns_dash(self) -> None:
+        from cli.main import _workspace_du_size
+
+        with patch("cli.main.subprocess.run", side_effect=FileNotFoundError("du")):
+            assert _workspace_du_size("/p") == "—"
+
+
+class TestStatusSummaryView:
+    """`sandbox status` (no <inst>) renders a registry-driven summary table."""
+
+    def test_summary_empty_registry(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "no instances" in result.output.lower()
+
+    def test_summary_with_registered_instances(self, runner: CliRunner) -> None:
+        _register_instance("alpha")
+        _register_instance("beta")
+        _write_ipam("alpha", 0)
+
+        from cli.main import app
+
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "alpha" in result.output
+        assert "beta" in result.output
+
+    def test_summary_handles_corrupt_sandbox_toml(self, runner: CliRunner) -> None:
+        """A registered instance with unparseable TOML shows '?' for workspace count."""
+        instance_dir = _register_instance("broken")
+        (instance_dir / "sandbox.toml").write_text("not valid toml [[[")
+
+        from cli.main import app
+
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "broken" in result.output
+
+    def test_summary_handles_ipam_exhausted(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IPAMExhaustedError on peek surfaces '—' for the slot column without crashing."""
+        from core.ipam import IPAMExhaustedError
+
+        _register_instance("solo")
+        from cli.main import app
+
+        monkeypatch.setattr(
+            "cli.main.IPAMLedger.peek_next_slot",
+            lambda _self, _name: (_ for _ in ()).throw(IPAMExhaustedError("full")),
+        )
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "solo" in result.output
+
+    def test_status_detailed_without_inst_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        result = runner.invoke(app, ["status", "--detailed"])
+        assert result.exit_code == 1
+        assert "--detailed" in result.output
+
+
+class TestStatusDetailedWorkspacesTable:
+    """`sandbox status <inst>` renders a Workspaces section per cli-status spec."""
+
+    def test_workspaces_section_rendered(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        (instance_dir / "sandbox.toml").write_bytes(_TWO_WORKSPACE_TOML)
+
+        from cli.main import app
+
+        with patch("cli.main._container_status", return_value=[]):
+            result = runner.invoke(app, ["status", inst])
+            assert result.exit_code == 0
+            assert "Workspaces" in result.output
+            assert "main" in result.output
+            assert "scratch" in result.output
+
+    def test_detailed_flag_adds_size_column(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._container_status", return_value=[]),
+            patch("cli.main._workspace_du_size", return_value="42K"),
+        ):
+            result = runner.invoke(app, ["status", inst, "--detailed"])
+            assert result.exit_code == 0
+            assert "Size" in result.output
+            assert "42K" in result.output
+
+    def test_default_omits_size_column(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._container_status", return_value=[]),
+            patch("cli.main._workspace_du_size") as mock_du,
+        ):
+            result = runner.invoke(app, ["status", inst])
+            assert result.exit_code == 0
+            mock_du.assert_not_called()

@@ -4,23 +4,51 @@ This specification defines the Pydantic + Jinja2 hydration pipeline that renders
 
 ## Requirements
 
+### Requirement: Workspaces Context Key
+
+The Jinja2 context returned by `build_jinja_context()` SHALL include a `workspaces` key whose value is a list of dicts, one per workspace in `[workspaces]`, sorted lexicographically by workspace name. Each dict SHALL have at minimum:
+- `name`: the workspace name (string).
+- `path`: the absolute path of the workspace tree (string, from `WorkspaceConfig.path`).
+- `bootstrap_mode`: the bootstrap mode value (string, `"copy"` or `"empty"`).
+- `source`: the source path (string or null; from `WorkspaceConfig.source`).
+
+The list SHALL be non-empty (Pydantic enforces at least one workspace per instance, per the `sandbox-toml-schema` capability).
+
+#### Scenario: workspaces context key present and sorted
+- **WHEN** `build_jinja_context()` is called for an instance with workspaces `scratch` and `main` (in TOML insertion order)
+- **THEN** the returned context's `workspaces` key contains `[{name: "main", ...}, {name: "scratch", ...}]` (sorted lexicographically by name)
+
+#### Scenario: Each workspace dict has required fields
+- **WHEN** `build_jinja_context()` returns the workspaces list
+- **THEN** every entry has `name`, `path`, `bootstrap_mode`, and `source` keys
+
+#### Scenario: Empty workspaces list is impossible
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the workspaces list is never empty (at least one workspace exists; Pydantic guards this at sandbox.toml parse time)
+
+#### Scenario: Compose loop consumes workspaces context
+- **WHEN** `compose.yml` is rendered referencing `{% for ws in workspaces %}` ... `{% endfor %}`
+- **THEN** the loop body executes once per workspace, with `ws.name`, `ws.path`, etc. accessible
+
 ### Requirement: Pydantic Validation Before Rendering
-The system SHALL parse `sandbox.toml` into a typed Pydantic model and abort hydration with a structured error if validation fails, before any template is written.
+
+The system SHALL parse `sandbox.toml` into a typed Pydantic model and abort hydration with a structured error if validation fails, before any template is written. Validation SHALL include the non-empty `[workspaces]` map check (per the `sandbox-toml-schema` capability).
 
 #### Scenario: Invalid config aborts before any file write
-- **WHEN** `sandbox.toml` fails Pydantic validation (e.g., an invalid field type)
-- **THEN** no files in `sandboxes/<id>/docker/` or `sandboxes/<id>/config/` are created or overwritten
+- **WHEN** `sandbox.toml` fails Pydantic validation (e.g., an invalid field type, an empty `[workspaces]` map, or a workspace missing the `path` field)
+- **THEN** no files in `<sandbox_ai_home()>/instances/<inst>/docker/` or `<sandbox_ai_home()>/instances/<inst>/config/` are created or overwritten
 
 ### Requirement: Template Rendering on Every Start
-The system SHALL render all Jinja2 templates from the `templates` package into the instance directory on every `sandbox start` invocation. Extension templates SHALL use Jinja2 `{{ var }}` syntax for infrastructure values and Compose-time `${VAR}` syntax only for secrets loaded via `env_file:`.
+
+The system SHALL render all Jinja2 templates from the `templates` package into the instance directory on every `sandbox start` invocation. The instance directory is at `<sandbox_ai_home()>/instances/<inst>/`. Extension templates SHALL use Jinja2 `{{ var }}` syntax for infrastructure values and Compose-time `${VAR}` syntax only for secrets loaded via `env_file:`.
 
 #### Scenario: Compose and Dockerfile rendered
-- **WHEN** `sandbox start` proceeds to the hydration phase
-- **THEN** `templates/docker/compose.yml` is rendered into `sandboxes/<id>/docker/compose.yml` with all Jinja2 variables resolved from the Pydantic model context
+- **WHEN** `sandbox start <inst>` proceeds to the hydration phase
+- **THEN** `templates/docker/compose.yml` is rendered into `<sandbox_ai_home()>/instances/<inst>/docker/compose.yml` with all Jinja2 variables resolved from the Pydantic model context (including the new `workspaces` context key)
 
 #### Scenario: Config templates rendered
-- **WHEN** `sandbox start` proceeds to the hydration phase
-- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `sandboxes/<id>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `core/sshd_config`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
+- **WHEN** `sandbox start <inst>` proceeds to the hydration phase
+- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `<sandbox_ai_home()>/instances/<inst>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `core/sshd_config`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
 
 #### Scenario: Extras templates resolve Jinja2 variables
 - **WHEN** an enabled extras template (e.g., `db-postgres.yml`) is rendered
@@ -31,18 +59,24 @@ The system SHALL render all Jinja2 templates from the `templates` package into t
 - **THEN** the rendered file includes `env_file: "<instance_dir>/.sandbox.env"` and secrets appear as Compose-time `${VAR}` (e.g., `${PG_PASSWORD}`, `${FIRECRAWL_API_KEY}`)
 
 ### Requirement: Component-Conditional Template Inclusion
-The system SHALL render extension override files only for components that are enabled in `sandbox.toml`.
+
+The system SHALL render extension override files only for components that are enabled in `sandbox.toml`. Rendered files land in `<sandbox_ai_home()>/instances/<inst>/docker/extras/`.
 
 #### Scenario: Disabled component skips template rendering
 - **WHEN** `components.db_postgres = false`
-- **THEN** `sandboxes/<id>/docker/extras/db-postgres.yml` is NOT created or overwritten
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/docker/extras/db-postgres.yml` is NOT created or overwritten
 
 #### Scenario: Enabled component renders extension template
 - **WHEN** `components.db_postgres = true`
-- **THEN** `templates/docker/extras/db-postgres.yml` is rendered into `sandboxes/<id>/docker/extras/db-postgres.yml`
+- **THEN** `templates/docker/extras/db-postgres.yml` is rendered into `<sandbox_ai_home()>/instances/<inst>/docker/extras/db-postgres.yml`
 
 ### Requirement: Extras Jinja2 Context Completeness
-The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `dnsdist_image`, `agent_proxy_ip`, and `admin_proxy_ip`.
+
+The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `dnsdist_image`, `agent_proxy_ip`, `admin_proxy_ip`, AND the `workspaces` key (per the "Workspaces Context Key" requirement above).
+
+#### Scenario: Workspaces context key present
+- **WHEN** `build_jinja_context()` is called
+- **THEN** the returned context includes `workspaces` (list of dicts, sorted by name, non-empty)
 
 #### Scenario: Database context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -101,19 +135,24 @@ The system SHALL include all values required by extras templates and config temp
 - **THEN** the returned context includes `proxy_image` (from `IMAGE_REGISTRY["squid"].pinned`), `dns_image` (from `IMAGE_REGISTRY["coredns"].pinned`), and `dnsdist_image` (from `IMAGE_REGISTRY["dnsdist"].pinned`)
 
 ### Requirement: Precious State Preservation
-The system SHALL never overwrite the user's persistent state files during hydration.
+
+The system SHALL never overwrite the user's persistent state files during hydration. The instance dir is at `<sandbox_ai_home()>/instances/<inst>/`.
 
 #### Scenario: sandbox.toml is not overwritten
 - **WHEN** the hydration pipeline runs
-- **THEN** `sandboxes/<id>/sandbox.toml` is read as input but never written or truncated
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/sandbox.toml` is read as input but never written or truncated
 
 #### Scenario: User custom configs are preserved
 - **WHEN** the hydration pipeline runs
-- **THEN** files under `sandboxes/<id>/custom/config/` are NOT modified
+- **THEN** files under `<sandbox_ai_home()>/instances/<inst>/custom/config/` are NOT modified
 
 #### Scenario: Cache and logs are preserved
 - **WHEN** the hydration pipeline runs
-- **THEN** `sandboxes/<id>/cache/` and `sandboxes/<id>/log/` contents are NOT modified
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/` and `<sandbox_ai_home()>/instances/<inst>/log/` contents are NOT modified
+
+#### Scenario: Workspace trees are not modified by hydration
+- **WHEN** the hydration pipeline runs
+- **THEN** files under `<sandbox_ai_home()>/workspaces/<inst>/<ws>/` (any workspace tree) are NOT touched by hydration; workspaces are operator/agent state, separate from the rendered instance plane
 
 ### Requirement: Core Resource Limit Context Keys
 The system SHALL include `core_mem_limit`, `core_memswap_limit`, and `core_cpus` in the Jinja2 context returned by `build_jinja_context()`. `core_memswap_limit` SHALL always equal `core_mem_limit` (zero swap — not independently configurable).
@@ -176,23 +215,24 @@ The rendered compose templates (main `compose.yml` and feature-gated extras) SHA
 - **THEN** the db-postgres service block contains `cap_drop: [ALL]` and `cap_add: [CHOWN, FOWNER, SETGID, SETUID]`
 
 ### Requirement: Config Template Path Templatization
-The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations and tmux resurrect state directories within rendered config files. No rendered config file SHALL contain the literal path `/workspace/.sandbox/custom/` or `/workspace/.tmux_resurrect`.
+
+The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations and tmux resurrect state directories within rendered config files. No rendered config file SHALL contain literal references to custom config or tmux state under `/workspace` (legacy singular mount, removed in change 5) or `/workspaces/...` (new multi-workspace bind-mount paths). Custom config and tmux state belong in the agent's home directory, not in any workspace mount.
 
 #### Scenario: Core config files use templatized custom path
 - **WHEN** `templates/config/core/.gitconfig` and `templates/config/core/.bashrc` are rendered
-- **THEN** custom config references resolve to the value of `{{ custom_config_core }}` (not `/workspace/.sandbox/custom/`)
+- **THEN** custom config references resolve to the value of `{{ custom_config_core }}` (typically `/home/agent/.sandbox/custom`); they do NOT contain `/workspace/.sandbox/custom/` (legacy) or `/workspaces/<ws>/.sandbox/custom/` (post-change-5 violation)
 
 #### Scenario: Admin config files use templatized custom path
 - **WHEN** `templates/config/admin/.zshrc` and `templates/config/admin/.tmux.conf` are rendered
-- **THEN** custom config references resolve to the value of `{{ custom_config_admin }}` (not `/workspace/.sandbox/custom/`)
+- **THEN** custom config references resolve to the value of `{{ custom_config_admin }}` (typically `/home/human/.sandbox/custom`); they do NOT contain `/workspace/.sandbox/custom/` or `/workspaces/<ws>/.sandbox/custom/`
 
 #### Scenario: Tmux resurrect dir uses templatized path
 - **WHEN** `templates/config/admin/.tmux.conf` is rendered
-- **THEN** the resurrect-dir setting resolves to the value of `{{ tmux_resurrect_dir }}` (not `/workspace/.tmux_resurrect`)
+- **THEN** the resurrect-dir setting resolves to the value of `{{ tmux_resurrect_dir }}` (typically `/home/human/.sandbox/tmux_resurrect`); it does NOT contain `/workspace/.tmux_resurrect` or `/workspaces/<ws>/.tmux_resurrect`
 
 #### Scenario: No hardcoded workspace sandbox paths in rendered output
 - **WHEN** all config templates are rendered
-- **THEN** zero files in the rendered instance contain `/workspace/.sandbox/` or `/workspace/.tmux_resurrect`
+- **THEN** zero files in the rendered instance contain `/workspace/.sandbox/`, `/workspace/.tmux_resurrect`, or any analogous path under `/workspaces/<ws>/`
 
 ### Requirement: Gitconfig Default Filter Removal
 The `templates/config/core/.gitconfig` template SHALL use bare `{{ git_user }}` and `{{ git_email }}` without Jinja2 `| default()` filters. Default resolution is the responsibility of `build_jinja_context()`.
@@ -224,15 +264,16 @@ The system SHALL include `proxy_whitelist_read_only_domains` in the Jinja2 conte
 - **THEN** the returned context includes `proxy_whitelist_read_only_domains` (from `config.proxy_whitelist.read_only_domains`)
 
 ### Requirement: Read-Only Domains File Generation
-The system SHALL generate `config/proxy/read_only_domains.txt` during `render_templates()`, containing one domain per line from the `proxy_whitelist_read_only_domains` context key. This follows the same generation pattern as `allowed_domains.txt`.
+
+The system SHALL generate `config/proxy/read_only_domains.txt` during `render_templates()`, containing one domain per line from the `proxy_whitelist_read_only_domains` context key. The file lands at `<sandbox_ai_home()>/instances/<inst>/config/proxy/read_only_domains.txt`. This follows the same generation pattern as `allowed_domains.txt`.
 
 #### Scenario: read_only_domains.txt generated
 - **WHEN** `render_templates()` completes
-- **THEN** `sandboxes/<id>/config/proxy/read_only_domains.txt` exists and contains one domain per line from the configured `read_only_domains` list
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/config/proxy/read_only_domains.txt` exists and contains one domain per line from the configured `read_only_domains` list
 
 #### Scenario: Empty read_only_domains produces empty file
 - **WHEN** `render_templates()` runs with `proxy_whitelist.read_only_domains = []`
-- **THEN** `config/proxy/read_only_domains.txt` is created but empty
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/config/proxy/read_only_domains.txt` is created but empty
 
 ### Requirement: Read-Only Domains Validation Warning
 The system SHALL emit a validation warning (not error) if any domain in `read_only_domains` is not also present in `domains`. This indicates a configuration mistake (the domain is unreachable regardless of method), but the failure mode is over-restriction, not under-restriction.
@@ -291,11 +332,12 @@ The system SHALL include all seven subnet CIDR strings and all multi-network con
 - **THEN** the returned context includes `db_postgres_ip` and `db_postgres_admin_ip`
 
 ### Requirement: Programmatic .claude.json Generation
-The system SHALL generate `.claude.json` programmatically in `render_templates()` using `json.dump`, with conditional `mcpServers` registration. This follows the existing pattern for `allowed_domains.txt` and `read_only_domains.txt`.
+
+The system SHALL generate `.claude.json` programmatically in `render_templates()` using `json.dump`, with conditional `mcpServers` registration. The file lands at `<sandbox_ai_home()>/instances/<inst>/config/core/.claude.json`. This follows the existing pattern for `allowed_domains.txt` and `read_only_domains.txt`.
 
 #### Scenario: .claude.json generated during render_templates
 - **WHEN** `render_templates()` completes
-- **THEN** `sandboxes/<id>/config/core/.claude.json` exists and contains valid JSON
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/config/core/.claude.json` exists and contains valid JSON
 
 #### Scenario: Firecrawl MCP registered when enabled
 - **WHEN** `render_templates()` runs with `mcp_firecrawl_enabled = True`
@@ -317,15 +359,16 @@ The system SHALL include `busybox_image` in the Jinja2 context returned by `buil
 - **THEN** `jinja2.UndefinedError` is raised during template rendering
 
 ### Requirement: CoreDNS Dockerfile Static Copy
-The system SHALL copy `templates/docker/coredns/Dockerfile.coredns` as a static file (not Jinja2-rendered) during `render_templates()`, using the existing `_copy_file()` mechanism (or its `importlib.resources`-based equivalent post-`src-layout-and-templates-packaging`). The `docker/coredns` subdirectory SHALL be included in `INSTANCE_SUBDIRS`.
+
+The system SHALL copy `templates/docker/coredns/Dockerfile.coredns` as a static file (not Jinja2-rendered) during `render_templates()`, using the existing `_copy_file()` mechanism (or its `importlib.resources`-based equivalent). The `docker/coredns` subdirectory SHALL be included in `INSTANCE_SUBDIRS`. The destination is `<sandbox_ai_home()>/instances/<inst>/docker/coredns/Dockerfile.coredns`.
 
 #### Scenario: CoreDNS Dockerfile copied to instance
 - **WHEN** `render_templates()` completes
-- **THEN** `sandboxes/<id>/docker/coredns/Dockerfile.coredns` exists and is identical to `templates/docker/coredns/Dockerfile.coredns` (the source from the templates package)
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/docker/coredns/Dockerfile.coredns` exists and is identical to `templates/docker/coredns/Dockerfile.coredns` (the source from the templates package)
 
 #### Scenario: docker/coredns directory created by scaffold
 - **WHEN** `create_instance_dirs()` is called
-- **THEN** a `docker/coredns` subdirectory exists in the instance directory
+- **THEN** a `docker/coredns` subdirectory exists in the instance directory at `<sandbox_ai_home()>/instances/<inst>/docker/coredns`
 
 #### Scenario: CoreDNS Dockerfile validated as static file
 - **WHEN** `validate_templates()` runs

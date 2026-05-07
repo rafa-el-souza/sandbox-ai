@@ -330,15 +330,19 @@ The system SHALL render results using Rich, grouped by category, with compact su
 - **THEN** a summary line is displayed: `N/M passed · W warnings · X failed · Y skipped` (segments with zero count are omitted)
 
 ### Requirement: Check Subset API
-The system SHALL provide a function to execute a filtered subset of doctor checks by category, enabling `init` and `start` to run only their relevant dependency chains without duplicating check logic. Note: the Privilege Boundary count is 10 (reflecting the already-implemented `host_uds` check from Wave 4, not the new `check_image_digests` which is in the `"Supply Chain"` category).
+The system SHALL provide a function to execute a filtered subset of doctor checks by category, enabling `init` and `start` to run only their relevant dependency chains without duplicating check logic. The Privilege Boundary chain SHALL include `compose_project_name_collision` as a dependent check (depends on `machinectl_reachable`).
 
 #### Scenario: Init runs filesystem and repo checks
-- **WHEN** `sandbox init` invokes the doctor subset with categories `["Filesystem", "Repo Integrity"]`
-- **THEN** only the 4 checks in those categories are executed (setfacl, ACL support, tooling plane, state dir writable), with dependency graph and cascading skip logic preserved
+- **WHEN** `sandbox init <inst>` invokes the doctor subset with categories `["Filesystem", "Repo Integrity"]`
+- **THEN** only the checks in those categories are executed (setfacl, ACL support, tooling plane, state dir writable), with dependency graph and cascading skip logic preserved
 
 #### Scenario: Start runs privilege boundary checks
-- **WHEN** `sandbox start` invokes the doctor subset with category `["Privilege Boundary"]`
-- **THEN** only the 10 checks in that category are executed (sudo, machinectl, user exists, systemd-machined, machinectl reachable, Docker available, Docker rootless, gVisor runsc, runsc runtimeArgs, --host-uds=none), with dependency graph and cascading skip logic preserved
+- **WHEN** `sandbox start <inst>` invokes the doctor subset with category `["Privilege Boundary"]`
+- **THEN** the chain executes the existing privilege-boundary checks plus `compose_project_name_collision` (gated on `machinectl_reachable`); dependency graph and cascading skip logic preserved
+
+#### Scenario: Init pre-flight includes compose_project_name_collision
+- **WHEN** `sandbox init <inst>` runs the pre-flight after `machinectl_reachable` passes
+- **THEN** `compose_project_name_collision` runs and rejects init if a daemon-side project already exists with the prefixed name
 
 #### Scenario: Subset results match full doctor format
 - **WHEN** the subset API returns results
@@ -480,3 +484,131 @@ The doctor SHALL include a warn-only check `pre_existing_instance_layout` that d
 #### Scenario: Instance in pre-change-4 layout warns
 - **WHEN** the doctor inspects an instance whose `cache/core/.claude` (or any cache/log leaf) is owned by `dev` rather than the consumer subuid
 - **THEN** the check emits a warning identifying the instance and recommending `sandbox destroy <instance-name> && sandbox init`
+
+### Requirement: Doctor Instance Scan Uses Registry
+
+The doctor's per-instance scanning helper (`core.doctor._scan_instance_dirs`) SHALL iterate registered instances from `<sandbox_ai_home()>/state/instances.json` rather than walking `__file__` parents to discover a `sandboxes/` tree. This implementation change is install-mode-independent: doctor checks that depend on per-instance scanning (notably `secrets_hydrated_restrictively` and `pre_existing_instance_layout`) work correctly in both dev checkouts and wheel installs.
+
+This requirement closes change-4's deferred behavior where these checks SKIPped in wheel installs because `__file__` resolved into `site-packages/`.
+
+#### Scenario: Scan iterates registry
+- **WHEN** any doctor check that uses `_scan_instance_dirs` runs
+- **THEN** the helper reads `<sandbox_ai_home()>/state/instances.json` and yields each registered instance's `instance_dir`; `__file__`-derived discovery is NOT used
+
+#### Scenario: Scan works in wheel install
+- **WHEN** `sandbox doctor` runs after a wheel install (`uv tool install sandbox-ai`)
+- **THEN** `secrets_hydrated_restrictively` and `pre_existing_instance_layout` execute against registered instances; they do NOT SKIP with a wheel-install diagnostic
+
+#### Scenario: Unregistered partial-init dirs not scanned
+- **WHEN** stray instance dirs exist on disk but are absent from `instances.json` (e.g., partial-init artifacts)
+- **THEN** the registry-driven scan does NOT include them; `legacy_sandboxes_dir_detected` and `legacy_registry_shape` cover the stray-state cases via their own logic
+
+### Requirement: Backups Disk-Pressure Check
+
+The doctor SHALL include a warn-only check `backups_disk_pressure` that reports if `~/.sandbox-ai/workspaces/_backups/` total size exceeds 5 GB OR if the total entry count (number of `<ts>/` dirs across all `<inst>/<ws>/`) exceeds 50. The remediation message SHALL recommend manual `rm -rf` of stale backups.
+
+#### Scenario: Disk pressure warning at threshold
+- **WHEN** `sandbox doctor` runs and `_backups/` total size exceeds 5 GB
+- **THEN** `backups_disk_pressure` emits a warning identifying the size and recommending cleanup
+
+#### Scenario: Entry count warning at threshold
+- **WHEN** `sandbox doctor` runs and `_backups/` contains more than 50 `<ts>/` entries
+- **THEN** `backups_disk_pressure` emits a warning identifying the count
+
+#### Scenario: Below threshold passes
+- **WHEN** `sandbox doctor` runs and `_backups/` is below both thresholds (or absent)
+- **THEN** `backups_disk_pressure` passes silently
+
+### Requirement: Backups Partial-Dirs Check
+
+The doctor SHALL include a warn-only check `backups_partial_dirs_present` that reports if any `*.partial/` directory in `_backups/` is older than 1 hour. Remediation: manual cleanup or auto-cleanup with operator approval (post-MVP).
+
+#### Scenario: Stale partial warning
+- **WHEN** `sandbox doctor` runs and a `*.partial/` directory exists in `_backups/` older than 1 hour
+- **THEN** `backups_partial_dirs_present` emits a warning identifying the stale partial path
+
+### Requirement: Dev Umask Workspace-Friendly Check
+
+The doctor SHALL include a warn-only check `dev_umask_workspace_friendly` that warns when (a) at least one workspace is registered AND (b) the dev process's umask is `0o022` or worse. Recommendation: `umask 002` in shell rc files so dev-edited files in workspaces land mode `0664` group sb-ws (allowing the agent to read).
+
+#### Scenario: Umask 022 with workspaces warns
+- **WHEN** `sandbox doctor` runs and at least one workspace is registered AND `os.umask(0); os.umask(saved)` returns `0o022`
+- **THEN** `dev_umask_workspace_friendly` emits a warning recommending `umask 002`
+
+#### Scenario: Umask 002 passes
+- **WHEN** `sandbox doctor` runs and the dev umask is `0o002` or stricter
+- **THEN** `dev_umask_workspace_friendly` passes silently
+
+#### Scenario: No workspaces yet skips check
+- **WHEN** `sandbox doctor` runs and no instances/workspaces are registered
+- **THEN** `dev_umask_workspace_friendly` is skipped (no false-positive warning before the first init)
+
+### Requirement: Compose Project Name Collision Check
+
+The doctor SHALL include a check `compose_project_name_collision` (severity `fail`) that detects whether a daemon-side compose project with the prefixed name (`<sanitized-dev-username>-<inst>`, per `instance-registry`) already exists for any not-yet-registered instance the operator is about to create. The check is also run by `sandbox init` as a pre-flight gate.
+
+The check depends on `machinectl_reachable` (Privilege Boundary chain) — it runs `docker compose ls` via the daemon to enumerate existing projects.
+
+#### Scenario: Collision at init time rejected
+- **WHEN** `sandbox init <inst>` is invoked and the daemon already has a compose project with the prefixed name (e.g., another dev with the same username already created an instance with that name)
+- **THEN** init fails the pre-flight gate with an explicit collision error
+
+#### Scenario: No collision passes
+- **WHEN** `sandbox doctor` runs (or `sandbox init` pre-flight) and no daemon-side compose project matches the prefixed name
+- **THEN** the check passes
+
+#### Scenario: machinectl_reachable failure cascades
+- **WHEN** `machinectl_reachable` has failed
+- **THEN** `compose_project_name_collision` is skipped with annotation `requires: machinectl_reachable`
+
+### Requirement: Workspace Path in Walker Boundary Check
+
+The doctor SHALL include a check `workspace_path_in_walker_boundary` (severity `fail`) that scans every registered workspace's `path` and flags any that match the walker boundary list (per `instance-workspace-model`'s walker safety rules). Remediation: `sandbox workspace remove --purge` and re-add at a safe path.
+
+#### Scenario: Workspace at boundary path fails check
+- **WHEN** `sandbox doctor` finds a registered `workspace.path` that matches `/`, `/etc`, `/home`, the user's home dir, or any other boundary entry
+- **THEN** the check fails identifying the workspace and recommending remediation
+
+#### Scenario: All workspaces at safe paths passes
+- **WHEN** every registered workspace's `path` is below `~/.sandbox-ai/workspaces/<inst>/`
+- **THEN** the check passes
+
+### Requirement: Workspace Home Single-Filesystem Check
+
+The doctor SHALL include a warn-only check `workspace_home_single_filesystem` that verifies `~/.sandbox-ai/` and `~/.sandbox-ai/workspaces/` share a filesystem (`statvfs(...).f_fsid` or `os.stat(...).st_dev` comparison). Cross-fs splits would cause `os.rename` (used by `workspace rename` and backup atomic-rename) to raise `EXDEV`.
+
+#### Scenario: Single-fs passes
+- **WHEN** `sandbox doctor` runs and both paths share `st_dev`
+- **THEN** the check passes silently
+
+#### Scenario: Cross-fs warns
+- **WHEN** `sandbox doctor` runs and `st_dev` differs (e.g., `~/.sandbox-ai/workspaces/` is a separately-mounted filesystem)
+- **THEN** the check warns that workspace rename and atomic backup rename will fail with EXDEV; remediation suggests consolidating onto one filesystem
+
+### Requirement: Legacy Sandboxes Dir Detection Check
+
+The doctor SHALL include a warn-only check `legacy_sandboxes_dir_detected` that flags `<cwd>/sandboxes/` directories. These indicate pre-change-5 layouts that are no longer used. Recommendation: manual cleanup after confirming no useful state remains.
+
+#### Scenario: Legacy sandboxes dir warns
+- **WHEN** `sandbox doctor` runs and `<cwd>/sandboxes/` exists
+- **THEN** the check emits a warning identifying the path and recommending manual cleanup
+
+### Requirement: Legacy user_project_root Check
+
+The doctor SHALL include a warn-only check `legacy_workspace_in_user_project_root` that scans every registered instance's `sandbox.toml` for a `[instance].user_project_root` field. Presence indicates a pre-change-5 instance that needs `destroy + init` migration.
+
+#### Scenario: Legacy field detected
+- **WHEN** `sandbox doctor` runs and a registered instance's `sandbox.toml` contains `instance.user_project_root`
+- **THEN** the check warns identifying the instance and recommending `sandbox destroy <inst> && sandbox init <inst> --copy <ws>=<former-user-project-root>`
+
+### Requirement: Legacy Registry Shape Check
+
+The doctor SHALL include a warn-only check `legacy_registry_shape` that detects path-keyed `instances.json` (pre-change-5 shape: `{abs(cwd): {...}}`). Recommendation: `rm ~/.sandbox-ai/state/instances.json && sandbox init <each-inst>`.
+
+#### Scenario: Path-keyed registry warns
+- **WHEN** `sandbox doctor` runs and `instances.json` contains keys that look like absolute paths (start with `/`)
+- **THEN** the check warns identifying the legacy shape and recommending the manual recovery
+
+#### Scenario: Name-keyed registry passes
+- **WHEN** `sandbox doctor` runs and `instances.json` keys are valid instance names
+- **THEN** the check passes

@@ -4,24 +4,103 @@ This specification defines the `sandbox init` command, which scaffolds a new san
 
 ## Requirements
 
+### Requirement: Default Bootstrap is Empty Workspace Named main
+
+When `sandbox init <inst>` is invoked with no `--copy` and no `--empty` flags, the system SHALL scaffold exactly one workspace named `main` with `bootstrap_mode = "empty"`. This default fires only when both flag lists are empty; supplying any flag (even a single `--empty other`) suppresses the default and the operator gets exactly the workspaces named.
+
+#### Scenario: No flags creates main empty workspace
+- **WHEN** `sandbox init foo` is invoked with no workspace flags
+- **THEN** the resulting `sandbox.toml` contains `[workspaces.main]` with `bootstrap_mode = "empty"` and no `source` field
+
+#### Scenario: Single --empty other suppresses default
+- **WHEN** `sandbox init foo --empty other` is invoked
+- **THEN** the resulting `sandbox.toml` contains `[workspaces.other]` and NO `[workspaces.main]`
+
+#### Scenario: Single --copy suppresses default
+- **WHEN** `sandbox init foo --copy backend=/path` is invoked
+- **THEN** the resulting `sandbox.toml` contains `[workspaces.backend]` only
+
+### Requirement: Multi-Workspace Bootstrap Flags
+
+The `sandbox init` command SHALL accept `--copy NAME=PATH` and `--empty NAME` flags, both with `multiple=True` semantics. These flags MAY be repeated to scaffold multiple workspaces in a single invocation. Names supplied across all flags MUST be unique within the invocation; collisions are rejected before any state mutation.
+
+`--copy NAME=PATH` parsing rules:
+- Split on the first `=`. NAME = portion before; PATH = portion after.
+- NAME MUST pass workspace-name validation (per `instance-workspace-model`).
+- PATH MUST be non-empty.
+- A `--copy` value with no `=` is rejected with: "--copy requires NAME=PATH form".
+
+The CLI SHALL also accept `--no-default-excludes` and `--exclude=<glob>` (passthrough to rsync; per `cli-workspace`'s "Copy Default-Excludes List" requirement) and `--strip-unsafe-links` (per `cli-workspace`'s "Copy Symlink Security" requirement).
+
+The `--clone` flag SHALL NOT be accepted; operators clone host-side then `--copy`, or `--empty` and clone from inside the container after `sandbox start`.
+
+The `--as` flag (single-workspace name override, sketched in earlier proposals) SHALL NOT be accepted; the multi-flag grammar makes it unnecessary.
+
+#### Scenario: Multi-workspace init
+- **WHEN** `sandbox init foo --copy a=/p1 --copy b=/p2 --empty c` is invoked
+- **THEN** three workspaces (`a`, `b`, `c`) are scaffolded under instance `foo` in a single invocation
+
+#### Scenario: Duplicate name rejected
+- **WHEN** `sandbox init foo --copy a=/p --empty a` is invoked
+- **THEN** the CLI exits with a "duplicate workspace name" error before any state mutation
+
+#### Scenario: --copy without = rejected
+- **WHEN** `sandbox init foo --copy /path` is invoked
+- **THEN** the CLI exits with "--copy requires NAME=PATH form"
+
+#### Scenario: --clone flag rejected
+- **WHEN** `sandbox init foo --clone <url>` is invoked
+- **THEN** the CLI exits with "unknown option --clone" (the flag is removed; clone host-side then --copy, or --empty and clone in-container)
+
+#### Scenario: --as flag rejected
+- **WHEN** `sandbox init foo --as backend` is invoked
+- **THEN** the CLI exits with "unknown option --as"
+
+### Requirement: Per-Workspace Source Path Validation
+
+For each `--copy NAME=PATH` flag, the system SHALL validate the source path before any state mutation:
+- `realpath(PATH)` MUST exist and be a directory.
+- The current user MUST have read access (`os.access(R_OK)`).
+- The realpath MUST NOT match the walker boundary list (per `instance-workspace-model`).
+- The realpath MUST NOT be inside `~/.sandbox-ai/workspaces/<inst>/` (cycle prevention).
+- A size sanity warning SHALL emit if the source tree exceeds 5 GB (informational, not blocking).
+
+#### Scenario: Source must exist
+- **WHEN** `sandbox init foo --copy x=/does/not/exist` is invoked
+- **THEN** the CLI exits with "source path does not exist" before any state mutation
+
+#### Scenario: Source must be a directory
+- **WHEN** `sandbox init foo --copy x=/etc/passwd` is invoked
+- **THEN** the CLI exits with "source must be a directory"
+
+#### Scenario: Source in walker boundary rejected
+- **WHEN** `sandbox init foo --copy x=/etc` is invoked
+- **THEN** the CLI exits with a walker-boundary error
+
 ### Requirement: Init Command Interface
-The system SHALL provide a `sandbox init` command that scaffolds a new sandbox instance for the current working directory. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_user_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). A `--machinectl-auth` flag SHALL accept `"sudo"` or `"polkit"` to override the `machinectl_authentication` value from host config; absent the flag and absent a host config value, the default is `"sudo"`. The previously-supported `--user` flag is removed.
+The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). A `--machinectl-auth` flag SHALL accept `"sudo"` or `"polkit"` to override the `machinectl_authentication` value from host config; absent the flag and absent a host config value, the default is `"sudo"`. The previously-supported `--user` flag is removed.
+
+CWD-based instance discovery is removed: the `<inst>` argument is positional and required.
 
 #### Scenario: Init reads docker user from host config
-- **WHEN** the operator runs `sandbox init` and `<home>/config/sandbox-ai.toml` contains `docker_unprivileged_user = "sandbox"`
+- **WHEN** the operator runs `sandbox init foo` and `<home>/config/sandbox-ai.toml` contains `docker_unprivileged_user = "sandbox"`
 - **THEN** the system uses `"sandbox"` as the docker unprivileged user
 
 #### Scenario: machinectl-auth flag overrides config
-- **WHEN** the operator runs `sandbox init --machinectl-auth polkit` and `<home>/config/sandbox-ai.toml` contains `machinectl_authentication = "sudo"`
+- **WHEN** the operator runs `sandbox init foo --machinectl-auth polkit` and `<home>/config/sandbox-ai.toml` contains `machinectl_authentication = "sudo"`
 - **THEN** the system uses `"polkit"` as the authentication mode for this invocation
 
 #### Scenario: machinectl-auth defaults to sudo
-- **WHEN** the operator runs `sandbox init` without `--machinectl-auth` and `<home>/config/sandbox-ai.toml` does not specify `machinectl_authentication`
+- **WHEN** the operator runs `sandbox init foo` without `--machinectl-auth` and `<home>/config/sandbox-ai.toml` does not specify `machinectl_authentication`
 - **THEN** the system uses `"sudo"` as the authentication mode
 
 #### Scenario: --user flag is rejected
-- **WHEN** the operator runs `sandbox init --user sandbox`
-- **THEN** the CLI exits with an "unknown option" error (the flag has been removed; operators set `docker_unprivileged_user` via the canonical host config file or via the first-run seeding prompt)
+- **WHEN** the operator runs `sandbox init foo --user sandbox`
+- **THEN** the CLI exits with an "unknown option" error
+
+#### Scenario: Instance name argument required
+- **WHEN** the operator runs `sandbox init` without an `<inst>` argument
+- **THEN** the CLI exits with a typer "missing argument" error
 
 ### Requirement: Init-Time Auth Mode Probe
 The system SHALL validate that the resolved machinectl authentication mode works at init time by executing a probe command against the resolved docker unprivileged user. The probe SHALL use a 5-second timeout.
@@ -69,22 +148,26 @@ The system SHALL auto-detect `git_user` and `git_email` from the host's `git con
 - **THEN** `sandbox.toml` is written with `git_user = "Jane Doe"` regardless of `git config` output
 
 ### Requirement: Init Doctor Pre-Flight
-The system SHALL execute doctor Chain 2 (Filesystem) and Chain 3 (Repo Integrity) checks before beginning scaffold. If any check fails, init SHALL abort with the doctor diagnostic output and exit code 1.
+The system SHALL execute doctor Chain 2 (Filesystem) and Chain 3 (Repo Integrity) checks before beginning scaffold. The pre-flight SHALL also verify bridge-group existence and the dev process's supplementary-group membership (catches the post-`usermod`/pre-relogin pitfall). If any check fails, init SHALL abort with the doctor diagnostic output and exit code 1.
 
 #### Scenario: Pre-flight passes
-- **WHEN** `init` is invoked and setfacl is on PATH, filesystem supports ACLs, tooling plane files are present, and `<sandbox_ai_user_home()>/state/` is writable
+- **WHEN** `init` is invoked and setfacl is on PATH, filesystem supports ACLs, tooling plane files are present, `<sandbox_ai_home()>/state/` is writable, the bridge group exists, and the dev process has the bridge gid in its supplementary groups
 - **THEN** scaffold proceeds normally
 
-#### Scenario: Pre-flight fails
+#### Scenario: Bridge group missing fails pre-flight
+- **WHEN** `init` is invoked and the configured bridge group does not exist
+- **THEN** init aborts with the doctor failure output (including copy-pasteable `groupadd`/`usermod` commands), before creating any files or directories
+
+#### Scenario: Pre-flight fails on missing setfacl
 - **WHEN** `init` is invoked and setfacl is not on PATH
 - **THEN** init aborts with the doctor failure output including remediation guidance, before creating any files or directories
 
 ### Requirement: Init Re-Init Guard
-The system SHALL reject init for a project directory that already has a registered instance.
+The system SHALL reject init for an instance name that already has an entry in the registry.
 
 #### Scenario: Re-init rejected
-- **WHEN** `init` is invoked and the project directory already has an entry in `instances.json`
-- **THEN** the CLI exits with "Instance already initialized for this directory. Run `sandbox destroy` first." and exit code 1
+- **WHEN** `sandbox init <inst>` is invoked and `<inst>` already exists in `instances.json`
+- **THEN** the CLI exits with: "Instance '<inst>' already initialized. Use `sandbox workspace add` to add workspaces, or `sandbox destroy <inst>` first." and exit code 1
 
 ### Requirement: Init Non-TTY Mode
 The system SHALL skip interactive secret prompting when stdin is not a TTY, completing scaffold without secrets populated.

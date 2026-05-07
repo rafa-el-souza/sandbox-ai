@@ -1,6 +1,6 @@
 """Subprocess-level coverage for the per-user state relocation change.
 
-Each test invokes the CLI via ``uv run sandbox …`` with ``SANDBOX_AI_USER_HOME``
+Each test invokes the CLI via ``uv run sandbox …`` with ``SANDBOX_AI_HOME``
 redirected to ``tmp_path``. The user's real ``~/.sandbox-ai/`` is never touched.
 """
 
@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _env(home: Path) -> dict[str, str]:
     """Build a subprocess env that redirects per-user home to ``home``."""
     env = os.environ.copy()
-    env["SANDBOX_AI_USER_HOME"] = str(home)
+    env["SANDBOX_AI_HOME"] = str(home)
     return env
 
 
@@ -48,11 +48,18 @@ def _run_sandbox(
 
 @pytest.mark.parametrize("command", ["start", "stop", "destroy", "status", "attach"])
 def test_lifecycle_commands_fail_on_uninitialized_host(tmp_path: Path, command: str) -> None:
-    """Lifecycle commands exit 1 with the canonical error when the tree is absent."""
+    """Lifecycle commands exit 1 with the canonical error when the tree is absent.
+
+    Change 5: every lifecycle command takes an explicit ``<inst>`` argument.
+    ``status`` accepts an optional argument so we omit it for the all-instances
+    summary path, which still requires the per-user tree.
+    """
     home = tmp_path / ".sandbox-ai"
-    args = [command]
+    args: list[str] = [command]
+    if command != "status":
+        args.append("anything")
     if command == "destroy":
-        args.append("--force")
+        args.extend(["--force", "--backup-workspaces=none"])
     result = _run_sandbox(args, home=home)
     assert result.returncode == 1
     assert "per-user state not initialized" in result.stdout.lower() + result.stderr.lower()
@@ -63,9 +70,9 @@ def test_lifecycle_commands_fail_on_uninitialized_host(tmp_path: Path, command: 
 
 
 def test_non_tty_init_without_config_fails(tmp_path: Path) -> None:
-    """Non-TTY `sandbox init` with no canonical host config exits with guidance."""
+    """Non-TTY `sandbox init <inst>` with no canonical host config exits with guidance."""
     home = tmp_path / ".sandbox-ai"
-    result = _run_sandbox(["init"], home=home, stdin=subprocess.DEVNULL)
+    result = _run_sandbox(["init", "myinst"], home=home, stdin=subprocess.DEVNULL)
     assert result.returncode == 1
     combined = result.stdout + result.stderr
     # Rich wraps lines; collapse newlines before substring matching.
@@ -75,26 +82,15 @@ def test_non_tty_init_without_config_fails(tmp_path: Path) -> None:
 
 
 def test_init_creates_state_dir_with_mode_0700(tmp_path: Path) -> None:
-    """Init creates `<home>/state/` with mode 0700 on a clean host.
-
-    Uses a pre-seeded host config to bypass the interactive prompt without
-    pre-creating any directories. ensure_per_user_tree then creates the
-    full tree with mode 0700.
-    """
+    """Init creates `<home>/state/` with mode 0700 on a clean host."""
     home = tmp_path / ".sandbox-ai"
-    # Pre-create a parent dir for the host config and use mkdtemp-style:
-    # we want to verify that ensure_per_user_tree creates `home` itself with 0700.
-    # So we cannot pre-create `home`. Instead, pre-seed the config file by writing
-    # to a sibling location, then move it after ensure_per_user_tree has run is
-    # not possible from outside. Workaround: pre-create only `<home>/config/` to
-    # hold the seed and assert mode 0700 on `<home>/state/` (created fresh).
     (home / "config").mkdir(parents=True)
     (home / "config" / "sandbox-ai.toml").write_text(
         '[host]\ndocker_unprivileged_user = "preseed"\nmachinectl_authentication = "sudo"\n'
     )
-    _run_sandbox(["init"], home=home, stdin=subprocess.DEVNULL)
+    _run_sandbox(["init", "myinst"], home=home, stdin=subprocess.DEVNULL)
     assert (home / "state").is_dir()
-    # Freshly created by ensure_per_user_tree → mode 0700
+    # Freshly created by ensure_per_user_state → mode 0700
     assert stat.S_IMODE((home / "state").stat().st_mode) == 0o700
 
 

@@ -10,14 +10,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from tests.unit.conftest import CapturedConsole
 
 # ── Section 1: Data Types ────────────────────────────────────────────────────
@@ -423,17 +422,17 @@ class TestFilesystemChecks:
             assert result.status == "fail"
             assert "compose.yml" in result.detail
 
-    def test_state_dir_writable(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_state_dir_writable(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_state_dir_writable
 
-        (isolated_sandbox_ai_user_home / "state").mkdir(parents=True)
+        (isolated_sandbox_ai_home / "state").mkdir(parents=True)
         result = check_state_dir_writable("sandbox", None)
         assert result.status == "pass"
 
-    def test_state_dir_not_writable(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_state_dir_not_writable(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_state_dir_writable
 
-        (isolated_sandbox_ai_user_home / "state").mkdir(parents=True)
+        (isolated_sandbox_ai_home / "state").mkdir(parents=True)
         with patch("tempfile.NamedTemporaryFile", side_effect=OSError("perm denied")):
             result = check_state_dir_writable("sandbox", None)
             assert result.status == "fail"
@@ -449,12 +448,19 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 25
+        # 25 (pre-change-5) + 9 new (compose_project_name_collision +
+        # backups_disk_pressure + backups_partial_dirs_present +
+        # dev_umask_workspace_friendly + workspace_path_in_walker_boundary +
+        # workspace_home_single_filesystem + legacy_sandboxes_dir_detected +
+        # legacy_workspace_in_user_project_root + legacy_registry_shape) = 34
+        assert len(checks) == 34
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert "machinectl_reachable" in ids
         assert "docker_rootless" in ids
         assert "runsc_runtimeargs" in ids
+        assert "compose_project_name_collision" in ids
+        assert "legacy_registry_shape" in ids
 
     def test_topological_sort_respects_dependencies(self) -> None:
         from core.doctor import Check, CheckResult, topological_sort
@@ -912,20 +918,20 @@ class TestCheckRunscRuntimeArgs:
             assert result.remediation is not None
             assert "~sandbox/.config/docker/daemon.json" in result.remediation
 
-    def test_registry_returns_13_checks(self) -> None:
-        """Task 9.11: build_check_registry returns 13 checks."""
+    def test_registry_returns_full_check_count(self) -> None:
+        """Registry size after change-5 doctor additions."""
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 25
+        assert len(checks) == 34
 
-    def test_privilege_boundary_subset_contains_9_checks(self) -> None:
-        """Task 9.12: Privilege boundary subset contains 9 checks (was 8)."""
+    def test_privilege_boundary_subset_count(self) -> None:
+        """Privilege Boundary chain: 10 base checks + compose_project_name_collision = 11."""
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
         pb_checks = [c for c in checks if c.category == "Privilege Boundary"]
-        assert len(pb_checks) == 10
+        assert len(pb_checks) == 11
 
     def test_runsc_runtimeargs_skipped_when_runsc_fails(self) -> None:
         """Task 9.13: check_runsc_runtimeargs is skipped when runsc check fails."""
@@ -1100,7 +1106,7 @@ class TestCheckAncestorTraverse:
         traversable = _make_stat(uid=0, gid=0, mode=0o755)
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", return_value=traversable),
         ):
@@ -1113,7 +1119,7 @@ class TestCheckAncestorTraverse:
         from core.doctor import check_ancestor_traverse
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", side_effect=KeyError("nonexistent")),
         ):
             result = check_ancestor_traverse("nonexistent_user_xyz", None)
@@ -1134,7 +1140,7 @@ class TestCheckAncestorTraverse:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1203,7 +1209,7 @@ class TestAncestorTraverseEdgeCases:
         traversable = _make_stat(uid=0, gid=0, mode=0o755)
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", return_value=traversable),
             # Force realpath to return something different from abspath
@@ -1225,7 +1231,7 @@ class TestAncestorTraverseEdgeCases:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1249,7 +1255,7 @@ class TestAncestorTraverseEdgeCases:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox", uid=2000, gid=2000)),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1271,7 +1277,7 @@ class TestAncestorTraverseEdgeCases:
             return traversable
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox", uid=2000, gid=2000)),
             patch("os.stat", side_effect=controlled_stat),
         ):
@@ -1364,7 +1370,7 @@ class TestAncestorTraverseWithAclFallback:
             return mock_getfacl
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
             patch("subprocess.run", side_effect=controlled_run),
@@ -1389,7 +1395,7 @@ class TestAncestorTraverseWithAclFallback:
         mock_getfacl = subprocess.CompletedProcess([], 0, stdout=getfacl_output, stderr="")
 
         with (
-            patch("core.doctor._get_sandbox_ai_home", return_value="/synthetic/project"),
+            patch("core.doctor.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
             patch("subprocess.run", return_value=mock_getfacl),
@@ -1560,7 +1566,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
         assert "sudo" not in ids
-        assert len(checks) == 24  # one fewer than sudo mode
+        assert len(checks) == 33  # one fewer than sudo mode
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
@@ -1569,7 +1575,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 25
+        assert len(checks) == 34
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
@@ -1705,15 +1711,15 @@ class TestPolkitRegistry:
 
 
 class TestCheckPerUserTreeExists:
-    def test_pass_when_tree_present(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_pass_when_tree_present(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_per_user_tree_exists
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        ensure_per_user_state(isolated_sandbox_ai_home)
         result = check_per_user_tree_exists("u", None)
         assert result.status == "pass"
 
-    def test_fail_when_home_missing(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_fail_when_home_missing(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_per_user_tree_exists
 
         result = check_per_user_tree_exists("u", None)
@@ -1722,40 +1728,40 @@ class TestCheckPerUserTreeExists:
         assert result.remediation is not None
         assert "sandbox init" in result.remediation
 
-    def test_fail_when_state_subdir_missing(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_fail_when_state_subdir_missing(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_per_user_tree_exists
 
         # Create only home and config — state is missing.
-        (isolated_sandbox_ai_user_home / "config").mkdir(parents=True)
+        (isolated_sandbox_ai_home / "config").mkdir(parents=True)
         result = check_per_user_tree_exists("u", None)
         assert result.status == "fail"
         assert "state" in result.detail
 
 
 class TestCheckPerUserTreeMode:
-    def test_pass_when_all_0700(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_pass_when_all_0700(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_per_user_tree_mode
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
+        ensure_per_user_state(isolated_sandbox_ai_home)
         result = check_per_user_tree_mode("u", None)
         assert result.status == "pass"
 
-    def test_warn_on_mode_drift(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_warn_on_mode_drift(self, isolated_sandbox_ai_home: Path) -> None:
         import os
 
         from core.doctor import check_per_user_tree_mode
-        from core.scaffold import ensure_per_user_tree
+        from core.host_config import ensure_per_user_state
 
-        ensure_per_user_tree(isolated_sandbox_ai_user_home)
-        os.chmod(isolated_sandbox_ai_user_home / "state", 0o755)
+        ensure_per_user_state(isolated_sandbox_ai_home)
+        os.chmod(isolated_sandbox_ai_home / "state", 0o755)
         result = check_per_user_tree_mode("u", None)
         assert result.status == "warn"
         assert "0o755" in result.detail
         assert result.remediation is not None
         assert "chmod 0700" in result.remediation
 
-    def test_skip_when_tree_missing(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_skip_when_tree_missing(self, isolated_sandbox_ai_home: Path) -> None:
         from core.doctor import check_per_user_tree_mode
 
         result = check_per_user_tree_mode("u", None)
@@ -1786,16 +1792,16 @@ class TestCheckLegacyCwdFiles:
 
 
 class TestCheckWorkspaceBridgeGroupExists:
-    def test_skip_when_no_host_config(self, isolated_sandbox_ai_user_home: Any) -> None:
+    def test_skip_when_no_host_config(self, isolated_sandbox_ai_home: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
 
         result = check_workspace_bridge_group_exists("u", None)
         assert result.status == "skip"
 
-    def test_pass_when_group_resolves(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_pass_when_group_resolves(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
@@ -1803,13 +1809,11 @@ class TestCheckWorkspaceBridgeGroupExists:
         assert result.status == "pass"
         assert "200500" in result.detail
 
-    def test_fail_when_group_missing_with_recommendation(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
-    ) -> None:
+    def test_fail_when_group_missing_with_recommendation(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text(
             '[host]\ndocker_unprivileged_user = "claude-sandbox"\nworkspace_bridge_group = "sb-ws"\n'
@@ -1829,12 +1833,12 @@ class TestCheckWorkspaceBridgeGroupExists:
         assert "200999" in (result.remediation or "")
 
     def test_fail_when_group_missing_and_no_recommendation(
-        self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
     ) -> None:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import NoSubgidRangeError, WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
 
@@ -1850,11 +1854,31 @@ class TestCheckWorkspaceBridgeGroupExists:
         assert result.status == "fail"
         assert "<pick-a-gid" in (result.remediation or "")
 
-    def test_fail_when_gid_out_of_range(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_fail_when_recommendation_finds_no_free_gid(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_workspace_bridge_group_exists
+        from core.host_config import NoFreeGidInSubgidRangeError, WorkspaceBridgeGroupMissingError
+
+        config_dir = isolated_sandbox_ai_home / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+
+        def _raise(host: Any) -> int:
+            raise WorkspaceBridgeGroupMissingError("group missing")
+
+        def _raise_no_free(host_user: str, in_container_min: int = 1000) -> int:
+            raise NoFreeGidInSubgidRangeError("range exhausted")
+
+        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
+        monkeypatch.setattr("core.doctor.autodetect_workspace_bridge_gid_recommendation", _raise_no_free)
+        result = check_workspace_bridge_group_exists("claude-sandbox", None)
+        assert result.status == "fail"
+        assert "<pick-a-gid" in (result.remediation or "")
+
+    def test_fail_when_gid_out_of_range(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import SubgidOutOfRangeError
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
 
@@ -1868,16 +1892,16 @@ class TestCheckWorkspaceBridgeGroupExists:
 
 
 class TestCheckDevInWorkspaceBridgeGroup:
-    def test_skip_when_no_host_config(self, isolated_sandbox_ai_user_home: Any) -> None:
+    def test_skip_when_no_host_config(self, isolated_sandbox_ai_home: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "skip"
 
-    def test_pass_when_in_supplementary_groups(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_pass_when_in_supplementary_groups(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
@@ -1885,10 +1909,10 @@ class TestCheckDevInWorkspaceBridgeGroup:
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "pass"
 
-    def test_fail_relogin_path(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_fail_relogin_path(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
@@ -1914,10 +1938,10 @@ class TestCheckDevInWorkspaceBridgeGroup:
         assert result.status == "fail"
         assert "Log out" in (result.remediation or "")
 
-    def test_fail_usermod_path(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_fail_usermod_path(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
         monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
@@ -1936,11 +1960,11 @@ class TestCheckDevInWorkspaceBridgeGroup:
         assert result.status == "fail"
         assert "usermod -aG" in (result.remediation or "")
 
-    def test_fail_when_bridge_lookup_raises(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_fail_when_bridge_lookup_raises(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
         from core.host_config import WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_user_home / "config"
+        config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
 
@@ -2012,7 +2036,7 @@ class TestCheckHelperImagePulled:
 
 
 class TestCheckSecretsHydratedRestrictively:
-    def test_pass_when_no_instances(self, isolated_sandbox_ai_user_home: Any, monkeypatch: Any) -> None:
+    def test_pass_when_no_instances(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_secrets_hydrated_restrictively
 
         monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [])
@@ -2035,16 +2059,6 @@ class TestCheckSecretsHydratedRestrictively:
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "warn"
         assert "ipc_host_key" in result.detail
-
-    def test_skip_when_sandboxes_root_unresolvable(self, monkeypatch: Any) -> None:
-        """Wheel-install signal: _scan_instance_dirs returns None → skip."""
-        from core.doctor import check_secrets_hydrated_restrictively
-
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: None)
-        result = check_secrets_hydrated_restrictively("u", None)
-        assert result.status == "skip"
-        assert "wheel install" in (result.detail or "").lower()
-
 
 class TestCheckPreExistingInstanceLayout:
     def test_pass_when_chowned(self, tmp_path: Any, monkeypatch: Any) -> None:
@@ -2085,13 +2099,14 @@ class TestCheckPreExistingInstanceLayout:
         # All four leaves enumerated by the check.
         assert "4 cache/log leaf(s)" in result.detail
         for leaf in leaves:
-            assert leaf in result.detail or any(  # at minimum the sample shows the first 3
-                leaf in result.detail for leaf in leaves[:3]
+            assert (
+                leaf in result.detail
+                or any(  # at minimum the sample shows the first 3
+                    leaf in result.detail for leaf in leaves[:3]
+                )
             )
 
-    def test_warn_aggregates_across_multiple_instances(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_warn_aggregates_across_multiple_instances(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Multiple registered instances → stale leaves aggregated into one warning."""
         from core.doctor import check_pre_existing_instance_layout
 
@@ -2101,16 +2116,12 @@ class TestCheckPreExistingInstanceLayout:
         (inst_b / "log/admin").mkdir(parents=True)
 
         monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
-        monkeypatch.setattr(
-            "core.doctor._scan_instance_dirs", lambda: [str(inst_a), str(inst_b)]
-        )
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst_a), str(inst_b)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
         assert "2 cache/log leaf(s)" in result.detail
 
-    def test_pass_when_partial_layout_resolves_correctly(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_pass_when_partial_layout_resolves_correctly(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Missing leaves don't false-warn — only existing-and-stale leaves count."""
         from core.doctor import check_pre_existing_instance_layout
 
@@ -2137,100 +2148,68 @@ class TestCheckPreExistingInstanceLayout:
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "skip"
 
-    def test_skip_when_sandboxes_root_unresolvable(self, monkeypatch: Any) -> None:
-        """Wheel-install signal: _scan_instance_dirs returns None → skip."""
-        from core.doctor import check_pre_existing_instance_layout
-
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 100999)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: None)
-        result = check_pre_existing_instance_layout("u", None)
-        assert result.status == "skip"
-        assert "wheel install" in (result.detail or "").lower()
 
 
 class TestScanInstanceDirs:
-    def test_returns_empty_when_state_missing(self, isolated_sandbox_ai_user_home: Any) -> None:
+    def test_returns_empty_when_state_missing(self, isolated_sandbox_ai_home: Any) -> None:
         from core.doctor import _scan_instance_dirs
 
         assert _scan_instance_dirs() == []
 
-    def test_returns_empty_on_corrupt_json(self, isolated_sandbox_ai_user_home: Any) -> None:
+    def test_returns_empty_on_corrupt_json(self, isolated_sandbox_ai_home: Any) -> None:
         from core.doctor import _scan_instance_dirs
 
-        state = isolated_sandbox_ai_user_home / "state"
+        state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True, exist_ok=True)
         (state / "instances.json").write_text("{not json")
         assert _scan_instance_dirs() == []
 
-    def test_returns_empty_when_instances_field_wrong_shape(self, isolated_sandbox_ai_user_home: Any) -> None:
+    def test_returns_empty_when_instances_field_wrong_shape(self, isolated_sandbox_ai_home: Any) -> None:
         import json as _json
 
         from core.doctor import _scan_instance_dirs
 
-        state = isolated_sandbox_ai_user_home / "state"
+        state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True, exist_ok=True)
         (state / "instances.json").write_text(_json.dumps({"instances": []}))
         assert _scan_instance_dirs() == []
 
-    def test_returns_resolved_instance_dir(
-        self, isolated_sandbox_ai_user_home: Any, tmp_path: Any, monkeypatch: Any
+    def test_returns_registered_instance_dirs(
+        self, isolated_sandbox_ai_home: Any, tmp_path: Any
     ) -> None:
-        """Walks registry → sandbox_ai_home/sandboxes/<id>; skips non-string ids and
-        non-existent paths."""
+        """Iterates the name-keyed registry; yields each entry's instance_dir
+        when it exists on disk. Drops non-dict entries and missing dirs."""
         import json as _json
-        import os
 
-        # Stand up a fake sandbox_ai_home tree under tmp_path.
-        sandbox_ai_home = tmp_path / "repo"
-        (sandbox_ai_home / "sandboxes" / "myproj-abc").mkdir(parents=True)
-        # Patch __file__ resolution: doctor uses os.path.abspath(__file__)
-        # then walks up 3 dirs. Stand up the same shape under tmp_path.
-        fake_doctor_path = sandbox_ai_home / "src" / "core" / "doctor.py"
-        fake_doctor_path.parent.mkdir(parents=True, exist_ok=True)
-        fake_doctor_path.write_text("")
-        monkeypatch.setattr("core.doctor.__file__", str(fake_doctor_path))
+        # Stand up two real instance dirs and one missing.
+        present = tmp_path / "instances" / "myproj"
+        present.mkdir(parents=True)
+        missing = tmp_path / "instances" / "missing"
 
-        # Registry with three entries: valid string, non-string (dropped), missing dir
-        state = isolated_sandbox_ai_user_home / "state"
+        state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True, exist_ok=True)
         (state / "instances.json").write_text(
             _json.dumps(
                 {
-                    "instances": {
-                        "/home/dev/myproj": "myproj-abc",
-                        "/home/dev/non_str": 42,
-                        "/home/dev/missing": "missing-xyz",
-                    }
+                    "myproj": {"instance_dir": str(present), "created_at": "2026-05-07T00:00:00Z"},
+                    "gone": {"instance_dir": str(missing), "created_at": "2026-05-07T00:00:00Z"},
+                    "garbage": "not-a-dict",
                 }
             )
         )
         from core.doctor import _scan_instance_dirs
 
-        result = _scan_instance_dirs()
-        assert result == [str(sandbox_ai_home / "sandboxes" / "myproj-abc")]
-        assert os.path.exists(result[0])
+        assert _scan_instance_dirs() == [str(present)]
 
-    def test_returns_none_when_sandboxes_root_missing(
-        self, isolated_sandbox_ai_user_home: Any, tmp_path: Any, monkeypatch: Any
-    ) -> None:
-        """Wheel-install scenario: registry has entries but the sandboxes/ root
-        does not exist relative to ``__file__``. Returns ``None``."""
+    def test_returns_empty_when_top_level_not_dict(self, isolated_sandbox_ai_home: Any) -> None:
         import json as _json
 
-        # __file__ points into a fake site-packages with no sandboxes/ tree.
-        fake_doctor_path = tmp_path / "site-packages" / "core" / "doctor.py"
-        fake_doctor_path.parent.mkdir(parents=True, exist_ok=True)
-        fake_doctor_path.write_text("")
-        monkeypatch.setattr("core.doctor.__file__", str(fake_doctor_path))
-
-        state = isolated_sandbox_ai_user_home / "state"
-        state.mkdir(parents=True, exist_ok=True)
-        (state / "instances.json").write_text(
-            _json.dumps({"instances": {"/home/dev/myproj": "myproj-abc"}})
-        )
         from core.doctor import _scan_instance_dirs
 
-        assert _scan_instance_dirs() is None
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "instances.json").write_text(_json.dumps([1, 2, 3]))
+        assert _scan_instance_dirs() == []
 
 
 class TestCheckSecretsHydratedRestrictivelyEdges:
@@ -2271,3 +2250,456 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
         result = check_secrets_hydrated_restrictively("u", None)
         # File was skipped, no leaks reported.
         assert result.status == "pass"
+
+
+# ── change-5 doctor checks ──────────────────────────────────────────────────
+
+
+class TestCheckBackupsDiskPressure:
+    def test_pass_when_no_backups_dir(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_backups_disk_pressure
+
+        result = check_backups_disk_pressure("u", None)
+        assert result.status == "pass"
+        assert "no backups directory" in result.detail
+
+    def test_pass_under_threshold(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_backups_disk_pressure
+
+        backups = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w" / "2026-05-07-00-00-00"
+        backups.mkdir(parents=True)
+        (backups / "data").write_text("hi")
+        result = check_backups_disk_pressure("u", None)
+        assert result.status == "pass"
+
+    def test_warn_when_too_many_entries(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_backups_disk_pressure
+
+        ws_dir = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w"
+        ws_dir.mkdir(parents=True)
+        for n in range(51):
+            (ws_dir / f"2026-05-07-00-00-{n:02d}").mkdir()
+        result = check_backups_disk_pressure("u", None)
+        assert result.status == "warn"
+        assert "51 entries" in result.detail
+
+    def test_warn_when_size_exceeds(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_backups_disk_pressure
+
+        backup = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w" / "2026-05-07-00-00-00"
+        backup.mkdir(parents=True)
+        (backup / "data").write_text("x")
+
+        # Mock lstat to report a 6 GB file size.
+        real_lstat = os.lstat
+
+        def fat_stat(path: str) -> os.stat_result:
+            st = real_lstat(path)
+            if path.endswith("/data"):
+                # Build a stat_result clone with inflated st_size.
+                return os.stat_result(
+                    (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+                     6 * 1024**3 + 1, st.st_atime, st.st_mtime, st.st_ctime)
+                )
+            return st
+
+        monkeypatch.setattr("core.doctor.os.lstat", fat_stat)
+        result = check_backups_disk_pressure("u", None)
+        assert result.status == "warn"
+
+    def test_unstattable_file_skipped(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_backups_disk_pressure
+
+        backup = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w" / "2026-05-07-00-00-00"
+        backup.mkdir(parents=True)
+        (backup / "data").write_text("x")
+
+        real_lstat = os.lstat
+
+        def boom(path: str) -> os.stat_result:
+            if path.endswith("/data"):
+                raise OSError("denied")
+            return real_lstat(path)
+
+        monkeypatch.setattr("core.doctor.os.lstat", boom)
+        result = check_backups_disk_pressure("u", None)
+        # 1 entry, 0 bytes — under threshold.
+        assert result.status == "pass"
+
+    def test_stray_files_in_backup_tree_skipped(self, isolated_sandbox_ai_home: Any) -> None:
+        """Files (not dirs) under _backups/, _backups/<inst>/, or
+        _backups/<inst>/<ws>/ are skipped by the entry-count walk."""
+        from core.doctor import check_backups_disk_pressure
+
+        backups = isolated_sandbox_ai_home / "workspaces" / "_backups"
+        backups.mkdir(parents=True)
+        # Stray at the _backups/ level (not an instance dir).
+        (backups / "README").write_text("not an instance")
+        # Stray at the <inst>/ level (not a workspace dir).
+        (backups / "inst").mkdir()
+        (backups / "inst" / "stray-file").write_text("not a workspace")
+        # Stray at the <ws>/ level (not a timestamp dir).
+        (backups / "inst" / "ws").mkdir()
+        (backups / "inst" / "ws" / "another-stray").write_text("not a timestamp")
+        result = check_backups_disk_pressure("u", None)
+        assert result.status == "pass"
+
+
+class TestCheckBackupsPartialDirsPresent:
+    def test_pass_when_no_backups_dir(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_backups_partial_dirs_present
+
+        result = check_backups_partial_dirs_present("u", None)
+        assert result.status == "pass"
+
+    def test_pass_when_partial_is_fresh(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_backups_partial_dirs_present
+
+        partial = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w" / "2026-05-07-00-00-00.partial"
+        partial.mkdir(parents=True)
+        result = check_backups_partial_dirs_present("u", None)
+        assert result.status == "pass"
+
+    def test_warn_when_partial_is_stale(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_backups_partial_dirs_present
+
+        partial = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w" / "2026-05-07-00-00-00.partial"
+        partial.mkdir(parents=True)
+
+        # Backdate the mtime by 2 hours.
+        import time
+
+        old = time.time() - 7200
+        os.utime(partial, (old, old))
+
+        result = check_backups_partial_dirs_present("u", None)
+        assert result.status == "warn"
+        assert ".partial" in result.detail
+
+    def test_unstattable_partial_skipped(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_backups_partial_dirs_present
+
+        partial = isolated_sandbox_ai_home / "workspaces" / "_backups" / "i" / "w" / "2026-05-07-00-00-00.partial"
+        partial.mkdir(parents=True)
+
+        real_lstat = os.lstat
+
+        def boom(path: str) -> os.stat_result:
+            if path.endswith(".partial"):
+                raise OSError("denied")
+            return real_lstat(path)
+
+        monkeypatch.setattr("core.doctor.os.lstat", boom)
+        result = check_backups_partial_dirs_present("u", None)
+        assert result.status == "pass"
+
+
+class TestCheckDevUmaskWorkspaceFriendly:
+    def test_skip_when_no_workspaces(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_dev_umask_workspace_friendly
+
+        monkeypatch.setattr("core.doctor._scan_instance_workspace_paths", lambda: [])
+        result = check_dev_umask_workspace_friendly("u", None)
+        assert result.status == "skip"
+
+    def test_warn_on_022_umask(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_dev_umask_workspace_friendly
+
+        monkeypatch.setattr(
+            "core.doctor._scan_instance_workspace_paths",
+            lambda: [("/i", "main", "/p")],
+        )
+        # 0o022 → group write masked.
+        monkeypatch.setattr("core.doctor.os.umask", lambda mask: 0o022 if mask == 0 else 0)
+        result = check_dev_umask_workspace_friendly("u", None)
+        assert result.status == "warn"
+        assert "0022" in result.detail
+
+    def test_pass_on_002_umask(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_dev_umask_workspace_friendly
+
+        monkeypatch.setattr(
+            "core.doctor._scan_instance_workspace_paths",
+            lambda: [("/i", "main", "/p")],
+        )
+        monkeypatch.setattr("core.doctor.os.umask", lambda mask: 0o002 if mask == 0 else 0)
+        result = check_dev_umask_workspace_friendly("u", None)
+        assert result.status == "pass"
+
+
+class TestCheckComposeProjectNameCollision:
+    def test_pass_when_no_registered_instances(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text("{}")
+        result = check_compose_project_name_collision("u", None)
+        assert result.status == "pass"
+        assert "no registered" in result.detail
+
+    def test_skip_on_timeout(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+
+        def boom(*a: Any, **k: Any) -> Any:
+            raise subprocess.TimeoutExpired(["docker"], 15)
+
+        monkeypatch.setattr("core.doctor.subprocess.run", boom)
+        result = check_compose_project_name_collision("u", None)
+        assert result.status == "skip"
+        assert "timed out" in result.detail
+
+    def test_skip_on_nonzero_exit(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+
+        result_obj = subprocess.CompletedProcess(["docker"], 1, stdout="", stderr="boom")
+        monkeypatch.setattr("core.doctor.subprocess.run", lambda *a, **k: result_obj)
+        out = check_compose_project_name_collision("u", None)
+        assert out.status == "skip"
+        assert "failed" in out.detail
+
+    def test_skip_on_unparseable_output(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+
+        result_obj = subprocess.CompletedProcess(["docker"], 0, stdout="not-json", stderr="")
+        monkeypatch.setattr("core.doctor.subprocess.run", lambda *a, **k: result_obj)
+        out = check_compose_project_name_collision("u", None)
+        assert out.status == "skip"
+        assert "parse" in out.detail
+
+    def test_pass_with_registered_instances_and_clean_daemon(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
+    ) -> None:
+        from core.doctor import check_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+
+        result_obj = subprocess.CompletedProcess(["docker"], 0, stdout="[]", stderr="")
+        monkeypatch.setattr("core.doctor.subprocess.run", lambda *a, **k: result_obj)
+        out = check_compose_project_name_collision("u", None)
+        assert out.status == "pass"
+
+
+class TestCheckWorkspacePathInWalkerBoundary:
+    def test_pass_when_no_workspaces(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_workspace_path_in_walker_boundary
+
+        monkeypatch.setattr("core.doctor._scan_instance_workspace_paths", lambda: [])
+        result = check_workspace_path_in_walker_boundary("u", None)
+        assert result.status == "pass"
+
+    def test_fail_when_workspace_at_boundary(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
+    ) -> None:
+        from core.doctor import check_workspace_path_in_walker_boundary
+
+        monkeypatch.setattr(
+            "core.doctor._scan_instance_workspace_paths",
+            lambda: [("/i", "main", "/etc")],
+        )
+        result = check_workspace_path_in_walker_boundary("u", None)
+        assert result.status == "fail"
+        assert "/etc" in result.detail
+
+    def test_realpath_oserror_skipped(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
+    ) -> None:
+        from core.doctor import check_workspace_path_in_walker_boundary
+
+        monkeypatch.setattr(
+            "core.doctor._scan_instance_workspace_paths",
+            lambda: [("/i", "main", "/some/path")],
+        )
+
+        def boom(_: str) -> str:
+            raise OSError("denied")
+
+        monkeypatch.setattr("core.doctor.os.path.realpath", boom)
+        result = check_workspace_path_in_walker_boundary("u", None)
+        # Path skipped → no offenders → pass.
+        assert result.status == "pass"
+
+
+class TestCheckWorkspaceHomeSingleFilesystem:
+    def test_pass_when_workspaces_dir_absent(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_workspace_home_single_filesystem
+
+        isolated_sandbox_ai_home.mkdir(parents=True)
+        result = check_workspace_home_single_filesystem("u", None)
+        assert result.status == "pass"
+        assert "absent" in result.detail
+
+    def test_pass_on_same_fs(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_workspace_home_single_filesystem
+
+        (isolated_sandbox_ai_home / "workspaces").mkdir(parents=True)
+        result = check_workspace_home_single_filesystem("u", None)
+        assert result.status == "pass"
+
+    def test_warn_on_cross_fs(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_workspace_home_single_filesystem
+
+        (isolated_sandbox_ai_home / "workspaces").mkdir(parents=True)
+
+        real_stat = os.stat
+
+        def differ(path: Any) -> Any:
+            st = real_stat(path)
+            if str(path).endswith("/workspaces"):
+                # Simulate different st_dev.
+                return os.stat_result(
+                    (st.st_mode, st.st_ino, st.st_dev + 1, st.st_nlink, st.st_uid, st.st_gid,
+                     st.st_size, st.st_atime, st.st_mtime, st.st_ctime)
+                )
+            return st
+
+        monkeypatch.setattr("core.doctor.os.stat", differ)
+        result = check_workspace_home_single_filesystem("u", None)
+        assert result.status == "warn"
+        assert "different filesystems" in result.detail
+
+    def test_skip_on_stat_error(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_workspace_home_single_filesystem
+
+        (isolated_sandbox_ai_home / "workspaces").mkdir(parents=True)
+
+        def boom(path: Any) -> Any:
+            raise PermissionError("denied")
+
+        monkeypatch.setattr("core.doctor.os.stat", boom)
+        result = check_workspace_home_single_filesystem("u", None)
+        assert result.status == "skip"
+
+
+class TestCheckLegacySandboxesDirDetected:
+    def test_pass_when_absent(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_sandboxes_dir_detected
+
+        monkeypatch.chdir(tmp_path)
+        result = check_legacy_sandboxes_dir_detected("u", None)
+        assert result.status == "pass"
+
+    def test_warn_when_present(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_sandboxes_dir_detected
+
+        (tmp_path / "sandboxes").mkdir()
+        monkeypatch.chdir(tmp_path)
+        result = check_legacy_sandboxes_dir_detected("u", None)
+        assert result.status == "warn"
+        assert "sandboxes" in result.detail
+
+
+class TestCheckLegacyWorkspaceInUserProjectRoot:
+    def test_pass_when_no_legacy_field(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_workspace_in_user_project_root
+
+        inst = tmp_path / "inst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text('[instance]\nname = "x"\n')
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = check_legacy_workspace_in_user_project_root("u", None)
+        assert result.status == "pass"
+
+    def test_warn_when_legacy_field_present(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_workspace_in_user_project_root
+
+        inst = tmp_path / "myinst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text(
+            '[instance]\nname = "myinst"\nuser_project_root = "/old/path"\n'
+        )
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = check_legacy_workspace_in_user_project_root("u", None)
+        assert result.status == "warn"
+        assert "myinst" in result.detail
+
+    def test_unparseable_toml_skipped(self, tmp_path: Any, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_workspace_in_user_project_root
+
+        inst = tmp_path / "inst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text("not = valid = toml = !!")
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = check_legacy_workspace_in_user_project_root("u", None)
+        # Skipped silently → pass (no legacy detected because we couldn't read).
+        assert result.status == "pass"
+
+
+class TestCheckLegacyRegistryShape:
+    def test_pass_on_name_keyed(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_legacy_registry_shape
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = check_legacy_registry_shape("u", None)
+        assert result.status == "pass"
+
+    def test_warn_on_path_keyed(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import check_legacy_registry_shape
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"/home/dev/foo": {"x": 1}}))
+        result = check_legacy_registry_shape("u", None)
+        assert result.status == "warn"
+
+
+class TestScanInstanceWorkspacePaths:
+    def test_skips_missing_sandbox_toml(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        from core.doctor import _scan_instance_workspace_paths
+
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: ["/no/such/dir"])
+        assert _scan_instance_workspace_paths() == []
+
+    def test_skips_unparseable_toml(self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any) -> None:
+        from core.doctor import _scan_instance_workspace_paths
+
+        inst = tmp_path / "inst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text("garbage = =")
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        assert _scan_instance_workspace_paths() == []
+
+    def test_skips_non_dict_workspaces_block(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        from core.doctor import _scan_instance_workspace_paths
+
+        inst = tmp_path / "inst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text("workspaces = []\n")
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        assert _scan_instance_workspace_paths() == []
+
+    def test_yields_each_workspace(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        from core.doctor import _scan_instance_workspace_paths
+
+        inst = tmp_path / "myinst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text(
+            '[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p1"\n'
+            '[workspaces.scratch]\nbootstrap_mode = "empty"\npath = "/p2"\n'
+        )
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = sorted(_scan_instance_workspace_paths())
+        assert result == [(str(inst), "main", "/p1"), (str(inst), "scratch", "/p2")]
+
+
+

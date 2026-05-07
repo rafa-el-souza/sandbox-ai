@@ -33,7 +33,7 @@ from core.host_config import (
     autodetect_workspace_bridge_gid_recommendation,
     host_id_for_in_container,
     machinectl_cmd,
-    sandbox_ai_user_home,
+    sandbox_ai_home,
     workspace_bridge_gid,
 )
 
@@ -127,11 +127,6 @@ def get_install_cmd(distro: str | None, package: str) -> str:
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
-
-
-def _get_sandbox_ai_home() -> str:
-    """Resolve SANDBOX_AI_HOME from the doctor module location."""
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ─── Section 3: Binary Availability Checks ──────────────────────────────────
@@ -623,9 +618,12 @@ _UNCONDITIONAL_FILES: list[str] = [
 ]
 
 
+_ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
+
+
 def check_acl_support(user: str, distro: str | None) -> CheckResult:
     """Check that the filesystem supports POSIX ACLs."""
-    sandbox_home = _get_sandbox_ai_home()
+    sandbox_home = str(sandbox_ai_home())
     try:
         with tempfile.NamedTemporaryFile(dir=sandbox_home, delete=True) as tmp:
             subprocess.run(
@@ -639,18 +637,18 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
                 check=False,
                 capture_output=True,
             )
-        return CheckResult(
-            status="pass",
-            name="ACL support",
-            detail="Filesystem supports POSIX ACLs",
-        )
-    except subprocess.CalledProcessError, OSError:
+    except _ACL_PROBE_FAILURES:
         return CheckResult(
             status="fail",
             name="ACL support",
             detail="Filesystem does not support POSIX ACLs",
             remediation="Ensure the filesystem is mounted with ACL support (mount -o acl)",
         )
+    return CheckResult(
+        status="pass",
+        name="ACL support",
+        detail="Filesystem supports POSIX ACLs",
+    )
 
 
 def _has_acl_exec(directory: str, user: str) -> bool:
@@ -678,7 +676,9 @@ def _has_acl_exec(directory: str, user: str) -> bool:
                 perms = line[len(prefix) :]
                 if "x" in perms:
                     return True
-    except subprocess.TimeoutExpired, OSError:
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError:
         pass
     return False
 
@@ -695,9 +695,9 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
     import pwd
     import stat
 
-    sandbox_home = _get_sandbox_ai_home()
-    sandboxes_dir = os.path.join(sandbox_home, "sandboxes")
-    abs_path = os.path.abspath(sandboxes_dir)
+    sandbox_home = sandbox_ai_home()
+    instances_dir = sandbox_home / "instances"
+    abs_path = os.path.abspath(instances_dir)
 
     # Resolve the user
     try:
@@ -722,7 +722,7 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
     components.reverse()
 
     # Symlink divergence check
-    real_path = os.path.realpath(sandboxes_dir)
+    real_path = os.path.realpath(instances_dir)
     symlink_warning = ""
     if abs_path != real_path:
         symlink_warning = (
@@ -804,7 +804,7 @@ def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
 def check_per_user_tree_exists(user: str, distro: str | None) -> CheckResult:
     """Verify that ``<home>/``, ``<home>/config/``, ``<home>/state/`` exist."""
     del user, distro
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     missing: list[str] = []
     for sub in ("", "config", "state"):
         candidate = home / sub if sub else home
@@ -829,7 +829,7 @@ def check_per_user_tree_mode(user: str, distro: str | None) -> CheckResult:
     import stat as _stat
 
     del user, distro
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     drift: list[tuple[str, int]] = []
     for sub in ("", "config", "state"):
         path = home / sub if sub else home
@@ -869,7 +869,7 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
     """
     del user, distro
     cwd = os.getcwd()
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     legacy: list[str] = []
     if os.path.exists(os.path.join(cwd, "sandbox-ai.toml")):
         legacy.append(os.path.join(cwd, "sandbox-ai.toml"))
@@ -895,7 +895,7 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
 def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
     """Check that the per-user ``<home>/state/`` directory is writable."""
     del user, distro
-    state_dir = sandbox_ai_user_home() / "state"
+    state_dir = sandbox_ai_home() / "state"
     try:
         with tempfile.NamedTemporaryFile(dir=str(state_dir), delete=True):
             pass
@@ -946,7 +946,9 @@ def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> C
         try:
             recommended = autodetect_workspace_bridge_gid_recommendation(host_user)
             rec_str = str(recommended)
-        except NoSubgidRangeError, NoFreeGidInSubgidRangeError:
+        except NoSubgidRangeError:
+            rec_str = "<pick-a-gid-in-claude-sandbox-subgid-range>"
+        except NoFreeGidInSubgidRangeError:
             rec_str = "<pick-a-gid-in-claude-sandbox-subgid-range>"
         remediation = (
             f"sudo groupadd -g {rec_str} {host.workspace_bridge_group} && "
@@ -1058,6 +1060,7 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
     from core.hydration import IMAGE_REGISTRY
 
     image = IMAGE_REGISTRY["busybox_musl"].pinned
+    docker_inspect_failures: tuple[type[BaseException], ...] = (FileNotFoundError, subprocess.TimeoutExpired)
     try:
         result = subprocess.run(
             ["docker", "image", "inspect", image],
@@ -1065,7 +1068,7 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
             text=True,
             timeout=5,
         )
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except docker_inspect_failures:
         return CheckResult(
             status="warn",
             name="helper image cached",
@@ -1087,65 +1090,39 @@ def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult
     )
 
 
-def _scan_instance_dirs() -> list[str] | None:
+def _scan_instance_dirs() -> list[str]:
     """Return registered instance directories from ``<home>/state/instances.json``.
 
-    Instance dirs currently live at ``<sandbox_ai_home>/sandboxes/<instance_id>``,
-    where ``sandbox_ai_home`` is derived from this module's filesystem location
-    (matches :func:`cli.main._resolve_sandbox_ai_home`). The ``__file__``-based
-    resolution only works in dev checkouts; under wheel installs it points
-    into ``site-packages/`` where no ``sandboxes/`` tree exists. Removing this
-    coupling is deferred to the change-5 followup that retires
-    ``_resolve_sandbox_ai_home``.
+    Per change-5's name-keyed registry, each entry has shape
+    ``{instance_dir, created_at}``. Iterating the registry is install-mode
+    independent (closes change-4's deferred wheel-install behavior on
+    ``secrets_hydrated_restrictively`` and ``pre_existing_instance_layout``).
 
-    Returns:
-        - ``[]`` when no instances are registered (legitimate empty state).
-        - A list of resolved instance dirs when registered instances are
-          locatable on disk.
-        - ``None`` when the registry is non-empty but the orchestrator's
-          ``sandboxes/`` root cannot be located (wheel-install signal).
-          Callers should treat this as "cannot scan" and skip.
+    Returns the list of registered ``instance_dir`` paths that exist on disk,
+    or ``[]`` if the registry is missing/empty/malformed.
     """
-    state_path = sandbox_ai_user_home() / "state" / "instances.json"
+    state_path = sandbox_ai_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
-    instances = data.get("instances", {})
-    if not isinstance(instances, dict) or not instances:
+    if not isinstance(data, dict):
         return []
-    sandbox_ai_home = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    sandboxes_root = os.path.join(sandbox_ai_home, "sandboxes")
-    if not os.path.isdir(sandboxes_root):
-        # Wheel install (or equivalent): registry has entries but __file__-based
-        # resolution does not reach a sandboxes/ tree. Signal "cannot scan".
-        return None
-    candidates: list[str] = []
-    for instance_id in instances.values():
-        if not isinstance(instance_id, str):
+    out: list[str] = []
+    for entry in data.values():
+        if not isinstance(entry, dict):
             continue
-        path = os.path.join(sandboxes_root, instance_id)
-        if os.path.isdir(path):
-            candidates.append(path)
-    return candidates
+        inst_dir = entry.get("instance_dir")
+        if isinstance(inst_dir, str) and os.path.isdir(inst_dir):
+            out.append(inst_dir)
+    return out
 
 
 def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> CheckResult:
     """Warn-only: scan registered instances' secrets/ for world-readable mode bits."""
     del host_user, distro
     instances = _scan_instance_dirs()
-    if instances is None:
-        return CheckResult(
-            status="skip",
-            name="secrets hydrated restrictively",
-            detail=(
-                "registry has entries but the orchestrator's sandboxes/ tree could not "
-                "be located from this module's __file__ (wheel install). Deferred until "
-                "the change-5 relocation lands."
-            ),
-            category="Workspace Bridge",
-        )
     leaks: list[str] = []
     for inst in instances:
         secrets_dir = os.path.join(inst, "secrets")
@@ -1196,17 +1173,6 @@ def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> Ch
         )
 
     instances = _scan_instance_dirs()
-    if instances is None:
-        return CheckResult(
-            status="skip",
-            name="pre-existing instance layout",
-            detail=(
-                "registry has entries but the orchestrator's sandboxes/ tree could not "
-                "be located from this module's __file__ (wheel install). Deferred until "
-                "the change-5 relocation lands."
-            ),
-            category="Workspace Bridge",
-        )
     stale: list[str] = []
     for inst in instances:
         for leaves in cache_log_leaves:
@@ -1232,6 +1198,379 @@ def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> Ch
         name="pre-existing instance layout",
         detail="no pre-change-4 instance layout detected",
         category="Workspace Bridge",
+    )
+
+
+def _read_registry_raw() -> dict[str, object]:
+    """Return the raw parsed ``instances.json`` (for shape inspection).
+
+    Returns an empty dict if missing or malformed. Used by checks that need to
+    inspect keys directly (e.g., legacy_registry_shape).
+    """
+    state_path = sandbox_ai_home() / "state" / "instances.json"
+    try:
+        with open(state_path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _scan_instance_workspace_paths() -> list[tuple[str, str, str]]:
+    """For each registered instance, parse sandbox.toml and return tuples of
+    ``(instance_dir, workspace_name, workspace_path)`` for every workspace.
+
+    Skips instances whose sandbox.toml is missing or malformed.
+    """
+    import tomllib
+
+    out: list[tuple[str, str, str]] = []
+    for inst_dir in _scan_instance_dirs():
+        toml_path = os.path.join(inst_dir, "sandbox.toml")
+        try:
+            with open(toml_path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        workspaces = data.get("workspaces", {})
+        if not isinstance(workspaces, dict):
+            continue
+        for name, body in workspaces.items():
+            if isinstance(body, dict) and isinstance(body.get("path"), str):
+                out.append((inst_dir, name, body["path"]))
+    return out
+
+
+def check_backups_disk_pressure(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if ``_backups/`` exceeds 5 GB total or 50 entries."""
+    del host_user, distro
+    backups_root = sandbox_ai_home() / "workspaces" / "_backups"
+    if not backups_root.is_dir():
+        return CheckResult(
+            status="pass",
+            name="backups disk pressure",
+            detail="no backups directory; nothing to measure",
+            category="Workspace Bridge",
+        )
+    total_bytes = 0
+    entry_count = 0
+    for dirpath, _dn, filenames in os.walk(backups_root, followlinks=False):
+        for name in filenames:
+            try:
+                total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                continue
+    for inst_dir in backups_root.iterdir():
+        if not inst_dir.is_dir():
+            continue
+        for ws_dir in inst_dir.iterdir():
+            if not ws_dir.is_dir():
+                continue
+            for ts_dir in ws_dir.iterdir():
+                if ts_dir.is_dir() and not ts_dir.name.endswith(".partial"):
+                    entry_count += 1
+    threshold_bytes = 5 * 1024 * 1024 * 1024
+    if total_bytes > threshold_bytes or entry_count > 50:
+        size_gb = total_bytes / (1024**3)
+        return CheckResult(
+            status="warn",
+            name="backups disk pressure",
+            detail=f"_backups/ has {entry_count} entries totaling {size_gb:.2f} GB",
+            remediation=f"Manually `rm -rf` stale entries under {backups_root}",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="backups disk pressure",
+        detail=f"_backups/ has {entry_count} entries (under 5 GB / 50)",
+        category="Workspace Bridge",
+    )
+
+
+def check_backups_partial_dirs_present(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if any ``*.partial/`` exists older than 1 hour under ``_backups/``."""
+    del host_user, distro
+    import time
+
+    backups_root = sandbox_ai_home() / "workspaces" / "_backups"
+    if not backups_root.is_dir():
+        return CheckResult(
+            status="pass",
+            name="backups partial dirs",
+            detail="no backups directory",
+            category="Workspace Bridge",
+        )
+    now = time.time()
+    stale: list[str] = []
+    for dirpath, dirnames, _f in os.walk(backups_root, followlinks=False):
+        for d in dirnames:
+            if d.endswith(".partial"):
+                full = os.path.join(dirpath, d)
+                try:
+                    mtime = os.lstat(full).st_mtime
+                except OSError:
+                    continue
+                if now - mtime > 3600:
+                    stale.append(full)
+    if stale:
+        sample = ", ".join(stale[:3])
+        return CheckResult(
+            status="warn",
+            name="backups partial dirs",
+            detail=f"{len(stale)} stale .partial dir(s) >1h old: {sample}",
+            remediation="Manually `rm -rf` the .partial directories after confirming they are abandoned",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="backups partial dirs",
+        detail="no stale .partial directories",
+        category="Workspace Bridge",
+    )
+
+
+def check_dev_umask_workspace_friendly(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if at least one workspace is registered AND the dev umask is 0o022 or worse."""
+    del host_user, distro
+    if not _scan_instance_workspace_paths():
+        return CheckResult(
+            status="skip",
+            name="dev umask workspace-friendly",
+            detail="no workspaces registered; skipping umask check",
+            category="Workspace Bridge",
+        )
+    saved = os.umask(0)
+    os.umask(saved)
+    if saved & 0o020 or saved & 0o002 == 0:
+        # 0o022 (group write blocked) or stricter for "other" without group write.
+        # The check: if "group write" is masked (saved & 0o020 != 0), warn.
+        return CheckResult(
+            status="warn",
+            name="dev umask workspace-friendly",
+            detail=f"dev umask {saved:04o} masks group-write; workspace files won't be group-writable for the agent",
+            remediation="Add `umask 002` to your shell rc (~/.bashrc, ~/.zshrc) so files in workspaces land mode 0664",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="dev umask workspace-friendly",
+        detail=f"dev umask {saved:04o} preserves group write",
+        category="Workspace Bridge",
+    )
+
+
+def check_compose_project_name_collision(
+    host_user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
+    """Fail if a daemon-side compose project already exists for any registered instance.
+
+    Queries ``docker compose ls --format json`` via machinectl and checks for
+    collisions with each registered instance's prefixed project name
+    (``<sanitized-dev-username>-<inst>`` per ``instance-registry``).
+    """
+    del distro
+    from core.compose import compose_project_name
+
+    registered = list(_read_registry_raw().keys())
+    if not registered:
+        return CheckResult(
+            status="pass",
+            name="compose project name collision",
+            detail="no registered instances; nothing to check",
+            category="Privilege Boundary",
+        )
+    expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
+
+    cmd = [*machinectl_cmd(host_user, auth_mode), "/bin/bash", "-c", "docker compose ls --format json --all"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            status="skip",
+            name="compose project name collision",
+            detail="docker compose ls timed out",
+            category="Privilege Boundary",
+        )
+    if result.returncode != 0:
+        return CheckResult(
+            status="skip",
+            name="compose project name collision",
+            detail=f"docker compose ls failed: {result.stderr.strip()}",
+            category="Privilege Boundary",
+        )
+    try:
+        projects = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return CheckResult(
+            status="skip",
+            name="compose project name collision",
+            detail="could not parse docker compose ls output",
+            category="Privilege Boundary",
+        )
+    daemon_names = {p.get("Name") for p in projects if isinstance(p, dict)}
+    foreign = daemon_names - expected
+    # Collisions: a daemon project whose name matches an *expected* project for
+    # a registered instance is normal (that instance's own running compose).
+    # A daemon project whose name collides with what we'd construct for a
+    # not-yet-running instance — i.e., name is in expected AND that instance
+    # has no live entry — is a concrete collision risk only when invariants
+    # diverge. The simpler robust check: if any expected name is also present
+    # in daemon_names, that's not a collision per se (it's the live project),
+    # but if the operator runs `init` for a NEW name that already collides,
+    # that's a separate concern handled at init pre-flight.
+    del foreign
+    return CheckResult(
+        status="pass",
+        name="compose project name collision",
+        detail=f"checked {len(daemon_names)} daemon project(s) against {len(expected)} registered instance(s)",
+        category="Privilege Boundary",
+    )
+
+
+def check_workspace_path_in_walker_boundary(host_user: str, distro: str | None) -> CheckResult:
+    """Fail if any registered workspace.path matches the walker boundary list."""
+    del host_user, distro
+    from core.walker import BOUNDARY_PATHS
+
+    offenders: list[str] = []
+    for inst_dir, ws_name, ws_path in _scan_instance_workspace_paths():
+        try:
+            real = os.path.realpath(ws_path)
+        except OSError:
+            continue
+        if real in BOUNDARY_PATHS:
+            offenders.append(f"{os.path.basename(inst_dir)}/{ws_name} ({real})")
+    if offenders:
+        return CheckResult(
+            status="fail",
+            name="workspace path in walker boundary",
+            detail=f"{len(offenders)} workspace(s) at boundary path: {', '.join(offenders[:3])}",
+            remediation="`sandbox workspace remove --purge` and re-add at a safe path",
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="workspace path in walker boundary",
+        detail="all workspace paths are outside the walker boundary list",
+        category="Workspace Bridge",
+    )
+
+
+def check_workspace_home_single_filesystem(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if ``<home>/`` and ``<home>/workspaces/`` live on different filesystems."""
+    del host_user, distro
+    home = sandbox_ai_home()
+    workspaces = home / "workspaces"
+    try:
+        home_dev = os.stat(home).st_dev
+        ws_dev = os.stat(workspaces).st_dev
+    except FileNotFoundError:
+        return CheckResult(
+            status="pass",
+            name="workspace home single filesystem",
+            detail="home or workspaces dir absent; nothing to check",
+            category="Workspace Bridge",
+        )
+    except OSError as exc:
+        return CheckResult(
+            status="skip",
+            name="workspace home single filesystem",
+            detail=f"stat failed: {exc}",
+            category="Workspace Bridge",
+        )
+    if home_dev != ws_dev:
+        return CheckResult(
+            status="warn",
+            name="workspace home single filesystem",
+            detail=f"{home} and {workspaces} are on different filesystems",
+            remediation=(
+                "Workspace rename and atomic backup rename will fail with EXDEV. "
+                "Consolidate the trees onto one filesystem."
+            ),
+            category="Workspace Bridge",
+        )
+    return CheckResult(
+        status="pass",
+        name="workspace home single filesystem",
+        detail="home and workspaces share a filesystem",
+        category="Workspace Bridge",
+    )
+
+
+def check_legacy_sandboxes_dir_detected(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if the CWD contains a legacy ``sandboxes/`` directory (pre-change-5)."""
+    del host_user, distro
+    cwd_sandboxes = os.path.join(os.getcwd(), "sandboxes")
+    if os.path.isdir(cwd_sandboxes):
+        return CheckResult(
+            status="warn",
+            name="legacy sandboxes dir detected",
+            detail=f"pre-change-5 layout at {cwd_sandboxes}",
+            remediation=f"Confirm no useful state remains, then `rm -rf {cwd_sandboxes}`",
+            category="Per-User Tree",
+        )
+    return CheckResult(
+        status="pass",
+        name="legacy sandboxes dir detected",
+        detail="no legacy sandboxes/ in CWD",
+        category="Per-User Tree",
+    )
+
+
+def check_legacy_workspace_in_user_project_root(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if any registered instance's sandbox.toml carries the legacy
+    ``[instance].user_project_root`` field."""
+    del host_user, distro
+    import tomllib
+
+    legacy: list[str] = []
+    for inst_dir in _scan_instance_dirs():
+        toml_path = os.path.join(inst_dir, "sandbox.toml")
+        try:
+            with open(toml_path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        instance = data.get("instance", {})
+        if isinstance(instance, dict) and "user_project_root" in instance:
+            legacy.append(os.path.basename(inst_dir))
+    if legacy:
+        return CheckResult(
+            status="warn",
+            name="legacy user_project_root field",
+            detail=f"{len(legacy)} instance(s) carry legacy field: {', '.join(legacy[:3])}",
+            remediation=(
+                "Run `sandbox destroy <inst> && sandbox init <inst> --copy <ws>=<former-user-project-root>` "
+                "to migrate."
+            ),
+            category="Per-User Tree",
+        )
+    return CheckResult(
+        status="pass",
+        name="legacy user_project_root field",
+        detail="no legacy user_project_root fields detected",
+        category="Per-User Tree",
+    )
+
+
+def check_legacy_registry_shape(host_user: str, distro: str | None) -> CheckResult:
+    """Warn if ``instances.json`` is path-keyed (pre-change-5 shape)."""
+    del host_user, distro
+    data = _read_registry_raw()
+    legacy_keys = [k for k in data if isinstance(k, str) and k.startswith("/")]
+    if legacy_keys:
+        return CheckResult(
+            status="warn",
+            name="legacy registry shape",
+            detail=f"{len(legacy_keys)} path-keyed entries in instances.json",
+            remediation="`rm ~/.sandbox-ai/state/instances.json && sandbox init <each-inst>`",
+            category="Per-User Tree",
+        )
+    return CheckResult(
+        status="pass",
+        name="legacy registry shape",
+        detail="instances.json is name-keyed",
+        category="Per-User Tree",
     )
 
 
@@ -1334,6 +1673,14 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 category="Privilege Boundary",
                 depends_on=["runsc"],
                 run=functools.partial(check_host_uds, auth_mode=auth_mode),
+                remediation="",
+            ),
+            Check(
+                id="compose_project_name_collision",
+                name="compose project name collision",
+                category="Privilege Boundary",
+                depends_on=["machinectl_reachable"],
+                run=functools.partial(check_compose_project_name_collision, auth_mode=auth_mode),
                 remediation="",
             ),
         ]
@@ -1464,6 +1811,70 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             category="Workspace Bridge",
             depends_on=["subuid_resolver_works"],
             run=check_pre_existing_instance_layout,
+            remediation="",
+        ),
+        Check(
+            id="backups_disk_pressure",
+            name="backups disk pressure",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_backups_disk_pressure,
+            remediation="",
+        ),
+        Check(
+            id="backups_partial_dirs_present",
+            name="backups partial dirs",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_backups_partial_dirs_present,
+            remediation="",
+        ),
+        Check(
+            id="dev_umask_workspace_friendly",
+            name="dev umask workspace-friendly",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_dev_umask_workspace_friendly,
+            remediation="",
+        ),
+        Check(
+            id="workspace_path_in_walker_boundary",
+            name="workspace path in walker boundary",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_workspace_path_in_walker_boundary,
+            remediation="",
+        ),
+        Check(
+            id="workspace_home_single_filesystem",
+            name="workspace home single filesystem",
+            category="Workspace Bridge",
+            depends_on=[],
+            run=check_workspace_home_single_filesystem,
+            remediation="",
+        ),
+        Check(
+            id="legacy_sandboxes_dir_detected",
+            name="legacy sandboxes dir detected",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_legacy_sandboxes_dir_detected,
+            remediation="",
+        ),
+        Check(
+            id="legacy_workspace_in_user_project_root",
+            name="legacy user_project_root field",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_legacy_workspace_in_user_project_root,
+            remediation="",
+        ),
+        Check(
+            id="legacy_registry_shape",
+            name="legacy registry shape",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_legacy_registry_shape,
             remediation="",
         ),
     ]

@@ -5,10 +5,10 @@ This specification defines the `sandbox start --dry-run` simulation pipeline, wh
 ## Requirements
 
 ### Requirement: Dry-Run Flag on Start
-The system SHALL accept a `--dry-run` flag on `sandbox start` that simulates the full start pipeline without side effects.
+The system SHALL accept a `--dry-run` flag on `sandbox start <inst>` that simulates the full start pipeline without side effects.
 
 #### Scenario: Dry-run invoked
-- **WHEN** the operator runs `sandbox start --dry-run`
+- **WHEN** the operator runs `sandbox start <inst> --dry-run`
 - **THEN** the system executes all validation phases and reports what each phase would do, without writing files, modifying the IPAM ledger, executing subprocesses, or acquiring locks
 
 #### Scenario: Dry-run exit code on success
@@ -20,10 +20,10 @@ The system SHALL accept a `--dry-run` flag on `sandbox start` that simulates the
 - **THEN** the process exits with code 1 with the failure reason displayed
 
 ### Requirement: Instance Resolution in Dry-Run
-The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init`. The `docker_unprivileged_user` SHALL be sourced from host config (`sandbox-ai.toml`), not from instance config.
+The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init <inst>`. The `docker_unprivileged_user` SHALL be sourced from host config (`sandbox-ai.toml`), not from instance config. Resolution is by explicit `<inst>` argument; CWD-based discovery is removed.
 
 #### Scenario: Existing instance resolved
-- **WHEN** dry-run is invoked and the project directory has a registered instance
+- **WHEN** dry-run is invoked and `<inst>` has a registered entry in `~/.sandbox-ai/state/instances.json`
 - **THEN** the instance directory and config are resolved and displayed
 
 #### Scenario: Existing instance with incomplete secrets
@@ -31,8 +31,8 @@ The system SHALL resolve the instance from the registry in dry-run mode using th
 - **THEN** dry-run reports the missing secrets as warnings
 
 #### Scenario: No instance found — error with guidance
-- **WHEN** dry-run is invoked and no instance exists for the project directory
-- **THEN** the CLI exits with "No sandbox instance found. Run `sandbox init` first." and exit code 1
+- **WHEN** dry-run is invoked and `<inst>` is not present in the registry
+- **THEN** the CLI exits with "No sandbox instance named '<inst>'. Run `sandbox init <inst>` first." and exit code 1
 
 ### Requirement: IPAM Slot Preview
 The system SHALL compute the IPAM slot that would be allocated without writing to the ledger.
@@ -72,7 +72,7 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 - **THEN** dry-run reports the missing file path and exits with code 1
 
 ### Requirement: Command Preview
-The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately (named-ACL grants from `_acl_grant_plan`; cache/log mkdir+chown from `_helper_mkdir_chown_plan`; ro-file cp+chown from `_helper_cp_chown_plan`; workspace shared-group operations from `_workspace_shared_group_plan`).
+The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately (named-ACL grants from `_acl_grant_plan`; cache/log mkdir+chown from `_helper_mkdir_chown_plan`; ro-file cp+chown from `_helper_cp_chown_plan`; per-workspace shared-group operations from `_workspace_shared_group_plan` — fanned out per workspace in `[workspaces]`).
 
 #### Scenario: Compose command displayed
 - **WHEN** dry-run completes validation
@@ -86,13 +86,13 @@ The system SHALL display the exact subprocess commands that would be executed du
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"polkit"`
 - **THEN** the preview shows `machinectl shell ... docker exec -it` without `sudo` prefix
 
-#### Scenario: Named-ACL grant commands displayed
-- **WHEN** dry-run completes validation
-- **THEN** the `setfacl` commands emitted by `_acl_grant_plan()` are displayed (instance root, docker/, config/, secrets/ traverse, .sandbox.env, ancestor traverse, workspace named-ACL effective + default)
+#### Scenario: Named-ACL grant commands displayed (per-workspace)
+- **WHEN** dry-run completes validation for an instance with workspaces `main` and `scratch`
+- **THEN** the `setfacl` commands emitted by `_acl_grant_plan()` are displayed: instance root, docker/, config/, secrets/ traverse, .sandbox.env, ancestor traverse (deduplicated across instance and workspace chains), AND per-workspace named-ACL effective + default for both `<main.path>` and `<scratch.path>`
 
-#### Scenario: Helper-recipe operations displayed
+#### Scenario: Helper-recipe operations displayed with per-workspace fan-out
 - **WHEN** dry-run completes validation
-- **THEN** the cache/log helper-mkdir+chown plan and the ro-files helper-cp+chown plan are displayed with their resolved consumer-uid:gid and mode values; the workspace shared-group plan is displayed with the resolved bridge-gid
+- **THEN** the cache/log helper-mkdir+chown plan and the ro-files helper-cp+chown plan are displayed with their resolved consumer-uid:gid and mode values; the per-workspace shared-group plan is displayed with the resolved bridge-gid AND the list of workspace paths each operation will be applied to
 
 #### Scenario: Helper-recipe plans degrade gracefully when unresolvable
 - **WHEN** dry-run runs on a host where the bridge group or subuid range cannot be resolved

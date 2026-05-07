@@ -33,16 +33,16 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 ### Two configuration scopes
 
-- **Per-host** (`<sandbox_ai_user_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user`, `[host].machinectl_authentication` (`sudo` | `polkit`), and `[host].workspace_bridge_group` (default `sb-ws`, the group used by the workspace shared-group recipe). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_USER_HOME` env var redirects this path for test isolation only.
-- **Per-instance** (`sandboxes/<id>/sandbox.toml`): generated during `sandbox init` and **re-hydrated on every `sandbox start`** via the Pydantic→Jinja2 pipeline in `core.hydration`. Drift is eliminated by regenerating compose/sidecar configs from the model on each start.
+- **Per-host** (`<sandbox_ai_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user`, `[host].machinectl_authentication` (`sudo` | `polkit`), and `[host].workspace_bridge_group` (default `sb-ws`, the group used by the workspace shared-group recipe). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_HOME` env var redirects this path for test isolation only.
+- **Per-instance** (`<sandbox_ai_home()>/instances/<inst>/sandbox.toml`): generated during `sandbox init` and **re-hydrated on every `sandbox start`** via the Pydantic→Jinja2 pipeline in `core.hydration`. Drift is eliminated by regenerating compose/sidecar configs from the model on each start. The `[workspaces]` map-of-tables holds one or more workspaces per instance; each workspace tree lives under `<sandbox_ai_home()>/workspaces/<inst>/<ws>/`. Backup snapshots accumulate at `<sandbox_ai_home()>/workspaces/_backups/<inst>/<ws>/<UTC-timestamp>/`.
 
 ### Core modules (`src/core/`)
 
 - `executor.py` — sterile POSIX subprocess execution (the only sanctioned way to shell out).
-- `registry.py` — instance registry as fcntl-locked JSON at `<sandbox_ai_user_home()>/state/instances.json`.
+- `registry.py` — instance registry as fcntl-locked JSON at `<sandbox_ai_home()>/state/instances.json`.
 - `ipam.py` — `/24` subnet septuple allocator (isolated, core_proxy, dns, admin, admin_proxy, egress, ipc) over 10.100.0.0–10.255.255.0 with lowest-slot scan and slot reuse (`MAX_SLOTS = 5705`).
 - `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `src/templates/config/` and `src/templates/docker/` (the immutable tooling/config plane), shipped with the wheel as the top-level `templates` Python package and discovered via `jinja2.PackageLoader("templates", package_path="")` / `importlib.resources`.
-- `scaffold.py` — bootstraps `sandboxes/<id>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel).
+- `scaffold.py` — bootstraps `<sandbox_ai_home()>/instances/<inst>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel) plus per-workspace trees under `<sandbox_ai_home()>/workspaces/<inst>/`. `mutate_workspaces()` rewrites the `[workspaces]` block on add/remove/rename without disturbing operator hand-edits to other sections.
 - `crypto.py` — bcrypt htpasswd, SSH keypair, credential generation for the proxy sidecar.
 - `host_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder + subuid/subgid resolvers (`host_id_for_in_container`, `in_container_gid_for_host_gid`, `workspace_bridge_gid`, `autodetect_workspace_bridge_gid_recommendation`).
 - `helper_container.py` — disposable-helper-container primitives (`helper_chown_files`, `helper_mkdir_chown_dirs`) used by the helper-recipe phases. Pins `IMAGE_REGISTRY["busybox_musl"]`; runs every helper invocation with the full hardening baseline (runc runtime, network none, read-only rootfs, cap-drop ALL + cap-add CHOWN/DAC_OVERRIDE, no-new-privileges, tmpfs /tmp).
@@ -50,7 +50,7 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 ### State and locking
 
-- Mutable orchestrator state lives under `<sandbox_ai_user_home()>/state/` (default `~/.sandbox-ai/state/`): `instances.json`, `ipam.json`, `state.lock`. The directory is created with mode `0700` by `sandbox init`.
+- Mutable orchestrator state lives under `<sandbox_ai_home()>/state/` (default `~/.sandbox-ai/state/`): `instances.json`, `ipam.json`, `state.lock`. The directory is created with mode `0700` by `sandbox init`.
 - `state.lock` is now **per-user** (not per-CWD): all `sandbox` invocations under the same user serialize on the same lock during provisioning, regardless of which working directory they were launched from.
 - `state.lock` is **transient** — held only during provisioning, released for the runtime lifetime of a sandbox. Don't add long-lived locks.
 - Lifecycle commands (`start`, `stop`, `destroy`, `status`, `attach`) hard-fail with a "run sandbox init first" error when `<home>/state/instances.json` is absent.

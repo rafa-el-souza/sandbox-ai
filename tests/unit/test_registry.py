@@ -1,13 +1,23 @@
+"""Tests for core.registry — name-keyed instance registry."""
+
+from __future__ import annotations
+
+import json
 import threading
 from pathlib import Path
 
 import pytest
-from core.registry import InstanceRegistry, generate_instance_id
+from core.registry import (
+    InstanceNameInUseError,
+    InstanceRegistry,
+    RegistryEntry,
+    is_path_keyed,
+)
 
 
 @pytest.fixture
-def registry(isolated_sandbox_ai_user_home: Path) -> InstanceRegistry:
-    """Create a registry rooted at the per-user home (autouse fixture)."""
+def registry(isolated_sandbox_ai_home: Path) -> InstanceRegistry:
+    del isolated_sandbox_ai_home
     return InstanceRegistry()
 
 
@@ -15,97 +25,133 @@ def _registry_file(home: Path) -> Path:
     return home / "state" / "instances.json"
 
 
-class TestGenerateInstanceId:
-    def test_deterministic_from_path(self) -> None:
-        """Instance ID is deterministic for a given absolute path."""
-        instance_id = generate_instance_id("/home/dev/myproject")
-        assert instance_id == generate_instance_id("/home/dev/myproject")
+class TestIsPathKeyed:
+    def test_detects_path_keyed_legacy_shape(self) -> None:
+        assert is_path_keyed({"/home/dev/foo": "foo-aaa111"})
 
-    def test_format_basename_plus_hash(self) -> None:
-        """Instance ID is <basename>-<md5[:6]>."""
-        instance_id = generate_instance_id("/home/dev/myproject")
-        assert instance_id.startswith("myproject-")
-        # Hash portion is exactly 6 hex characters
-        hash_part = instance_id.split("-", 1)[1]
-        assert len(hash_part) == 6
-        assert all(c in "0123456789abcdef" for c in hash_part)
+    def test_name_keyed_returns_false(self) -> None:
+        assert not is_path_keyed({"foo": {"instance_dir": "/x", "created_at": "Z"}})
 
-    def test_different_paths_different_ids(self) -> None:
-        """Different absolute paths produce different instance IDs."""
-        id_a = generate_instance_id("/home/dev/project-a")
-        id_b = generate_instance_id("/home/dev/project-b")
-        assert id_a != id_b
+    def test_empty_returns_false(self) -> None:
+        assert not is_path_keyed({})
 
 
-class TestInstanceRegistry:
-    def test_register_and_lookup(self, registry: InstanceRegistry) -> None:
-        """Register a project and look it up by path."""
-        registry.register("/home/dev/myproject", "myproject-abc123")
-        result = registry.lookup("/home/dev/myproject")
-        assert result == "myproject-abc123"
+class TestRegisterAndGet:
+    def test_register_returns_entry_with_dir_and_timestamp(self, registry: InstanceRegistry) -> None:
+        entry = registry.register("foo", "/x/sandboxes/foo-aaa")
+        assert entry.instance_dir == "/x/sandboxes/foo-aaa"
+        assert entry.created_at  # ISO timestamp populated
 
-    def test_lookup_not_found(self, registry: InstanceRegistry) -> None:
-        """Lookup returns None for unregistered paths."""
-        result = registry.lookup("/home/dev/nonexistent")
-        assert result is None
+    def test_get_returns_registered_entry(self, registry: InstanceRegistry) -> None:
+        registry.register("foo", "/x/foo")
+        got = registry.get("foo")
+        assert got is not None
+        assert got.instance_dir == "/x/foo"
 
-    def test_remove(self, registry: InstanceRegistry) -> None:
-        """Remove clears the registry entry."""
-        registry.register("/home/dev/myproject", "myproject-abc123")
-        registry.remove("/home/dev/myproject")
-        assert registry.lookup("/home/dev/myproject") is None
+    def test_get_unknown_returns_none(self, registry: InstanceRegistry) -> None:
+        assert registry.get("unknown") is None
 
-    def test_remove_nonexistent_is_noop(self, registry: InstanceRegistry) -> None:
-        """Removing a non-existent entry does not raise."""
-        registry.remove("/home/dev/nonexistent")  # Should not raise
+    def test_register_duplicate_name_raises(self, registry: InstanceRegistry) -> None:
+        registry.register("foo", "/x/foo")
+        with pytest.raises(InstanceNameInUseError):
+            registry.register("foo", "/y/foo")
 
-    def test_idempotent_reregister(self, registry: InstanceRegistry) -> None:
-        """Re-registering the same path overwrites the instance_id."""
-        registry.register("/home/dev/myproject", "myproject-aaa111")
-        registry.register("/home/dev/myproject", "myproject-bbb222")
-        assert registry.lookup("/home/dev/myproject") == "myproject-bbb222"
+    def test_register_overwrite_allowed(self, registry: InstanceRegistry) -> None:
+        registry.register("foo", "/x/foo")
+        registry.register("foo", "/y/foo", allow_overwrite=True)
+        got = registry.get("foo")
+        assert got is not None
+        assert got.instance_dir == "/y/foo"
 
-    def test_concurrent_write_safety(self, isolated_sandbox_ai_user_home: Path) -> None:
-        """Two threads writing concurrently do not corrupt the registry."""
-        errors: list[Exception] = []
 
-        def writer(project_dir: str, instance_id: str) -> None:
-            try:
-                reg = InstanceRegistry()
-                reg.register(project_dir, instance_id)
-            except Exception as e:
-                errors.append(e)
+class TestAll:
+    def test_all_returns_dict_of_entries(self, registry: InstanceRegistry) -> None:
+        registry.register("foo", "/x/foo")
+        registry.register("bar", "/x/bar")
+        all_entries = registry.all()
+        assert set(all_entries.keys()) == {"foo", "bar"}
+        assert all(isinstance(v, RegistryEntry) for v in all_entries.values())
 
-        t1 = threading.Thread(target=writer, args=("/home/dev/p1", "p1-aaa111"))
-        t2 = threading.Thread(target=writer, args=("/home/dev/p2", "p2-bbb222"))
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        assert not errors, f"Concurrent write errors: {errors}"
+    def test_all_skips_records_missing_required_fields(self, isolated_sandbox_ai_home: Path) -> None:
+        path = _registry_file(isolated_sandbox_ai_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"good": {"instance_dir": "/x", "created_at": "Z"}, "bad": {"instance_dir": "/y"}}))
         reg = InstanceRegistry()
-        assert reg.lookup("/home/dev/p1") == "p1-aaa111"
-        assert reg.lookup("/home/dev/p2") == "p2-bbb222"
+        all_entries = reg.all()
+        assert "good" in all_entries
+        assert "bad" not in all_entries
 
-    def test_persistence_across_instances(self, isolated_sandbox_ai_user_home: Path) -> None:
-        """Data persists across InstanceRegistry instances (file-backed)."""
-        reg1 = InstanceRegistry()
-        reg1.register("/home/dev/myproject", "myproject-abc123")
 
-        reg2 = InstanceRegistry()
-        assert reg2.lookup("/home/dev/myproject") == "myproject-abc123"
+class TestRemove:
+    def test_remove_drops_entry(self, registry: InstanceRegistry) -> None:
+        registry.register("foo", "/x/foo")
+        registry.remove("foo")
+        assert registry.get("foo") is None
 
-    def test_corrupt_json_recovers(self, isolated_sandbox_ai_user_home: Path) -> None:
-        """Corrupt JSON file is treated as empty registry."""
-        registry_path = _registry_file(isolated_sandbox_ai_user_home)
-        registry_path.parent.mkdir(parents=True, exist_ok=True)
-        registry_path.write_text("{ corrupt json !!!")
+    def test_remove_missing_is_noop(self, registry: InstanceRegistry) -> None:
+        registry.remove("never-existed")  # must not raise
+
+
+class TestPersistence:
+    def test_persistence_across_instances(self, isolated_sandbox_ai_home: Path) -> None:
+        del isolated_sandbox_ai_home
+        InstanceRegistry().register("foo", "/x/foo")
+        got = InstanceRegistry().get("foo")
+        assert got is not None
+        assert got.instance_dir == "/x/foo"
+
+    def test_corrupt_json_is_treated_empty(self, isolated_sandbox_ai_home: Path) -> None:
+        path = _registry_file(isolated_sandbox_ai_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ not json !!!")
         reg = InstanceRegistry()
-        assert reg.lookup("/home/dev/anything") is None
+        assert reg.get("anything") is None
 
-    def test_default_path_uses_user_home(self, isolated_sandbox_ai_user_home: Path) -> None:
-        """No-arg constructor resolves <user_home>/state/instances.json."""
+    def test_legacy_path_keyed_registry_treated_empty(self, isolated_sandbox_ai_home: Path) -> None:
+        path = _registry_file(isolated_sandbox_ai_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"/home/dev/foo": "foo-aaa111"}))
         reg = InstanceRegistry()
-        reg.register("/home/dev/x", "x-aaa")
-        assert _registry_file(isolated_sandbox_ai_user_home).exists()
+        # Path-keyed entries are filtered; new lookups by name return None.
+        assert reg.get("foo") is None
+
+    def test_non_dict_top_level_treated_empty(self, isolated_sandbox_ai_home: Path) -> None:
+        path = _registry_file(isolated_sandbox_ai_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([1, 2, 3]))
+        reg = InstanceRegistry()
+        assert reg.get("foo") is None
+
+    def test_missing_required_field_in_get(self, isolated_sandbox_ai_home: Path) -> None:
+        path = _registry_file(isolated_sandbox_ai_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        reg = InstanceRegistry()
+        assert reg.get("foo") is None
+
+
+class TestConcurrency:
+    def test_concurrent_writes_dont_corrupt(self, isolated_sandbox_ai_home: Path) -> None:
+        """Both writers complete and both entries land in the registry under fcntl serialization."""
+        del isolated_sandbox_ai_home
+        thread_excs: list[BaseException] = []
+        original_hook = threading.excepthook
+
+        def capture(args: threading.ExceptHookArgs) -> None:
+            thread_excs.append(args.exc_value if args.exc_value else BaseException("unknown"))
+
+        threading.excepthook = capture
+        try:
+            t1 = threading.Thread(target=lambda: InstanceRegistry().register("a", "/x/a"))
+            t2 = threading.Thread(target=lambda: InstanceRegistry().register("b", "/x/b"))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        finally:
+            threading.excepthook = original_hook
+
+        assert thread_excs == []
+        reg = InstanceRegistry()
+        assert reg.get("a") is not None
+        assert reg.get("b") is not None

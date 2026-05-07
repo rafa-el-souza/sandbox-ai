@@ -5,25 +5,25 @@ This specification governs the zero-trust IPAM bridging logic isolating internal
 ## Requirements
 
 ### Requirement: Global IPv4 and Port Demilitarization
-The system SHALL allocate seven consecutive `/24` subnets per sandbox instance from the `10.100.0.0–10.255.255.0` address space, with the allocation ledger mapping `instance_id` to a reusable `base_index` integer.
+The system SHALL allocate seven consecutive `/24` subnets per sandbox instance from the `10.100.0.0–10.255.255.0` address space, with the allocation ledger mapping **instance name** (the registry key per `instance-registry`) to a reusable `base_index` integer.
 
 #### Scenario: Seven /24 Subnet Allocation
 - **WHEN** a new sandbox instance requires IPAM allocation
 - **THEN** the system assigns the lowest available `base_index` (integer, 0–5704) and derives seven subnets as: `ISOLATED_NET = 10.(100 + g//256).(g%256).0/24`, `CORE_PROXY_NET = 10.(100 + (g+1)//256).((g+1)%256).0/24`, `DNS_NET = 10.(100 + (g+2)//256).((g+2)%256).0/24`, `ADMIN_NET = 10.(100 + (g+3)//256).((g+3)%256).0/24`, `ADMIN_PROXY_NET = 10.(100 + (g+4)//256).((g+4)%256).0/24`, `EGRESS_NET = 10.(100 + (g+5)//256).((g+5)%256).0/24`, `IPC_NET = 10.(100 + (g+6)//256).((g+6)%256).0/24` where `g = base_index * 7`
 
 #### Scenario: Idempotent Re-Allocation on Restart
-- **WHEN** `sandbox start` is invoked for an instance already present in `ipam.json`
+- **WHEN** `sandbox start <inst>` is invoked for an instance already present in `ipam.json`
 - **THEN** the previously assigned `base_index` is reused and subnets are re-derived without modifying the ledger
 
 #### Scenario: COMPOSE_PROJECT_NAME Isolation
-- **WHEN** two `sandbox start` invocations execute from separate project directories
-- **THEN** each receives a distinct `base_index` and non-overlapping `/24` subnet septuples, preventing Docker network and volume name collisions
+- **WHEN** two `sandbox start` invocations are issued for distinct instance names (`<inst-a>` and `<inst-b>`) under the same user
+- **THEN** each receives a distinct `base_index` and non-overlapping `/24` subnet septuples; their daemon-side compose project names (`<sanitized-dev-username>-<inst-a>` and `<sanitized-dev-username>-<inst-b>` per `instance-registry`'s "Compose Project Name Prefix" requirement) are also distinct, preventing Docker network and volume name collisions
 
 ### Requirement: IPAM Slot Reuse After Destroy
 The system SHALL support reuse of previously allocated `base_index` slots once their owning instance is destroyed.
 
 #### Scenario: Freed slot available for new allocation
-- **WHEN** `sandbox destroy` removes an `instance_id` entry from `ipam.json`
+- **WHEN** `sandbox destroy <inst>` removes the instance entry from `ipam.json`
 - **THEN** that `base_index` is eligible for allocation by the next new instance that invokes `sandbox start`
 
 ### Requirement: IPAM Overflow Detection

@@ -1,6 +1,7 @@
 """Tests for core/host_config.py — HostConfig model and machinectl_cmd builder."""
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -15,37 +16,76 @@ from core.host_config import (
     SubuidOutOfRangeError,
     WorkspaceBridgeGroupMissingError,
     autodetect_workspace_bridge_gid_recommendation,
+    ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
     in_container_gid_for_host_gid,
     machinectl_cmd,
     parse_subgid_for_user,
     parse_subuid_for_user,
-    sandbox_ai_user_home,
+    sandbox_ai_home,
     workspace_bridge_gid,
 )
 from pydantic import ValidationError
 
 
 class TestSandboxAiUserHome:
-    """sandbox_ai_user_home() canonical-path resolver."""
+    """sandbox_ai_home() canonical-path resolver."""
 
     def test_env_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """With SANDBOX_AI_USER_HOME unset, returns ~/.sandbox-ai."""
-        monkeypatch.delenv("SANDBOX_AI_USER_HOME", raising=False)
-        result = sandbox_ai_user_home()
+        """With SANDBOX_AI_HOME unset, returns ~/.sandbox-ai."""
+        monkeypatch.delenv("SANDBOX_AI_HOME", raising=False)
+        result = sandbox_ai_home()
         assert result == Path(os.path.expanduser("~/.sandbox-ai"))
 
     def test_env_set_returns_env_value(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """With SANDBOX_AI_USER_HOME set, returns that path."""
-        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(tmp_path / "custom"))
-        result = sandbox_ai_user_home()
+        """With SANDBOX_AI_HOME set, returns that path."""
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(tmp_path / "custom"))
+        result = sandbox_ai_home()
         assert result == tmp_path / "custom"
 
     def test_idempotent(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Repeated calls return equal paths."""
-        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(tmp_path))
-        assert sandbox_ai_user_home() == sandbox_ai_user_home()
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(tmp_path))
+        assert sandbox_ai_home() == sandbox_ai_home()
+
+
+class TestEnsurePerUserState:
+    """ensure_per_user_state(): creates the 5-dir per-user tree with mode 0700, idempotent."""
+
+    EXPECTED_SUBDIRS = ("config", "state", "instances", "workspaces")
+
+    def test_creates_full_tree_with_mode_0700(self, tmp_path: Path) -> None:
+        home = tmp_path / ".sandbox-ai"
+        ensure_per_user_state(home)
+        assert home.is_dir()
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        for sub in self.EXPECTED_SUBDIRS:
+            assert (home / sub).is_dir()
+            assert stat.S_IMODE((home / sub).stat().st_mode) == 0o700
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        home = tmp_path / ".sandbox-ai"
+        ensure_per_user_state(home)
+        ensure_per_user_state(home)  # must not raise
+
+    def test_partial_tree_completion(self, tmp_path: Path) -> None:
+        """Missing subdirs are filled in; pre-existing ones are left alone."""
+        home = tmp_path / ".sandbox-ai"
+        home.mkdir(mode=0o700)
+        (home / "config").mkdir(mode=0o700)
+        ensure_per_user_state(home)
+        for sub in self.EXPECTED_SUBDIRS:
+            assert (home / sub).is_dir()
+
+    def test_does_not_modify_existing_mode(self, tmp_path: Path) -> None:
+        """Pre-existing dirs keep their mode (exist_ok=True semantics)."""
+        home = tmp_path / ".sandbox-ai"
+        home.mkdir(mode=0o755)
+        (home / "config").mkdir(mode=0o755)
+        ensure_per_user_state(home)
+        assert stat.S_IMODE(home.stat().st_mode) == 0o755
+        assert stat.S_IMODE((home / "config").stat().st_mode) == 0o755
 
 
 # ─── Task 1.2: HostConfig.from_toml() ─────────────────────────────────────
@@ -80,54 +120,54 @@ def _seed_host_config(home: Path, body: str) -> Path:
 class TestHostConfigFromToml:
     """HostConfig.from_toml() parsing and validation."""
 
-    def test_valid_config_parsed(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_valid_config_parsed(self, isolated_sandbox_ai_home: Path) -> None:
         """Valid sandbox-ai.toml parses into HostConfig without errors."""
-        _seed_host_config(isolated_sandbox_ai_user_home, VALID_PROJECT_TOML)
+        _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML)
         config = HostConfig.from_toml()
         assert config.host.docker_unprivileged_user == "sandbox"
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
-    def test_polkit_mode_parsed(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_polkit_mode_parsed(self, isolated_sandbox_ai_home: Path) -> None:
         """machinectl_authentication = 'polkit' parses to MachinectlAuth.POLKIT."""
-        _seed_host_config(isolated_sandbox_ai_user_home, VALID_PROJECT_TOML_POLKIT)
+        _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML_POLKIT)
         config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
-    def test_missing_file_raises_file_not_found(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_missing_file_raises_file_not_found(self, isolated_sandbox_ai_home: Path) -> None:
         """Missing sandbox-ai.toml raises FileNotFoundError with canonical path."""
         with pytest.raises(FileNotFoundError, match="Run sandbox init"):
             HostConfig.from_toml()
 
-    def test_missing_required_field_raises_validation_error(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_missing_required_field_raises_validation_error(self, isolated_sandbox_ai_home: Path) -> None:
         """Missing docker_unprivileged_user raises ValidationError."""
-        _seed_host_config(isolated_sandbox_ai_user_home, '[host]\nmachinectl_authentication = "sudo"\n')
+        _seed_host_config(isolated_sandbox_ai_home, '[host]\nmachinectl_authentication = "sudo"\n')
         with pytest.raises(ValidationError):
             HostConfig.from_toml()
 
-    def test_invalid_enum_value_raises_validation_error(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_invalid_enum_value_raises_validation_error(self, isolated_sandbox_ai_home: Path) -> None:
         """Invalid machinectl_authentication value raises ValidationError."""
         bad_toml = '[host]\ndocker_unprivileged_user = "sandbox"\nmachinectl_authentication = "pkexec"\n'
-        _seed_host_config(isolated_sandbox_ai_user_home, bad_toml)
+        _seed_host_config(isolated_sandbox_ai_home, bad_toml)
         with pytest.raises(ValidationError):
             HostConfig.from_toml()
 
-    def test_default_auth_mode_is_sudo(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_default_auth_mode_is_sudo(self, isolated_sandbox_ai_home: Path) -> None:
         """Omitted machinectl_authentication defaults to 'sudo'."""
-        _seed_host_config(isolated_sandbox_ai_user_home, VALID_PROJECT_TOML_NO_AUTH)
+        _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML_NO_AUTH)
         config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_loader_honors_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Loader reads from SANDBOX_AI_USER_HOME-resolved path."""
+        """Loader reads from SANDBOX_AI_HOME-resolved path."""
         custom_home = tmp_path / "custom"
-        monkeypatch.setenv("SANDBOX_AI_USER_HOME", str(custom_home))
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(custom_home))
         _seed_host_config(custom_home, VALID_PROJECT_TOML)
         config = HostConfig.from_toml()
         assert config.host.docker_unprivileged_user == "sandbox"
 
-    def test_malformed_toml_raises(self, isolated_sandbox_ai_user_home: Path) -> None:
+    def test_malformed_toml_raises(self, isolated_sandbox_ai_home: Path) -> None:
         """Malformed TOML syntax raises before any state changes."""
-        _seed_host_config(isolated_sandbox_ai_user_home, "[host\ninvalid toml")
+        _seed_host_config(isolated_sandbox_ai_home, "[host\ninvalid toml")
         with pytest.raises(Exception):  # tomllib.TOMLDecodeError
             HostConfig.from_toml()
 

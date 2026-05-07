@@ -67,15 +67,15 @@ The system SHALL provide a Jinja2-rendered `sshd_config` template with security-
 - **THEN** `PidFile none` is set
 
 ### Requirement: SSH Keypair Generation
-The orchestrator SHALL generate two Ed25519 keypairs per instance during credential provisioning using the `cryptography` Python library.
+The orchestrator SHALL generate two Ed25519 keypairs per instance during credential provisioning using the `cryptography` Python library. Keys land under `<sandbox_ai_home()>/instances/<inst>/secrets/`.
 
 #### Scenario: Auth keypair generated
 - **WHEN** `_phase_credentials()` runs for a new instance
-- **THEN** the system generates an Ed25519 auth keypair and writes: the private key to `secrets/ipc_ssh_key` (PEM, mode 0600) and the public key to `secrets/authorized_keys` (OpenSSH format)
+- **THEN** the system generates an Ed25519 auth keypair and writes: the private key to `<sandbox_ai_home()>/instances/<inst>/secrets/ipc_ssh_key` (PEM, mode 0600) and the public key to `<sandbox_ai_home()>/instances/<inst>/secrets/authorized_keys` (OpenSSH format)
 
 #### Scenario: Host keypair generated
 - **WHEN** `_phase_credentials()` runs for a new instance
-- **THEN** the system generates an Ed25519 host keypair and writes: the private key to `secrets/ipc_host_key` (PEM, mode 0600) and a `known_hosts` entry to `secrets/ipc_known_hosts` (OpenSSH format with `{{ core_ipc_ip }}` as the hostname)
+- **THEN** the system generates an Ed25519 host keypair and writes: the private key to `<sandbox_ai_home()>/instances/<inst>/secrets/ipc_host_key` (PEM, mode 0600) and a `known_hosts` entry to `<sandbox_ai_home()>/instances/<inst>/secrets/ipc_known_hosts` (OpenSSH format with `{{ core_ipc_ip }}` as the hostname)
 
 #### Scenario: Keypair generation is idempotent
 - **WHEN** `_phase_credentials()` runs and SSH key files already exist
@@ -87,7 +87,7 @@ The orchestrator SHALL generate two Ed25519 keypairs per instance during credent
 
 #### Scenario: Secrets directory in INSTANCE_SUBDIRS
 - **WHEN** `INSTANCE_SUBDIRS` in `scaffold.py` is inspected
-- **THEN** it contains `"secrets"` so that `create_instance_dirs()` creates `sandboxes/<id>/secrets/` during `sandbox init`
+- **THEN** it contains `"secrets"` so that `create_instance_dirs()` creates `<sandbox_ai_home()>/instances/<inst>/secrets/` during `sandbox init`
 
 ### Requirement: SSH Credential Mounts
 The rendered `compose.yml` SHALL mount SSH credentials into core and admin containers via bind-mount volumes. Docker Compose `secrets:` syntax SHALL NOT be used — its `uid`, `gid`, `mode` directives are silently ignored under rootless Docker. A top-level `secrets:` block SHALL NOT exist in the compose template.

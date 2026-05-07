@@ -6,9 +6,11 @@ All Docker operations cross the dev/sandbox privilege boundary via machinectl.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json as _json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,9 +21,11 @@ import typer
 
 if TYPE_CHECKING:
     from pathlib import Path
+from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
+    check_compose_project_name_collision,
     detect_distro,
     render_results,
     run_check_subset,
@@ -35,10 +39,11 @@ from core.host_config import (
     HostSettings,
     MachinectlAuth,
     WorkspaceBridgeGroupMissingError,
+    ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
     machinectl_cmd,
-    sandbox_ai_user_home,
+    sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
 )
@@ -49,23 +54,40 @@ from core.hydration import (
     validate_templates,
 )
 from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_subnets
-from core.registry import InstanceRegistry, generate_instance_id
+from core.locks import acquire_backup_lock, is_backup_lock_held
+from core.registry import InstanceRegistry
 from core.scaffold import (
+    WorkspaceSpec,
     _detect_git_config,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
-    ensure_per_user_tree,
     ensure_registry_seed,
+    mutate_workspaces,
     prompt_secrets,
     write_initialized_sentinel,
     write_sandbox_toml,
 )
+from core.walker import BoundaryPathError as WalkerBoundaryPathError
+from core.walker import walk_ancestors
+from core.workspace_backups import (
+    BackupError,
+    BackupFilter,
+    BackupSpecAmbiguousError,
+    BackupSpecNotFoundError,
+    create_backup,
+    list_backups,
+    resolve_backup_spec,
+    restore_backup,
+)
+from core.workspace_copy import copy_workspace
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 app = typer.Typer()
+workspace_app = typer.Typer(help="Workspace lifecycle commands")
+app.add_typer(workspace_app, name="workspace")
 console = Console()
 
 
@@ -86,24 +108,145 @@ class ContainerInfo:
 # ─── Resolution helpers ─────────────────────────────────────────────────────
 
 
-def _resolve_sandbox_ai_home() -> str:
-    """Resolve SANDBOX_AI_HOME from the orchestrator source location."""
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_NAME_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_RESERVED_NAMES: frozenset[str] = frozenset(
+    {
+        # Orchestrator-internal / spec-reserved
+        "_backups",
+        "default",
+        "all",
+        "none",
+        "system",
+        # Subnet names from the IPAM septuple
+        "isolated",
+        "core_proxy",
+        "dns",
+        "admin",
+        "admin_proxy",
+        "egress",
+        "ipc",
+    }
+)
+_INSTANCE_NAME_MAX = 30
+_WORKSPACE_NAME_MAX = 32
 
 
-def _resolve_project_dir() -> str:
-    """Resolve the project directory from CWD."""
-    return os.path.abspath(os.getcwd())
+def _validate_name(name: str, *, kind: str, max_len: int) -> None:
+    """Apply the instance/workspace name regex + length + reserved-name rules.
+
+    Raises:
+        typer.BadParameter: ``name`` violates the rules; the message names the
+            specific failure mode so the user can correct it.
+    """
+    if not name:
+        raise typer.BadParameter(f"{kind} name must not be empty")
+    if len(name) > max_len:
+        raise typer.BadParameter(f"{kind} name {name!r} exceeds {max_len}-character cap")
+    if name.startswith(("-", "_")):
+        raise typer.BadParameter(f"{kind} name {name!r} must not start with '-' or '_'")
+    if not _NAME_REGEX.match(name):
+        raise typer.BadParameter(f"{kind} name {name!r} contains invalid characters; use [a-z0-9_-]")
+    if name in _RESERVED_NAMES:
+        raise typer.BadParameter(f"{kind} name {name!r} is reserved")
 
 
-def _resolve_instance(sandbox_ai_home: str, project_dir: str) -> tuple[str | None, str | None]:
-    """Look up instance from registry. Returns (instance_dir, instance_id) or (None, None)."""
-    registry = InstanceRegistry()
-    instance_id = registry.lookup(project_dir)
-    if instance_id is None:
-        return None, None
-    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-    return instance_dir, instance_id
+def _parse_workspace_flags(
+    inst: str,
+    user_home: Path,
+    copy_specs: list[str],
+    empty_specs: list[str],
+) -> list[WorkspaceSpec]:
+    """Resolve --copy/--empty multi-flags into a list of :class:`WorkspaceSpec`.
+
+    Defaults to a single empty workspace named ``main`` when both lists are
+    empty. Raises :class:`typer.BadParameter` on duplicate names, malformed
+    ``--copy NAME=PATH`` values, or invalid workspace names.
+    """
+    if not copy_specs and not empty_specs:
+        empty_specs = ["main"]
+
+    specs: list[WorkspaceSpec] = []
+    seen: set[str] = set()
+    workspaces_root = user_home / "workspaces" / inst
+
+    for raw in copy_specs:
+        if "=" not in raw:
+            raise typer.BadParameter(f"--copy value {raw!r} must be NAME=PATH")
+        name, _, src = raw.partition("=")
+        if not name or not src:
+            raise typer.BadParameter(f"--copy value {raw!r} requires non-empty NAME and PATH")
+        _validate_name(name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+        if name in seen:
+            raise typer.BadParameter(f"workspace name {name!r} specified more than once")
+        seen.add(name)
+        specs.append(
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode="copy",
+                source=os.path.abspath(src),
+                path=str(workspaces_root / name),
+            )
+        )
+
+    for name in empty_specs:
+        _validate_name(name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+        if name in seen:
+            raise typer.BadParameter(f"workspace name {name!r} specified more than once")
+        seen.add(name)
+        specs.append(
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode="empty",
+                source=None,
+                path=str(workspaces_root / name),
+            )
+        )
+
+    return specs
+
+
+def _preflight_workspace_source(source: str, *, inst: str, user_home: Path) -> None:
+    """Validate a ``--copy`` source path before invoking rsync.
+
+    Checks: realpath resolution, source existence, source readability, walker
+    boundary list, cycle prevention (source must not be inside the orchestrator
+    workspaces tree for this instance), 5GB size warning.
+    """
+    realpath = os.path.realpath(source)
+    if not os.path.exists(realpath):
+        raise typer.BadParameter(f"--copy source {source!r} does not exist")
+    if not os.access(realpath, os.R_OK):
+        raise typer.BadParameter(f"--copy source {source!r} is not readable")
+    try:
+        walk_ancestors(realpath)
+    except WalkerBoundaryPathError as exc:
+        raise typer.BadParameter(f"--copy source {source!r} is in the walker boundary list") from exc
+    instance_workspaces = str((user_home / "workspaces" / inst).resolve())
+    if realpath.startswith(instance_workspaces + os.sep) or realpath == instance_workspaces:
+        raise typer.BadParameter(f"--copy source {source!r} is inside the destination workspaces tree (cycle)")
+    total = sum(
+        os.path.getsize(os.path.join(dp, f))
+        for dp, _dn, fns in os.walk(realpath, followlinks=False)
+        for f in fns
+        if not os.path.islink(os.path.join(dp, f))
+    )
+    if total > 5 * 1024 * 1024 * 1024:
+        console.print(
+            f"⚠ --copy source {source!r} is larger than 5 GB ({total // (1024 * 1024)} MB); rsync will take a while.",
+            style="yellow",
+        )
+
+
+def _lookup_instance_or_exit(inst: str) -> str:
+    """Look up ``inst`` in the registry; exit 1 with guidance when absent."""
+    entry = InstanceRegistry().get(inst)
+    if entry is None:
+        console.print(
+            f"No sandbox instance named {inst!r}. Run `sandbox init {inst}` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+    return entry.instance_dir
 
 
 def _load_config(instance_dir: str) -> InstanceConfig:
@@ -117,7 +260,7 @@ def _load_config(instance_dir: str) -> InstanceConfig:
 
 def _container_status(
     instance_dir: str,
-    name: str,
+    project_name: str,
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
@@ -142,7 +285,7 @@ def _container_status(
                 "/bin/bash",
                 "-c",
                 (
-                    f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={name} "
+                    f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={project_name} "
                     f"docker compose {files_str} "
                     f"--env-file {os.path.join(instance_dir, '.sandbox.env')} "
                     f"--ansi never ps --format json"
@@ -175,7 +318,12 @@ def _container_status(
     return containers
 
 
-def _warm_check(instance_dir: str, name: str, host_user: str, auth: MachinectlAuth = MachinectlAuth.SUDO) -> bool:
+def _warm_check(
+    instance_dir: str,
+    project_name: str,
+    host_user: str,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> bool:
     """Check if containers are already running. Returns True if warm.
 
     Delegates to _container_status (D-3) — returns True if any containers exist.
@@ -185,7 +333,7 @@ def _warm_check(instance_dir: str, name: str, host_user: str, auth: MachinectlAu
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, name, host_user, config, auth))
+    return bool(_container_status(instance_dir, project_name, host_user, config, auth))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -220,11 +368,10 @@ def _release_lock(fd: int) -> None:
 # ─── Phase implementations ──────────────────────────────────────────────────
 
 
-def _phase_ipam(sandbox_ai_home: str, instance_id: str) -> int:
+def _phase_ipam(inst: str) -> int:
     """Phase 2: IPAM allocation. Returns base_index."""
-    del sandbox_ai_home
     ledger = IPAMLedger()
-    return ledger.allocate(instance_id)
+    return ledger.allocate(inst)
 
 
 def _phase_credentials(
@@ -253,7 +400,6 @@ def _phase_hydrate(
     config: InstanceConfig,
     base_index: int,
     proxy_password: str,
-    sandbox_ai_home: str,
     instance_dir: str,
     host: HostSettings,
 ) -> None:
@@ -298,7 +444,10 @@ def _compute_ancestors(instance_dir: str) -> list[str]:
 
 
 def _acl_grant_plan(
-    instance_dir: str, host_user: str, user_project_root: str | None = None, dev_user: str | None = None
+    instance_dir: str,
+    host_user: str,
+    workspace_paths: list[str] | None = None,
+    dev_user: str | None = None,
 ) -> list[tuple[list[str], str]]:
     """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
 
@@ -309,7 +458,7 @@ def _acl_grant_plan(
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
     - secrets/: dir-level ``rX`` traverse
-    - workspace named-ACL: effective ``rwx`` plus default with named entry on user_project_root
+    - per-workspace named-ACL: effective ``rwx`` plus default with named entry on each ``workspace.path``
 
     Cache/log Option-B grants are intentionally absent — replaced by the
     helper-mkdir+chown phase (acl-ownership-recipes Decision 1).
@@ -373,42 +522,46 @@ def _acl_grant_plan(
     # rootless Docker daemon traverse + r/w access to the gofer-mounted /workspace.
     # Persistent shared-group state (chgrp/chmod/setgid + persistent default ACL
     # entries) is applied separately by _phase_workspace_shared_group.
-    if user_project_root is not None:
-        # Ancestor traverse on workspace path components above instance_dir's chain
-        ws_ancestors = _compute_workspace_ancestors(user_project_root)
-        for ancestor in ws_ancestors:
+    # Per-workspace fan-out with execution-side ancestor dedup.
+    if workspace_paths:
+        seen_ancestors: set[str] = set()
+        for ws_path in workspace_paths:
+            for ancestor in _compute_workspace_ancestors(ws_path):
+                if ancestor in seen_ancestors:
+                    continue
+                seen_ancestors.add(ancestor)
+                plan.append(
+                    (
+                        ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
+                        f"workspace ancestor traverse: {ancestor}",
+                    )
+                )
             plan.append(
                 (
-                    ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
-                    f"workspace ancestor traverse: {ancestor}",
+                    ["setfacl", "-m", f"u:{host_user}:rwx", ws_path],
+                    f"workspace named-ACL: {ws_path}",
                 )
             )
-        plan.append(
-            (
-                ["setfacl", "-m", f"u:{host_user}:rwx", user_project_root],
-                f"workspace named-ACL: {user_project_root}",
+            default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
+            if dev_user:
+                default_entry += f",u:{dev_user}:rwx"
+            plan.append(
+                (
+                    ["setfacl", "-d", "-m", default_entry, ws_path],
+                    f"workspace default ACL: {ws_path}",
+                )
             )
-        )
-        default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
-        if dev_user:
-            default_entry += f",u:{dev_user}:rwx"
-        plan.append(
-            (
-                ["setfacl", "-d", "-m", default_entry, user_project_root],
-                f"workspace default ACL: {user_project_root}",
-            )
-        )
 
     return plan
 
 
-def _compute_workspace_ancestors(user_project_root: str) -> list[str]:
-    """Walk ancestors of ``user_project_root`` owned by the current uid.
+def _compute_workspace_ancestors(workspace_path: str) -> list[str]:
+    """Walk ancestors of ``workspace_path`` owned by the current uid.
 
-    Returns shallowest-first; excludes ``/`` and ``user_project_root`` itself.
+    Returns shallowest-first; excludes ``/`` and ``workspace_path`` itself.
     """
     current_uid = os.getuid()
-    abs_path = os.path.abspath(user_project_root)
+    abs_path = os.path.abspath(workspace_path)
     ancestors: list[str] = []
     parent = os.path.dirname(abs_path)
     while parent != "/":
@@ -425,7 +578,9 @@ def _compute_workspace_ancestors(user_project_root: str) -> list[str]:
 
 
 def _acl_revoke_plan(
-    instance_dir: str, host_user: str, user_project_root: str | None = None
+    instance_dir: str,
+    host_user: str,
+    workspace_paths: list[str] | None = None,
 ) -> list[tuple[list[str], str]]:
     """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
 
@@ -485,20 +640,21 @@ def _acl_revoke_plan(
 
     # Workspace named-ACL — both effective and default-entry revocation.
     # Persistent shared-group state (chgrp/chmod/setgid + g::rwx, u:dev:rwx
-    # default) is left intact (Decision 4).
-    if user_project_root is not None:
-        plan.append(
-            (
-                ["setfacl", "-x", f"u:{host_user}", user_project_root],
-                f"workspace named-ACL: {user_project_root}",
+    # default) is left intact (Decision 4). Per-workspace fan-out.
+    if workspace_paths:
+        for ws_path in workspace_paths:
+            plan.append(
+                (
+                    ["setfacl", "-x", f"u:{host_user}", ws_path],
+                    f"workspace named-ACL: {ws_path}",
+                )
             )
-        )
-        plan.append(
-            (
-                ["setfacl", "-d", "-x", f"u:{host_user}", user_project_root],
-                f"workspace default named entry: {user_project_root}",
+            plan.append(
+                (
+                    ["setfacl", "-d", "-x", f"u:{host_user}", ws_path],
+                    f"workspace default named entry: {ws_path}",
+                )
             )
-        )
 
     return plan
 
@@ -689,7 +845,7 @@ def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[
 
 
 def _workspace_shared_group_plan(
-    user_project_root: str, bridge_gid: int, dev_user: str | None, host_user: str
+    workspace_path: str, bridge_gid: int, dev_user: str | None, host_user: str
 ) -> list[tuple[str, str]]:
     """Return the (operation_summary, target) list for the workspace shared-group recipe.
 
@@ -699,19 +855,19 @@ def _workspace_shared_group_plan(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     return [
-        (f"chgrp {bridge_gid}", user_project_root),
-        ("chmod 2770", user_project_root),
-        (f"setfacl -m u:{host_user}:rwx", user_project_root),
-        (f"setfacl -d -m {default_entry}", user_project_root),
+        (f"chgrp {bridge_gid}", workspace_path),
+        ("chmod 2770", workspace_path),
+        (f"setfacl -m u:{host_user}:rwx", workspace_path),
+        (f"setfacl -d -m {default_entry}", workspace_path),
     ]
 
 
 def _phase_workspace_shared_group(
-    user_project_root: str,
+    workspace_path: str,
     host: HostSettings,
     dev_user: str | None = None,
 ) -> None:
-    """Phase 5e: chgrp + chmod 2770 + setfacl on user_project_root.
+    """Phase 5e: chgrp + chmod 2770 + setfacl on a single workspace tree.
 
     Drift-detects the workspace root: when not yet at setgid + bridge_gid,
     runs the recursive recipe (best-effort, per-file failures aggregated and
@@ -724,8 +880,8 @@ def _phase_workspace_shared_group(
     bridge_gid = workspace_bridge_gid(host)
     host_user = host.docker_unprivileged_user
 
-    if _workspace_needs_recursive_setup(user_project_root, bridge_gid):
-        failure_count, sample_paths = _workspace_shared_group_recursive(user_project_root, bridge_gid)
+    if _workspace_needs_recursive_setup(workspace_path, bridge_gid):
+        failure_count, sample_paths = _workspace_shared_group_recursive(workspace_path, bridge_gid)
         if failure_count:
             sample = ", ".join(sample_paths)
             console.print(
@@ -735,24 +891,24 @@ def _phase_workspace_shared_group(
 
     # Steady-state idempotent root setup
     try:
-        os.chown(user_project_root, -1, bridge_gid, follow_symlinks=False)
-        os.chmod(user_project_root, 0o2770)
+        os.chown(workspace_path, -1, bridge_gid, follow_symlinks=False)
+        os.chmod(workspace_path, 0o2770)
     except OSError as exc:
-        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {user_project_root}: {exc}") from exc
+        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {workspace_path}: {exc}") from exc
 
     default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     for args, label in (
-        (["setfacl", "-m", f"u:{host_user}:rwx", user_project_root], "effective"),
-        (["setfacl", "-d", "-m", default_entry, user_project_root], "default"),
+        (["setfacl", "-m", f"u:{host_user}:rwx", workspace_path], "effective"),
+        (["setfacl", "-d", "-m", default_entry, workspace_path], "default"),
     ):
         try:
             subprocess.run(args, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             raise SandboxExecutionError(
-                f"Workspace shared-group {label} ACL failed for {user_project_root}: {stderr}"
+                f"Workspace shared-group {label} ACL failed for {workspace_path}: {stderr}"
             ) from exc
 
 
@@ -805,7 +961,7 @@ def _phase_helper_mkdir_chown_cache_log(
 def _phase_acl_grant(
     instance_dir: str,
     host_user: str,
-    user_project_root: str | None = None,
+    workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
 ) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
@@ -814,7 +970,7 @@ def _phase_acl_grant(
     sentinel injection would corrupt the setfacl command, per I-1).
     CalledProcessError is wrapped in SandboxExecutionError (D6).
     """
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, user_project_root, dev_user):
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         try:
             subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
@@ -841,7 +997,7 @@ def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]
 
 def _phase_compose_up(
     instance_dir: str,
-    name: str,
+    project_name: str,
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
@@ -858,7 +1014,7 @@ def _phase_compose_up(
     env_file = os.path.join(instance_dir, ".sandbox.env")
     cmd = (
         f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
+        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
         f"--ansi never --env-file {env_file} up -d --build --wait"
     )
     executor = Executor()
@@ -874,17 +1030,28 @@ def _phase_compose_up(
 
 
 def _phase_handover(
-    name: str,
+    project_name: str,
     host_user: str,
     warmup_prompt: str = "",
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    cwd_workspace: str | None = None,
 ) -> None:
-    """Phase 7: PTY handover — docker exec -it via machinectl."""
+    """Phase 7: PTY handover — docker exec -it via machinectl.
+
+    ``cwd_workspace`` is the runtime cwd selector: when supplied, ``-w
+    /workspaces/<ws>`` sets the in-container cwd at exec time per cli-attach.
+    ``attach`` always passes a value (resolved per the N=1 default / N>1 list
+    rule). ``start`` intentionally passes ``None`` — cli-start does NOT mandate
+    a runtime cwd, so the admin shell inherits whatever the entrypoint sets.
+    The Dockerfile WORKDIR is intentionally ignored for runtime cwd.
+    """
     executor = Executor()
     exec_args = ["exec"]
     if warmup_prompt:
         exec_args.extend(["-e", f"SANDBOX_WARMUP_PROMPT={warmup_prompt}"])
-    exec_args.extend(["-it", f"{name}-admin-1", "zsh"])
+    if cwd_workspace is not None:
+        exec_args.extend(["-w", f"/workspaces/{cwd_workspace}"])
+    exec_args.extend(["-it", f"{project_name}-admin-1", "zsh"])
 
     executor.run(
         [
@@ -901,7 +1068,7 @@ def _phase_handover(
 
 def _compose_down(
     instance_dir: str,
-    name: str,
+    project_name: str,
     host_user: str,
     config: InstanceConfig,
     *,
@@ -915,7 +1082,7 @@ def _compose_down(
     env_file = os.path.join(instance_dir, ".sandbox.env")
     cmd = (
         f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
+        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
         f"--ansi never --env-file {env_file} down{v_flag}"
     )
     executor = Executor()
@@ -930,14 +1097,14 @@ def _compose_down(
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str, user_project_root: str | None = None) -> list[str]:
+def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] | None = None) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
     Iterates _acl_revoke_plan(). Uses check=False; failures are collected
     as warning strings, not raised. Returns list of warning messages.
     """
     warnings: list[str] = []
-    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, user_project_root):
+    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
         try:
             result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
             if result.returncode != 0:
@@ -951,7 +1118,7 @@ def _revoke_acls(instance_dir: str, host_user: str, user_project_root: str | Non
 # ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
 
 
-def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
+def _dry_run_pipeline(inst: str) -> None:
     """Simulate the full start pipeline without side effects.
 
     Validates config parsing, IPAM allocation, template rendering, secret
@@ -959,28 +1126,19 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     """
     console.print("\n[bold]Dry-run: sandbox start[/bold]\n")
 
-    # ── Instance resolution ──────────────────────────────────────────────
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-
-    if instance_dir is None or instance_id is None:
-        console.print(
-            "No sandbox instance found. Run `sandbox init` first.",
-            style="red",
-        )
-        raise typer.Exit(code=1)
-
-    console.print(f"  Instance: [green]{instance_id}[/green] (existing)")
+    instance_dir = _lookup_instance_or_exit(inst)
+    console.print(f"  Instance: [green]{inst}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings(project_dir, config)
+    host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
 
-    name = config.instance.name
+    project_name = compose_project_name(inst)
 
     # ── IPAM preview ─────────────────────────────────────────────────────
     ledger = IPAMLedger()
     try:
-        slot, is_existing = ledger.peek_next_slot(instance_id)
+        slot, is_existing = ledger.peek_next_slot(inst)
         isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
         status = "existing" if is_existing else "preview — subject to concurrent changes"
         console.print(f"\n  IPAM slot: {slot} ({status})")
@@ -1032,7 +1190,8 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     dev_user = os.environ.get("USER")
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, config.instance.user_project_root, dev_user):
+    workspace_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
@@ -1052,13 +1211,12 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
-    # Workspace shared-group plan
+    # Workspace shared-group plan — fanned out per workspace
     try:
         bridge_gid = workspace_bridge_gid(host_settings)
-        for op, target in _workspace_shared_group_plan(
-            config.instance.user_project_root, bridge_gid, os.environ.get("USER"), host_user
-        ):
-            console.print(f"    workspace: {op} {target}", style="dim")
+        for ws_path in workspace_paths:
+            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
+                console.print(f"    workspace: {op} {target}", style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
@@ -1068,13 +1226,13 @@ def _dry_run_pipeline(sandbox_ai_home: str, project_dir: str) -> None:
     compose_cmd = (
         f"{machinectl_prefix} /bin/bash -c "
         f"'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={name} docker compose {files_str} "
+        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
         f"--ansi never --env-file {env_file} up -d --build --wait'"
     )
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
-    handover_cmd = f"{machinectl_prefix} /usr/bin/docker exec -it {name}-admin-1 zsh"
+    handover_cmd = f"{machinectl_prefix} /usr/bin/docker exec -it {project_name}-admin-1 zsh"
     console.print(f"    $ {handover_cmd}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
@@ -1106,19 +1264,18 @@ def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
     return missing
 
 
-def _resolve_host_config(project_dir: str, config: InstanceConfig) -> tuple[str, MachinectlAuth]:
+def _resolve_host_config() -> tuple[str, MachinectlAuth]:
     """Resolve host_user and auth from per-host ``sandbox-ai.toml``.
 
     Post-init commands SHALL fail when host config is absent — the field
     no longer exists on the per-instance ``SandboxInstanceSection``.
     """
-    settings = _resolve_host_settings(project_dir, config)
+    settings = _resolve_host_settings()
     return settings.docker_unprivileged_user, settings.machinectl_authentication
 
 
-def _resolve_host_settings(project_dir: str, config: InstanceConfig) -> HostSettings:
+def _resolve_host_settings() -> HostSettings:
     """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
-    del project_dir, config  # accepted for signature stability; host config is authoritative
     try:
         project_config = HostConfig.from_toml()
     except FileNotFoundError as exc:
@@ -1165,7 +1322,7 @@ def _require_per_user_state_initialized() -> None:
     this as their first step. Initialization is signaled by the registry
     file's presence, which `sandbox init` writes via `ensure_registry_seed`.
     """
-    home = sandbox_ai_user_home()
+    home = sandbox_ai_home()
     registry = home / "state" / "instances.json"
     if not registry.exists():
         console.print(
@@ -1227,33 +1384,15 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
     )
 
 
-def _warn_legacy_cwd_files(project_dir: str, user_home: Path) -> None:
-    """Warn when legacy ``<cwd>/sandbox-ai.toml`` or ``<cwd>/.state/`` exists.
-
-    The legacy path tokens in this docstring are intentional and load-bearing:
-    they preserve the exact strings users may grep for during migration.
-    Per the per-user-config-and-state-relocation change (task 14.7), do not
-    remove them in future cleanups.
-    """
-    legacy_toml = os.path.join(project_dir, "sandbox-ai.toml")
-    if os.path.exists(legacy_toml):
-        console.print(
-            f"Found legacy {legacy_toml}. Per-host config now lives at "
-            f"{user_home / 'config' / 'sandbox-ai.toml'}. "
-            "Migrate manually or delete the legacy file.",
-            style="yellow",
-        )
-    legacy_state = os.path.join(project_dir, ".state")
-    if os.path.isdir(legacy_state):
-        console.print(
-            f"Found legacy {legacy_state}. Orchestrator state now lives at "
-            f"{user_home / 'state'}. Migrate manually or delete the legacy directory.",
-            style="yellow",
-        )
+_COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
+_EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
 
 
 @app.command()
 def init(
+    inst: str = typer.Argument(..., help="Instance name (1-30 chars, [a-z0-9_-])"),
+    copy: list[str] = _COPY_FLAG,
+    empty: list[str] = _EMPTY_FLAG,
     machinectl_auth: str | None = typer.Option(
         None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
     ),
@@ -1261,22 +1400,20 @@ def init(
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
 ) -> None:
-    """Initialize a new sandbox instance for the current project."""
-    sandbox_ai_home = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
+    """Initialize a new sandbox instance with one or more workspaces."""
+    _validate_name(inst, kind="instance", max_len=_INSTANCE_NAME_MAX)
 
     # Per-user tree creation (idempotent, mode 0700)
-    user_home = sandbox_ai_user_home()
-    ensure_per_user_tree(user_home)
+    user_home = sandbox_ai_home()
+    ensure_per_user_state(user_home)
 
-    # Legacy CWD-local file detection (advisory)
-    _warn_legacy_cwd_files(project_dir, user_home)
+    # Resolve workspace specs (defaults to single empty `main` when no flags supplied).
+    workspace_specs = _parse_workspace_flags(inst, user_home, copy, empty)
 
-    # Re-init guard (D-6)
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    if instance_dir is not None:
+    # Re-init guard (D-6) — registry uniqueness on instance name (per-user).
+    if InstanceRegistry().get(inst) is not None:
         console.print(
-            "Instance already initialized for this directory. Run `sandbox destroy` first.",
+            f"Instance {inst!r} is already registered. Run `sandbox destroy {inst}` first.",
             style="red",
         )
         raise typer.Exit(code=1)
@@ -1359,6 +1496,17 @@ def init(
             render_results(preflight_results, console=console)
             raise typer.Exit(code=1)
 
+        # Compose-project-name collision pre-flight (per cli-doctor's
+        # "Init pre-flight includes compose_project_name_collision"). The
+        # auth probe above proved machinectl_reachable; call the check
+        # directly and surface failure.
+        collision_result = check_compose_project_name_collision(
+            resolved_user, distro, auth_mode=resolved_auth
+        )
+        if collision_result.status == "fail":
+            render_results([collision_result], console=console)
+            raise typer.Exit(code=1)
+
     # Git config auto-detection (D-8)
     if not git_user or not git_email:
         detected_name, detected_email = _detect_git_config()
@@ -1367,29 +1515,39 @@ def init(
         if not git_email:
             git_email = detected_email
 
-    # Derive instance identity
-    instance_id = generate_instance_id(project_dir)
-    instance_dir = os.path.join(sandbox_ai_home, "sandboxes", instance_id)
-    instance_name = os.path.basename(project_dir)
+    # Pre-flight gates for every --copy source (boundary, exists, readable, cycle, size).
+    for ws in workspace_specs:
+        if ws.bootstrap_mode == "copy" and ws.source is not None:
+            _preflight_workspace_source(ws.source, inst=inst, user_home=user_home)
+
+    instance_dir = str(sandbox_ai_home() / "instances" / inst)
 
     if dry_run:
         console.print("\n[bold]Dry-run: sandbox init[/bold]\n")
-        console.print(f"  Instance ID: {instance_id}")
+        console.print(f"  Instance: {inst}")
         console.print(f"  Directory: {instance_dir}")
         console.print(f"  User: {resolved_user}")
         console.print(f"  Git: {git_user} <{git_email}>")
-        console.print(f"  Project: {instance_name}")
+        for ws in workspace_specs:
+            origin = f"copy from {ws.source}" if ws.bootstrap_mode == "copy" else "empty"
+            console.print(f"  Workspace [{ws.name}]: {origin} → {ws.path}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
-    # S1: Directory tree
-    create_instance_dirs(instance_dir)
+    # S1: Directory tree (instance + per-workspace orchestrator-owned trees).
+    create_instance_dirs(instance_dir, workspace_specs)
+
+    # S1b: Populate --copy workspaces via the rsync recipe (default-excludes,
+    # safe-link refusal). --empty workspaces start as bare 0700 dev:dev dirs.
+    for ws in workspace_specs:
+        if ws.bootstrap_mode == "copy" and ws.source is not None:
+            copy_workspace(ws.source, ws.path)
 
     # S2: sandbox.toml
     write_sandbox_toml(
         instance_dir,
-        instance_name,
-        project_dir,
+        inst,
+        workspace_specs,
         git_user=git_user,
         git_email=git_email,
     )
@@ -1403,14 +1561,13 @@ def init(
         mcp_firecrawl=config.components.mcp_firecrawl,
     )
 
-    # S4: Default ACLs (Pattern B)
+    # S4: Default ACLs (Pattern B) — fanned out across the workspaces map.
     dev_user = os.environ.get("USER", "dev")
-    apply_default_acls(instance_dir, config.instance.user_project_root, dev_user)
+    apply_default_acls(instance_dir, [ws.path for ws in config.workspaces.values()], dev_user)
 
-    # S5: Register — ensure registry seed exists, then register
+    # S5: Register — ensure registry seed exists, then register by name.
     ensure_registry_seed(user_home)
-    registry = InstanceRegistry()
-    registry.register(project_dir, instance_id)
+    InstanceRegistry().register(inst, instance_dir)
 
     # S6: Secret prompting (non-TTY safe)
     required_secrets: list[tuple[str, str]] = [
@@ -1429,54 +1586,47 @@ def init(
     # S7: Sentinel
     write_initialized_sentinel(instance_dir)
 
-    console.print(f"Sandbox '{instance_name}' initialized. Run `sandbox start` to launch.")
+    console.print(f"Sandbox '{inst}' initialized. Run `sandbox start {inst}` to launch.")
 
 
 @app.command()
 def start(
+    inst: str = typer.Argument(..., help="Instance name"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
 ) -> None:
     """Start the sandbox."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
     if dry_run:
-        _dry_run_pipeline(sandbox_ai_home, project_dir)
+        _dry_run_pipeline(inst)
         return
 
     # Phase 0: Instance resolution
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-
-    if instance_dir is None or instance_id is None:
-        console.print(
-            "No sandbox instance found. Run `sandbox init` first.",
-            style="red",
-        )
-        raise typer.Exit(code=1)
+    instance_dir = _lookup_instance_or_exit(inst)
 
     # Sentinel check: verify init completed
     sentinel_path = os.path.join(instance_dir, ".initialized")
     if not os.path.exists(sentinel_path):
         console.print(
-            "Instance partially initialized. Run `sandbox destroy` then `sandbox init`.",
+            f"Instance partially initialized. Run `sandbox destroy {inst}` then `sandbox init {inst}`.",
             style="red",
         )
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.instance.name
-    host_settings = _resolve_host_settings(project_dir, config)
+    host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
+    project_name = compose_project_name(inst)
 
-    # Project name immutability check (sandbox-toml-schema spec)
-    # instance_id format: <instance_name>-<md5[:6]> — strip last 7 chars to recover original name
-    original_name = instance_id[:-7]
-    if name != original_name:
+    # Operator-edited TOML guard: ``instance.name`` should match the registry
+    # key (the typer arg). Divergence is harmless for compose-project-name
+    # correctness — that's derived from ``inst`` per Group 7 — but produces
+    # confusing operator-facing output (status panel, sandbox.toml display).
+    if config.instance.name != inst:
         console.print(
-            "WARNING: instance.name has changed since init. "
-            "COMPOSE_PROJECT_NAME mismatch may orphan running containers.",
+            f"WARNING: sandbox.toml instance.name ({config.instance.name!r}) differs from the "
+            f"registry key ({inst!r}). Edit sandbox.toml to set instance.name = {inst!r}.",
             style="yellow",
         )
 
@@ -1502,8 +1652,8 @@ def start(
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, name, host_user, auth):
-        console.print(f"Sandbox '{name}' is already running. Use 'sandbox attach' to reconnect.")
+    if _warm_check(instance_dir, project_name, host_user, auth):
+        console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
     # Phase 1: Locking
@@ -1517,10 +1667,20 @@ def start(
         )
         raise typer.Exit(code=1) from None
 
+    # Backup-lock check (after state.lock acquisition per cli-start spec).
+    if is_backup_lock_held(inst):
+        if lock_fd is not None:
+            _release_lock(lock_fd)
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
     acl_granted = False
     try:
         # Phase 2: IPAM
-        base_index = _phase_ipam(sandbox_ai_home, instance_id)
+        base_index = _phase_ipam(inst)
         console.print("✓ IPAM — network allocation complete")
 
         # Phase 3: Credentials (generation only)
@@ -1532,7 +1692,7 @@ def start(
 
         # Phase 4: Hydration
         try:
-            _phase_hydrate(config, base_index, proxy_password, sandbox_ai_home, instance_dir, host_settings)
+            _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -1543,10 +1703,11 @@ def start(
             raise typer.Exit(code=1) from None
         console.print("✓ Hydration — templates rendered")
 
-        # Phase 5: ACL grants (Pattern A)
+        # Phase 5: ACL grants (Pattern A) — fan out across [workspaces].
         acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         dev_user = os.environ.get("USER")
-        _phase_acl_grant(instance_dir, host_user, config.instance.user_project_root, dev_user)
+        ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 5c: helper-mkdir+chown for cache/log leaves
@@ -1557,13 +1718,14 @@ def start(
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
 
-        # Phase 5e: workspace shared-group recipe (chgrp + chmod 2770 + setfacl)
-        _phase_workspace_shared_group(config.instance.user_project_root, host_settings, dev_user)
+        # Phase 5e: workspace shared-group recipe — per-workspace fan-out.
+        for ws_path in ws_paths:
+            _phase_workspace_shared_group(ws_path, host_settings, dev_user)
         console.print("✓ Workspace — shared-group recipe applied")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
-            _phase_compose_up(instance_dir, name, host_user, config, auth)
+            _phase_compose_up(instance_dir, project_name, host_user, config, auth)
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
@@ -1574,7 +1736,7 @@ def start(
         # ACL on the workspace) are NOT reverted — they're persistent state
         # that survives intermediate stop/start cycles by design.
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
+            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
@@ -1586,28 +1748,25 @@ def start(
         _release_lock(lock_fd)
 
     console.print("→ Handing over to admin shell")
-    _phase_handover(name, host_user, config.instance.warmup_prompt, auth)
+    _phase_handover(project_name, host_user, config.instance.warmup_prompt, auth)
 
 
 @app.command()
-def stop(clean: bool = False) -> None:
+def stop(
+    inst: str = typer.Argument(..., help="Instance name"),
+    clean: bool = False,
+) -> None:
     """Stop the sandbox."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
-        raise typer.Exit(code=1)
-
+    instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    project_name = compose_project_name(inst)
+    host_user, auth = _resolve_host_config()
 
     # Warm check
-    if not _warm_check(instance_dir, name, host_user, auth):
-        console.print(f"Sandbox '{name}' is not running. Nothing to stop.")
+    if not _warm_check(instance_dir, project_name, host_user, auth):
+        console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
     # Lock acquisition (D8)
@@ -1620,62 +1779,155 @@ def stop(clean: bool = False) -> None:
         )
         raise typer.Exit(code=1) from None
 
-    # Compose down
-    _compose_down(instance_dir, name, host_user, config, volumes=clean, auth=auth)
+    # Backup-lock check (after state.lock per cli-stop spec).
+    if is_backup_lock_held(inst):
+        _release_lock(lock_fd)
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
-    # ACL revocation (Pattern A) — fault-isolated (D5)
-    acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
+    # Compose down
+    _compose_down(instance_dir, project_name, host_user, config, volumes=clean, auth=auth)
+
+    # ACL revocation (Pattern A) — fault-isolated (D5), per-workspace fan-out
+    ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+    acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
     for w in acl_warnings:
         console.print(f"⚠ {w}", style="yellow")
 
     _release_lock(lock_fd)
 
     if clean:
-        console.print(f"Sandbox '{name}' stopped. Named volumes destroyed — data unrecoverable.")
+        console.print(f"Sandbox '{inst}' stopped. Named volumes destroyed — data unrecoverable.")
     else:
-        console.print(f"Sandbox '{name}' stopped. Named volumes preserved.")
+        console.print(f"Sandbox '{inst}' stopped. Named volumes preserved.")
 
 
 @app.command()
-def attach() -> None:
+def attach(
+    inst: str = typer.Argument(..., help="Instance name"),
+    ws: str | None = typer.Argument(None, help="Workspace name (optional iff N=1)"),
+) -> None:
     """Attach to a running sandbox."""
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
+    # Backup-lock check (cli-attach: refuse fast if held; attach holds no
+    # state.lock, so the only cleanup needed on this path is the exit).
+    if is_backup_lock_held(inst):
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
         raise typer.Exit(code=1)
 
+    instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    project_name = compose_project_name(inst)
+    host_user, auth = _resolve_host_config()
+
+    # Workspace selection per cli-attach spec.
+    workspace_names = sorted(config.workspaces.keys())
+    if ws is None:
+        if len(workspace_names) == 1:
+            ws = workspace_names[0]
+        else:
+            joined = ", ".join(workspace_names)
+            console.print(
+                f"Multiple workspaces in {inst!r}. Pick one: {joined}.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+    elif ws not in config.workspaces:
+        console.print(
+            f"Workspace {ws!r} not found in instance {inst!r}. Available: {', '.join(workspace_names)}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, name, host_user, auth):
-        console.print(f"Sandbox '{name}' is not running. Use 'sandbox start' to launch.")
+    if not _warm_check(instance_dir, project_name, host_user, auth):
+        console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
     # Direct handover — no hydration, no credentials, no locking
-    _phase_handover(name, host_user, auth=auth)
+    _phase_handover(project_name, host_user, auth=auth, cwd_workspace=ws)
+
+
+def _resolve_backup_workspaces_spec(
+    spec: str,
+    available: set[str],
+) -> list[str]:
+    """Resolve the ``--backup-workspaces=<spec>`` value to a list of workspace
+    names to back up. Empty list means "back up nothing".
+
+    Forms: ``all`` | ``none`` | ``<csv>``. Rejects ``all,foo`` combinations
+    and unknown names in csv. Callers handle the no-flag case (``None``)
+    separately by routing into TTY/non-TTY paths.
+    """
+    parts = [p.strip() for p in spec.split(",")]
+    if "all" in parts and len(parts) > 1:
+        raise typer.BadParameter("cannot combine 'all' with named workspaces")
+    if parts == ["all"]:
+        return sorted(available)
+    if parts == ["none"]:
+        return []
+    if "none" in parts:
+        raise typer.BadParameter("cannot combine 'none' with named workspaces")
+    unknown = [p for p in parts if p not in available]
+    if unknown:
+        joined = ", ".join(unknown)
+        raise typer.BadParameter(f"workspace(s) not found in instance: {joined}")
+    return parts
+
+
+def _prompt_backup_selection(workspaces: list[str]) -> list[str]:
+    """TTY interactive: ask per-workspace whether to back up. Returns the
+    selected names. Implementation uses ``typer.confirm`` per workspace as a
+    portable substitute for the spec's "Rich toggleable list"."""
+    selected: list[str] = []
+    for name in workspaces:
+        if typer.confirm(f"Back up workspace {name!r}?", default=False):
+            selected.append(name)
+    return selected
 
 
 @app.command()
-def destroy(force: bool = False) -> None:
-    """Permanently destroy a sandbox instance."""
+def destroy(
+    inst: str = typer.Argument(..., help="Instance name"),
+    force: bool = False,
+    backup_workspaces: str | None = typer.Option(
+        None,
+        "--backup-workspaces",
+        help="Backup spec: 'all' | 'none' | comma-separated workspace names",
+    ),
+) -> None:
+    """Permanently destroy a sandbox instance.
+
+    Phases (per `cli-destroy` "Phase Order Preserves Recoverability Through
+    Backup"). D5 onward is irreversible:
+
+    D1  confirmation (typed name) unless --force; backup-set selection
+    D2  acquire state.lock (briefly) + <inst>.backup.lock (held)
+    D3  compose down (REVERSIBLE)
+    D4  per-workspace backup (any failure aborts: partial retained, no
+        irreversible mutation)
+    D5  compose down -v (IRREVERSIBLE from here)
+    D6  ACL revoke (per workspace)
+    D7  rmtree(instances/<inst>/)
+    D8  rmtree(workspaces/<inst>/<ws>/) for ALL workspaces
+    D9  rmdir(workspaces/<inst>/) if empty
+    D10 IPAM release + registry remove
+    D11 release locks
+    """
     _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
 
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
-        raise typer.Exit(code=1)
+    instance_dir = _lookup_instance_or_exit(inst)
 
-    # Prefix guard — before anything else
-    sandboxes_prefix = os.path.join(sandbox_ai_home, "sandboxes")
-    if not instance_dir.startswith(sandboxes_prefix):
+    # Prefix guard — before anything else.
+    instances_prefix = str(sandbox_ai_home() / "instances") + os.sep
+    if not instance_dir.startswith(instances_prefix):
         console.print(
             "[FATAL] Instance directory path fails prefix guard. Aborting.",
             style="red bold",
@@ -1683,59 +1935,135 @@ def destroy(force: bool = False) -> None:
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    project_name = compose_project_name(inst)
+    host_user, auth = _resolve_host_config()
+    available = set(config.workspaces.keys())
 
-    # Phase 0: Confirmation
+    # D1: Confirmation + backup-set selection.
     if not force:
-        console.print(f"WARNING: This permanently deletes sandbox '{name}' and all its state.")
-        console.print(f"         Your project at {config.instance.user_project_root} is NOT affected.")
+        console.print(f"WARNING: This permanently deletes sandbox {inst!r} and all its state.")
+        ws_summary = ", ".join(sorted(available)) or "<none>"
+        console.print(f"         Workspaces affected: {ws_summary}")
         typed_name = typer.prompt("Type the sandbox name to confirm")
-        if typed_name != name:
+        if typed_name != inst:
             console.print("Aborted.")
             return
 
-    # Phase 1: Locking
-    lock_fd = _acquire_state_lock(instance_dir)
+    if backup_workspaces is not None:
+        backup_set = _resolve_backup_workspaces_spec(backup_workspaces, available)
+    elif _stdin_is_tty():
+        backup_set = _prompt_backup_selection(sorted(available))
+    else:
+        console.print(
+            "destroy in non-interactive mode requires --backup-workspaces=...",
+            style="red",
+        )
+        raise typer.Exit(code=1)
 
+    # D2: Acquire state.lock briefly (gate); refuse if backup.lock held; then
+    # acquire backup.lock and release state.lock for the long phases.
     try:
-        # Phase 2: Container and volume teardown — fault-isolated (D12)
+        gate_lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+    if is_backup_lock_held(inst):
+        _release_lock(gate_lock_fd)
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    with acquire_backup_lock(inst):
+        _release_lock(gate_lock_fd)
+
+        # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(instance_dir, name, host_user, config, volumes=True, auth=auth)
+            _compose_down(instance_dir, project_name, host_user, config, volumes=False, auth=auth)
         except SandboxExecutionError as e:
-            console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
+            console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
-        # Phase 3: ACL revocation — fault-isolated (D5)
-        acl_warnings = _revoke_acls(instance_dir, host_user, config.instance.user_project_root)
-        for w in acl_warnings:
-            console.print(f"⚠ {w}", style="yellow")
+        # D4: per-workspace backup. Abort destroy on any failure — instance
+        # remains recoverable via `sandbox start <inst>`.
+        for ws_name in backup_set:
+            target = config.workspaces[ws_name]
+            try:
+                create_backup(
+                    instance_name=inst,
+                    workspace_name=ws_name,
+                    source_path=target.path,
+                    source_bootstrap_mode=target.bootstrap_mode.value,
+                    dev_primary_gid=os.getgid(),
+                    acquire_lock=False,  # we already hold backup.lock
+                )
+            except BackupError as exc:
+                console.print(
+                    f"Backup of workspace {ws_name!r} failed: {exc}\n"
+                    f"Destroy aborted; partial retained for diagnosis. "
+                    f"Run `sandbox start {inst}` to resume or fix and retry.",
+                    style="red",
+                )
+                raise typer.Exit(code=1) from None
 
-        # Phase 4: Directory removal — fault-isolated (D12)
-        # FileNotFoundError silenced (idempotent); PermissionError propagates
+        # D5: compose down -v (IRREVERSIBLE).
         try:
-            shutil.rmtree(instance_dir)
-        except FileNotFoundError:
-            pass
+            lock_fd = _acquire_state_lock(instance_dir)
+        except BlockingIOError:
+            console.print(
+                "Another sandbox operation is already in progress for this instance.",
+                style="red",
+            )
+            raise typer.Exit(code=1) from None
 
-        # Phase 5: State cleanup — IPAM — fault-isolated (D12)
         try:
-            ledger = IPAMLedger()
-            ledger.release(instance_id)
-        except Exception as e:
-            console.print(f"⚠ IPAM release warning: {e}", style="yellow")
+            try:
+                _compose_down(instance_dir, project_name, host_user, config, volumes=True, auth=auth)
+            except SandboxExecutionError as e:
+                console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
-        # Phase 6: State cleanup — Registry — fault-isolated (D12)
-        try:
-            registry = InstanceRegistry()
-            registry.remove(project_dir)
-        except Exception as e:
-            console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
+            # D6: ACL revocation — per-workspace fan-out, fault-isolated.
+            ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+            for w in _revoke_acls(instance_dir, host_user, ws_paths):
+                console.print(f"⚠ {w}", style="yellow")
 
-    finally:
-        # Close lock fd — safe after rmtree: kernel keeps inode alive while fd is open
-        _release_lock(lock_fd)
+            # D7: rmtree(instances/<inst>/).
+            try:
+                shutil.rmtree(instance_dir)
+            except FileNotFoundError:
+                pass
 
-    console.print(f"Sandbox '{name}' permanently destroyed. IPAM slot freed for reuse.")
+            # D8: rmtree workspace trees (regardless of backup status).
+            for ws in config.workspaces.values():
+                try:
+                    shutil.rmtree(ws.path)
+                except FileNotFoundError:
+                    pass
+
+            # D9: rmdir workspaces/<inst>/ if empty.
+            inst_workspaces_dir = sandbox_ai_home() / "workspaces" / inst
+            try:
+                inst_workspaces_dir.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+
+            # D10: state cleanup — IPAM and registry, fault-isolated.
+            try:
+                IPAMLedger().release(inst)
+            except Exception as e:
+                console.print(f"⚠ IPAM release warning: {e}", style="yellow")
+            try:
+                InstanceRegistry().remove(inst)
+            except Exception as e:
+                console.print(f"⚠ Registry cleanup warning: {e}", style="yellow")
+        finally:
+            # D11: release state.lock; backup.lock context manager releases on exit.
+            _release_lock(lock_fd)
+
+    console.print(f"Sandbox {inst!r} permanently destroyed. IPAM slot freed for reuse.")
 
 
 @app.command()
@@ -1777,7 +2105,7 @@ def doctor(
     else:
         resolved_auth = MachinectlAuth.SUDO
 
-    console.print(f"Per-user home: {sandbox_ai_user_home()}")
+    console.print(f"Per-user home: {sandbox_ai_home()}")
 
     distro = detect_distro()
     checks = build_check_registry(resolved_auth)
@@ -1789,29 +2117,96 @@ def doctor(
         raise typer.Exit(code=1)
 
 
-@app.command()
-def status() -> None:
-    """Show sandbox instance status and diagnostics."""
-    _require_per_user_state_initialized()
-    sandbox_ai_home = _resolve_sandbox_ai_home()
-    project_dir = _resolve_project_dir()
+def _workspace_state_label(ws_path: str, host_settings: HostSettings) -> str:
+    """Return the per-cli-status state label for a single workspace path.
 
-    # Instance resolution
-    instance_dir, instance_id = _resolve_instance(sandbox_ai_home, project_dir)
-    if instance_dir is None or instance_id is None:
-        console.print("No sandbox instance found for this directory.", style="red")
-        raise typer.Exit(code=1)
+    `● ok`    — path exists, setgid + group ownership matches the bridge gid.
+    `⚠ drift` — path exists but bridge-group state is missing or wrong.
+    `✗ missing` — path does not exist on disk.
+    """
+    try:
+        st = os.stat(ws_path)
+    except FileNotFoundError:
+        return "[red]✗ missing[/red]"
+    try:
+        expected_gid = workspace_bridge_gid(host_settings)
+    except WorkspaceBridgeGroupMissingError:
+        return "[yellow]⚠ drift[/yellow]"
+    setgid_ok = bool(st.st_mode & 0o2000)
+    group_ok = st.st_gid == expected_gid
+    if setgid_ok and group_ok:
+        return "[green]● ok[/green]"
+    return "[yellow]⚠ drift[/yellow]"
 
+
+def _workspace_du_size(ws_path: str) -> str:
+    """Return a `du -sh`-style size string, or "—" when the path is unreadable."""
+    try:
+        result = subprocess.run(
+            ["du", "-sh", ws_path],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError:
+        return "—"
+    except subprocess.TimeoutExpired:
+        return "—"
+    except FileNotFoundError:
+        return "—"
+    return result.stdout.split()[0] if result.stdout.strip() else "—"
+
+
+def _render_status_summary() -> None:
+    """Render the all-instances summary table for ``sandbox status`` (no inst)."""
+    entries = InstanceRegistry().all()
+    if not entries:
+        console.print("No instances registered. Run `sandbox init <inst>` to create one.")
+        return
+
+    table = Table(title="Sandbox instances")
+    table.add_column("Name", style="cyan")
+    table.add_column("State")
+    table.add_column("Workspaces", justify="right")
+    table.add_column("IPAM slot", justify="right")
+
+    ledger = IPAMLedger()
+    for inst_name in sorted(entries):
+        entry = entries[inst_name]
+        try:
+            config = _load_config(entry.instance_dir)
+            ws_count = str(len(config.workspaces))
+        except Exception:
+            ws_count = "?"
+        slot_str = "—"
+        try:
+            slot, is_existing = ledger.peek_next_slot(inst_name)
+            if is_existing:
+                slot_str = str(slot)
+        except IPAMExhaustedError:
+            pass
+        # State is computed cheaply: "registered" only — exact running-state requires
+        # daemon round-trips which the summary view does not justify.
+        table.add_row(inst_name, "registered", ws_count, slot_str)
+
+    console.print(table)
+
+
+def _render_status_detailed(inst: str, *, detailed: bool) -> None:
+    """Render the per-instance detailed panel + workspaces + containers."""
+    instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    name = config.instance.name
-    host_user, auth = _resolve_host_config(project_dir, config)
+    project_name = compose_project_name(inst)
+    host_settings = _resolve_host_settings()
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     # Container status
-    containers = _container_status(instance_dir, name, host_user, config, auth)
+    containers = _container_status(instance_dir, project_name, host_user, config, auth)
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
-    # Determine state
     if is_running and has_unhealthy:
         state_label = "⚠ degraded"
         border_color = "yellow"
@@ -1822,31 +2217,42 @@ def status() -> None:
         state_label = "○ stopped"
         border_color = "red"
 
-    # Instance header panel
     header_lines = [
-        f"[bold]Name:[/bold]    {name}",
-        f"[bold]ID:[/bold]      {instance_id}",
-        f"[bold]Path:[/bold]    {config.instance.user_project_root}",
-        f"[bold]User:[/bold]    {host_user}",
-        f"[bold]State:[/bold]   {state_label}",
+        f"[bold]Name:[/bold]        {inst}",
+        f"[bold]Dir:[/bold]         {instance_dir}",
+        f"[bold]User:[/bold]        {host_user}",
+        f"[bold]State:[/bold]       {state_label}",
     ]
     panel = Panel(
         "\n".join(header_lines),
-        title=f"Sandbox: {name}",
+        title=f"Sandbox: {inst}",
         border_style=border_color,
     )
     console.print(panel)
 
-    # Container grid (running only)
+    # Workspaces table per cli-status spec.
+    ws_table = Table(title="Workspaces")
+    ws_table.add_column("Name", style="cyan")
+    ws_table.add_column("Mode")
+    ws_table.add_column("Path")
+    ws_table.add_column("State")
+    if detailed:
+        ws_table.add_column("Size", justify="right")
+    for ws_name, ws in sorted(config.workspaces.items()):
+        row = [ws_name, str(ws.bootstrap_mode.value), ws.path, _workspace_state_label(ws.path, host_settings)]
+        if detailed:
+            row.append(_workspace_du_size(ws.path))
+        ws_table.add_row(*row)
+    console.print(ws_table)
+
+    # Containers table (running only)
     if is_running:
-        # Derive static IPs for network column
         ledger = IPAMLedger()
         ip_map: dict[str, str] = {}
         try:
-            slot, _is_existing = ledger.peek_next_slot(instance_id)
-            if _is_existing:
+            slot, is_existing = ledger.peek_next_slot(inst)
+            if is_existing:
                 ips = derive_static_ips(slot)
-                # Map service names to IPs from IPAM
                 ip_map = {
                     "core": ips.get("agent_isolated_ip", ""),
                     "admin": ips.get("admin_admin_ip", ""),
@@ -1880,8 +2286,8 @@ def status() -> None:
     # IPAM display
     ledger = IPAMLedger()
     try:
-        slot, _is_existing = ledger.peek_next_slot(instance_id)
-        if _is_existing:
+        slot, is_existing = ledger.peek_next_slot(inst)
+        if is_existing:
             isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
             console.print(f"\n[bold]IPAM[/bold] slot {slot}")
             console.print(f"  Isolated:    {isolated}")
@@ -1902,6 +2308,476 @@ def status() -> None:
             console.print("\n[yellow bold]Warnings[/yellow bold]")
             for secret in missing:
                 console.print(f"  ⊘ Missing secret: {secret}", style="yellow")
+
+
+@app.command()
+def status(
+    inst: str | None = typer.Argument(None, help="Instance name (omit for all-instances summary)"),
+    detailed: bool = typer.Option(False, "--detailed", help="Include `du -sh` per workspace"),
+) -> None:
+    """Show sandbox instance status and diagnostics."""
+    _require_per_user_state_initialized()
+    if inst is None:
+        if detailed:
+            console.print("--detailed requires an explicit <inst> argument.", style="red")
+            raise typer.Exit(code=1)
+        _render_status_summary()
+        return
+    _render_status_detailed(inst, detailed=detailed)
+
+
+# ─── workspace subcommands ──────────────────────────────────────────────────
+
+
+_WORKSPACE_COPY_FLAG = typer.Option(
+    [],
+    "--copy",
+    help="Copy a workspace from a host path: --copy NAME=PATH",
+)
+_WORKSPACE_EMPTY_FLAG = typer.Option(
+    [],
+    "--empty",
+    help="Create an empty workspace: --empty NAME",
+)
+
+
+def _require_instance_stopped(inst: str, instance_dir: str) -> None:
+    """Refuse if any container for ``inst`` is running.
+
+    Workspace mutations (add/remove/rename/restore) require the instance to
+    be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
+    """
+    project_name = compose_project_name(inst)
+    host_user, auth = _resolve_host_config()
+    if _warm_check(instance_dir, project_name, host_user, auth):
+        console.print(
+            f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+
+def _refuse_if_backup_in_progress(inst: str) -> None:
+    if is_backup_lock_held(inst):
+        console.print(
+            f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+
+@workspace_app.command("add")
+def workspace_add(
+    inst: str = typer.Argument(..., help="Instance name"),
+    copy: list[str] = _WORKSPACE_COPY_FLAG,
+    empty: list[str] = _WORKSPACE_EMPTY_FLAG,
+) -> None:
+    """Add one or more workspaces to a stopped instance."""
+    _require_per_user_state_initialized()
+    if not copy and not empty:
+        console.print("Specify at least one --copy or --empty flag.", style="red")
+        raise typer.Exit(code=1)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+    existing_names = set(config.workspaces.keys())
+
+    # Parse flags (will not autofill `main` because at least one is non-empty).
+    user_home = sandbox_ai_home()
+    new_specs = _parse_workspace_flags(inst, user_home, copy, empty)
+
+    # Reject collisions with existing workspaces.
+    for ws in new_specs:
+        if ws.name in existing_names:
+            console.print(
+                f"Workspace {ws.name!r} already exists in instance {inst!r}.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+
+    # Pre-flight every --copy source.
+    for ws in new_specs:
+        if ws.bootstrap_mode == "copy" and ws.source is not None:
+            _preflight_workspace_source(ws.source, inst=inst, user_home=user_home)
+
+    _require_instance_stopped(inst, instance_dir)
+    _refuse_if_backup_in_progress(inst)
+
+    # Acquire state.lock for the duration of the mutation.
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        # Create workspace dirs (orchestrator-owned, mode 0700).
+        for ws in new_specs:
+            os.makedirs(ws.path, mode=0o700, exist_ok=True)
+
+        # Populate --copy workspaces via the rsync recipe.
+        for ws in new_specs:
+            if ws.bootstrap_mode == "copy" and ws.source is not None:
+                copy_workspace(ws.source, ws.path)
+
+        # Mutate sandbox.toml: append new entries to the [workspaces] block.
+        merged = [
+            WorkspaceSpec(name=name, bootstrap_mode=ws.bootstrap_mode, source=ws.source, path=ws.path)
+            for name, ws in config.workspaces.items()
+        ] + list(new_specs)
+        mutate_workspaces(instance_dir, merged)
+    finally:
+        _release_lock(lock_fd)
+
+    added = ", ".join(ws.name for ws in new_specs)
+    console.print(f"Added workspace(s) to {inst!r}: {added}.")
+
+
+@workspace_app.command("remove")
+def workspace_remove(
+    inst: str = typer.Argument(..., help="Instance name"),
+    ws_name: str = typer.Argument(..., help="Workspace name"),
+    backup: bool = typer.Option(False, "--backup", help="Back up the workspace before removal"),
+    purge: bool = typer.Option(False, "--purge", help="Remove without backup"),
+) -> None:
+    """Remove a workspace from a stopped instance."""
+    _require_per_user_state_initialized()
+
+    if backup and purge:
+        console.print("--backup and --purge are mutually exclusive.", style="red")
+        raise typer.Exit(code=1)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+    if ws_name not in config.workspaces:
+        names = ", ".join(sorted(config.workspaces.keys())) or "<none>"
+        console.print(
+            f"Workspace {ws_name!r} not found in instance {inst!r}. Available: {names}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Resolve mode in TTY/non-TTY contexts when neither flag is given.
+    if not backup and not purge:
+        if _stdin_is_tty():
+            response = typer.prompt(
+                f"Backup workspace {ws_name!r} before removing? [Y/n]",
+                default="Y",
+                show_default=False,
+            )
+            backup = response.strip().lower() not in ("n", "no")
+            purge = not backup
+        else:
+            console.print(
+                "Use --backup or --purge to specify removal mode in non-interactive contexts.",
+                style="red",
+            )
+            raise typer.Exit(code=1)
+
+    _require_instance_stopped(inst, instance_dir)
+    if not backup:
+        _refuse_if_backup_in_progress(inst)
+
+    target = config.workspaces[ws_name]
+    last_workspace = len(config.workspaces) == 1
+
+    if backup:
+        # Phase order: state.lock not held → backup acquires backup.lock and
+        # runs rsync → returns → state.lock acquired below for rmtree +
+        # sandbox.toml mutation.
+        try:
+            create_backup(
+                instance_name=inst,
+                workspace_name=ws_name,
+                source_path=target.path,
+                source_bootstrap_mode=target.bootstrap_mode.value,
+                dev_primary_gid=os.getgid(),
+            )
+        except BackupError as exc:
+            console.print(f"Backup failed: {exc}", style="red")
+            raise typer.Exit(code=1) from exc
+
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        shutil.rmtree(target.path, ignore_errors=False)
+        remaining = [
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode=ws.bootstrap_mode.value,
+                source=ws.source,
+                path=ws.path,
+            )
+            for name, ws in config.workspaces.items()
+            if name != ws_name
+        ]
+        mutate_workspaces(instance_dir, remaining)
+    finally:
+        _release_lock(lock_fd)
+
+    console.print(f"Removed workspace {ws_name!r} from {inst!r}.")
+    if last_workspace:
+        console.print(
+            f"WARNING: {inst!r} now has zero workspaces; "
+            f"`sandbox start {inst}` will fail until you add one.",
+            style="yellow",
+        )
+
+
+@workspace_app.command("rename")
+def workspace_rename(
+    inst: str = typer.Argument(..., help="Instance name"),
+    old: str = typer.Argument(..., help="Existing workspace name"),
+    new: str = typer.Argument(..., help="New workspace name"),
+) -> None:
+    """Rename a workspace in a stopped instance (atomic, ACL-preserving)."""
+    _require_per_user_state_initialized()
+
+    if old == new:
+        console.print(
+            f"Old and new workspace names are identical ({old!r}); refusing no-op rename.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    _validate_name(new, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+
+    if old not in config.workspaces:
+        names = ", ".join(sorted(config.workspaces.keys())) or "<none>"
+        console.print(
+            f"Workspace {old!r} not found in instance {inst!r}. Available: {names}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+    if new in config.workspaces:
+        console.print(
+            f"Workspace {new!r} already exists in instance {inst!r}.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    _require_instance_stopped(inst, instance_dir)
+    _refuse_if_backup_in_progress(inst)
+
+    old_spec = config.workspaces[old]
+    new_path = str(sandbox_ai_home() / "workspaces" / inst / new)
+
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        # R2: atomic same-fs rename. ACL/setgid/xattrs preserved by inode.
+        try:
+            os.rename(old_spec.path, new_path)
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                console.print(
+                    f"Cross-filesystem rename not supported "
+                    f"({old_spec.path!r} → {new_path!r}). "
+                    "See doctor's `workspace_home_single_filesystem` check.",
+                    style="red",
+                )
+                raise typer.Exit(code=1) from None
+            raise
+
+        # R3: rewrite [workspaces.<old>] → [workspaces.<new>] + path field.
+        renamed = [
+            WorkspaceSpec(
+                name=(new if name == old else name),
+                bootstrap_mode=ws.bootstrap_mode.value,
+                source=ws.source,
+                path=(new_path if name == old else ws.path),
+            )
+            for name, ws in config.workspaces.items()
+        ]
+        mutate_workspaces(instance_dir, renamed)
+    finally:
+        _release_lock(lock_fd)
+
+    console.print(f"Renamed workspace {old!r} → {new!r} in {inst!r}.")
+
+
+@workspace_app.command("restore")
+def workspace_restore(
+    inst: str = typer.Argument(..., help="Destination instance name"),
+    ws_name: str = typer.Argument(..., help="Destination workspace name"),
+    from_spec: str | None = typer.Option(
+        None,
+        "--from",
+        help="Backup spec: omit (latest by ws name), <src-inst>/<src-ws>, or <src-inst>/<src-ws>/<ts>",
+    ),
+) -> None:
+    """Restore a backup into a stopped instance as a new workspace."""
+    _require_per_user_state_initialized()
+    _validate_name(ws_name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+    if ws_name in config.workspaces:
+        console.print(
+            f"Workspace {ws_name!r} already exists in {inst!r}. "
+            f"Run `sandbox workspace remove {inst} {ws_name}` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        backup = resolve_backup_spec(from_spec, ws_name)
+    except BackupSpecAmbiguousError as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=1) from None
+    except BackupSpecNotFoundError as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=1) from None
+
+    _require_instance_stopped(inst, instance_dir)
+    _refuse_if_backup_in_progress(inst)
+
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        new_path = restore_backup(backup, inst, ws_name)
+        merged = [
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode=ws.bootstrap_mode.value,
+                source=ws.source,
+                path=ws.path,
+            )
+            for name, ws in config.workspaces.items()
+        ] + [
+            WorkspaceSpec(
+                name=ws_name,
+                bootstrap_mode="copy",
+                source=str(backup.path),
+                path=str(new_path),
+            )
+        ]
+        mutate_workspaces(instance_dir, merged)
+    finally:
+        _release_lock(lock_fd)
+
+    spec_id = f"{backup.source_instance}/{backup.source_workspace}/{backup.timestamp}"
+    console.print(f"Restored backup {spec_id} → {inst}/{ws_name}.")
+
+
+def _format_age(timestamp: str) -> str:
+    """Format a YYYY-MM-DD-HH-MM-SS timestamp as a coarse age string.
+
+    Used for the ``workspace list`` Backups column. Format follows the
+    convention of "<n>d ago" / "<n>h ago" / "<n>m ago" with the largest
+    sensible unit.
+    """
+    import datetime as _dt
+
+    try:
+        ts = _dt.datetime.strptime(timestamp, "%Y-%m-%d-%H-%M-%S").replace(tzinfo=_dt.UTC)
+    except ValueError:
+        return "unknown"
+    delta = _dt.datetime.now(tz=_dt.UTC) - ts
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+
+@workspace_app.command("list")
+def workspace_list(
+    inst: str = typer.Argument(..., help="Instance name"),
+    no_backups: bool = typer.Option(False, "--no-backups", help="Suppress the Backups section"),
+    json_out: bool = typer.Option(False, "--json", help="Emit structured JSON output"),
+) -> None:
+    """List live workspaces and (by default) available backups for an instance."""
+    _require_per_user_state_initialized()
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+
+    backups = []
+    if not no_backups:
+        backups = list_backups(BackupFilter(source_instance=inst))
+
+    if json_out:
+        payload: dict[str, list[dict[str, object]]] = {
+            "workspaces": [
+                {
+                    "name": name,
+                    "bootstrap_mode": ws.bootstrap_mode.value,
+                    "path": ws.path,
+                }
+                for name, ws in sorted(config.workspaces.items())
+            ],
+            "backups": [
+                {
+                    "id": f"{b.source_instance}/{b.source_workspace}/{b.timestamp}",
+                    "source_instance": b.source_instance,
+                    "source_workspace": b.source_workspace,
+                    "timestamp": b.timestamp,
+                    "size_bytes": b.size_bytes,
+                }
+                for b in backups
+            ],
+        }
+        console.print_json(_json.dumps(payload))
+        return
+
+    live_table = Table(title=f"Live workspaces ({inst})")
+    live_table.add_column("NAME")
+    live_table.add_column("MODE")
+    live_table.add_column("PATH")
+    for name, ws in sorted(config.workspaces.items()):
+        live_table.add_row(name, ws.bootstrap_mode.value, ws.path)
+    console.print(live_table)
+
+    if no_backups:
+        return
+
+    backup_table = Table(title=f"Backups ({len(backups)})")
+    backup_table.add_column("ID")
+    backup_table.add_column("SIZE")
+    backup_table.add_column("AGE")
+    for b in backups:
+        size_kb = b.size_bytes // 1024
+        size_str = f"{size_kb} KB" if size_kb < 1024 else f"{size_kb // 1024} MB"
+        backup_table.add_row(
+            f"{b.source_instance}/{b.source_workspace}/{b.timestamp}",
+            size_str,
+            _format_age(b.timestamp),
+        )
+    console.print(backup_table)
 
 
 if __name__ == "__main__":

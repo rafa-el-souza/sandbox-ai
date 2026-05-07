@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.crypto import generate_credential
@@ -17,17 +18,6 @@ from core.hydration import IMAGE_REGISTRY
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def ensure_per_user_tree(home: Path) -> None:
-    """Create ``<home>/``, ``<home>/config/``, ``<home>/state/`` with mode 0700.
-
-    Idempotent: ``exist_ok=True`` suppresses ``FileExistsError`` and does NOT
-    modify the mode of any pre-existing directory.
-    """
-    os.makedirs(home, mode=0o700, exist_ok=True)
-    os.makedirs(home / "config", mode=0o700, exist_ok=True)
-    os.makedirs(home / "state", mode=0o700, exist_ok=True)
 
 
 def ensure_registry_seed(home: Path) -> None:
@@ -68,10 +58,20 @@ INSTANCE_SUBDIRS = [
 ]
 
 
-def create_instance_dirs(instance_dir: str) -> None:
-    """Create the full instance directory tree. Idempotent."""
+def create_instance_dirs(instance_dir: str, workspaces: list[WorkspaceSpec] | None = None) -> None:
+    """Create the full instance directory tree plus orchestrator-owned workspace
+    trees. Idempotent.
+
+    Each entry in ``workspaces`` produces ``<workspace.path>`` with mode 0700.
+    Per the ``instance-workspace-model`` spec the path is always under
+    ``<home>/workspaces/<inst>/<ws>/`` for the current bootstrap modes, but
+    consumers SHALL read ``workspace.path`` rather than re-derive it.
+    """
     for subdir in INSTANCE_SUBDIRS:
         os.makedirs(os.path.join(instance_dir, subdir), exist_ok=True)
+    if workspaces:
+        for ws in workspaces:
+            os.makedirs(ws.path, mode=0o700, exist_ok=True)
 
 
 # ─── S2: sandbox.toml ────────────────────────────────────────────────────────
@@ -83,9 +83,10 @@ _SANDBOX_TOML_TEMPLATE = """\
 
 [instance]
 name = "{name}"
-user_project_root = "{user_project_root}"
 host_uid = "{host_uid}"
 warmup_prompt = ""
+
+{workspaces_section}
 
 [core]
 shm_size = "2gb"
@@ -160,18 +161,45 @@ read_only_domains = [
 """
 
 
+@dataclass(frozen=True)
+class WorkspaceSpec:
+    """Resolved workspace request emitted by the CLI parser.
+
+    ``source`` is required for ``bootstrap_mode='copy'`` and ignored for
+    ``bootstrap_mode='empty'``. ``path`` is the orchestrator-owned workspace
+    tree (under ``<home>/workspaces/<inst>/<name>/``).
+    """
+
+    name: str
+    bootstrap_mode: str
+    source: str | None
+    path: str
+
+
+def _render_workspaces_section(workspaces: list[WorkspaceSpec]) -> str:
+    sections: list[str] = []
+    for ws in sorted(workspaces, key=lambda w: w.name):
+        sections.append(f"[workspaces.{ws.name}]")
+        sections.append(f'bootstrap_mode = "{ws.bootstrap_mode}"')
+        if ws.source is not None:
+            sections.append(f'source = "{ws.source}"')
+        sections.append(f'path = "{ws.path}"')
+        sections.append("")
+    return "\n".join(sections).rstrip() + "\n"
+
+
 def write_sandbox_toml(
     instance_dir: str,
     instance_name: str,
-    project_dir: str,
+    workspaces: list[WorkspaceSpec],
     git_user: str = "",
     git_email: str = "",
 ) -> None:
-    """Write sandbox.toml with auto-derived defaults."""
+    """Write sandbox.toml with auto-derived defaults and workspace entries."""
     content = _SANDBOX_TOML_TEMPLATE.format(
         name=instance_name,
-        user_project_root=os.path.abspath(project_dir),
         host_uid=str(os.getuid()),
+        workspaces_section=_render_workspaces_section(workspaces),
         git_user=git_user,
         git_email=git_email,
         core_base_image=IMAGE_REGISTRY["wolfi_base"].pinned,
@@ -181,6 +209,59 @@ def write_sandbox_toml(
     toml_path = os.path.join(instance_dir, "sandbox.toml")
     with open(toml_path, "w") as f:
         f.write(content)
+
+
+def replace_workspaces_section(toml_text: str, workspaces: list[WorkspaceSpec]) -> str:
+    """Replace the ``[workspaces.*]`` block in ``toml_text`` with one rendered
+    from ``workspaces``. The block is identified as the contiguous run of
+    ``[workspaces.<name>]`` sections (and their key/value lines) starting at
+    the first such header; it ends at the next non-workspaces top-level
+    section header.
+
+    Operator hand-edits to other sections are preserved verbatim.
+    """
+    lines = toml_text.splitlines(keepends=True)
+    start: int | None = None
+    end: int | None = None
+    for idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("[workspaces."):
+            if start is None:
+                start = idx
+        elif stripped.startswith("[") and start is not None and not stripped.startswith("[workspaces."):
+            end = idx
+            break
+    if start is None:
+        # No existing block — append before any trailing whitespace.
+        rendered = "\n" + _render_workspaces_section(workspaces)
+        return toml_text.rstrip() + "\n" + rendered
+    if end is None:
+        end = len(lines)
+
+    # Trim trailing blank lines from the existing block so the rendered
+    # block sits flush with one separator before the next section.
+    block_end = end
+    while block_end > start and lines[block_end - 1].strip() == "":
+        block_end -= 1
+    head = "".join(lines[:start])
+    tail = "".join(lines[end:])
+    rendered = _render_workspaces_section(workspaces)
+    separator = "" if tail.startswith("\n") else "\n"
+    return head + rendered + separator + tail
+
+
+def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> None:
+    """Read ``<instance_dir>/sandbox.toml``, replace its ``[workspaces.*]``
+    block with ``workspaces`` (rendered sorted by name), write it back.
+
+    Used by ``workspace add``, ``workspace remove``, ``workspace rename``.
+    """
+    toml_path = os.path.join(instance_dir, "sandbox.toml")
+    with open(toml_path) as f:
+        existing = f.read()
+    updated = replace_workspaces_section(existing, workspaces)
+    with open(toml_path, "w") as f:
+        f.write(updated)
 
 
 def _detect_git_config() -> tuple[str, str]:
@@ -261,13 +342,10 @@ def create_env_file(env_path: str, *, db_postgres: bool, mcp_firecrawl: bool) ->
 # ─── S4: Default ACLs ────────────────────────────────────────────────────────
 
 
-def apply_default_acls(instance_dir: str, user_project_root: str, dev_user: str) -> None:
+def apply_default_acls(instance_dir: str, workspace_paths: list[str], dev_user: str) -> None:
     """Apply default ACLs so dev can read container-created files (D-39)."""
-    for target in [
-        os.path.join(instance_dir, "log/"),
-        os.path.join(instance_dir, "cache/"),
-        user_project_root,
-    ]:
+    targets = [os.path.join(instance_dir, "log/"), os.path.join(instance_dir, "cache/"), *workspace_paths]
+    for target in targets:
         subprocess.run(
             ["setfacl", "-d", "-m", f"u:{dev_user}:rwx", target],
             check=True,

@@ -1,7 +1,7 @@
 """End-to-end coverage for the acl-ownership-recipes change.
 
 These tests invoke the CLI via ``uv run sandbox …`` against a real host with
-``SANDBOX_AI_USER_HOME`` redirected to ``tmp_path``. They require:
+``SANDBOX_AI_HOME`` redirected to ``tmp_path``. They require:
 
 - root (for ``sudo groupadd`` / ``sudo usermod``) to set up the bridge group;
 - a configured rootless docker daemon for the unprivileged user;
@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _env(home: Path) -> dict[str, str]:
     """Build a subprocess env that redirects per-user home to ``home``."""
     env = os.environ.copy()
-    env["SANDBOX_AI_USER_HOME"] = str(home)
+    env["SANDBOX_AI_HOME"] = str(home)
     return env
 
 
@@ -286,10 +286,8 @@ def test_workspace_named_acl_round_trip(tmp_path: Path) -> None:
     # Drive revocation through the production plan (just the workspace entries).
     # Match by description prefix, not substring — the tmp_path itself may
     # contain the word "workspace" via pytest's test-name dirs.
-    plan = _acl_revoke_plan(str(tmp_path / "fake_instance"), user, str(workspace))
-    workspace_revokes = [
-        args for args, desc in plan if desc.startswith("workspace ")
-    ]
+    plan = _acl_revoke_plan(str(tmp_path / "fake_instance"), user, [str(workspace)])
+    workspace_revokes = [args for args, desc in plan if desc.startswith("workspace ")]
     assert workspace_revokes, "_acl_revoke_plan must emit workspace revocation entries"
     for args in workspace_revokes:
         subprocess.run(args, check=True)

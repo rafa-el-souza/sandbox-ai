@@ -4,20 +4,54 @@ This specification defines the `sandbox status` command, which displays the curr
 
 ## Requirements
 
+### Requirement: Workspaces Section in Status Panel
+
+`sandbox status [<inst>]` SHALL display a Workspaces section in the Rich panel listing each workspace's name, bootstrap mode, path, and state. State values:
+
+- `● ok`: workspace path exists and bridge-group state is correct (setgid bit + group ownership match `workspace_bridge_gid(host)`).
+- `⚠ drift`: workspace path exists but bridge-group state is inconsistent (next start triggers recipe re-run via change-4 drift detection).
+- `✗ missing`: `sandbox.toml` lists the workspace but `workspace.path` does not exist on disk.
+
+Size column SHALL be opt-in via `sandbox status <inst> --detailed` (`du -sh` per workspace can be slow on large trees). Default output omits the size column.
+
+#### Scenario: Workspaces section displayed
+- **WHEN** `sandbox status foo` is invoked for an instance with workspaces `main` and `scratch`
+- **THEN** the panel includes a Workspaces section with rows for `main` and `scratch`, each showing name, mode, path, and state
+
+#### Scenario: Drift state displayed
+- **WHEN** `sandbox status foo` runs and a workspace's path lacks the setgid bit (drift)
+- **THEN** the workspace's State column shows `⚠ drift`
+
+#### Scenario: Missing state displayed
+- **WHEN** `sandbox status foo` runs and a workspace's `path` does not exist on disk
+- **THEN** the workspace's State column shows `✗ missing`
+
+#### Scenario: Size column opt-in via --detailed
+- **WHEN** `sandbox status foo --detailed` is invoked
+- **THEN** the Workspaces section includes a Size column populated via `du -sh` per workspace
+
+#### Scenario: Size column omitted by default
+- **WHEN** `sandbox status foo` is invoked without `--detailed`
+- **THEN** the Workspaces section does NOT include a Size column
+
 ### Requirement: Status Command Interface
-The system SHALL provide a `sandbox status` command that displays the current state of the sandbox instance for the current project directory.
+The system SHALL provide a `sandbox status [<inst>]` command that displays the current state of one or all sandbox instances. When `<inst>` is omitted, the command displays a summary table of all registered instances. When `<inst>` is supplied, the command displays a detailed Rich Panel for that instance.
 
-#### Scenario: Status of running instance
-- **WHEN** `sandbox status` is invoked and the instance containers are running
-- **THEN** the system displays a Rich Panel with instance identity (name, ID, project path, user), a Rich Table with per-container health (service name, health status, network IPs), IPAM allocation (slot and subnets), and enabled components
+#### Scenario: Status of a specific running instance
+- **WHEN** `sandbox status <inst>` is invoked and `<inst>`'s containers are running
+- **THEN** the system displays a Rich Panel with instance identity (name, dir, user), a Rich Table with per-container health (service name, health status, network IPs), IPAM allocation (slot and subnets), enabled components, and a Workspaces section
 
-#### Scenario: Status of stopped instance
-- **WHEN** `sandbox status` is invoked and the instance exists but containers are not running
-- **THEN** the system displays a Rich Panel with instance identity and state "stopped", without querying container health
+#### Scenario: Status of a specific stopped instance
+- **WHEN** `sandbox status <inst>` is invoked and `<inst>` exists but containers are not running
+- **THEN** the system displays a Rich Panel with instance identity and state "stopped", without querying container health, plus a Workspaces section
 
-#### Scenario: Status with no instance
-- **WHEN** `sandbox status` is invoked and no instance is registered for the current directory
-- **THEN** the system prints "No sandbox instance found for this directory." and exits with code 1
+#### Scenario: Status of unknown instance
+- **WHEN** `sandbox status <inst>` is invoked and `<inst>` is not in the registry
+- **THEN** the system prints "No sandbox instance named '<inst>'." and exits with code 1
+
+#### Scenario: Status with no argument displays all instances
+- **WHEN** `sandbox status` is invoked without an `<inst>` argument
+- **THEN** the system displays a summary table of all entries in `instances.json`, each row showing name, state (running/stopped), workspace count, and IPAM slot
 
 ### Requirement: Container Health Display
 The system SHALL query per-container health via `docker compose ps --format json` through machinectl using the configured authentication mode and display results in a Rich Table.
