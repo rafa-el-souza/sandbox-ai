@@ -10,11 +10,9 @@ Guards two invariants:
 2. ``state_lock_path()`` and ``registry_lock_path()`` are path-disjoint —
    regression guard against accidental re-unification onto a single file.
 
-The deadlock-regression test uses a SIGALRM watchdog because pre-fix
-behavior is "hang forever" (registry's ``_open_lock`` issues a blocking
-``fcntl.flock(LOCK_EX)`` without ``LOCK_NB``); a watchdog converts the
-hang into a fast-failing assertion rather than letting the test run
-exhaust the CI budget.
+The deadlock-regression tests use ``pytest-timeout`` to fail fast on a
+hang; ``method="thread"`` is chosen because the registry's
+``fcntl.flock(LOCK_EX)`` blocks the calling thread, not the process.
 """
 
 from __future__ import annotations
@@ -22,39 +20,21 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import signal
 from pathlib import Path
-from types import FrameType
 
 import pytest
 from core.host_config import registry_lock_path, state_lock_path
 from core.registry import InstanceRegistry
 
 
-class _WatchdogTimeout(Exception):
-    """Raised by the SIGALRM watchdog when a test would otherwise hang."""
-
-
-def _arm_watchdog(seconds: int) -> None:
-    def _handler(_signum: int, _frame: FrameType | None) -> None:
-        raise _WatchdogTimeout(f"watchdog fired after {seconds}s — likely self-deadlock")
-
-    signal.signal(signal.SIGALRM, _handler)
-    signal.alarm(seconds)
-
-
-def _disarm_watchdog() -> None:
-    signal.alarm(0)
-    signal.signal(signal.SIGALRM, signal.SIG_DFL)
-
-
+@pytest.mark.timeout(2, method="thread")
 def test_remove_succeeds_while_outer_state_lock_held(isolated_sandbox_ai_home: Path) -> None:
     """`InstanceRegistry.remove` MUST NOT hang when the caller already holds `state.lock`.
 
     Pre-fix: registry's ``_open_lock`` opens ``state.lock`` on a second FD
-    and ``fcntl.flock(LOCK_EX)`` blocks indefinitely. A 2-second SIGALRM
-    watchdog converts that hang into a ``_WatchdogTimeout`` so the test
-    fails fast rather than stalling the suite.
+    and ``fcntl.flock(LOCK_EX)`` blocks indefinitely. The 2-second
+    pytest-timeout deadline converts that hang into a fast test failure
+    rather than stalling the suite.
     """
     state_lock = state_lock_path()
     os.makedirs(state_lock.parent, exist_ok=True)
@@ -76,11 +56,7 @@ def test_remove_succeeds_while_outer_state_lock_held(isolated_sandbox_ai_home: P
     try:
         fcntl.flock(outer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-        _arm_watchdog(2)
-        try:
-            InstanceRegistry().remove("test-inst-under-outer-state-lock")
-        finally:
-            _disarm_watchdog()
+        InstanceRegistry().remove("test-inst-under-outer-state-lock")
 
         # Verify the mutation took effect — and that the registry lock file
         # was created lazily and is distinct from state.lock.
@@ -98,6 +74,7 @@ def test_state_and_registry_lock_paths_are_disjoint(isolated_sandbox_ai_home: Pa
     assert registry_lock_path().name == "instances.json.lock"
 
 
+@pytest.mark.timeout(2, method="thread")
 def test_register_succeeds_while_outer_state_lock_held(isolated_sandbox_ai_home: Path) -> None:
     """`InstanceRegistry.register` MUST NOT hang when the caller already holds `state.lock`.
 
@@ -111,32 +88,13 @@ def test_register_succeeds_while_outer_state_lock_held(isolated_sandbox_ai_home:
     try:
         fcntl.flock(outer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-        _arm_watchdog(2)
-        try:
-            entry = InstanceRegistry().register(
-                "fresh-under-outer-state-lock",
-                str(isolated_sandbox_ai_home / "instances" / "fresh"),
-            )
-        finally:
-            _disarm_watchdog()
+        entry = InstanceRegistry().register(
+            "fresh-under-outer-state-lock",
+            str(isolated_sandbox_ai_home / "instances" / "fresh"),
+        )
 
         assert entry.instance_dir.endswith("instances/fresh")
         assert registry_lock_path().exists()
     finally:
         fcntl.flock(outer_fd, fcntl.LOCK_UN)
         os.close(outer_fd)
-
-
-def test_watchdog_assertion_marker(isolated_sandbox_ai_home: Path) -> None:
-    """Sanity guard: the watchdog actually fires when a hang is simulated.
-
-    Confirms the deadlock-regression test would observe a watchdog timeout
-    if the underlying bug regressed (rather than silently passing because
-    the watchdog is broken). Uses ``signal.pause()`` to simulate a hang.
-    """
-    _arm_watchdog(1)
-    try:
-        with pytest.raises(_WatchdogTimeout):
-            signal.pause()
-    finally:
-        _disarm_watchdog()
