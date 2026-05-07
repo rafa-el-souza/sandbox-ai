@@ -83,6 +83,7 @@ from core.workspace_backups import (
 )
 from core.workspace_copy import copy_workspace
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -1369,6 +1370,7 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
             f"Create {config_path} with a [host] section containing docker_unprivileged_user "
             f"before running sandbox init.",
             style="red",
+            markup=False,
         )
         raise typer.Exit(code=1)
 
@@ -1549,7 +1551,7 @@ def init(
         console.print(f"  Git: {git_user} <{git_email}>")
         for ws in workspace_specs:
             origin = f"copy from {ws.source}" if ws.bootstrap_mode == "copy" else "empty"
-            console.print(f"  Workspace [{ws.name}]: {origin} → {ws.path}")
+            console.print(f"  Workspace [{rich_escape(ws.name)}]: {origin} → {ws.path}")
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
@@ -1716,6 +1718,7 @@ def start(
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
                 style="red bold",
+                markup=False,
             )
             if lock_fd is not None:
                 _release_lock(lock_fd)
@@ -1748,7 +1751,7 @@ def start(
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
-        console.print(f"[FATAL] {e}", style="red bold")
+        console.print(f"[FATAL] {e}", style="red bold", markup=False)
         # ACL cleanup on failure (Decision 4 of acl-ownership-recipes):
         # named-ACL grants from Phase 5 are revoked here. Helper-recipe
         # mutations (subuid chowns on cache/log/ro-files; chgrp+chmod+default
@@ -1950,6 +1953,7 @@ def destroy(
         console.print(
             "[FATAL] Instance directory path fails prefix guard. Aborting.",
             style="red bold",
+            markup=False,
         )
         raise typer.Exit(code=1)
 
@@ -2104,6 +2108,7 @@ def doctor(
             console.print(
                 "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
                 style="red",
+                markup=False,
             )
             raise typer.Exit(code=1)
         resolved_user = project_config.host.docker_unprivileged_user
