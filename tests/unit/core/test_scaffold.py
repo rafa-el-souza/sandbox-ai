@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from core.host_config import ensure_per_user_state
 from core.scaffold import (
+    INSTANCE_SUBDIRS,
     WorkspaceSpec,
     apply_default_acls,
     create_env_file,
@@ -19,6 +20,11 @@ from core.scaffold import (
 )
 
 # ─── Expected directory tree (S1 from design spec) ───────────────────────────
+#
+# Post-Change-D contract (per orchestrator-volumes "Scaffold-vs-Helper Boundary"):
+# scaffold creates the cache/log parents but NOT the helper-recipe-owned leaves.
+# The leaves listed in ``HELPER_RECIPE_LEAVES`` below are created by
+# ``_phase_helper_mkdir_chown_cache_log`` on first start.
 
 EXPECTED_DIRS = [
     "docker/core",
@@ -33,11 +39,23 @@ EXPECTED_DIRS = [
     "log/core",
     "log/proxy",
     "log/orchestrator",
-    "cache/core/.claude",
-    "cache/admin/tmux_resurrect",
+    "cache/core",
+    "cache/admin",
     "custom/config/admin",
     "custom/config/core",
 ]
+
+# Cache/log leaf inventory per orchestrator-volumes "Cache/Log Leaf Inventory"
+# requirement. These are owned end-to-end by the helper recipe and MUST NOT
+# appear in INSTANCE_SUBDIRS (the "Scaffold-vs-Helper Boundary" requirement).
+# log/core and log/admin appear in INSTANCE_SUBDIRS as scaffold-managed dirs
+# whose ownership is later asserted by the helper recipe; the "leaf"
+# distinction here applies to the directories that must be created by the
+# helper, which are the two cache leaves below.
+HELPER_RECIPE_CACHE_LEAVES = frozenset({
+    "cache/core/.claude",
+    "cache/admin/tmux_resurrect",
+})
 
 
 class TestCreateInstanceDirs:
@@ -48,6 +66,42 @@ class TestCreateInstanceDirs:
 
         for rel in EXPECTED_DIRS:
             assert (instance_dir / rel).is_dir(), f"Missing dir: {rel}"
+
+    def test_helper_recipe_leaves_absent_post_scaffold(self, tmp_path: Path) -> None:
+        """Cache/log helper-recipe-owned leaves are NOT created by scaffold.
+
+        Per orchestrator-volumes' "Scaffold-vs-Helper Boundary" requirement,
+        directories subject to a helper-recipe ``subuid-chown`` mechanism
+        (the cache/log leaves) are created by ``_phase_helper_mkdir_chown_cache_log``
+        on first start, not by ``create_instance_dirs``. A leaf created by
+        scaffold (running as host dev uid) would be unmapped in the daemon's
+        userns, blocking the helper's chown with EPERM.
+        """
+        instance_dir = tmp_path / "sandboxes" / "myproject-abc123"
+        create_instance_dirs(str(instance_dir))
+
+        for leaf in HELPER_RECIPE_CACHE_LEAVES:
+            assert not (instance_dir / leaf).exists(), (
+                f"Scaffold MUST NOT pre-create helper-recipe-owned leaf: {leaf}"
+            )
+
+    def test_scaffold_helper_boundary(self) -> None:
+        """INSTANCE_SUBDIRS does not intersect the helper-recipe leaf inventory.
+
+        Enforces orchestrator-volumes' "Scaffold-vs-Helper Boundary"
+        requirement: cache/log leaves owned by a helper-recipe
+        ``subuid-chown`` mechanism MUST NOT appear in
+        ``core.scaffold.INSTANCE_SUBDIRS``. Inventory currently:
+        ``cache/core/.claude`` and ``cache/admin/tmux_resurrect``. Future
+        helper-recipe leaves added to ``orchestrator-volumes``'s
+        "Cache/Log Leaf Inventory" must extend ``HELPER_RECIPE_CACHE_LEAVES``
+        and remain absent from ``INSTANCE_SUBDIRS``.
+        """
+        intersection = HELPER_RECIPE_CACHE_LEAVES & set(INSTANCE_SUBDIRS)
+        assert intersection == set(), (
+            f"INSTANCE_SUBDIRS must not contain helper-recipe-owned leaves; "
+            f"violating entries: {sorted(intersection)}"
+        )
 
     def test_idempotent(self, tmp_path: Path) -> None:
         """Calling twice does not raise."""
