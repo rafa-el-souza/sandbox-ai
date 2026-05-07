@@ -69,7 +69,16 @@ from core.scaffold import (
 )
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
-from core.workspace_backups import BackupError, create_backup
+from core.workspace_backups import (
+    BackupError,
+    BackupFilter,
+    BackupSpecAmbiguousError,
+    BackupSpecNotFoundError,
+    create_backup,
+    list_backups,
+    resolve_backup_spec,
+    restore_backup,
+)
 from core.workspace_copy import copy_workspace
 from rich.console import Console
 from rich.panel import Panel
@@ -2495,6 +2504,170 @@ def workspace_rename(
         _release_lock(lock_fd)
 
     console.print(f"Renamed workspace {old!r} → {new!r} in {inst!r}.")
+
+
+@workspace_app.command("restore")
+def workspace_restore(
+    inst: str = typer.Argument(..., help="Destination instance name"),
+    ws_name: str = typer.Argument(..., help="Destination workspace name"),
+    from_spec: str | None = typer.Option(
+        None,
+        "--from",
+        help="Backup spec: omit (latest by ws name), <src-inst>/<src-ws>, or <src-inst>/<src-ws>/<ts>",
+    ),
+) -> None:
+    """Restore a backup into a stopped instance as a new workspace."""
+    _require_per_user_state_initialized()
+    _validate_name(ws_name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+    if ws_name in config.workspaces:
+        console.print(
+            f"Workspace {ws_name!r} already exists in {inst!r}. "
+            f"Run `sandbox workspace remove {inst} {ws_name}` first.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        backup = resolve_backup_spec(from_spec, ws_name)
+    except BackupSpecAmbiguousError as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=1) from None
+    except BackupSpecNotFoundError as exc:
+        console.print(str(exc), style="red")
+        raise typer.Exit(code=1) from None
+
+    _require_instance_stopped(inst, instance_dir)
+    _refuse_if_backup_in_progress(inst)
+
+    try:
+        lock_fd = _acquire_state_lock(instance_dir)
+    except BlockingIOError:
+        console.print(
+            "Another sandbox operation is already in progress for this instance.",
+            style="red",
+        )
+        raise typer.Exit(code=1) from None
+
+    try:
+        new_path = restore_backup(backup, inst, ws_name)
+        merged = [
+            WorkspaceSpec(
+                name=name,
+                bootstrap_mode=ws.bootstrap_mode.value,
+                source=ws.source,
+                path=ws.path,
+            )
+            for name, ws in config.workspaces.items()
+        ] + [
+            WorkspaceSpec(
+                name=ws_name,
+                bootstrap_mode="copy",
+                source=str(backup.path),
+                path=str(new_path),
+            )
+        ]
+        mutate_workspaces(instance_dir, merged)
+    finally:
+        _release_lock(lock_fd)
+
+    spec_id = f"{backup.source_instance}/{backup.source_workspace}/{backup.timestamp}"
+    console.print(f"Restored backup {spec_id} → {inst}/{ws_name}.")
+
+
+def _format_age(timestamp: str) -> str:
+    """Format a YYYY-MM-DD-HH-MM-SS timestamp as a coarse age string.
+
+    Used for the ``workspace list`` Backups column. Format follows the
+    convention of "<n>d ago" / "<n>h ago" / "<n>m ago" with the largest
+    sensible unit.
+    """
+    import datetime as _dt
+
+    try:
+        ts = _dt.datetime.strptime(timestamp, "%Y-%m-%d-%H-%M-%S").replace(tzinfo=_dt.UTC)
+    except ValueError:
+        return "unknown"
+    delta = _dt.datetime.now(tz=_dt.UTC) - ts
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = hours // 24
+    return f"{days}d ago"
+
+
+@workspace_app.command("list")
+def workspace_list(
+    inst: str = typer.Argument(..., help="Instance name"),
+    no_backups: bool = typer.Option(False, "--no-backups", help="Suppress the Backups section"),
+    json_out: bool = typer.Option(False, "--json", help="Emit structured JSON output"),
+) -> None:
+    """List live workspaces and (by default) available backups for an instance."""
+    _require_per_user_state_initialized()
+
+    instance_dir = _lookup_instance_or_exit(inst)
+    config = _load_config(instance_dir)
+
+    backups = []
+    if not no_backups:
+        backups = list_backups(BackupFilter(source_instance=inst))
+
+    if json_out:
+        payload: dict[str, list[dict[str, object]]] = {
+            "workspaces": [
+                {
+                    "name": name,
+                    "bootstrap_mode": ws.bootstrap_mode.value,
+                    "path": ws.path,
+                }
+                for name, ws in sorted(config.workspaces.items())
+            ],
+            "backups": [
+                {
+                    "id": f"{b.source_instance}/{b.source_workspace}/{b.timestamp}",
+                    "source_instance": b.source_instance,
+                    "source_workspace": b.source_workspace,
+                    "timestamp": b.timestamp,
+                    "size_bytes": b.size_bytes,
+                }
+                for b in backups
+            ],
+        }
+        console.print_json(_json.dumps(payload))
+        return
+
+    live_table = Table(title=f"Live workspaces ({inst})")
+    live_table.add_column("NAME")
+    live_table.add_column("MODE")
+    live_table.add_column("PATH")
+    for name, ws in sorted(config.workspaces.items()):
+        live_table.add_row(name, ws.bootstrap_mode.value, ws.path)
+    console.print(live_table)
+
+    if no_backups:
+        return
+
+    backup_table = Table(title=f"Backups ({len(backups)})")
+    backup_table.add_column("ID")
+    backup_table.add_column("SIZE")
+    backup_table.add_column("AGE")
+    for b in backups:
+        size_kb = b.size_bytes // 1024
+        size_str = f"{size_kb} KB" if size_kb < 1024 else f"{size_kb // 1024} MB"
+        backup_table.add_row(
+            f"{b.source_instance}/{b.source_workspace}/{b.timestamp}",
+            size_str,
+            _format_age(b.timestamp),
+        )
+    console.print(backup_table)
 
 
 if __name__ == "__main__":

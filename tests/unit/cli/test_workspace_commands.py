@@ -553,3 +553,236 @@ class TestReplaceWorkspacesSection:
         )
         assert "[workspaces.renamed]" in result
         assert "[workspaces.main]" not in result
+
+
+# ── workspace restore ────────────────────────────────────────────────────
+
+
+def _make_backup(
+    inst: str, ws_name: str, ts: str, *, source_instance: str | None = None
+) -> Path:
+    """Create a finalized backup tree under ``<home>/workspaces/_backups/`` and
+    return the backup directory."""
+    src_inst = source_instance or inst
+    target = _user_home() / "workspaces" / "_backups" / src_inst / ws_name / ts
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "data.txt").write_text("payload")
+    (target / ".backup-info.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_instance": src_inst,
+                "source_workspace": ws_name,
+                "source_bootstrap_mode": "empty",
+                "source_path": f"/orig/{src_inst}/{ws_name}",
+                "created_at_utc": "2026-05-07T00:00:00Z",
+                "size_bytes": 7,
+                "file_count": 1,
+                "sandbox_ai_version": "test",
+                "rsync_excludes_applied": [],
+                "stripped_unsafe_links_count": 0,
+                "tooling": {"rsync_version": "test", "rsync_xattrs_supported": True},
+            }
+        )
+    )
+    return target
+
+
+class TestWorkspaceRestore:
+    def test_unknown_dest_instance(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        result = runner.invoke(app, ["workspace", "restore", "missing", "main"])
+        assert result.exit_code == 1
+        assert "no sandbox instance" in result.output.lower()
+
+    def test_dest_workspace_collision_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        result = runner.invoke(app, ["workspace", "restore", "foo", "main"])
+        assert result.exit_code == 1
+        assert "already exists" in result.output
+
+    def test_no_backup_found_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        result = runner.invoke(app, ["workspace", "restore", "foo", "scratch"])
+        assert result.exit_code == 1
+        assert "no backups" in result.output.lower()
+
+    def test_omitted_spec_picks_latest_unique_match(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        instance_dir = _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "scratch", "2026-05-07-00-00-00")
+
+        result = runner.invoke(app, ["workspace", "restore", "foo", "scratch"])
+        assert result.exit_code == 0, result.output
+        restored = _user_home() / "workspaces" / "foo" / "scratch"
+        assert (restored / "data.txt").exists()
+        toml_text = (instance_dir / "sandbox.toml").read_text()
+        assert "[workspaces.scratch]" in toml_text
+        assert 'bootstrap_mode = "copy"' in toml_text
+
+    def test_omitted_spec_ambiguous_refuses(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("a", "scratch", "2026-05-07-00-00-00", source_instance="a")
+        _make_backup("b", "scratch", "2026-05-07-00-00-00", source_instance="b")
+
+        result = runner.invoke(app, ["workspace", "restore", "foo", "scratch"])
+        assert result.exit_code == 1
+        assert "multiple source instances" in result.output.lower()
+
+    def test_fully_qualified_spec(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("oldfoo", "scratch", "2026-05-07-00-00-00", source_instance="oldfoo")
+
+        result = runner.invoke(
+            app,
+            ["workspace", "restore", "foo", "scratch", "--from", "oldfoo/scratch/2026-05-07-00-00-00"],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_invalid_dest_workspace_name(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        result = runner.invoke(app, ["workspace", "restore", "foo", "_bad"])
+        assert result.exit_code != 0
+
+    def test_running_instance_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "scratch", "2026-05-07-00-00-00")
+        with patch("cli.main._warm_check", return_value=True):
+            result = runner.invoke(app, ["workspace", "restore", "foo", "scratch"])
+        assert result.exit_code == 1
+        assert "must be stopped" in result.output
+
+    def test_lock_contention_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "scratch", "2026-05-07-00-00-00")
+        with patch("cli.main._acquire_state_lock", side_effect=BlockingIOError):
+            result = runner.invoke(app, ["workspace", "restore", "foo", "scratch"])
+        assert result.exit_code == 1
+        assert "already in progress" in result.output
+
+    def test_backup_lock_held_rejected(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "scratch", "2026-05-07-00-00-00")
+        with patch("cli.main.is_backup_lock_held", return_value=True):
+            result = runner.invoke(app, ["workspace", "restore", "foo", "scratch"])
+        assert result.exit_code == 1
+        assert "backup in progress" in result.output.lower()
+
+
+# ── workspace list ───────────────────────────────────────────────────────
+
+
+class TestWorkspaceList:
+    def test_unknown_instance(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        result = runner.invoke(app, ["workspace", "list", "missing"])
+        assert result.exit_code == 1
+
+    def test_default_lists_live_and_backups(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "main", "2026-05-07-00-00-00")
+        result = runner.invoke(app, ["workspace", "list", "foo"])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "Live workspaces (foo)" in flat
+        assert "main" in flat
+        assert "Backups" in flat
+        assert "foo/main/2026-05-07-00-00-00" in flat
+
+    def test_no_backups_flag_suppresses_section(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "main", "2026-05-07-00-00-00")
+        result = runner.invoke(app, ["workspace", "list", "foo", "--no-backups"])
+        assert result.exit_code == 0
+        assert "Backups" not in result.output
+
+    def test_json_output_shape(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        _seed_registry(_user_home())
+        _register("foo", workspaces=[("main", "empty", None)])
+        _make_backup("foo", "main", "2026-05-07-00-00-00")
+        result = runner.invoke(app, ["workspace", "list", "foo", "--json"])
+        assert result.exit_code == 0
+        # Rich's print_json may pretty-print; parse the entire output.
+        payload = json.loads(result.output)
+        assert "workspaces" in payload
+        assert payload["workspaces"][0]["name"] == "main"
+        assert payload["workspaces"][0]["bootstrap_mode"] == "empty"
+        assert payload["backups"][0]["id"] == "foo/main/2026-05-07-00-00-00"
+        assert payload["backups"][0]["source_workspace"] == "main"
+
+
+class TestFormatAge:
+    def test_seconds(self) -> None:
+        import datetime as _dt
+
+        from cli.main import _format_age
+
+        ts = (_dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(seconds=30)).strftime("%Y-%m-%d-%H-%M-%S")
+        assert _format_age(ts).endswith("s ago")
+
+    def test_minutes(self) -> None:
+        import datetime as _dt
+
+        from cli.main import _format_age
+
+        ts = (_dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(minutes=30)).strftime("%Y-%m-%d-%H-%M-%S")
+        assert _format_age(ts).endswith("m ago")
+
+    def test_hours(self) -> None:
+        import datetime as _dt
+
+        from cli.main import _format_age
+
+        ts = (_dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(hours=5)).strftime("%Y-%m-%d-%H-%M-%S")
+        assert _format_age(ts).endswith("h ago")
+
+    def test_days(self) -> None:
+        import datetime as _dt
+
+        from cli.main import _format_age
+
+        ts = (_dt.datetime.now(tz=_dt.UTC) - _dt.timedelta(days=10)).strftime("%Y-%m-%d-%H-%M-%S")
+        assert _format_age(ts).endswith("d ago")
+
+    def test_invalid_timestamp(self) -> None:
+        from cli.main import _format_age
+
+        assert _format_age("not-a-timestamp") == "unknown"
