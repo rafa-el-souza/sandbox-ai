@@ -1154,16 +1154,39 @@ def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> 
 
 
 def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> CheckResult:
-    """Warn-only: detect instances whose cache/log leaves are still dev-owned."""
+    """Warn-only: detect cache/log leaves whose ownership is inconsistent with the
+    post-Change-D scaffold-vs-helper boundary.
+
+    Three-state semantics per ``cli-doctor``'s "Pre-Existing Instance Layout
+    Check" requirement:
+
+    - Leaf absent — pass silently. The expected state for a freshly-init'd
+      instance that has not yet been started; the helper recipe creates the
+      leaf on first start (per ``orchestrator-volumes``'s
+      "Scaffold-vs-Helper Boundary").
+    - Leaf present and consumer-subuid-owned — pass silently. The helper
+      recipe ran successfully on a prior start.
+    - Leaf present and not consumer-subuid-owned (typically dev-owned from
+      a pre-Change-D scaffold) — warn with a per-leaf
+      ``rm -rf <leaf>`` remediation. Re-running ``sandbox start`` after the
+      operator removes the affected leaves lets the helper recipe recreate
+      them as claude-sandbox-owned and chown to the consumer subuid.
+
+    The remediation is per-leaf so a mixed-state instance (some leaves
+    helper-owned, some still dev-owned from legacy state) reports only the
+    affected leaves, not the entire inventory.
+    """
     del distro
-    cache_log_leaves = [
-        ("cache/core/.claude",),
-        ("cache/admin/tmux_resurrect",),
-        ("log/core",),
-        ("log/admin",),
-    ]
+    # Cache/log leaf inventory per orchestrator-volumes' "Cache/Log Leaf
+    # Inventory" requirement. Stays in sync with that spec.
+    cache_log_leaves = (
+        "cache/core/.claude",
+        "cache/admin/tmux_resurrect",
+        "log/core",
+        "log/admin",
+    )
     try:
-        host_uid_1000 = host_id_for_in_container(1000, host_user)
+        consumer_subuid = host_id_for_in_container(1000, host_user)
     except NoSubuidRangeError:
         return CheckResult(
             status="skip",
@@ -1173,30 +1196,41 @@ def check_pre_existing_instance_layout(host_user: str, distro: str | None) -> Ch
         )
 
     instances = _scan_instance_dirs()
-    stale: list[str] = []
+    stale_paths: list[str] = []
     for inst in instances:
-        for leaves in cache_log_leaves:
-            for leaf in leaves:
-                leaf_path = os.path.join(inst, leaf)
-                try:
-                    st = os.stat(leaf_path)
-                except OSError:
-                    continue
-                if st.st_uid != host_uid_1000:
-                    stale.append(leaf_path)
-    if stale:
-        sample = ", ".join(stale[:3])
+        for leaf in cache_log_leaves:
+            leaf_path = os.path.join(inst, leaf)
+            try:
+                st = os.stat(leaf_path)
+            except OSError:
+                # Leaf absent — the expected post-Change-D state for an
+                # instance that has not yet been started. Pass silently.
+                continue
+            if st.st_uid == consumer_subuid:
+                # Helper recipe ran successfully on a prior start. Pass silently.
+                continue
+            # Leaf present but not consumer-owned — typically dev-owned from
+            # pre-Change-D scaffold or a partial helper failure. Flag for
+            # operator-targeted remediation.
+            stale_paths.append(leaf_path)
+
+    if stale_paths:
+        sample = ", ".join(stale_paths[:3])
+        remediation = "; ".join(f"rm -rf {p}" for p in stale_paths)
         return CheckResult(
             status="warn",
             name="pre-existing instance layout",
-            detail=f"{len(stale)} cache/log leaf(s) not chowned to consumer subuid: {sample}",
-            remediation="sandbox destroy <instance> && sandbox init",
+            detail=(
+                f"{len(stale_paths)} cache/log leaf(s) present but not "
+                f"consumer-subuid-owned: {sample}"
+            ),
+            remediation=remediation,
             category="Workspace Bridge",
         )
     return CheckResult(
         status="pass",
         name="pre-existing instance layout",
-        detail="no pre-change-4 instance layout detected",
+        detail="no stale cache/log leaf ownership detected",
         category="Workspace Bridge",
     )
 
