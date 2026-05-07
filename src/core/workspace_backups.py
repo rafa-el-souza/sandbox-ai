@@ -173,9 +173,16 @@ def _build_rsync_cmd(
     """Build the backup-recipe rsync invocation.
 
     Flag set per cli-workspace's "Workspace Backup Recipe":
-    ``rsync -aHXS --no-owner --no-group --group=<gid> --chmod=...
+    ``rsync -aHXS --no-owner --no-group --chmod=...
     [<excludes>] <src>/ <dest>.partial/``.
+
+    ``dev_primary_gid`` is retained as a parameter for
+    ``.backup-info.json`` provenance, but is not passed to rsync — rsync 3.x
+    has no ``--group=GID`` flag (the original spec draft was wrong); with
+    ``--no-owner --no-group`` the destination naturally inherits the rsync
+    invoker's identity, which is the dev user.
     """
+    del dev_primary_gid  # provenance only; see docstring
     flags = ["rsync", "-aHS"]
     if use_xattrs:
         flags.append("-X")
@@ -183,7 +190,6 @@ def _build_rsync_cmd(
         [
             "--no-owner",
             "--no-group",
-            f"--group={dev_primary_gid}",
             "--chmod=Du+rwx,Dg-s,Dgo-rwx,Fu+rw,Fgo-rwx,Fa-st",
         ]
     )

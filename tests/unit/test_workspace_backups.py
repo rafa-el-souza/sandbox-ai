@@ -168,9 +168,14 @@ class TestBuildRsyncCmd:
         assert "--safe-links" not in self._build()
         assert "--safe-links" in self._build(safe_links=True)
 
-    def test_dev_primary_group_passthrough(self) -> None:
+    def test_no_group_set_via_rsync_flags(self) -> None:
+        """rsync 3.x has no --group=GID flag; the recipe relies on
+        ``--no-owner --no-group`` plus the chmod recipe instead."""
         cmd = self._build(dev_primary_gid=4242)
-        assert "--group=4242" in cmd
+        # No --group=... flag in any form.
+        assert not any(arg.startswith("--group=") for arg in cmd)
+        assert "--no-group" in cmd
+        assert "--no-owner" in cmd
 
     def test_default_and_extra_excludes_concatenated(self) -> None:
         cmd = wb._build_rsync_cmd(
