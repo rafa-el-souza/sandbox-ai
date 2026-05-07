@@ -295,10 +295,12 @@ class TestWorkspaceRemove:
         from cli.main import app
 
         _seed_registry(_user_home())
-        _register("foo", workspaces=[("main", "empty", None)])
+        # Register two workspaces so the refuse-last-workspace check passes
+        # and we exercise the non-TTY no-flag branch under test.
+        _register("foo", workspaces=[("main", "empty", None), ("scratch", "empty", None)])
         # CliRunner's invoke runs without a TTY by default.
         with patch("cli.main._stdin_is_tty", return_value=False):
-            result = runner.invoke(app, ["workspace", "remove", "foo", "main"])
+            result = runner.invoke(app, ["workspace", "remove", "foo", "scratch"])
         assert result.exit_code == 1
         assert "non-interactive" in result.output.lower()
 
@@ -353,20 +355,12 @@ class TestWorkspaceRemove:
         from cli.main import app
 
         _seed_registry(_user_home())
-        _register("foo", workspaces=[("main", "empty", None)])
+        # Two workspaces so the refuse-last check passes and we reach the warm-check.
+        _register("foo", workspaces=[("main", "empty", None), ("scratch", "empty", None)])
         with patch("cli.main._warm_check", return_value=True):
-            result = runner.invoke(app, ["workspace", "remove", "foo", "main", "--purge"])
+            result = runner.invoke(app, ["workspace", "remove", "foo", "scratch", "--purge"])
         assert result.exit_code == 1
         assert "must be stopped" in result.output
-
-    def test_last_workspace_emits_warning(self, runner: CliRunner) -> None:
-        from cli.main import app
-
-        _seed_registry(_user_home())
-        _register("foo", workspaces=[("main", "empty", None)])
-        result = runner.invoke(app, ["workspace", "remove", "foo", "main", "--purge"])
-        assert result.exit_code == 0, result.output
-        assert "zero workspaces" in result.output
 
     def test_tty_prompt_yes_runs_backup(self, runner: CliRunner) -> None:
         from cli.main import app

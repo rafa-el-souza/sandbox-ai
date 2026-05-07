@@ -2437,10 +2437,15 @@ def workspace_add(
         for ws in new_specs:
             os.makedirs(ws.path, mode=0o700, exist_ok=True)
 
-        # Populate --copy workspaces via the rsync recipe.
+        # Populate --copy workspaces via the rsync recipe, then normalize the
+        # workspace root mode to 0700. rsync `-a` preserves source mode, which
+        # would silently inherit a `0775` (group/world-readable) source onto the
+        # workspace and undermine the privacy default the `--empty` path enforces
+        # via `mkdir(..., mode=0o700)`.
         for ws in new_specs:
             if ws.bootstrap_mode == "copy" and ws.source is not None:
                 copy_workspace(ws.source, ws.path)
+                os.chmod(ws.path, 0o700)
 
         # Mutate sandbox.toml: append new entries to the [workspaces] block.
         merged = [
@@ -2479,6 +2484,21 @@ def workspace_remove(
         )
         raise typer.Exit(code=1)
 
+    # Refuse to leave the instance with zero workspaces. The check precedes
+    # the --backup/--purge branching so the refusal is identical regardless
+    # of mode (no backup directory, no rsync, no rmtree, no sandbox.toml
+    # mutation). Schema's min_length=1 invariant is preserved as a runtime
+    # contract — operators who want a "blank" instance use `sandbox destroy`.
+    if len(config.workspaces) == 1 and ws_name in config.workspaces:
+        console.print(
+            f"Cannot remove the last workspace from {inst!r}. "
+            f"Add a replacement workspace first "
+            f"('sandbox workspace add {inst} --empty <name>' or '--copy <name>=<path>'), "
+            f"or use 'sandbox destroy {inst}' to remove the instance entirely.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
     # Resolve mode in TTY/non-TTY contexts when neither flag is given.
     if not backup and not purge:
         if _stdin_is_tty():
@@ -2501,7 +2521,6 @@ def workspace_remove(
         _refuse_if_backup_in_progress(inst)
 
     target = config.workspaces[ws_name]
-    last_workspace = len(config.workspaces) == 1
 
     if backup:
         # Phase order: state.lock not held → backup acquires backup.lock and
@@ -2545,12 +2564,6 @@ def workspace_remove(
         _release_lock(lock_fd)
 
     console.print(f"Removed workspace {ws_name!r} from {inst!r}.")
-    if last_workspace:
-        console.print(
-            f"WARNING: {inst!r} now has zero workspaces; "
-            f"`sandbox start {inst}` will fail until you add one.",
-            style="yellow",
-        )
 
 
 @workspace_app.command("rename")
