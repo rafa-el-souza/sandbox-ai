@@ -99,8 +99,8 @@ def helper_chown_files(
         f'cp /p/"$f" /tmp/"$f" && '
         f'unlink /p/"$f" && '
         f'cp /tmp/"$f" /p/"$f" && '
-        f'chown {in_container_uid}:{in_container_gid} /p/"$f" && '
-        f'chmod {mode_octal} /p/"$f"; '
+        f'chmod {mode_octal} /p/"$f" && '
+        f'chown {in_container_uid}:{in_container_gid} /p/"$f"; '
         "done"
     )
     cmd = _hardened_docker_run(image, parent, inner)
