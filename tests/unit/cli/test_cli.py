@@ -245,7 +245,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -299,7 +299,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -331,7 +331,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -417,7 +417,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -575,7 +575,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -606,44 +606,56 @@ class TestStartSshKeypairGeneration:
             assert calls[0] == call(str(tmp_path), "auth")
             assert calls[1] == call(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
 
-    def test_grant_helper_cp_files_daemon_read_setfacls_every_existing_recipe_file(
+    def test_grant_post_hydrate_daemon_read_setfacls_helper_cp_and_direct_files(
         self, tmp_path: Path
     ) -> None:
-        """Every file in RO_FILE_RECIPES + EXEC_FILE_RECIPES that exists on
-        disk receives a ``u:<host_user>:r`` named ACL entry; missing files
-        are skipped.
+        """Post-hydrate setfacl pass covers BOTH helper-cp source files
+        AND daemon-read direct files (DAEMON_READ_DIRECT_FILES).
 
-        Cluster 1 structural fix for finding 8.D extended to cover the
-        config/<subdir> + docker/core helper-cp source files. Empirical
-        evidence: post-reorder integration probe failed with
-        ``cp: can't open '/p/Corefile': Permission denied`` because the
-        recursive ``setfacl -R -m u:<host_user>:rwX <config>`` ran in
-        ``_phase_acl_grant`` BEFORE the file existed; new files inherited
-        no named ACL because ``config/<subdir>`` had no default ACL AND
-        because ``write_restricted``'s fchmod-resets-mask defeats any
-        default-ACL-only approach.
+        Iteration 5 of the cluster-1 8.D structural fix. Empirical
+        evidence: iteration 4 made phases 1-8 green but compose-up
+        failed with ``open /…/docker/compose.yml: permission denied``
+        because compose.yml is dev-created (by hydrate's
+        write_restricted) and never transferred via helper-cp; the
+        previous unified pass only iterated RO_FILE_RECIPES +
+        EXEC_FILE_RECIPES.
 
-        The post-hydrate setfacl pass touches every existing
-        helper-cp source file (one per (parent, file) tuple in the
-        recipe tables) and runs as the file owner (``dev``); failures
-        surface as SandboxExecutionError.
+        The DAEMON_READ_DIRECT_FILES inventory is the single source of
+        truth for files the daemon reads in place forever (compose.yml
+        + conditional extras). The post-hydrate pass now setfacls each
+        existing file across both categories; missing files are skipped
+        defensively (covers conditional extras whose presence depends
+        on InstanceConfig component flags).
         """
         from cli.main import (
+            DAEMON_READ_DIRECT_FILES,
             EXEC_FILE_RECIPES,
             RO_FILE_RECIPES,
-            _grant_helper_cp_files_daemon_read,
+            _grant_post_hydrate_daemon_read,
         )
 
         # Materialize every recipe file on disk so the helper iterates
-        # them; leave one absent to verify the skip-if-missing branch.
-        absent: tuple[str, str] | None = None
+        # them; leave one helper-cp source file absent and one daemon-
+        # read direct file absent to verify the skip-if-missing branch
+        # on both code paths.
+        absent_recipe: tuple[str, str] | None = None
         for parent, files, _uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
             parent_abs = tmp_path / parent
             parent_abs.mkdir(parents=True, exist_ok=True)
             for fname in files:
-                if absent is None:
-                    absent = (parent, fname)
-                    continue  # leave this one missing
+                if absent_recipe is None:
+                    absent_recipe = (parent, fname)
+                    continue
+                (parent_abs / fname).write_text("dummy")
+
+        absent_direct: tuple[str, str] | None = None
+        for parent, files in DAEMON_READ_DIRECT_FILES:
+            parent_abs = tmp_path / parent
+            parent_abs.mkdir(parents=True, exist_ok=True)
+            for fname in files:
+                if absent_direct is None:
+                    absent_direct = (parent, fname)
+                    continue
                 (parent_abs / fname).write_text("dummy")
 
         recorded: list[list[str]] = []
@@ -653,30 +665,43 @@ class TestStartSshKeypairGeneration:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         with patch("cli.main.subprocess.run", side_effect=_record):
-            _grant_helper_cp_files_daemon_read(str(tmp_path), "claude-sandbox")
+            _grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
 
-        assert absent is not None
-        absent_path = str(tmp_path / absent[0] / absent[1])
         recorded_paths = {args[-1] for args in recorded}
-        assert absent_path not in recorded_paths, (
-            f"missing file should be skipped, got setfacl on {absent_path}"
-        )
 
-        # Each existing recipe file got a setfacl -m u:claude-sandbox:r.
-        expected_count = sum(
-            1 for parent, files, _u, _m in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES) for _f in files
-        ) - 1  # minus the absent one
-        assert len(recorded) == expected_count, (
-            f"expected {expected_count} setfacl invocations, got {len(recorded)}: {recorded!r}"
-        )
+        # Both absent files were skipped on their respective code paths.
+        assert absent_recipe is not None and absent_direct is not None
+        absent_recipe_path = str(tmp_path / absent_recipe[0] / absent_recipe[1])
+        absent_direct_path = str(tmp_path / absent_direct[0] / absent_direct[1])
+        assert absent_recipe_path not in recorded_paths
+        assert absent_direct_path not in recorded_paths
+
+        # All present helper-cp source files setfacl'd.
+        for parent, files, _u, _m in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+            for fname in files:
+                p = str(tmp_path / parent / fname)
+                if (parent, fname) == absent_recipe:
+                    continue
+                assert p in recorded_paths, f"missing setfacl on helper-cp source {p}"
+
+        # All present daemon-read direct files setfacl'd — including
+        # compose.yml (the iteration-5 regression).
+        for parent, files in DAEMON_READ_DIRECT_FILES:
+            for fname in files:
+                p = str(tmp_path / parent / fname)
+                if (parent, fname) == absent_direct:
+                    continue
+                assert p in recorded_paths, f"missing setfacl on daemon-read direct {p}"
+
+        # Every invocation has the canonical shape.
         for args in recorded:
             assert args[:3] == ["setfacl", "-m", "u:claude-sandbox:r"], args
 
-    def test_grant_helper_cp_files_daemon_read_propagates_setfacl_failure(
+    def test_grant_post_hydrate_daemon_read_propagates_setfacl_failure(
         self, tmp_path: Path
     ) -> None:
         """A failed setfacl surfaces as SandboxExecutionError (no silent skip)."""
-        from cli.main import _grant_helper_cp_files_daemon_read
+        from cli.main import _grant_post_hydrate_daemon_read
         from core.exceptions import SandboxExecutionError
 
         secrets_dir = tmp_path / "secrets"
@@ -688,22 +713,42 @@ class TestStartSshKeypairGeneration:
 
         with (
             patch("cli.main.subprocess.run", side_effect=_fail),
-            pytest.raises(SandboxExecutionError, match="grant daemon read on helper-cp source"),
+            pytest.raises(SandboxExecutionError, match="grant daemon read on post-hydrate target"),
         ):
-            _grant_helper_cp_files_daemon_read(str(tmp_path), "claude-sandbox")
+            _grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
 
-    def test_phase_grant_helper_cp_files_daemon_read_is_thin_wrapper(self, tmp_path: Path) -> None:
-        """`_phase_grant_helper_cp_files_daemon_read` is a thin wrapper.
+    def test_phase_grant_post_hydrate_daemon_read_is_thin_wrapper(self, tmp_path: Path) -> None:
+        """`_phase_grant_post_hydrate_daemon_read` is a thin wrapper.
 
         Asserts the start command's phase entry-point exists and forwards
         to the helper. The phase delegates so the start command can swap
         in a no-op for tests that patch the wrapper.
         """
-        from cli.main import _phase_grant_helper_cp_files_daemon_read
+        from cli.main import _phase_grant_post_hydrate_daemon_read
 
-        with patch("cli.main._grant_helper_cp_files_daemon_read") as mock_helper:
-            _phase_grant_helper_cp_files_daemon_read(str(tmp_path), "claude-sandbox")
+        with patch("cli.main._grant_post_hydrate_daemon_read") as mock_helper:
+            _phase_grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
             mock_helper.assert_called_once_with(str(tmp_path), "claude-sandbox")
+
+    def test_daemon_read_direct_files_includes_compose_and_extras(self) -> None:
+        """DAEMON_READ_DIRECT_FILES is the canonical source-of-truth for the
+        post-hydrate setfacl pass on dev-created files the daemon reads in
+        place (no helper-cp ownership transfer).
+
+        The constant's contents must match what ``_build_compose_files``
+        produces (compose.yml unconditionally + conditional db-postgres /
+        mcp-firecrawl extras). If a new compose ``--file`` path is added
+        anywhere in cli.main, this list must be extended in lockstep.
+        """
+        from cli.main import DAEMON_READ_DIRECT_FILES
+
+        flat = {(parent, fname) for parent, files in DAEMON_READ_DIRECT_FILES for fname in files}
+        assert ("docker", "compose.yml") in flat, (
+            "compose.yml is the canonical daemon-read direct file; "
+            "removing it re-breaks `compose -f compose.yml up`"
+        )
+        assert ("docker/extras", "db-postgres.yml") in flat
+        assert ("docker/extras", "mcp-firecrawl.yml") in flat
 
     def test_phase_ipc_setup_not_in_start(self) -> None:
         """_phase_ipc_setup function no longer exists in cli.main."""
@@ -752,7 +797,7 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -783,7 +828,7 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -4227,7 +4272,7 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant", side_effect=track_acl),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=track_ownership),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
@@ -4264,7 +4309,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
@@ -4356,7 +4401,7 @@ class TestStartErrorHandlerACLCleanup:
             ),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),

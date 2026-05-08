@@ -399,7 +399,7 @@ def _phase_credentials(
     Returns proxy password. Per-file daemon read access on the freshly-
     written secrets (and on the helper-cp ro/exec source files written
     by :func:`_phase_hydrate`) is granted by
-    :func:`_phase_grant_helper_cp_files_daemon_read` AFTER hydrate, in
+    :func:`_phase_grant_post_hydrate_daemon_read` AFTER hydrate, in
     one unified pass. The unified pass exists because
     ``core.hydration.write_restricted`` does ``os.open(O_CREAT, mode)``
     followed by ``os.fchmod(mode)``, which zero the ACL ``mask::`` to
@@ -420,64 +420,92 @@ def _phase_credentials(
     return password
 
 
-def _grant_helper_cp_files_daemon_read(instance_dir: str, host_user: str) -> None:
-    """Add a ``u:<host_user>:r`` named ACL entry to every helper-cp source file.
+def _post_hydrate_daemon_read_targets(instance_dir: str) -> list[str]:
+    """Return absolute paths the post-hydrate setfacl pass targets.
 
-    Iterates ``RO_FILE_RECIPES`` and ``EXEC_FILE_RECIPES`` — the
-    authoritative set of files the helper-cp+chown phase will copy
-    through a daemon-managed bind mount. For each file that exists on
-    disk, runs ``setfacl -m u:<host_user>:r <path>`` AS THE FILE OWNER
-    (``dev``); setfacl recomputes ``mask::`` to cover the named entry,
-    restoring effective daemon read access against
-    ``core.hydration.write_restricted``'s fchmod-zeroed mask.
+    Aggregates two distinct categories of dev-created files the daemon
+    needs explicit DAC read on (cap_dac_override does NOT bypass DAC for
+    dev-owned, userns-unmapped inodes — see "Helper-CP Source Files
+    Daemon-Readable Pre-Recipe" rationale):
 
-    Why this is necessary even with cap_dac_override on the helper
-    container: in rootless docker the daemon runs as ``host_user`` (not
-    ``dev``); cap_dac_override held inside a user namespace bypasses
-    DAC only for files whose owner uid/gid is mapped INSIDE that
-    namespace. Source files written by ``dev`` (host uid 1000, NOT
-    mapped in the daemon's userns) appear as the overflow uid to
-    in-container kernel checks; cap_dac_override does NOT apply, and
-    the daemon needs an explicit DAC grant — provided here by the named
-    ACL entry. Post-helper-cp the destination files are owned by the
-    consumer's subuid (mapped in the userns), so cap_dac_override
-    handles runtime reads without further ACL.
+    1. **Helper-cp source files** (``RO_FILE_RECIPES`` + ``EXEC_FILE_RECIPES``):
+       transferred to a consumer subuid by the helper-cp recipe. The
+       per-file ``setfacl -m u:<host_user>:r`` covers the daemon's read
+       through the bind mount during the recipe's ``cp /p/<file>`` step.
+    2. **Daemon-read direct files** (``DAEMON_READ_DIRECT_FILES``):
+       NEVER transferred — the daemon reads them in place forever. The
+       canonical case is ``docker compose -f <compose.yml>`` and its
+       conditional extras (``db-postgres.yml``, ``mcp-firecrawl.yml``);
+       paths are derived from the same single-source-of-truth that
+       ``_build_compose_files`` uses.
 
-    Files listed in the recipes that do not yet exist on disk are
-    skipped (defensive — covers unscaffolded conditional mounts).
-    setfacl-as-owner does not require escalated privilege; failures are
-    surfaced as ``SandboxExecutionError`` with the offending path.
+    Both categories converge in one post-hydrate setfacl pass because
+    ``core.hydration.write_restricted`` zeros ``mask::`` via
+    ``os.fchmod(mode)`` (which would mask out any inherited named
+    entry); the per-file setfacl recomputes the mask so the named entry
+    stays effective.
+
+    Returns paths only for files that exist on disk (defensive — the
+    compose extras are present only when ``InstanceConfig`` enables the
+    matching component).
     """
+    paths: list[str] = []
     for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
         parent_abs = os.path.join(instance_dir, parent)
         for fname in files:
             path = os.path.join(parent_abs, fname)
-            if not os.path.isfile(path):
-                continue
-            try:
-                subprocess.run(
-                    ["setfacl", "-m", f"u:{host_user}:r", path],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
-                raise SandboxExecutionError(
-                    f"Failed to grant daemon read on helper-cp source {path}: {stderr}"
-                ) from exc
+            if os.path.isfile(path):
+                paths.append(path)
+    for parent, files in DAEMON_READ_DIRECT_FILES:
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            path = os.path.join(parent_abs, fname)
+            if os.path.isfile(path):
+                paths.append(path)
+    return paths
 
 
-def _phase_grant_helper_cp_files_daemon_read(instance_dir: str, host_user: str) -> None:
-    """Phase 5b: setfacl-as-owner pass on all helper-cp source files.
+def _grant_post_hydrate_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Add a ``u:<host_user>:r`` named ACL entry to every post-hydrate target.
 
-    Thin wrapper over :func:`_grant_helper_cp_files_daemon_read` that
-    runs after `_phase_hydrate` and `_phase_credentials` so every file
-    the helper-cp recipe will read has been written by then. Closes the
+    See :func:`_post_hydrate_daemon_read_targets` for the file inventory
+    (helper-cp source files + daemon-read direct files like
+    ``docker/compose.yml``). Runs ``setfacl -m u:<host_user>:r <path>``
+    AS THE FILE OWNER (``dev``) on each target; setfacl-as-owner does
+    not require escalated privilege. ``setfacl`` recomputes ``mask::``
+    to cover the named entry, restoring effective daemon read access
+    against ``core.hydration.write_restricted``'s fchmod-zeroed mask.
+
+    Failures surface as ``SandboxExecutionError`` mentioning the
+    offending path and the phrase "grant daemon read on post-hydrate
+    target"; the failure is not silently swallowed.
+    """
+    for path in _post_hydrate_daemon_read_targets(instance_dir):
+        try:
+            subprocess.run(
+                ["setfacl", "-m", f"u:{host_user}:r", path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+            raise SandboxExecutionError(
+                f"Failed to grant daemon read on post-hydrate target {path}: {stderr}"
+            ) from exc
+
+
+def _phase_grant_post_hydrate_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Phase 5b: setfacl-as-owner pass on all post-hydrate daemon-read targets.
+
+    Thin wrapper over :func:`_grant_post_hydrate_daemon_read` that runs
+    after `_phase_hydrate` and `_phase_credentials` so every file the
+    daemon will read (helper-cp source files AND direct-read files like
+    ``docker/compose.yml``) has been written by then. Closes the
     "Helper-CP Source Files Daemon-Readable Pre-Recipe" requirement
     under orchestrator-volumes.
     """
-    _grant_helper_cp_files_daemon_read(instance_dir, host_user)
+    _grant_post_hydrate_daemon_read(instance_dir, host_user)
 
 
 def _phase_hydrate(
@@ -614,7 +642,7 @@ def _acl_grant_plan(
     # write on file CONTENTS):
     #   - dir-level ``rwx`` (this entry) covers BUG-B (provisioning write
     #     on the parent — needed by ``mv``).
-    #   - per-file ``r`` (granted by ``_phase_grant_helper_cp_files_daemon_read``
+    #   - per-file ``r`` (granted by ``_phase_grant_post_hydrate_daemon_read``
     #     post-hydrate, iterating ``RO_FILE_RECIPES + EXEC_FILE_RECIPES``)
     #     covers BUG-A (runtime read on each secret's contents). The
     #     per-file pass also defeats ``write_restricted``'s ``fchmod``
@@ -922,6 +950,43 @@ Distinct from ro config / secrets recipes because the entrypoint scripts need
 the exec bit and a tighter access set. Consumed alongside RO_FILE_RECIPES by
 :func:`_helper_cp_chown_plan` so the helper-cp+chown phase processes both
 tables in a single pass.
+"""
+
+
+DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Files the daemon (host_user) reads in-place from the orchestrator-owned
+    # tree, with NO ownership transfer through helper-cp. Distinct from
+    # RO_FILE_RECIPES / EXEC_FILE_RECIPES (which transfer ownership to a
+    # consumer subuid via helper-cp) — these files stay dev-owned forever
+    # and the daemon needs explicit DAC read via a named ACL entry because
+    # cap_dac_override does not bypass DAC for dev-owned (host-uid-1000,
+    # unmapped-in-userns) inodes (per "Helper-CP Source Files
+    # Daemon-Readable Pre-Recipe" rationale).
+    #
+    # Each tuple: ``(parent_relative_to_instance, files)``. The
+    # post-hydrate setfacl pass iterates and runs
+    # ``setfacl -m u:<host_user>:r <path>`` on each existing file
+    # (skip-if-missing for the conditional compose extras whose presence
+    # depends on InstanceConfig component flags).
+    #
+    # Consumed by ``docker compose -f <path> ...`` invocations whose
+    # canonical path-set is built by ``_build_compose_files`` and used by
+    # ``_phase_compose_up``, ``_compose_down``, and the ``docker compose
+    # ps`` callsites in ``_container_status`` / ``_render_status_detailed``.
+    ("docker", ("compose.yml",)),
+    # Conditional extras — present iff the instance enables the component.
+    # Listed unconditionally; the post-hydrate phase skips entries whose
+    # files do not exist on disk. Same skip-if-missing semantics as
+    # ``_grant_post_hydrate_daemon_read`` for `RO_FILE_RECIPES`.
+    ("docker/extras", ("db-postgres.yml", "mcp-firecrawl.yml")),
+)
+"""Authoritative inventory of dev-created files the daemon reads in place.
+
+Single source of truth for the post-hydrate daemon-read setfacl pass on
+files that are NOT subject to helper-cp ownership transfer. The compose
+extras (`db-postgres.yml`, `mcp-firecrawl.yml`) are conditional on
+``InstanceConfig`` component flags — the post-hydrate phase iterates and
+skips non-existent paths defensively.
 """
 
 
@@ -1388,14 +1453,22 @@ def _dry_run_pipeline(inst: str) -> None:
     for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
-    # Helper-cp source files setfacl-as-owner pre-recipe — covers the
-    # write_restricted fchmod-mask-reset bug. Per-file setfacl on each
-    # helper-cp source file (config/<subdir>/* + secrets/* + docker/core/*).
+    # Post-hydrate setfacl-as-owner pass — covers the write_restricted
+    # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
+    # file (RO_FILE_RECIPES + EXEC_FILE_RECIPES) AND each daemon-read
+    # direct file (DAEMON_READ_DIRECT_FILES — compose.yml + extras).
     for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
         parent_abs = os.path.join(instance_dir, parent)
         for fname in files:
             console.print(
                 f"    $ setfacl -m u:{host_user}:r {parent_abs}/{fname}  # helper-cp source",
+                style="dim",
+            )
+    for parent, files in DAEMON_READ_DIRECT_FILES:
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            console.print(
+                f"    $ setfacl -m u:{host_user}:r {parent_abs}/{fname}  # daemon-read direct",
                 style="dim",
             )
 
@@ -1923,13 +1996,14 @@ def start(
 
         # Phase 5b: setfacl-as-owner the helper-cp source files (config/<subdir>
         # files written by hydrate + secrets/ files written by credentials)
-        # so the daemon can read them through the bind mount during the
-        # helper-cp recipe's `cp /p/<file>` step. Required because
-        # `write_restricted`'s fchmod zeroes ACL mask, masking out any
-        # inherited named entry; per-file setfacl recomputes mask. Closes
-        # the "Helper-CP Source Files Daemon-Readable Pre-Recipe" requirement.
-        _phase_grant_helper_cp_files_daemon_read(instance_dir, host_user)
-        console.print("✓ ACL — helper-cp source files daemon-readable")
+        # AND every dev-created file the daemon reads in place (compose.yml
+        # + conditional extras per DAEMON_READ_DIRECT_FILES). Required
+        # because `write_restricted`'s fchmod zeroes ACL mask, masking
+        # out any inherited named entry; per-file setfacl recomputes
+        # mask. Closes the "Helper-CP Source Files Daemon-Readable
+        # Pre-Recipe" requirement.
+        _phase_grant_post_hydrate_daemon_read(instance_dir, host_user)
+        console.print("✓ ACL — post-hydrate daemon-readable files")
 
         # Phase 6a: helper-mkdir+chown for cache/log leaves
         _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
