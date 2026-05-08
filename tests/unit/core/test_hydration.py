@@ -2780,6 +2780,34 @@ class TestDockerfileUserContext:
         )
         assert user_between, "USER ${USERNAME} must appear between chmod and ENTRYPOINT"
 
+    def test_admin_entrypoint_owner_only_mode_and_consumer_owned(self) -> None:
+        """Admin Dockerfile: entrypoint.sh installed at mode 0500 with COPY --chown=human:human.
+
+        Cluster 1 regression for finding 8.L (orchestrator-volumes'
+        "Executable-Script File Recipes" requirement). The consumer is
+        the sole reader/exec; nobody else has any access. A regression
+        to ``a+x`` / ``a+rx`` / world-readable mode would re-widen the
+        access set and fail this assertion.
+        """
+        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
+        copy_line = next(
+            (line for line in lines if line.strip().startswith("COPY") and "entrypoint.sh" in line),
+            None,
+        )
+        chmod_line = next(
+            (line for line in lines if "chmod" in line and "entrypoint.sh" in line),
+            None,
+        )
+        assert copy_line is not None, "Admin Dockerfile missing COPY entrypoint.sh"
+        assert chmod_line is not None, "Admin Dockerfile missing chmod entrypoint.sh"
+        assert "--chown=human:human" in copy_line, (
+            f"COPY entrypoint.sh must use --chown=human:human (got: {copy_line.strip()})"
+        )
+        assert "0500" in chmod_line, f"chmod entrypoint.sh must use 0500 (got: {chmod_line.strip()})"
+        # Negative assertions: legacy modes must NOT appear.
+        assert "a+x" not in chmod_line, f"chmod entrypoint.sh must NOT use a+x: {chmod_line.strip()}"
+        assert "a+rx" not in chmod_line, f"chmod entrypoint.sh must NOT use a+rx: {chmod_line.strip()}"
+
     def test_claude_local_bin_path(self) -> None:
         """Dockerfile.core.wolfi uses ${HOME_DIR}/.local/bin/claude (not .claude/local/claude)."""
         lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")

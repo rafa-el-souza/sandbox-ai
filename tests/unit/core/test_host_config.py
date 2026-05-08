@@ -437,6 +437,34 @@ class TestWorkspaceBridgeGid:
             workspace_bridge_gid(host)
 
 
+class TestHostUserPrimaryGid:
+    """host_user_primary_gid resolves the daemon's primary gid via passwd.
+
+    Used by cluster 1's structural fix for finding 8.D (the
+    "Secrets Group-Readable to Daemon" requirement) so secrets can be
+    chgrp'd to the daemon at credential-phase write time.
+    """
+
+    def test_resolves_primary_gid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import host_user_primary_gid
+
+        class _Pwd:
+            pw_gid = 991
+
+        monkeypatch.setattr("core.host_config.pwd.getpwnam", lambda _n: _Pwd())
+        assert host_user_primary_gid("claude-sandbox") == 991
+
+    def test_missing_user_raises_keyerror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import host_user_primary_gid
+
+        def _raise(_n: str) -> None:
+            raise KeyError("claude-sandbox")
+
+        monkeypatch.setattr("core.host_config.pwd.getpwnam", _raise)
+        with pytest.raises(KeyError):
+            host_user_primary_gid("claude-sandbox")
+
+
 class TestAutodetectRecommendation:
     """autodetect_workspace_bridge_gid_recommendation."""
 

@@ -596,6 +596,114 @@ class TestStartSshKeypairGeneration:
             assert calls[0] == call(str(tmp_path), "auth")
             assert calls[1] == call(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
 
+    def test_phase_credentials_makes_secrets_daemon_group_readable(self, tmp_path: Path) -> None:
+        """When host_user is supplied, freshly-written secrets are chgrp'd to daemon and chmod'd to 0640.
+
+        Cluster 1 structural fix for finding 8.D: replaces the recursive
+        ``rwX`` ACL widening on ``secrets/`` with chgrp + chmod at
+        credential-phase write-time.
+        """
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+        # Pre-create representative secret files (mimics what generate_ssh_keypair
+        # would emit) so the chgrp/chmod loop has something to act on.
+        for name in ("authorized_keys", "ipc_host_key"):
+            (secrets_dir / name).write_text("dummy")
+
+        chowns: list[tuple[str, int, int]] = []
+        chmods: list[tuple[str, int]] = []
+
+        def _record_chown(path: str, uid: int, gid: int, **_kw: object) -> None:
+            chowns.append((path, uid, gid))
+
+        def _record_chmod(path: str, mode: int) -> None:
+            chmods.append((path, mode))
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.host_user_primary_gid", return_value=991) as mock_resolver,
+            patch("cli.main.os.chown", side_effect=_record_chown),
+            patch("cli.main.os.chmod", side_effect=_record_chmod),
+        ):
+            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3", host_user="claude-sandbox")
+        mock_resolver.assert_called_once_with("claude-sandbox")
+        # Both secret files received chgrp -1:991 and chmod 0o640.
+        chowned_paths = {p for p, _uid, gid in chowns if gid == 991}
+        assert str(secrets_dir / "authorized_keys") in chowned_paths
+        assert str(secrets_dir / "ipc_host_key") in chowned_paths
+        chmod_targets = {(p, m) for p, m in chmods}
+        assert (str(secrets_dir / "authorized_keys"), 0o640) in chmod_targets
+        assert (str(secrets_dir / "ipc_host_key"), 0o640) in chmod_targets
+
+    def test_phase_credentials_skips_daemon_readability_when_host_user_none(self, tmp_path: Path) -> None:
+        """Back-compat: ``host_user=None`` skips the daemon-readability transform."""
+        from cli.main import _phase_credentials
+
+        proxy_dir = tmp_path / "config" / "proxy"
+        proxy_dir.mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir(parents=True)
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+            patch("cli.main.host_user_primary_gid") as mock_resolver,
+        ):
+            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3")
+        mock_resolver.assert_not_called()
+
+    def test_make_secrets_daemon_group_readable_no_secrets_dir(self, tmp_path: Path) -> None:
+        """No-op when ``secrets/`` does not exist."""
+        from cli.main import _make_secrets_daemon_group_readable
+
+        with patch("cli.main.host_user_primary_gid", return_value=991):
+            # Should not raise — instance dir without secrets/ is tolerated.
+            _make_secrets_daemon_group_readable(str(tmp_path), "claude-sandbox")
+
+    def test_make_secrets_daemon_group_readable_skips_subdirs(self, tmp_path: Path) -> None:
+        """Subdirectories under ``secrets/`` are skipped (defensive — none exist today)."""
+        from cli.main import _make_secrets_daemon_group_readable
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "subdir").mkdir()
+        (secrets_dir / "file").write_text("k")
+
+        chowns: list[tuple[str, int]] = []
+
+        def _record_chown(path: str, _uid: int, gid: int, **_kw: object) -> None:
+            chowns.append((path, gid))
+
+        with (
+            patch("cli.main.host_user_primary_gid", return_value=991),
+            patch("cli.main.os.chown", side_effect=_record_chown),
+            patch("cli.main.os.chmod"),
+        ):
+            _make_secrets_daemon_group_readable(str(tmp_path), "claude-sandbox")
+        # Only the file was chowned; the subdirectory was skipped.
+        assert chowns == [(str(secrets_dir / "file"), 991)]
+
+    def test_make_secrets_daemon_group_readable_propagates_oserror(self, tmp_path: Path) -> None:
+        """A failed chown/chmod surfaces as SandboxExecutionError (no silent skip)."""
+        from cli.main import _make_secrets_daemon_group_readable
+        from core.exceptions import SandboxExecutionError
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "ipc_ssh_key").write_text("k")
+
+        with (
+            patch("cli.main.host_user_primary_gid", return_value=991),
+            patch("cli.main.os.chown", side_effect=OSError("EPERM")),
+            pytest.raises(SandboxExecutionError, match="daemon-group-readable"),
+        ):
+            _make_secrets_daemon_group_readable(str(tmp_path), "claude-sandbox")
+
     def test_phase_ipc_setup_not_in_start(self) -> None:
         """_phase_ipc_setup function no longer exists in cli.main."""
         import cli.main
@@ -3424,26 +3532,52 @@ class TestACLPlanAsymmetry:
                 f"helper-recipe parent {parent_rel} missing default-ACL daemon entry"
             )
 
-    def test_workspace_shared_group_plan_includes_owning_group_rwx(self) -> None:
-        """Cluster 1 regression for finding 8.N: workspace shared-group plan emits g::rwx.
+    def test_workspace_shared_group_plan_omits_explicit_g_rwx_setfacl(self) -> None:
+        """Cluster 1 structural fix for finding 8.N: post-reorder, no explicit g::rwx setfacl.
 
         Spec source: orchestrator-volumes' "Workspace Shared-Group Phase
-        Ordering" requirement. The temp fix (commit 6f1831e) inserts a
-        ``setfacl -m g::rwx`` step into the workspace shared-group recipe
-        because the prior ``chmod 2770`` after Phase-5 named-ACL grant only
-        updates the mask (not the group:: entry), leaving group::--- in
-        place and breaking bridge-group access. The structural fix (run
-        the shared-group recipe BEFORE Phase-5) remains an Open Question
-        in design.md; this test pins the temp's emitted-step until the
-        reorder lands.
+        Ordering" requirement. The structural fix runs the shared-group
+        recipe BEFORE Phase-5 named-ACL grants, so ``chmod 2770`` lands
+        on a non-extended-ACL inode and the ``group::`` entry propagates
+        from the mode bits without a separate setfacl call. Any
+        ``setfacl -m g::rwx`` step in the plan would indicate the temp
+        workaround has resurfaced.
         """
         from cli.main import _workspace_shared_group_plan
 
         plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
         ops = [op for op, _ in plan]
-        assert any("setfacl -m g::rwx" in op for op in ops), (
-            "workspace shared-group plan must emit owning-group rwx step"
+        assert not any("setfacl -m g::rwx" in op for op in ops), (
+            "workspace shared-group plan must NOT emit explicit g::rwx setfacl post-reorder"
         )
+
+    def test_acl_grant_plan_secrets_dir_is_not_recursive_rwx(self, tmp_path: Path) -> None:
+        """Cluster 1 structural fix for finding 8.D: secrets/ is dir-level rX only.
+
+        Spec source: orchestrator-volumes' new "Secrets Group-Readable to
+        Daemon" requirement. The temp's recursive ``rwX`` widening on
+        ``secrets/`` is replaced by chgrp <daemon-gid> + chmod 0640 on
+        each secret file at credential-phase time; the named-ACL grant
+        on the dir is non-recursive ``rX`` (traverse only).
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        secrets_entries = [
+            (args, desc) for args, desc in plan if "secrets dir traverse" in desc
+        ]
+        assert secrets_entries, "secrets dir traverse entry missing"
+        args, _desc = secrets_entries[0]
+        joined = " ".join(args)
+        assert "-R" not in args, f"secrets/ grant must NOT be recursive: {joined}"
+        assert "rwX" not in joined, f"secrets/ grant must NOT carry rwX: {joined}"
+        assert "u:sandbox:rX" in joined, f"secrets/ grant must be u:<daemon>:rX: {joined}"
 
     def test_exec_file_recipes_table_emits_mode_0500(self) -> None:
         """Cluster 1 regression for findings 8.K + 8.L: EXEC_FILE_RECIPES sibling table.
@@ -3474,6 +3608,52 @@ class TestACLPlanAsymmetry:
         assert ("docker/core", ("entrypoint.sh",)) not in ro_parents, (
             "entrypoint.sh must live in EXEC_FILE_RECIPES, not RO_FILE_RECIPES"
         )
+
+    def test_workspace_shared_group_runs_before_named_acl_grant(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Cluster 1 phase-order regression for finding 8.N.
+
+        Spec source: orchestrator-volumes' "Workspace Shared-Group Phase
+        Ordering" requirement and the MODIFIED "Phase Order Contract for
+        Ownership-Sensitive Phases". The shared-group recipe MUST be
+        invoked before ``_phase_acl_grant`` so ``chmod 2770`` lands on a
+        non-extended-ACL inode and the ``group::`` entry propagates from
+        the mode bits.
+        """
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        call_order: list[str] = []
+
+        def _record_workspace_shared(*_a: object, **_kw: object) -> None:
+            call_order.append("workspace_shared_group")
+
+        def _record_acl_grant(*_a: object, **_kw: object) -> None:
+            call_order.append("acl_grant")
+            # Abort early so we don't have to mock all subsequent phases.
+            raise SandboxExecutionError("stop after acl_grant")
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_workspace_shared_group", side_effect=_record_workspace_shared),
+            patch("cli.main._phase_acl_grant", side_effect=_record_acl_grant),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 1
+        # Workspace shared-group ran first; acl_grant ran second.
+        assert call_order == ["workspace_shared_group", "acl_grant"], call_order
 
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
@@ -4058,6 +4238,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=SandboxExecutionError("chown failed")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
@@ -4083,6 +4264,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_acl_grant"),
             patch(
                 "cli.main._phase_helper_mkdir_chown_cache_log",
@@ -4095,10 +4277,14 @@ class TestStartErrorHandlerACLCleanup:
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
-    def test_workspace_shared_group_failure_triggers_revoke(
+    def test_workspace_shared_group_failure_does_not_trigger_revoke(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """Section 10: workspace shared-group failure → ACL cleanup runs."""
+        """Section 10 + cluster-1 reorder: workspace shared-group runs BEFORE Phase-5
+        named-ACL grants per the "Workspace Shared-Group Phase Ordering" requirement,
+        so a workspace failure precedes ``acl_granted=True`` and no ACLs exist
+        to revoke. Test inverts the prior post-Phase-5-only assumption.
+        """
         inst = "myproject"
         _register_instance(inst)
 
@@ -4113,19 +4299,19 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
-            patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch(
                 "cli.main._phase_workspace_shared_group",
                 side_effect=SandboxExecutionError("workspace setup failed"),
             ),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
-            mock_revoke.assert_called_once()
+            mock_revoke.assert_not_called()
 
     def test_ipam_failure_does_not_trigger_revoke(self, runner: CliRunner) -> None:
         """WHEN IPAM fails (pre-Phase-5), THEN _revoke_acls is NOT called."""

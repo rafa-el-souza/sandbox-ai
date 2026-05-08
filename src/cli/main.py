@@ -43,6 +43,7 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
+    host_user_primary_gid,
     machinectl_cmd,
     sandbox_ai_home,
     state_lock_path,
@@ -393,11 +394,20 @@ def _phase_ipam(inst: str) -> int:
 def _phase_credentials(
     instance_dir: str,
     core_ipc_ip: str,
+    host_user: str | None = None,
 ) -> str:
     """Phase 3: Generate proxy credentials and SSH keypairs.
 
     Returns proxy password. Credential ownership matching is handled
     separately by _phase_credential_ownership() after ACL grants.
+
+    When ``host_user`` is provided, freshly-written secrets under
+    ``secrets/`` are chgrp'd to the daemon user's primary gid and chmod'd
+    to mode 0640 so the gofer (running as ``host_user``) can read them
+    via group permission. The dir-level named-ACL on ``secrets/`` stays
+    at non-recursive ``rX`` traverse (the
+    "Secrets Group-Readable to Daemon" requirement under
+    orchestrator-volumes).
     """
     password = generate_credential()
     hashed = hash_proxy_password(password)
@@ -409,7 +419,35 @@ def _phase_credentials(
     generate_ssh_keypair(instance_dir, "auth")
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
 
+    if host_user is not None:
+        _make_secrets_daemon_group_readable(instance_dir, host_user)
+
     return password
+
+
+def _make_secrets_daemon_group_readable(instance_dir: str, host_user: str) -> None:
+    """Chgrp secrets/* to the daemon's primary gid and chmod to 0640.
+
+    The gofer reads files on the daemon's behalf using traditional DAC
+    (no CAP_DAC_OVERRIDE on the host side); group=daemon + mode 0640
+    gives it read access without exposing the secrets to "other" and
+    without requiring a recursive ACL widening on the parent dir.
+    """
+    daemon_gid = host_user_primary_gid(host_user)
+    secrets_dir = os.path.join(instance_dir, "secrets")
+    if not os.path.isdir(secrets_dir):
+        return
+    for entry in os.listdir(secrets_dir):
+        path = os.path.join(secrets_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.chown(path, -1, daemon_gid, follow_symlinks=False)
+            os.chmod(path, 0o640)
+        except OSError as exc:
+            raise SandboxExecutionError(
+                f"Failed to make secret {path} daemon-group-readable: {exc}"
+            ) from exc
 
 
 def _phase_hydrate(
@@ -473,7 +511,7 @@ def _acl_grant_plan(
     - docker/: ``rX`` recursive
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
-    - secrets/: dir-level ``rX`` traverse
+    - secrets/: dir-level ``rX`` traverse (per-file daemon read via group=daemon + mode 0640)
     - per-workspace named-ACL: effective ``rwx`` plus default with named entry on each ``workspace.path``
 
     Cache/log Option-B grants are intentionally absent — replaced by the
@@ -535,11 +573,14 @@ def _acl_grant_plan(
         )
     )
 
-    # secrets/ — dir-level traverse only (per-file ownership handled by helper-cp+chown)
+    # secrets/ — dir-level traverse only. Per-file daemon read access comes
+    # from chgrp <daemon-gid> + chmod 0640 applied during _phase_credentials
+    # (the "Secrets Group-Readable to Daemon" requirement). Recursive widening
+    # is NOT used here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rwX", secrets_dir],
+            ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
             f"secrets dir traverse: {secrets_dir}",
         )
     )
@@ -924,7 +965,6 @@ def _workspace_shared_group_plan(
     return [
         (f"chgrp {bridge_gid}", workspace_path),
         ("chmod 2770", workspace_path),
-        ("setfacl -m g::rwx", workspace_path),
         (f"setfacl -m u:{host_user}:rwx", workspace_path),
         (f"setfacl -d -m {default_entry}", workspace_path),
     ]
@@ -968,7 +1008,6 @@ def _phase_workspace_shared_group(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     for args, label in (
-        (["setfacl", "-m", "g::rwx", workspace_path], "owning-group rwx"),
         (["setfacl", "-m", f"u:{host_user}:rwx", workspace_path], "effective"),
         (["setfacl", "-d", "-m", default_entry, workspace_path], "default"),
     ):
@@ -1267,9 +1306,20 @@ def _dry_run_pipeline(inst: str) -> None:
     # ── Command preview ──────────────────────────────────────────────────
     console.print("\n  [bold]Commands that would execute:[/bold]")
 
-    # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     dev_user = os.environ.get("USER")
     workspace_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+
+    # Workspace shared-group plan — runs BEFORE Phase-5 named-ACL grants per
+    # the "Workspace Shared-Group Phase Ordering" requirement.
+    try:
+        bridge_gid = workspace_bridge_gid(host_settings)
+        for ws_path in workspace_paths:
+            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
+                console.print(f"    workspace: {op} {target}", style="dim")
+    except SandboxExecutionError as exc:
+        console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
+
+    # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
@@ -1289,15 +1339,6 @@ def _dry_run_pipeline(inst: str) -> None:
             )
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
-
-    # Workspace shared-group plan — fanned out per workspace
-    try:
-        bridge_gid = workspace_bridge_gid(host_settings)
-        for ws_path in workspace_paths:
-            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
-                console.print(f"    workspace: {op} {target}", style="dim")
-    except SandboxExecutionError as exc:
-        console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # Compose up — derived from the same plan helper _phase_compose_up uses
     machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
@@ -1757,10 +1798,11 @@ def start(
         base_index = _phase_ipam(inst)
         console.print("✓ IPAM — network allocation complete")
 
-        # Phase 3: Credentials (generation only)
+        # Phase 3: Credentials (generation + daemon-group readability for secrets)
         proxy_password = _phase_credentials(
             instance_dir,
             core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
+            host_user=host_user,
         )
         console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 
@@ -1778,10 +1820,18 @@ def start(
             raise typer.Exit(code=1) from None
         console.print("✓ Hydration — templates rendered")
 
-        # Phase 5: ACL grants (Pattern A) — fan out across [workspaces].
-        acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
+        # Phase 5a: workspace shared-group recipe — runs BEFORE Phase-5 named-ACL
+        # grants so chmod 2770 lands on a non-extended-ACL inode and group::
+        # propagates correctly (the "Workspace Shared-Group Phase Ordering"
+        # requirement; closes the bug class fixed by temp commit 6f1831e).
         dev_user = os.environ.get("USER")
         ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+        for ws_path in ws_paths:
+            _phase_workspace_shared_group(ws_path, host_settings, dev_user)
+        console.print("✓ Workspace — shared-group recipe applied")
+
+        # Phase 5b: ACL grants (Pattern A) — fan out across [workspaces].
+        acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
@@ -1792,11 +1842,6 @@ def start(
         # Phase 5d: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
-
-        # Phase 5e: workspace shared-group recipe — per-workspace fan-out.
-        for ws_path in ws_paths:
-            _phase_workspace_shared_group(ws_path, host_settings, dev_user)
-        console.print("✓ Workspace — shared-group recipe applied")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):

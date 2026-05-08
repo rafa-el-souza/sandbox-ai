@@ -319,6 +319,20 @@ def workspace_bridge_gid(host: HostSettings) -> int:
     return gid
 
 
+def host_user_primary_gid(host_user: str) -> int:
+    """Resolve ``host_user``'s primary gid via the host passwd database.
+
+    Used by the credential phase to chgrp secrets to the daemon's primary
+    group at write time so the gofer (running as ``host_user``) can read
+    them via group permission, eliminating the need for a recursive
+    ``rwX`` ACL widening on ``secrets/``.
+
+    Raises:
+        KeyError: ``host_user`` does not exist on the host.
+    """
+    return pwd.getpwnam(host_user).pw_gid
+
+
 def autodetect_workspace_bridge_gid_recommendation(host_user: str, in_container_min: int = 1000) -> int:
     """Pick the lowest available host gid suitable for the workspace bridge group.
 
