@@ -529,7 +529,7 @@ def _acl_grant_plan(
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
-            ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
+            ["setfacl", "-R", "-m", f"u:{host_user}:rwX", secrets_dir],
             f"secrets dir traverse: {secrets_dir}",
         )
     )
