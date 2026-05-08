@@ -2470,6 +2470,13 @@ def destroy(
             except SandboxExecutionError as e:
                 console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
 
+            # Recipe-symmetry partner of phase 5d (mirrors stop's Change I):
+            # unlink helper-cp-managed files before the ACL revoke walks them.
+            # Without this, the recursive setfacl in _revoke_acls EPERMs on
+            # every consumer-owned file (~16 warnings on a normal destroy).
+            for w in _phase_stop_unlink_consumer_files(instance_dir, host_user):
+                console.print(f"⚠ {w}", style="yellow")
+
             # D6: ACL revocation — per-workspace fan-out, fault-isolated.
             ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
             for w in _revoke_acls(instance_dir, host_user, ws_paths):

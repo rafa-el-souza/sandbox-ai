@@ -993,6 +993,7 @@ class TestDestroyConfirmation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -1030,6 +1031,7 @@ class TestDestroyConfirmation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -1070,6 +1072,7 @@ class TestDestroyIPAMAndRegistryCleanup:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
@@ -1098,6 +1101,7 @@ class TestDestroyRmtree:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -4622,6 +4626,7 @@ class TestDestroyFaultIsolation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down", side_effect=SandboxExecutionError("timeout")),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -4644,6 +4649,7 @@ class TestDestroyFaultIsolation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree", side_effect=FileNotFoundError("gone")),
         ):
@@ -4924,6 +4930,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=["ACL warning: test"]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
@@ -4942,6 +4949,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.IPAMLedger.release", side_effect=RuntimeError("corrupt")),
@@ -4962,6 +4970,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.InstanceRegistry.remove", side_effect=KeyError("not found")),
@@ -5025,6 +5034,7 @@ class TestDestroyBackupFlows:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.create_backup") as mock_backup,
@@ -5085,6 +5095,7 @@ class TestDestroyBackupFlows:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.create_backup") as mock_backup,
@@ -5097,6 +5108,33 @@ class TestDestroyBackupFlows:
             # confirm called once per workspace (myproject has "main").
             assert mock_confirm.call_count == 1
             assert mock_backup.call_count == 1
+
+
+class TestDestroyUnlinksConsumerFiles:
+    """destroy invokes the same unlink-before-revoke phase as stop (Change L)."""
+
+    def test_destroy_emits_unlink_warnings(self, runner: CliRunner) -> None:
+        """destroy emits warnings returned by _phase_stop_unlink_consumer_files."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch(
+                "cli.main._phase_stop_unlink_consumer_files",
+                return_value=["unlink /x: stale lock"],
+            ),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+        ):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+            assert result.exit_code == 0
+            assert "unlink /x: stale lock" in result.output
 
 
 class TestDestroyLockContention:
