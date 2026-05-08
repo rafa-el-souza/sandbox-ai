@@ -671,6 +671,25 @@ def _acl_grant_plan(
         )
     )
 
+    # Helper-cp parents — default ACL `u:<host_user>:r` so newly-created
+    # replacement files (helper recipe re-creates each ro file from a tmpfs
+    # scratch via cp+unlink+cp) inherit a daemon-readable named entry.
+    for rel in (
+        "config/coredns",
+        "config/dnsdist",
+        "config/proxy",
+        "config/core",
+        "config/admin",
+        "secrets",
+    ):
+        parent_dir = os.path.join(instance_dir, rel)
+        plan.append(
+            (
+                ["setfacl", "-d", "-m", f"u:{host_user}:r", parent_dir],
+                f"helper-cp parent default ACL: {parent_dir}",
+            )
+        )
+
     # Helper-recipe parents (cache/log) — grant <daemon>:rwx + matching default
     # so the helper-mkdir+chown phase can create leaves inside them.
     for rel in ("cache/core", "cache/admin", "log"):
