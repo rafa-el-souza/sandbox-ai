@@ -245,6 +245,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
@@ -298,6 +299,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -329,6 +331,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -414,6 +417,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -571,6 +575,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -601,74 +606,45 @@ class TestStartSshKeypairGeneration:
             assert calls[0] == call(str(tmp_path), "auth")
             assert calls[1] == call(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
 
-    def test_phase_credentials_grants_daemon_read_via_setfacl_as_owner(self, tmp_path: Path) -> None:
-        """Freshly-written secrets receive a ``u:<host_user>:r`` named ACL entry.
+    def test_grant_helper_cp_files_daemon_read_setfacls_every_existing_recipe_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Every file in RO_FILE_RECIPES + EXEC_FILE_RECIPES that exists on
+        disk receives a ``u:<host_user>:r`` named ACL entry; missing files
+        are skipped.
 
-        Cluster 1 structural fix for finding 8.D, alternative #1: replaces
-        the rejected chgrp-to-daemon-gid approach (broken — orchestrator
-        runs as ``dev`` which is intentionally NOT a member of the
-        daemon's primary group) with a per-file ``setfacl -m u:<host_user>:r``
-        run as the file owner. setfacl-as-owner is permitted without
-        privilege.
+        Cluster 1 structural fix for finding 8.D extended to cover the
+        config/<subdir> + docker/core helper-cp source files. Empirical
+        evidence: post-reorder integration probe failed with
+        ``cp: can't open '/p/Corefile': Permission denied`` because the
+        recursive ``setfacl -R -m u:<host_user>:rwX <config>`` ran in
+        ``_phase_acl_grant`` BEFORE the file existed; new files inherited
+        no named ACL because ``config/<subdir>`` had no default ACL AND
+        because ``write_restricted``'s fchmod-resets-mask defeats any
+        default-ACL-only approach.
 
-        The default ACL on ``secrets/`` set by ``_phase_acl_grant`` covers
-        future write paths; this per-file step exists because the current
-        ``write_restricted`` write path does fchmod(0o600) which zeroes
-        the ACL ``mask::`` and would mask out an inherited named entry.
+        The post-hydrate setfacl pass touches every existing
+        helper-cp source file (one per (parent, file) tuple in the
+        recipe tables) and runs as the file owner (``dev``); failures
+        surface as SandboxExecutionError.
         """
-        from cli.main import _phase_credentials
+        from cli.main import (
+            EXEC_FILE_RECIPES,
+            RO_FILE_RECIPES,
+            _grant_helper_cp_files_daemon_read,
+        )
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-        # Pre-create representative secret files (mimics what
-        # ``generate_ssh_keypair`` would emit).
-        for name in ("authorized_keys", "ipc_host_key"):
-            (secrets_dir / name).write_text("dummy")
-
-        recorded: list[list[str]] = []
-
-        def _record(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
-            recorded.append(list(args))
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-
-        with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.subprocess.run", side_effect=_record),
-        ):
-            _phase_credentials(
-                str(tmp_path),
-                core_ipc_ip="10.100.6.3",
-                host_user="claude-sandbox",
-            )
-
-        per_file = {tuple(args) for args in recorded}
-        for fname in ("authorized_keys", "ipc_host_key"):
-            expected = (
-                "setfacl",
-                "-m",
-                "u:claude-sandbox:r",
-                str(secrets_dir / fname),
-            )
-            assert expected in per_file, f"missing setfacl for {fname}: got {recorded!r}"
-
-    def test_grant_secrets_daemon_read_no_secrets_dir(self, tmp_path: Path) -> None:
-        """No-op when ``secrets/`` does not exist."""
-        from cli.main import _grant_secrets_daemon_read
-
-        # Should not raise — instance dir without secrets/ is tolerated.
-        _grant_secrets_daemon_read(str(tmp_path), "claude-sandbox")
-
-    def test_grant_secrets_daemon_read_skips_subdirs(self, tmp_path: Path) -> None:
-        """Subdirectories under ``secrets/`` are skipped (defensive)."""
-        from cli.main import _grant_secrets_daemon_read
-
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir()
-        (secrets_dir / "subdir").mkdir()
-        (secrets_dir / "file").write_text("k")
+        # Materialize every recipe file on disk so the helper iterates
+        # them; leave one absent to verify the skip-if-missing branch.
+        absent: tuple[str, str] | None = None
+        for parent, files, _uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+            parent_abs = tmp_path / parent
+            parent_abs.mkdir(parents=True, exist_ok=True)
+            for fname in files:
+                if absent is None:
+                    absent = (parent, fname)
+                    continue  # leave this one missing
+                (parent_abs / fname).write_text("dummy")
 
         recorded: list[list[str]] = []
 
@@ -677,13 +653,30 @@ class TestStartSshKeypairGeneration:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         with patch("cli.main.subprocess.run", side_effect=_record):
-            _grant_secrets_daemon_read(str(tmp_path), "claude-sandbox")
-        # Only the file targeted; subdirectory skipped.
-        assert recorded == [["setfacl", "-m", "u:claude-sandbox:r", str(secrets_dir / "file")]]
+            _grant_helper_cp_files_daemon_read(str(tmp_path), "claude-sandbox")
 
-    def test_grant_secrets_daemon_read_propagates_setfacl_failure(self, tmp_path: Path) -> None:
+        assert absent is not None
+        absent_path = str(tmp_path / absent[0] / absent[1])
+        recorded_paths = {args[-1] for args in recorded}
+        assert absent_path not in recorded_paths, (
+            f"missing file should be skipped, got setfacl on {absent_path}"
+        )
+
+        # Each existing recipe file got a setfacl -m u:claude-sandbox:r.
+        expected_count = sum(
+            1 for parent, files, _u, _m in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES) for _f in files
+        ) - 1  # minus the absent one
+        assert len(recorded) == expected_count, (
+            f"expected {expected_count} setfacl invocations, got {len(recorded)}: {recorded!r}"
+        )
+        for args in recorded:
+            assert args[:3] == ["setfacl", "-m", "u:claude-sandbox:r"], args
+
+    def test_grant_helper_cp_files_daemon_read_propagates_setfacl_failure(
+        self, tmp_path: Path
+    ) -> None:
         """A failed setfacl surfaces as SandboxExecutionError (no silent skip)."""
-        from cli.main import _grant_secrets_daemon_read
+        from cli.main import _grant_helper_cp_files_daemon_read
         from core.exceptions import SandboxExecutionError
 
         secrets_dir = tmp_path / "secrets"
@@ -695,9 +688,22 @@ class TestStartSshKeypairGeneration:
 
         with (
             patch("cli.main.subprocess.run", side_effect=_fail),
-            pytest.raises(SandboxExecutionError, match="grant daemon read"),
+            pytest.raises(SandboxExecutionError, match="grant daemon read on helper-cp source"),
         ):
-            _grant_secrets_daemon_read(str(tmp_path), "claude-sandbox")
+            _grant_helper_cp_files_daemon_read(str(tmp_path), "claude-sandbox")
+
+    def test_phase_grant_helper_cp_files_daemon_read_is_thin_wrapper(self, tmp_path: Path) -> None:
+        """`_phase_grant_helper_cp_files_daemon_read` is a thin wrapper.
+
+        Asserts the start command's phase entry-point exists and forwards
+        to the helper. The phase delegates so the start command can swap
+        in a no-op for tests that patch the wrapper.
+        """
+        from cli.main import _phase_grant_helper_cp_files_daemon_read
+
+        with patch("cli.main._grant_helper_cp_files_daemon_read") as mock_helper:
+            _phase_grant_helper_cp_files_daemon_read(str(tmp_path), "claude-sandbox")
+            mock_helper.assert_called_once_with(str(tmp_path), "claude-sandbox")
 
     def test_phase_ipc_setup_not_in_start(self) -> None:
         """_phase_ipc_setup function no longer exists in cli.main."""
@@ -746,6 +752,7 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -776,6 +783,7 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -4184,6 +4192,7 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant", side_effect=track_acl),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=track_ownership),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
@@ -4220,6 +4229,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
@@ -4311,6 +4321,7 @@ class TestStartErrorHandlerACLCleanup:
             ),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_helper_cp_files_daemon_read"),
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),

@@ -393,27 +393,19 @@ def _phase_ipam(inst: str) -> int:
 def _phase_credentials(
     instance_dir: str,
     core_ipc_ip: str,
-    host_user: str | None = None,
 ) -> str:
     """Phase 3: Generate proxy credentials and SSH keypairs.
 
-    Returns proxy password. The named-ACL grant on ``secrets/`` (dir-level
-    ``rX`` traverse plus a default entry ``u:<host_user>:r``) is
-    established by :func:`_phase_acl_grant` BEFORE this phase runs.
-    However, ``core.crypto.generate_ssh_keypair`` writes via
-    ``write_restricted`` which performs ``os.open(O_CREAT, 0o600)`` +
-    ``os.fchmod(0o600)``; both steps zero the ACL ``mask::`` to ``---``,
-    which would mask out the inherited named entry. We therefore call
-    ``setfacl -m u:<host_user>:r`` on each freshly-written secret to
-    add the named entry with a recomputed mask. ``setfacl`` is
-    permitted to the file *owner* (``dev``) without any escalated
-    privilege — preserving the intent of finding 8.D alternative #1
-    (no chgrp-to-foreign-group, no host_user_primary_gid resolver).
-
-    The named entry remains effective until the helper-cp recipe later
-    chowns each secret to the consumer subuid; at that point inheritance
-    from ``secrets/``'s default ACL re-establishes daemon read access on
-    the post-helper-cp inode.
+    Returns proxy password. Per-file daemon read access on the freshly-
+    written secrets (and on the helper-cp ro/exec source files written
+    by :func:`_phase_hydrate`) is granted by
+    :func:`_phase_grant_helper_cp_files_daemon_read` AFTER hydrate, in
+    one unified pass. The unified pass exists because
+    ``core.hydration.write_restricted`` does ``os.open(O_CREAT, mode)``
+    followed by ``os.fchmod(mode)``, which zero the ACL ``mask::`` to
+    match the new mode's group bits and would mask out any inherited
+    named entry; setfacl-as-owner post-write recomputes the mask so the
+    daemon's ``u:<host_user>:r`` named entry stays effective.
     """
     password = generate_credential()
     hashed = hash_proxy_password(password)
@@ -425,47 +417,67 @@ def _phase_credentials(
     generate_ssh_keypair(instance_dir, "auth")
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
 
-    if host_user is not None:
-        _grant_secrets_daemon_read(instance_dir, host_user)
-
     return password
 
 
-def _grant_secrets_daemon_read(instance_dir: str, host_user: str) -> None:
-    """Add a ``u:<host_user>:r`` named ACL entry to each freshly-written secret.
+def _grant_helper_cp_files_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Add a ``u:<host_user>:r`` named ACL entry to every helper-cp source file.
 
-    Runs as the file owner (``dev``) — no escalated privilege required;
-    contrast with the rejected chgrp-to-daemon-gid approach which fails
-    EPERM because ``dev`` is intentionally not a member of the daemon's
-    primary group (the privilege boundary is load-bearing).
+    Iterates ``RO_FILE_RECIPES`` and ``EXEC_FILE_RECIPES`` — the
+    authoritative set of files the helper-cp+chown phase will copy
+    through a daemon-managed bind mount. For each file that exists on
+    disk, runs ``setfacl -m u:<host_user>:r <path>`` AS THE FILE OWNER
+    (``dev``); setfacl recomputes ``mask::`` to cover the named entry,
+    restoring effective daemon read access against
+    ``core.hydration.write_restricted``'s fchmod-zeroed mask.
 
-    The dir-level default ACL on ``secrets/`` (set by
-    :func:`_acl_grant_plan`) covers any future write path that does NOT
-    chmod-after-create; this per-file step covers the current
-    ``write_restricted`` write path which fchmod-resets the mask.
+    Why this is necessary even with cap_dac_override on the helper
+    container: in rootless docker the daemon runs as ``host_user`` (not
+    ``dev``); cap_dac_override held inside a user namespace bypasses
+    DAC only for files whose owner uid/gid is mapped INSIDE that
+    namespace. Source files written by ``dev`` (host uid 1000, NOT
+    mapped in the daemon's userns) appear as the overflow uid to
+    in-container kernel checks; cap_dac_override does NOT apply, and
+    the daemon needs an explicit DAC grant — provided here by the named
+    ACL entry. Post-helper-cp the destination files are owned by the
+    consumer's subuid (mapped in the userns), so cap_dac_override
+    handles runtime reads without further ACL.
 
-    Subdirectories under ``secrets/`` are skipped (defensive — none
-    exist in the current schema).
+    Files listed in the recipes that do not yet exist on disk are
+    skipped (defensive — covers unscaffolded conditional mounts).
+    setfacl-as-owner does not require escalated privilege; failures are
+    surfaced as ``SandboxExecutionError`` with the offending path.
     """
-    secrets_dir = os.path.join(instance_dir, "secrets")
-    if not os.path.isdir(secrets_dir):
-        return
-    for entry in os.listdir(secrets_dir):
-        path = os.path.join(secrets_dir, entry)
-        if not os.path.isfile(path):
-            continue
-        try:
-            subprocess.run(
-                ["setfacl", "-m", f"u:{host_user}:r", path],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
-            raise SandboxExecutionError(
-                f"Failed to grant daemon read on secret {path}: {stderr}"
-            ) from exc
+    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            path = os.path.join(parent_abs, fname)
+            if not os.path.isfile(path):
+                continue
+            try:
+                subprocess.run(
+                    ["setfacl", "-m", f"u:{host_user}:r", path],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+                raise SandboxExecutionError(
+                    f"Failed to grant daemon read on helper-cp source {path}: {stderr}"
+                ) from exc
+
+
+def _phase_grant_helper_cp_files_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Phase 5b: setfacl-as-owner pass on all helper-cp source files.
+
+    Thin wrapper over :func:`_grant_helper_cp_files_daemon_read` that
+    runs after `_phase_hydrate` and `_phase_credentials` so every file
+    the helper-cp recipe will read has been written by then. Closes the
+    "Helper-CP Source Files Daemon-Readable Pre-Recipe" requirement
+    under orchestrator-volumes.
+    """
+    _grant_helper_cp_files_daemon_read(instance_dir, host_user)
 
 
 def _phase_hydrate(
@@ -594,12 +606,15 @@ def _acl_grant_plan(
     )
 
     # secrets/ — dir-level traverse + default ACL granting the daemon a
-    # named ``r`` entry on every file created inside. _phase_credentials
-    # runs AFTER this phase (per Phase Order Contract), so each
-    # generate_ssh_keypair() open(..., O_CREAT) inherits the named entry
-    # automatically (the "Secrets Inherit Daemon-Readable Default ACL"
-    # requirement; closes finding 8.D alternative #1). Recursive widening
-    # is NOT used here.
+    # named ``r`` entry on inherited child entries. _phase_credentials
+    # runs AFTER this phase (per Phase Order Contract); per-file daemon
+    # read access on freshly-written secrets is granted post-hydrate by
+    # `_phase_grant_helper_cp_files_daemon_read` (because
+    # ``core.hydration.write_restricted``'s `os.fchmod` zeroes the mask
+    # and would mask out an inherited named entry). The default ACL is
+    # belt-and-suspenders / future-proof for any write path that
+    # ultimately leaves an extended ACL intact. Recursive widening is
+    # NOT used here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
@@ -1365,6 +1380,17 @@ def _dry_run_pipeline(inst: str) -> None:
     for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
 
+    # Helper-cp source files setfacl-as-owner pre-recipe — covers the
+    # write_restricted fchmod-mask-reset bug. Per-file setfacl on each
+    # helper-cp source file (config/<subdir>/* + secrets/* + docker/core/*).
+    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            console.print(
+                f"    $ setfacl -m u:{host_user}:r {parent_abs}/{fname}  # helper-cp source",
+                style="dim",
+            )
+
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
     try:
         for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
@@ -1871,18 +1897,14 @@ def start(
         _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
-        # Phase 4: Credentials. The default ACL on `secrets/` (set in Phase 3b
-        # above) covers future write paths; for the current
-        # write_restricted-based path we additionally setfacl-as-owner each
-        # freshly-written secret to defeat write_restricted's fchmod mask reset.
+        # Phase 4: Credentials.
         proxy_password = _phase_credentials(
             instance_dir,
             core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
-            host_user=host_user,
         )
         console.print("✓ Credentials — proxy auth + SSH keypairs configured")
 
-        # Phase 5: Hydration. WorkspaceBridgeGroupMissingError is caught by
+        # Phase 5a: Hydration. WorkspaceBridgeGroupMissingError is caught by
         # _phase_workspace_shared_group above (it runs first); when ws_paths
         # is empty AND hydrate raises, the outer SandboxExecutionError
         # handler catches it (WorkspaceBridgeGroupMissingError subclass) and
@@ -1890,6 +1912,16 @@ def start(
         # for the empty-workspaces edge case.
         _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
         console.print("✓ Hydration — templates rendered")
+
+        # Phase 5b: setfacl-as-owner the helper-cp source files (config/<subdir>
+        # files written by hydrate + secrets/ files written by credentials)
+        # so the daemon can read them through the bind mount during the
+        # helper-cp recipe's `cp /p/<file>` step. Required because
+        # `write_restricted`'s fchmod zeroes ACL mask, masking out any
+        # inherited named entry; per-file setfacl recomputes mask. Closes
+        # the "Helper-CP Source Files Daemon-Readable Pre-Recipe" requirement.
+        _phase_grant_helper_cp_files_daemon_read(instance_dir, host_user)
+        console.print("✓ ACL — helper-cp source files daemon-readable")
 
         # Phase 6a: helper-mkdir+chown for cache/log leaves
         _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
