@@ -249,6 +249,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
@@ -335,11 +336,72 @@ class TestStartHappyPath:
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             assert "handing over" in out or "handover" in out or "admin shell" in out
+
+    def test_start_skips_handover_when_no_tty(self, runner: CliRunner) -> None:
+        """Non-TTY stdin: skip the interactive handover and print attach hint."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=False),
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 0
+            mock_handover.assert_not_called()
+            assert "attach with" in result.output.lower()
+
+    def test_start_no_handover_flag_skips_handover(self, runner: CliRunner) -> None:
+        """--no-handover: skip the interactive handover even with a TTY."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(app, ["start", inst, "--no-handover"])
+            assert result.exit_code == 0
+            mock_handover.assert_not_called()
+            assert "attach with" in result.output.lower()
 
 
 class TestStartSecretCompletenessGate:

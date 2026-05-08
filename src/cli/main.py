@@ -2064,6 +2064,11 @@ def init(
 def start(
     inst: str = typer.Argument(..., help="Instance name"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
+    no_handover: bool = typer.Option(
+        False,
+        "--no-handover",
+        help="Skip the interactive admin-shell handover; print attach hint and return.",
+    ),
 ) -> None:
     """Start the sandbox."""
     _require_per_user_state_initialized()
@@ -2243,6 +2248,10 @@ def start(
     # Phase 7: Handover — release lock first
     if lock_fd is not None:
         _release_lock(lock_fd)
+
+    if no_handover or not _stdin_is_tty():
+        console.print(f"Sandbox '{inst}' started. Attach with: sandbox attach {inst}")
+        return
 
     console.print("→ Handing over to admin shell")
     _phase_handover(project_name, host_user, config.instance.warmup_prompt, auth)
