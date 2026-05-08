@@ -1432,6 +1432,26 @@ def _phase_handover(
 # ─── Compose down / ACL revoke ──────────────────────────────────────────────
 
 
+def _ensure_env_file_readable_by_daemon(instance_dir: str, host_user: str) -> None:
+    """Best-effort idempotent re-grant of `u:<host_user>:r` on `.sandbox.env`.
+
+    Used by destroy to avoid a `permission denied` warning during compose-down
+    when a prior `sandbox stop` revoked the daemon's ACL on the env file.
+    Missing file or setfacl failure is silently ignored.
+    """
+    env_file = os.path.join(instance_dir, ".sandbox.env")
+    if not os.path.exists(env_file):
+        return
+    try:
+        subprocess.run(
+            ["setfacl", "-m", f"u:{host_user}:r", env_file],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return
+
+
 def _compose_down(
     instance_dir: str,
     project_name: str,
@@ -2394,6 +2414,11 @@ def destroy(
 
     with acquire_backup_lock(inst):
         _release_lock(gate_lock_fd)
+
+        # Re-grant daemon read on .sandbox.env in case a prior `sandbox stop`
+        # revoked it; compose-down needs to read --env-file as the daemon.
+        # Idempotent and best-effort; missing file or no-ACL-support is a no-op.
+        _ensure_env_file_readable_by_daemon(instance_dir, host_user)
 
         # D3: compose down (REVERSIBLE).
         try:

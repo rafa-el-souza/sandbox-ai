@@ -4810,6 +4810,37 @@ class TestStopACLWarningEmission:
             assert "ACL revoke warning" in result.output
 
 
+class TestEnsureEnvFileReadableByDaemon:
+    """destroy preflight that re-grants daemon read on .sandbox.env."""
+
+    def test_skips_when_env_file_missing(self, tmp_path: Path) -> None:
+        from cli.main import _ensure_env_file_readable_by_daemon
+
+        with patch("cli.main.subprocess.run") as mock_run:
+            _ensure_env_file_readable_by_daemon(str(tmp_path), "claude-sandbox")
+        mock_run.assert_not_called()
+
+    def test_invokes_setfacl_when_file_present(self, tmp_path: Path) -> None:
+        from cli.main import _ensure_env_file_readable_by_daemon
+
+        env_file = tmp_path / ".sandbox.env"
+        env_file.write_text("CORE_X=1")
+        with patch("cli.main.subprocess.run") as mock_run:
+            _ensure_env_file_readable_by_daemon(str(tmp_path), "claude-sandbox")
+        mock_run.assert_called_once()
+        argv = mock_run.call_args[0][0]
+        assert argv[0] == "setfacl"
+        assert "u:claude-sandbox:r" in argv
+
+    def test_swallows_oserror(self, tmp_path: Path) -> None:
+        from cli.main import _ensure_env_file_readable_by_daemon
+
+        env_file = tmp_path / ".sandbox.env"
+        env_file.write_text("CORE_X=1")
+        with patch("cli.main.subprocess.run", side_effect=OSError("setfacl missing")):
+            _ensure_env_file_readable_by_daemon(str(tmp_path), "claude-sandbox")
+
+
 class TestStopUnlinkConsumerFiles:
     """Recipe-symmetry partner of helper-cp+chown phase: stop unlinks consumer files."""
 
