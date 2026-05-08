@@ -475,15 +475,29 @@ The doctor SHALL include a warn-only check `secrets_hydrated_restrictively` that
 
 ### Requirement: Pre-Existing Instance Layout Check
 
-The doctor SHALL include a warn-only check `pre_existing_instance_layout` that detects instance directories whose cache/log leaves are still in the pre-change-4 layout (dev-owned with named-ACL `u:host_user:rwX` rather than subuid-owned). The check SHALL recommend `sandbox destroy <instance> && sandbox init` for any such instance.
+The doctor SHALL include a warn-only check `pre_existing_instance_layout` that detects instance directories whose cache/log leaves are in a state inconsistent with the post-Change-D scaffold-vs-helper boundary (per `orchestrator-volumes`'s "Scaffold-vs-Helper Boundary" requirement). The check SHALL distinguish three states for each leaf in the "Cache/Log Leaf Inventory":
 
-#### Scenario: Instance in new layout passes
-- **WHEN** the doctor inspects an instance whose cache/log leaves are subuid-owned
+- **Leaf absent** — pass. The expected state for an instance that has been init'd but never started (the helper recipe has not run yet). No misconfiguration to report.
+- **Leaf present and consumer-subuid-owned** — pass. The helper recipe ran successfully on a prior start; on-disk ownership matches the contract.
+- **Leaf present and dev-owned** — warn. Either a legacy instance from before the scaffold-vs-helper boundary was enforced (pre-Change-D scaffold pre-created the leaf as `dev:dev`), or a misconfiguration where the helper recipe failed silently on a prior start. The check SHALL recommend `rm -rf <home>/instances/<inst>/<leaf-path>` for each affected leaf; running the remediation lets the next `sandbox start` succeed because the helper recipe creates the leaf fresh as claude-sandbox-owned.
+
+The check uses `core.doctor._scan_instance_dirs` to iterate registered instances (per the "Doctor Instance Scan Uses Registry" requirement).
+
+#### Scenario: Just-init'd instance passes (leaf absent)
+- **WHEN** the doctor inspects a freshly-init'd instance whose cache/log leaves do not yet exist on disk
+- **THEN** the check passes for that instance with no warnings (the absent state is the expected scaffold-vs-helper boundary outcome)
+
+#### Scenario: Started instance with consumer-owned leaves passes
+- **WHEN** the doctor inspects an instance whose cache/log leaves are present and consumer-subuid-owned
 - **THEN** the check passes for that instance
 
-#### Scenario: Instance in pre-change-4 layout warns
-- **WHEN** the doctor inspects an instance whose `cache/core/.claude` (or any cache/log leaf) is owned by `dev` rather than the consumer subuid
-- **THEN** the check emits a warning identifying the instance and recommending `sandbox destroy <instance-name> && sandbox init`
+#### Scenario: Legacy / misconfigured instance with dev-owned leaves warns
+- **WHEN** the doctor inspects an instance whose `cache/core/.claude` (or any cache/log leaf per `orchestrator-volumes`'s "Cache/Log Leaf Inventory") exists on disk and is owned by `dev` rather than the consumer subuid
+- **THEN** the check emits a warning identifying the instance and the affected leaf path(s), and recommending `rm -rf <home>/instances/<instance-name>/<leaf-path>` for each affected leaf. After remediation, the next `sandbox start` runs the helper recipe, which creates the leaf as claude-sandbox-owned and chowns to consumer subuid.
+
+#### Scenario: Mixed-state instance reports per-leaf
+- **WHEN** the doctor inspects an instance where one cache/log leaf is consumer-owned (helper ran) but another is dev-owned (e.g., partial helper failure)
+- **THEN** the check passes the consumer-owned leaf silently and warns on the dev-owned leaf with the per-leaf `rm -rf` remediation; the warning enumerates each affected leaf separately for operator clarity
 
 ### Requirement: Doctor Instance Scan Uses Registry
 

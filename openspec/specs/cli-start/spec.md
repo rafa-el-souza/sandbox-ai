@@ -238,15 +238,16 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 - **THEN** the error output includes the traverse failure diagnostic (if applicable) followed by the ACL cleanup status
 
 ### Requirement: ACL Grants for rw Bind-Mount Sources
-The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unprivileged_user` on rw bind-mount source subdirectories during Phase 5. These grants — formerly Pattern B / Option B — are empirically dead under runsc (named ACLs are stripped at the gofer/directfs boundary per `temp/bug-tracker/2026-05-04.md` finding 1) and are replaced by the cache/log helper-recipe phase (subuid-chown + parent default ACL `u:dev:rwx`) for `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, and `log/admin`. Each workspace's bind-mount source (every `workspace.path` in `[workspaces]`) is handled by the per-workspace shared-group phase plus a granted/revoked named-ACL applied per-workspace.
+
+The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unprivileged_user` on rw bind-mount source subdirectories during Phase 5. These grants — formerly Pattern B / Option B — are empirically dead under runsc (named ACLs are stripped at the gofer/directfs boundary per `temp/bug-tracker/2026-05-04.md` finding 1) and are replaced by the cache/log helper-recipe phase (subuid-chown + parent default ACL `u:dev:rwx`) for the cache/log leaves per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement. Each workspace's bind-mount source (every `workspace.path` in `[workspaces]`) is handled by the per-workspace shared-group phase plus a granted/revoked named-ACL applied per-workspace.
 
 #### Scenario: rw bind-mount source directories do NOT receive the prior effective ACLs
 - **WHEN** `_acl_grant_plan()` is called for an instance
-- **THEN** the returned plan does NOT include `setfacl -R -m u:<host_user>:rwX <target>` entries for `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, or `log/admin`
+- **THEN** the returned plan does NOT include `setfacl -R -m u:<host_user>:rwX <target>` entries for any leaf in `orchestrator-volumes`'s "Cache/Log Leaf Inventory"
 
 #### Scenario: rw bind-mount source directories do NOT receive the prior default ACLs
 - **WHEN** `_acl_grant_plan()` is called for an instance
-- **THEN** the returned plan does NOT include `setfacl -R -d -m u:<host_user>:rwX <target>` entries for the same paths
+- **THEN** the returned plan does NOT include `setfacl -R -d -m u:<host_user>:rwX <target>` entries for the same paths (the cache/log leaves per `orchestrator-volumes`'s "Cache/Log Leaf Inventory")
 
 #### Scenario: Cache/log access is provided by the helper-recipe phase instead
 - **WHEN** `sandbox start` reaches `_phase_helper_mkdir_chown_cache_log`
@@ -258,7 +259,7 @@ The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unpriv
 
 #### Scenario: Non-bind-mounted log directories excluded from grants
 - **WHEN** `_acl_grant_plan()` is called for an instance
-- **THEN** the returned plan does NOT include entries for `log/proxy` or `log/orchestrator` (these directories are not bind-mounted into containers)
+- **THEN** the returned plan does NOT include entries for `log/proxy` or `log/orchestrator` (these directories are not bind-mounted into containers and are NOT in the "Cache/Log Leaf Inventory")
 
 #### Scenario: rw bind-mount ACLs absent from dry-run preview
 - **WHEN** `sandbox start <inst> --dry-run` is invoked
@@ -278,15 +279,15 @@ The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unpriv
 
 ### Requirement: Phase 5 Plan Drops Option-B Grants on rw Mount Sources
 
-The Phase-5 ACL grant plan (`_acl_grant_plan`) SHALL NOT include the recursive `u:<host_unprivileged_user>:rwX` grants (effective or default) on rw mount sources (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`, OR any workspace path from `[workspaces]`). These grants were "Option B" in the prior model; they are empirically dead under runsc and are replaced by helper-recipe phases (cache/log) and the per-workspace shared-group phase (workspace paths).
+The Phase-5 ACL grant plan (`_acl_grant_plan`) SHALL NOT include the recursive `u:<host_unprivileged_user>:rwX` grants (effective or default) on rw mount sources — neither the cache/log leaves per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement, nor any workspace path from `[workspaces]`. These grants were "Option B" in the prior model; they are empirically dead under runsc and are replaced by helper-recipe phases (cache/log) and the per-workspace shared-group phase (workspace paths).
 
 #### Scenario: rw bind-mount source dirs absent from grant plan
 - **WHEN** `_acl_grant_plan()` is called
-- **THEN** the returned plan does NOT include `setfacl -R -m u:host_user:rwX` entries for any of `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`, or any `workspace.path` from `[workspaces]`
+- **THEN** the returned plan does NOT include `setfacl -R -m u:host_user:rwX` entries for any leaf in `orchestrator-volumes`'s "Cache/Log Leaf Inventory" or any `workspace.path` from `[workspaces]`
 
 #### Scenario: rw bind-mount source dirs absent from default-ACL grant plan
 - **WHEN** `_acl_grant_plan()` is called
-- **THEN** the returned plan does NOT include `setfacl -R -d -m u:host_user:rwX` entries for the same paths
+- **THEN** the returned plan does NOT include `setfacl -R -d -m u:host_user:rwX` entries for the same paths (cache/log inventory leaves and workspace paths)
 
 ### Requirement: Phase 5 Plan Includes Per-Workspace Named-ACL Grants
 
@@ -302,10 +303,10 @@ The Phase-5 ACL grant plan SHALL include the per-workspace named-ACL grants (eff
 
 ### Requirement: Cache/Log Helper-Recipe Phase
 
-The system SHALL provide `_phase_helper_mkdir_chown_cache_log` that, after Phase 5 ACL grants, applies the cache/log subuid-chown recipe to every cache/log leaf identified by the bind-mount inventory in `compose.yml`. The phase SHALL invoke `helper_mkdir_chown_dirs` for each (parent, leaves, owner_uid, owner_gid) group, batching leaves that share the same parent and target ownership.
+The system SHALL provide `_phase_helper_mkdir_chown_cache_log` that, after Phase 5 ACL grants, applies the cache/log subuid-chown recipe to every leaf in the cache/log bind-mount inventory (per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement; the runtime source of truth is `compose.yml`). The phase SHALL invoke `helper_mkdir_chown_dirs` for each (parent, leaves, owner_uid, owner_gid) group, batching leaves that share the same parent and target ownership. Per `orchestrator-volumes`'s "Scaffold-vs-Helper Boundary" requirement, the helper recipe is the sole creator of the leaves on disk — `sandbox init` does NOT pre-create them.
 
 #### Scenario: Cache/log phase batches by parent
-- **WHEN** the phase runs against the four standard cache/log leaves (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`)
+- **WHEN** the phase runs against the cache/log leaves enumerated in `orchestrator-volumes`'s "Cache/Log Leaf Inventory"
 - **THEN** `helper_mkdir_chown_dirs` is invoked at most once per distinct parent dir (each invocation handles all leaves under that parent)
 
 #### Scenario: Cache/log phase sets parent default ACL before helper runs
@@ -313,8 +314,12 @@ The system SHALL provide `_phase_helper_mkdir_chown_cache_log` that, after Phase
 - **THEN** `setfacl -d -m u::rwx,g::---,o::---,m::rwx,u:dev:rwx <parent>` is applied BEFORE the helper invocation; the helper-created leaf inherits the default ACL on its child files
 
 #### Scenario: Cache/log phase is idempotent
-- **WHEN** the phase runs and the leaves already exist with correct ownership
-- **THEN** `helper_mkdir_chown_dirs` returns successfully without changing any state (mkdir -p is no-op; chown is no-op when owner matches)
+- **WHEN** the phase runs a second time against an instance whose leaves already exist with correct ownership
+- **THEN** `helper_mkdir_chown_dirs`'s `mkdir -p` is a no-op and the `chown` is idempotent; on-disk state is unchanged
+
+#### Scenario: Cache/log phase creates leaves on first start (post-Change-D contract)
+- **WHEN** the phase runs against a freshly-init'd instance whose cache/log leaves do NOT exist on disk (the post-Change-D scaffold contract per `orchestrator-volumes`'s "Scaffold-vs-Helper Boundary")
+- **THEN** the phase succeeds: `helper_mkdir_chown_dirs` creates the leaves as in-container root (= host claude-sandbox, mapped in the helper userns) and chowns them to the consumer subuid (also mapped); both operations are kernel-legal; the resulting on-disk leaves are consumer-subuid-owned
 
 ### Requirement: Ro-Files Helper-Recipe Phase
 

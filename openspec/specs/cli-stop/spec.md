@@ -74,7 +74,7 @@ The system SHALL revoke the `<host_unprivileged_user>` named-ACL grants applied 
 
 The persistent portion of each workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is NOT revoked (per the change-4 lifecycle: persistent identity properties).
 
-The cache/log rw bind-mount sources (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`) are NOT in the revoke set (subuid-chowned per change 4; no `u:<host_unprivileged_user>` named ACL exists on them).
+The cache/log rw bind-mount sources (per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement) are NOT in the revoke set (subuid-chowned per change 4; no `u:<host_unprivileged_user>` named ACL exists on them).
 
 Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
 
@@ -88,7 +88,7 @@ Revocation SHALL use fault-isolated execution — each target attempted independ
 
 #### Scenario: Cache/log rw bind-mount sources NOT in revoke set
 - **WHEN** `_acl_revoke_plan()` is called
-- **THEN** the returned target set does NOT include `cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, or `log/admin`
+- **THEN** the returned target set does NOT include any leaf enumerated in `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement
 
 #### Scenario: Partial revocation failure reported as warning
 - **WHEN** one or more ACL revocation targets fail during stop

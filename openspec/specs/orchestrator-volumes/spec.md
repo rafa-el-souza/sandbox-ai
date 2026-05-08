@@ -350,26 +350,81 @@ The rendered `compose.yml` SHALL include read-only bind mounts provisioning the 
 - **THEN** it contains a volume entry `{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro`
 
 ### Requirement: Tmux Resurrect State Bind Mount
+
 The rendered `compose.yml` SHALL include a read-write bind mount for the tmux resurrect session state directory in the admin container, sourced from the `cache/admin/tmux_resurrect` instance subdirectory. This relocates the plugin state from the agent-writable workspace.
+
+The bind-mount source path (`{{ instance_dir }}/cache/admin/tmux_resurrect`) is the **host-side** location. The corresponding **in-container** target path is provided by `hydration-pipeline`'s Jinja context value `tmux_resurrect_dir` (typically `/home/human/.sandbox/tmux_resurrect`); the two paths are different sides of the same mount and are deliberately decoupled — host-side layout is governed by this spec, in-container layout by the consumer's home-directory convention.
 
 #### Scenario: Tmux resurrect mount in admin service
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
 - **THEN** it contains a volume entry `{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw`
 
 ### Requirement: Container-Namespaced Cache Directory
-The `cache/` subtree under each instance dir SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`). Paths are relative to the instance dir at `<sandbox_ai_home()>/instances/<inst>/`.
 
-#### Scenario: Scaffold creates namespaced cache directory
-- **WHEN** scaffold creates a new instance via `INSTANCE_SUBDIRS`
-- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/core/.claude` is created (not `cache/.claude`)
+The `cache/` subtree under each instance dir SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`). The tmux resurrect cache directory SHALL be at `cache/admin/tmux_resurrect` (not `cache/tmux_resurrect`). Paths are relative to the instance dir at `<sandbox_ai_home()>/instances/<inst>/`.
 
-#### Scenario: Scaffold creates tmux resurrect cache directory
-- **WHEN** scaffold creates a new instance via `INSTANCE_SUBDIRS`
-- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/admin/tmux_resurrect` is created
+The cache subtree splits between scaffold-created parents and helper-recipe-created leaves per the "Scaffold-vs-Helper Boundary" requirement: `core.scaffold.INSTANCE_SUBDIRS` includes `cache/core` and `cache/admin` (parent dirs) but NOT the leaves `cache/core/.claude` and `cache/admin/tmux_resurrect`. The leaves are created by `_phase_helper_mkdir_chown_cache_log` on first start (per the "Cache/Log Leaf Inventory" requirement).
+
+#### Scenario: Scaffold creates namespaced cache parents only
+- **WHEN** `sandbox init` runs `core.scaffold.create_instance_dirs()`
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/core/` and `<sandbox_ai_home()>/instances/<inst>/cache/admin/` are created (mode `0775` dev:dev) but the leaves `cache/core/.claude` and `cache/admin/tmux_resurrect` are NOT created at scaffold time
+
+#### Scenario: Helper recipe creates namespaced cache leaves on first start
+- **WHEN** `_phase_helper_mkdir_chown_cache_log` runs for the first time on a freshly-init'd instance
+- **THEN** the helper container creates `cache/core/.claude` and `cache/admin/tmux_resurrect` as in-container root and chowns each to the consumer's host subuid; the on-disk paths exist post-phase
 
 #### Scenario: Compose mount references namespaced cache path
 - **WHEN** the rendered `compose.yml` is inspected for the core service
 - **THEN** the `.claude` directory mount references `{{ instance_dir }}/cache/core/.claude` (not `{{ instance_dir }}/cache/.claude`)
+
+#### Scenario: Compose mount references namespaced tmux path
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the tmux resurrect mount references `{{ instance_dir }}/cache/admin/tmux_resurrect` (not `{{ instance_dir }}/cache/tmux_resurrect`)
+
+### Requirement: Cache/Log Leaf Inventory
+
+The cache/log helper-recipe phase operates on a fixed inventory of bind-mount source leaves. The inventory SHALL be enumerated in this requirement as the single source of truth; other specs (`cli-start`, `cli-stop`, scenario bodies elsewhere in this spec) reference it by name rather than re-enumerating.
+
+The inventory:
+
+| Leaf path (relative to `<sandbox_ai_home()>/instances/<inst>/`) | Container service consuming the mount |
+| --- | --- |
+| `cache/core/.claude` | core (Claude Code agent cache) |
+| `cache/admin/tmux_resurrect` | admin (tmux session resurrect state) |
+| `log/core` | core (agent log output) |
+| `log/admin` | admin (admin shell log output) |
+
+The inventory's authoritative *runtime* source is the bind-mount inventory rendered in `compose.yml`; this spec enumeration is documentary. If the runtime inventory ever diverges from this enumeration, the spec is updated in the same change that adds or removes a leaf in `compose.yml` / its templates.
+
+#### Scenario: Inventory enumerates exactly the four cache/log leaves
+- **WHEN** the inventory is consulted by `_phase_helper_mkdir_chown_cache_log`, `_acl_grant_plan`, `_acl_revoke_plan`, or any doctor check
+- **THEN** the consulted set is exactly `{cache/core/.claude, cache/admin/tmux_resurrect, log/core, log/admin}`; no consumer constructs a different list inline
+
+#### Scenario: Other specs reference inventory by name
+- **WHEN** `cli-start` or `cli-stop` or any cross-referencing spec describes behavior over the cache/log leaves
+- **THEN** the spec text refers to "the cache/log leaves per `orchestrator-volumes`'s 'Cache/Log Leaf Inventory' requirement" rather than re-enumerating the four paths inline
+
+### Requirement: Scaffold-vs-Helper Boundary
+
+Directories subject to a helper-recipe `subuid-chown` or `consumer-uid-0-chown` mechanism (per the lifecycle×mechanism table in "UID Paradox ACL Default Overrides") SHALL NOT be created by `core.scaffold.create_instance_dirs()` (i.e., they MUST NOT appear in `INSTANCE_SUBDIRS`). The helper recipe creates them on first start as in-container root (= host claude-sandbox, mapped) and chowns them to the consumer's host subuid; the scaffolded *parent* directory carries the orchestrator's `dev`-owned `u:dev:rwx` default ACL so the agent's child files inherit dev-readability.
+
+The rationale is enforceable by kernel rule: `CAP_CHOWN` in a user namespace authorizes `chown` only when the file's current owner uid is mapped in the userns. `sandbox init` runs as the dev user (host uid `1000`), which is unmapped in the helper container's userns; a scaffold-pre-created leaf would be permanently unreachable to the helper recipe.
+
+#### Scenario: INSTANCE_SUBDIRS excludes helper-recipe-owned leaves
+- **WHEN** `core.scaffold.INSTANCE_SUBDIRS` is inspected
+- **THEN** the list contains `cache/core` and `cache/admin` (parents) but NOT `cache/core/.claude` or `cache/admin/tmux_resurrect` (helper-owned leaves per the "Cache/Log Leaf Inventory" requirement); future helper-recipe leaves added to the inventory are similarly excluded
+
+#### Scenario: Helper recipe creates the leaf on first start
+- **WHEN** `_phase_helper_mkdir_chown_cache_log` runs against a freshly-init'd instance whose cache/log leaves do not yet exist on disk
+- **THEN** `helper_mkdir_chown_dirs` performs `mkdir -p /p/<leaf>` followed by `chown <consumer-subuid>:<consumer-subgid> /p/<leaf>`, both as in-container root; both operations succeed because the leaf is created by claude-sandbox (mapped) and the chown target is in the subuid range (mapped)
+
+#### Scenario: Helper recipe is idempotent on re-start
+- **WHEN** `_phase_helper_mkdir_chown_cache_log` runs against an instance whose cache/log leaves already exist with the correct consumer-subuid ownership
+- **THEN** the `mkdir -p` is a no-op and the `chown` is idempotent; no change in on-disk state
+
+#### Scenario: Pre-Change-D leftover leaves trigger doctor warning
+- **WHEN** an operator who init'd their instance before the scaffold-vs-helper boundary was enforced runs `sandbox doctor` (their `cache/core/.claude` exists as `dev:dev`)
+- **THEN** the `pre_existing_instance_layout` doctor check (per `cli-doctor`) emits the dev-owned-leaf warning with a `rm -rf` remediation; running the remediation lets the next `sandbox start` succeed because the helper recipe creates the leaf fresh as claude-sandbox-owned
 
 ### Requirement: Stale Proxy Seed File Removal
 The following files in `templates/config/proxy/` SHALL be absent from the tooling plane: `allowed_domains.txt`, `trusted_clients.acl`, `.htpasswd`. These files are overridden by programmatic generation in `render_templates()` or by `core/crypto.py` during scaffold. Their presence in the tooling plane is misleading — edits to them have no effect.
