@@ -2061,7 +2061,30 @@ class TestCheckSecretsHydratedRestrictively:
         assert "ipc_host_key" in result.detail
 
 class TestCheckPreExistingInstanceLayout:
+    """Three-state semantics per cli-doctor's "Pre-Existing Instance Layout Check":
+    (a) leaf absent → pass; (b) consumer-owned → pass; (c) dev-owned → warn with
+    per-leaf ``rm -rf`` remediation; (d) mixed-state → per-leaf reporting.
+    """
+
+    def test_just_initd_instance_passes_silently(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """State (a): no cache/log leaves on disk (post-Change-D scaffold contract).
+
+        A freshly-init'd instance whose helper recipe has not yet run on first
+        start is the new default; the absent state must NOT warn.
+        """
+        from core.doctor import check_pre_existing_instance_layout
+
+        inst = tmp_path / "inst"
+        inst.mkdir(parents=True)
+        # No leaves created — the post-Change-D scaffold-vs-helper boundary state.
+        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = check_pre_existing_instance_layout("u", None)
+        assert result.status == "pass"
+        assert result.detail == "no stale cache/log leaf ownership detected"
+
     def test_pass_when_chowned(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """State (b): all leaves present and consumer-subuid-owned (post-helper-run)."""
         import os
 
         from core.doctor import check_pre_existing_instance_layout
@@ -2069,15 +2092,14 @@ class TestCheckPreExistingInstanceLayout:
         inst = tmp_path / "inst"
         for leaf in ("cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"):
             (inst / leaf).mkdir(parents=True)
-        # Mock host_id_for_in_container to return a uid that "matches" our test dirs
         target_uid = os.stat(inst / "cache/core/.claude").st_uid
         monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: target_uid)
         monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
 
-    def test_warn_when_dev_owned(self, tmp_path: Any, monkeypatch: Any) -> None:
-        """All four cache/log leaves are scanned; each dev-owned one is flagged."""
+    def test_warn_when_dev_owned_includes_per_leaf_rm_rf(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """State (c): all leaves present and dev-owned (legacy/pre-Change-D)."""
         from core.doctor import check_pre_existing_instance_layout
 
         inst = tmp_path / "inst"
@@ -2095,16 +2117,69 @@ class TestCheckPreExistingInstanceLayout:
         monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
-        assert "destroy" in (result.remediation or "")
-        # All four leaves enumerated by the check.
         assert "4 cache/log leaf(s)" in result.detail
+        # Per-leaf rm -rf remediation; "destroy && init" is no longer the recommendation.
+        remediation = result.remediation or ""
         for leaf in leaves:
-            assert (
-                leaf in result.detail
-                or any(  # at minimum the sample shows the first 3
-                    leaf in result.detail for leaf in leaves[:3]
-                )
+            assert f"rm -rf {inst}/{leaf}" in remediation, (
+                f"remediation missing per-leaf rm -rf for {leaf}: {remediation!r}"
             )
+        assert "destroy" not in remediation
+
+    def test_mixed_state_reports_only_stale_leaves(self, tmp_path: Any, monkeypatch: Any) -> None:
+        """State (d): one leaf consumer-owned, one dev-owned → only the dev-owned leaf is flagged."""
+        import os
+
+        from core.doctor import check_pre_existing_instance_layout
+
+        inst = tmp_path / "inst"
+        consumer_leaf = inst / "cache/core/.claude"
+        legacy_leaf = inst / "cache/admin/tmux_resurrect"
+        consumer_leaf.mkdir(parents=True)
+        legacy_leaf.mkdir(parents=True)
+
+        # Override legacy_leaf to be visibly different by mocking the consumer
+        # subuid lookup to match consumer_leaf's owner; legacy_leaf will then
+        # appear stale because it shares that same uid (we cannot chown in the
+        # test). Instead invert: pretend consumer subuid is something else,
+        # making BOTH leaves stale, then assert by selectively mocking
+        # ``os.stat`` on the consumer leaf to return the consumer subuid.
+        # Simpler: set the mocked consumer subuid to legacy_leaf's owner, and
+        # use a stat-side-effect to pretend consumer_leaf is consumer-owned.
+        real_stat = os.stat
+
+        def fake_stat(path: str | os.PathLike[str], *args: Any, **kwargs: Any) -> Any:
+            st = real_stat(path, *args, **kwargs)
+            if str(path) == str(consumer_leaf):
+                # Construct a stat_result with st_uid set to a value matching
+                # the mocked consumer subuid (777777 below). os.stat_result is
+                # immutable; build a new one via the 10-tuple constructor.
+                return os.stat_result((
+                    st.st_mode,
+                    st.st_ino,
+                    st.st_dev,
+                    st.st_nlink,
+                    777777,  # st_uid — pretend it's the consumer subuid
+                    st.st_gid,
+                    st.st_size,
+                    st.st_atime,
+                    st.st_mtime,
+                    st.st_ctime,
+                ))
+            return st
+
+        monkeypatch.setattr("core.doctor.os.stat", fake_stat)
+        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 777777)
+        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        result = check_pre_existing_instance_layout("u", None)
+        assert result.status == "warn"
+        # Only the legacy leaf is flagged; the consumer-owned one passes silently.
+        assert "1 cache/log leaf(s)" in result.detail
+        assert str(legacy_leaf) in result.detail
+        assert str(consumer_leaf) not in result.detail
+        remediation = result.remediation or ""
+        assert f"rm -rf {legacy_leaf}" in remediation
+        assert str(consumer_leaf) not in remediation
 
     def test_warn_aggregates_across_multiple_instances(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Multiple registered instances → stale leaves aggregated into one warning."""
@@ -2120,6 +2195,9 @@ class TestCheckPreExistingInstanceLayout:
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
         assert "2 cache/log leaf(s)" in result.detail
+        remediation = result.remediation or ""
+        assert f"rm -rf {inst_a}/log/core" in remediation
+        assert f"rm -rf {inst_b}/log/admin" in remediation
 
     def test_pass_when_partial_layout_resolves_correctly(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Missing leaves don't false-warn — only existing-and-stale leaves count."""
