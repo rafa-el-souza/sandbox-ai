@@ -35,8 +35,6 @@ EXPECTED_DIRS = [
     "config/coredns",
     "config/dnsdist",
     "config/proxy",
-    "log/admin",
-    "log/core",
     "log/proxy",
     "log/orchestrator",
     "cache/core",
