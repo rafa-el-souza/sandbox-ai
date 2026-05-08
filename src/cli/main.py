@@ -1255,6 +1255,31 @@ def _phase_helper_cp_chown_ro_files(
         helper_chown_files(host_user, parent_abs, files, owner_uid, owner_gid, mode, auth)
 
 
+def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list[str]:
+    """Stop-time recipe symmetry partner of `_phase_helper_cp_chown_ro_files`.
+
+    Each helper-cp-managed file is owned by an unmapped consumer subuid after
+    start. On a subsequent start, hydration would EACCES trying to overwrite
+    those files as dev. We unlink them here so the next hydration's `O_CREAT`
+    creates fresh dev-owned files. ``unlink`` requires write+exec on the parent
+    only, which dev has on every helper-cp parent (parents are dev-owned).
+
+    Returns a list of human-readable warning strings (one per FileNotFoundError /
+    OSError encountered); the phase is fault-isolated, never raises.
+    """
+    warnings: list[str] = []
+    for parent_abs, files, _owner_uid, _owner_gid, _mode in _helper_cp_chown_plan(instance_dir, host_user):
+        for fname in files:
+            path = os.path.join(parent_abs, fname)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                warnings.append(f"unlink {path}: {exc}")
+    return warnings
+
+
 def _phase_helper_mkdir_chown_cache_log(
     instance_dir: str,
     host_user: str,
@@ -2175,6 +2200,12 @@ def stop(
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
     for w in acl_warnings:
+        console.print(f"⚠ {w}", style="yellow")
+
+    # Recipe-symmetry partner of phase 5d: unlink helper-cp-managed files so
+    # next start's hydration can re-render them as dev-owned via O_CREAT.
+    unlink_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
+    for w in unlink_warnings:
         console.print(f"⚠ {w}", style="yellow")
 
     _release_lock(lock_fd)

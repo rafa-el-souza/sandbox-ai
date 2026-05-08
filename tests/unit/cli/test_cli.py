@@ -886,6 +886,7 @@ class TestStopWarm:
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls") as mock_revoke,
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
         ):
             result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
@@ -928,6 +929,7 @@ class TestStopClean:
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
         ):
             result = runner.invoke(app, ["stop", inst, "--clean"])
             assert result.exit_code == 0
@@ -4578,6 +4580,7 @@ class TestStopLock:
             patch("cli.main._acquire_state_lock", return_value=99) as mock_lock,
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock") as mock_release,
         ):
             result = runner.invoke(app, ["stop", inst])
@@ -4799,11 +4802,80 @@ class TestStopACLWarningEmission:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=["ACL revoke warning for test: fail"]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
             assert "ACL revoke warning" in result.output
+
+
+class TestStopUnlinkConsumerFiles:
+    """Recipe-symmetry partner of helper-cp+chown phase: stop unlinks consumer files."""
+
+    def test_unlink_removes_existing_files(self, tmp_path: Path) -> None:
+        from cli.main import _phase_stop_unlink_consumer_files
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        (instance_dir / "config" / "coredns").mkdir(parents=True)
+        (instance_dir / "config" / "proxy").mkdir(parents=True)
+        (instance_dir / "config" / "coredns" / "Corefile").write_text("x")
+        (instance_dir / "config" / "proxy" / "squid.conf").write_text("y")
+        # `missing.txt` deliberately not created — covers FileNotFoundError branch.
+
+        with patch(
+            "cli.main._helper_cp_chown_plan",
+            return_value=[
+                (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
+                (str(instance_dir / "config" / "proxy"), ("squid.conf", "missing.txt"), 0, 0, 0o640),
+            ],
+        ):
+            warnings = _phase_stop_unlink_consumer_files(str(instance_dir), "claude-sandbox")
+        assert warnings == []
+        assert not (instance_dir / "config" / "coredns" / "Corefile").exists()
+        assert not (instance_dir / "config" / "proxy" / "squid.conf").exists()
+
+    def test_stop_emits_unlink_warnings(self, runner: CliRunner) -> None:
+        """stop emits warnings returned by _phase_stop_unlink_consumer_files."""
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch(
+                "cli.main._phase_stop_unlink_consumer_files",
+                return_value=["unlink /x: stale lock"],
+            ),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop", inst])
+            assert result.exit_code == 0
+            assert "unlink /x: stale lock" in result.output
+
+    def test_unlink_aggregates_oserror_warnings(self, tmp_path: Path) -> None:
+        from cli.main import _phase_stop_unlink_consumer_files
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        with (
+            patch(
+                "cli.main._helper_cp_chown_plan",
+                return_value=[
+                    (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
+                ],
+            ),
+            patch("cli.main.os.unlink", side_effect=PermissionError("locked down")),
+        ):
+            warnings = _phase_stop_unlink_consumer_files(str(instance_dir), "claude-sandbox")
+            assert len(warnings) == 1
+            assert "Corefile" in warnings[0]
+            assert "locked down" in warnings[0]
 
 
 class TestDestroyFaultIsolationWarnings:
