@@ -3380,6 +3380,101 @@ class TestACLPlanAsymmetry:
         # Shared parent appears at most once even though both workspaces walk through it.
         assert ancestor_targets.count(str(ws_root)) == 1
 
+    def test_acl_grant_plan_includes_helper_parent_grants(self, tmp_path: Path) -> None:
+        """Cluster 1 regression: helper-recipe parents (cache/log) get u:<daemon>:rwx + matching default ACL.
+
+        Per orchestrator-volumes' "Helper-Recipe Parent ACL Grants" requirement:
+        scaffold creates cache/core, cache/admin, log/ as host dev:dev mode 0775;
+        the daemon's userns has dev unmapped, so CAP_DAC_OVERRIDE cannot bypass
+        DAC. Without the named-acl grant, the helper sees only "other" (r-x)
+        and EPERMs on mkdir for the helper-recipe leaves. The grant plan adds
+        an effective ``u:<daemon>:rwx`` plus a matching default ACL on each
+        helper-recipe parent so the helper recipe can create leaves inside.
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        for parent_rel in ("cache/core", "cache/admin", "log"):
+            parent_abs = str(instance_dir / parent_rel)
+            effective = [
+                args
+                for args, desc in plan
+                if desc == f"helper-recipe parent: {parent_abs}"
+            ]
+            assert effective, f"missing helper-recipe-parent effective grant for {parent_rel}"
+            assert any(arg == "u:sandbox:rwx" for arg in effective[0]), (
+                f"helper-recipe parent {parent_rel} missing u:<daemon>:rwx"
+            )
+            default_entries = [
+                args
+                for args, desc in plan
+                if desc == f"helper-recipe parent default ACL: {parent_abs}"
+            ]
+            assert default_entries, (
+                f"missing helper-recipe-parent default ACL grant for {parent_rel}"
+            )
+            joined = " ".join(default_entries[0])
+            assert "-d" in joined and "u:sandbox:rwx" in joined, (
+                f"helper-recipe parent {parent_rel} missing default-ACL daemon entry"
+            )
+
+    def test_workspace_shared_group_plan_includes_owning_group_rwx(self) -> None:
+        """Cluster 1 regression for finding 8.N: workspace shared-group plan emits g::rwx.
+
+        Spec source: orchestrator-volumes' "Workspace Shared-Group Phase
+        Ordering" requirement. The temp fix (commit 6f1831e) inserts a
+        ``setfacl -m g::rwx`` step into the workspace shared-group recipe
+        because the prior ``chmod 2770`` after Phase-5 named-ACL grant only
+        updates the mask (not the group:: entry), leaving group::--- in
+        place and breaking bridge-group access. The structural fix (run
+        the shared-group recipe BEFORE Phase-5) remains an Open Question
+        in design.md; this test pins the temp's emitted-step until the
+        reorder lands.
+        """
+        from cli.main import _workspace_shared_group_plan
+
+        plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
+        ops = [op for op, _ in plan]
+        assert any("setfacl -m g::rwx" in op for op in ops), (
+            "workspace shared-group plan must emit owning-group rwx step"
+        )
+
+    def test_exec_file_recipes_table_emits_mode_0500(self) -> None:
+        """Cluster 1 regression for findings 8.K + 8.L: EXEC_FILE_RECIPES sibling table.
+
+        Spec source: orchestrator-volumes' "Executable-Script File Recipes"
+        requirement. The entrypoint-script kind is structurally distinct
+        from RO_FILE_RECIPES (mode 0640 ro configs / 0600 secrets): mode
+        0500 owner-only with the consumer as the sole reader/exec. The
+        table maps ``docker/core/entrypoint.sh`` to (uid=1000, mode=0o500).
+        """
+        from cli.main import EXEC_FILE_RECIPES
+
+        # Exactly one entry today: docker/core/entrypoint.sh
+        entries = list(EXEC_FILE_RECIPES)
+        assert entries, "EXEC_FILE_RECIPES must be non-empty"
+        match = next(
+            (e for e in entries if e[0] == "docker/core" and "entrypoint.sh" in e[1]),
+            None,
+        )
+        assert match is not None, "docker/core/entrypoint.sh missing from EXEC_FILE_RECIPES"
+        parent, files, consumer_uid, mode = match
+        assert consumer_uid == 1000
+        assert mode == 0o500, f"entrypoint mode must be 0500 owner-only; got 0o{mode:03o}"
+        # Confirm executable-script kind is NOT duplicated in RO_FILE_RECIPES.
+        from cli.main import RO_FILE_RECIPES
+
+        ro_parents = [(p, files) for p, files, _, _ in RO_FILE_RECIPES]
+        assert ("docker/core", ("entrypoint.sh",)) not in ro_parents, (
+            "entrypoint.sh must live in EXEC_FILE_RECIPES, not RO_FILE_RECIPES"
+        )
+
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunHelperMkdirPlanFallback:

@@ -46,13 +46,15 @@ EXPECTED_DIRS = [
 # Cache/log leaf inventory per orchestrator-volumes "Cache/Log Leaf Inventory"
 # requirement. These are owned end-to-end by the helper recipe and MUST NOT
 # appear in INSTANCE_SUBDIRS (the "Scaffold-vs-Helper Boundary" requirement).
-# log/core and log/admin appear in INSTANCE_SUBDIRS as scaffold-managed dirs
-# whose ownership is later asserted by the helper recipe; the "leaf"
-# distinction here applies to the directories that must be created by the
-# helper, which are the two cache leaves below.
+# Cluster 1 (orchestrator-volumes-scaffold-helper-acl-completeness) extended
+# the inventory to include log/core and log/admin so the helper-mkdir+chown
+# phase owns log leaves end-to-end, eliminating the userns-EPERM bug class
+# from a scaffold-pre-created log leaf.
 HELPER_RECIPE_CACHE_LEAVES = frozenset({
     "cache/core/.claude",
     "cache/admin/tmux_resurrect",
+    "log/core",
+    "log/admin",
 })
 
 
@@ -100,6 +102,21 @@ class TestCreateInstanceDirs:
             f"INSTANCE_SUBDIRS must not contain helper-recipe-owned leaves; "
             f"violating entries: {sorted(intersection)}"
         )
+
+    def test_log_leaves_excluded_from_instance_subdirs(self) -> None:
+        """log/core and log/admin must NOT appear in INSTANCE_SUBDIRS.
+
+        Cluster 1 regression test for finding 8.A: scaffold pre-creating
+        ``log/core`` and ``log/admin`` as host dev (uid 1000) makes the
+        helper-mkdir+chown phase EPERM in the daemon's userns where
+        host uid 1000 is unmapped. The structural fix is to exclude
+        these leaves from ``INSTANCE_SUBDIRS`` so the helper recipe
+        creates them as in-container root (mapped to host claude-sandbox)
+        end-to-end. Spec source: orchestrator-volumes' extended
+        "Cache/Log Leaf Inventory" + "Scaffold-vs-Helper Boundary".
+        """
+        assert "log/core" not in INSTANCE_SUBDIRS
+        assert "log/admin" not in INSTANCE_SUBDIRS
 
     def test_idempotent(self, tmp_path: Path) -> None:
         """Calling twice does not raise."""
