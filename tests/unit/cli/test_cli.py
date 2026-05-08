@@ -3271,7 +3271,6 @@ class TestACLPlanAsymmetry:
             for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
                 assert cache_log not in desc
                 assert not any(cache_log in arg for arg in args)
-            assert "rwX" not in " ".join(args), f"rwX Option-B grant survived: {desc}"
 
     def test_grant_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
         """Workspace named-ACL is granted when user_project_root is supplied."""

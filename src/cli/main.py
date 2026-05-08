@@ -534,6 +534,29 @@ def _acl_grant_plan(
         )
     )
 
+    # Helper-recipe parents (cache/log) — grant <daemon>:rwx + matching default
+    # so the helper-mkdir+chown phase can create leaves inside them.
+    for rel in ("cache/core", "cache/admin", "log"):
+        parent_dir = os.path.join(instance_dir, rel)
+        plan.append(
+            (
+                ["setfacl", "-m", f"u:{host_user}:rwx", parent_dir],
+                f"helper-recipe parent: {parent_dir}",
+            )
+        )
+        plan.append(
+            (
+                [
+                    "setfacl",
+                    "-d",
+                    "-m",
+                    f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx",
+                    parent_dir,
+                ],
+                f"helper-recipe parent default ACL: {parent_dir}",
+            )
+        )
+
     # Workspace named-ACL — granted at start, revoked at stop. Provides the
     # rootless Docker daemon traverse + r/w access to the gofer-mounted /workspace.
     # Persistent shared-group state (chgrp/chmod/setgid + persistent default ACL
