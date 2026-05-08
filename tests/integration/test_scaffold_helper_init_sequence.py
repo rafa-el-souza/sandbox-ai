@@ -166,13 +166,15 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
 def cross_boundary_tmpdir() -> Iterator[Path]:
     """Tmpdir visible to both ``dev`` and the daemon user.
 
-    Mirrors the rationale documented in ``test_helper_container_userns.py``:
-    pytest's ``tmp_path`` lands under the dev user's per-user
-    ``/tmp/pytest-of-dev/`` mount, which the daemon's rootless docker
-    cannot see. Use a tmpdir under the user's home — both privilege
-    contexts share that view.
+    Mirrors ``test_helper_container_userns.py``'s relocated fixture
+    (commit ``9a3b426``): pytest's ``tmp_path`` lands under the dev user's
+    per-user ``/tmp/pytest-of-dev/`` mount which the daemon's rootless
+    docker cannot see (PrivateTmp= split). Use ``<repo>/temp/integration-
+    test-tmp/`` instead — already established as project scratch
+    (gitignored), shared filesystem view, stragglers visible in
+    ``git status`` if cleanup ever fails.
     """
-    base = Path.home() / ".cache" / "sandbox-ai-tests"
+    base = REPO_ROOT / "temp" / "integration-test-tmp"
     base.mkdir(parents=True, exist_ok=True)
     d = Path(tempfile.mkdtemp(dir=str(base)))
     try:
