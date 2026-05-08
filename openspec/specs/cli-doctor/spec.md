@@ -483,6 +483,8 @@ The doctor SHALL include a warn-only check `pre_existing_instance_layout` that d
 
 The check uses `core.doctor._scan_instance_dirs` to iterate registered instances (per the "Doctor Instance Scan Uses Registry" requirement).
 
+The per-leaf ownership lookup used by the check SHALL be expressed as an injectable callable (`uid_for_path: Callable[[str], int]`) with a default that wraps `os.stat(path).st_uid`. Tests MAY override the resolver to make per-path ownership deterministic without monkeypatching `os.stat`. Production behavior MUST remain identical to direct `os.stat` use, including raising `OSError` for absent leaves so the absent-leaf branch is reached as before.
+
 #### Scenario: Just-init'd instance passes (leaf absent)
 - **WHEN** the doctor inspects a freshly-init'd instance whose cache/log leaves do not yet exist on disk
 - **THEN** the check passes for that instance with no warnings (the absent state is the expected scaffold-vs-helper boundary outcome)
@@ -498,6 +500,10 @@ The check uses `core.doctor._scan_instance_dirs` to iterate registered instances
 #### Scenario: Mixed-state instance reports per-leaf
 - **WHEN** the doctor inspects an instance where one cache/log leaf is consumer-owned (helper ran) but another is dev-owned (e.g., partial helper failure)
 - **THEN** the check passes the consumer-owned leaf silently and warns on the dev-owned leaf with the per-leaf `rm -rf` remediation; the warning enumerates each affected leaf separately for operator clarity
+
+#### Scenario: Test override of ownership resolver yields deterministic mixed-state reporting
+- **WHEN** a test calls the check with `uid_for_path=` set to a callable that returns a uid mapping per path (e.g., consumer-subuid for one leaf, a different uid for another)
+- **THEN** the check uses the supplied resolver in place of `os.stat` for every per-leaf ownership comparison, the absent-leaf branch is still triggered when the resolver raises `OSError`, and the resulting `CheckResult` enumerates only the leaves whose resolver-returned uid does not match the consumer subuid
 
 ### Requirement: Doctor Instance Scan Uses Registry
 
