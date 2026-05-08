@@ -1173,8 +1173,8 @@ class TestHelperCpChownRoFiles:
 
         monkeypatch.setattr("cli.main.helper_chown_files", _fake)
         _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
-        # One invocation per RO_FILE_RECIPES entry (7 groups)
-        assert len(invocations) == 7
+        # One invocation per RO_FILE_RECIPES entry (8 groups).
+        assert len(invocations) == 8
 
     def test_phase_propagates_helper_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files

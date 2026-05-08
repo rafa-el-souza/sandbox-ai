@@ -507,6 +507,16 @@ def _acl_grant_plan(
         )
     )
 
+    # docker/core/ — helper-cp target needs rwx on the parent so the recipe
+    # can unlink+recreate entrypoint.sh (added to RO_FILE_RECIPES).
+    docker_core_dir = os.path.join(instance_dir, "docker/core")
+    plan.append(
+        (
+            ["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir],
+            f"helper-cp parent: {docker_core_dir}",
+        )
+    )
+
     # config/ — recursive read + conditional execute
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
@@ -760,6 +770,9 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
 # The helper-cp+chown phase chowns each group's files to (host_id_for_in_container(uid), 0).
 
 RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # Core (agent) entrypoint — bind-mounted at /usr/local/bin/entrypoint.sh.
+    # Needs read+exec for the in-container agent user (uid 1000).
+    ("docker/core", ("entrypoint.sh",), 1000, 0o755),
     # CoreDNS rendered config
     ("config/coredns", ("Corefile",), 65532, 0o640),
     # dnsdist rendered config
