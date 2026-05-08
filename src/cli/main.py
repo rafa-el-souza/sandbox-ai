@@ -605,21 +605,29 @@ def _acl_grant_plan(
         )
     )
 
-    # secrets/ — dir-level traverse + default ACL granting the daemon a
-    # named ``r`` entry on inherited child entries. _phase_credentials
-    # runs AFTER this phase (per Phase Order Contract); per-file daemon
-    # read access on freshly-written secrets is granted post-hydrate by
-    # `_phase_grant_helper_cp_files_daemon_read` (because
-    # ``core.hydration.write_restricted``'s `os.fchmod` zeroes the mask
-    # and would mask out an inherited named entry). The default ACL is
-    # belt-and-suspenders / future-proof for any write path that
-    # ultimately leaves an extended ACL intact. Recursive widening is
-    # NOT used here.
+    # secrets/ — dir-level ``rwx`` provisioning grant. The dir-level write
+    # bit is load-bearing for BUG-B (the daemon's helper-cp ``mv /tmp/$f
+    # /p/$f`` step requires write on the destination's parent so it can
+    # unlink the existing dest and rename the new inode in). The named
+    # entry's effect is partitioned along two axes that together replace
+    # the temp's recursive ``rwX`` (which over-widened by granting daemon
+    # write on file CONTENTS):
+    #   - dir-level ``rwx`` (this entry) covers BUG-B (provisioning write
+    #     on the parent — needed by ``mv``).
+    #   - per-file ``r`` (granted by ``_phase_grant_helper_cp_files_daemon_read``
+    #     post-hydrate, iterating ``RO_FILE_RECIPES + EXEC_FILE_RECIPES``)
+    #     covers BUG-A (runtime read on each secret's contents). The
+    #     per-file pass also defeats ``write_restricted``'s ``fchmod``
+    #     mask-reset which would mask out any inherited named entry.
+    # The default ACL applied below is belt-and-suspenders / future-proof
+    # for any write path that ultimately leaves an extended ACL intact.
+    # The recursive ``rwX`` widening from temp commit ``0b35a53`` MUST
+    # NOT appear in the plan.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
-            ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
-            f"secrets dir traverse: {secrets_dir}",
+            ["setfacl", "-m", f"u:{host_user}:rwx", secrets_dir],
+            f"secrets dir provisioning write: {secrets_dir}",
         )
     )
     plan.append(

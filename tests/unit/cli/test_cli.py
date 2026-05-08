@@ -3459,8 +3459,14 @@ class TestACLPlanAsymmetry:
         # Should not have crashed; the workspace named-ACL is still queued.
         assert any("workspace named-ACL" in d for _, d in plan)
 
-    def test_grant_plan_includes_secrets_traverse(self, tmp_path: Path) -> None:
-        """Grant plan retains a dir-level traverse on secrets/."""
+    def test_grant_plan_includes_secrets_provisioning_write(self, tmp_path: Path) -> None:
+        """Grant plan emits a dir-level rwx provisioning grant on secrets/.
+
+        See ``test_acl_grant_plan_secrets_dir_is_dir_level_rwx_not_recursive_rwx``
+        for the BUG-A/BUG-B partition rationale; this thinner test pins
+        that the entry is present so refactors don't quietly drop the
+        provisioning grant.
+        """
         from cli.main import _acl_grant_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3471,7 +3477,7 @@ class TestACLPlanAsymmetry:
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
         descriptions = [d for _, d in plan]
-        assert any("secrets dir traverse" in d for d in descriptions)
+        assert any("secrets dir provisioning write" in d for d in descriptions)
 
     def test_grant_plan_dedups_shared_ancestor_across_workspaces(self, tmp_path: Path) -> None:
         """Two workspaces under the same parent dir produce one ancestor-traverse entry per ancestor."""
@@ -3554,15 +3560,30 @@ class TestACLPlanAsymmetry:
             "workspace shared-group plan must NOT emit explicit g::rwx setfacl post-reorder"
         )
 
-    def test_acl_grant_plan_secrets_dir_is_not_recursive_rwx(self, tmp_path: Path) -> None:
-        """Cluster 1 structural fix for finding 8.D: secrets/ is dir-level rX only.
+    def test_acl_grant_plan_secrets_dir_is_dir_level_rwx_not_recursive_rwx(
+        self, tmp_path: Path
+    ) -> None:
+        """Cluster 1 structural fix for finding 8.D — partitioned BUG-A vs BUG-B.
 
-        Spec source: orchestrator-volumes' "Secrets Inherit Daemon-Readable
-        Default ACL" requirement. The temp's recursive ``rwX`` widening on
-        ``secrets/`` is replaced by (a) a dir-level ``rX`` traverse grant,
-        (b) a default ACL ``u:<host_user>:r`` for future-proofing, and
-        (c) per-file ``setfacl -m u:<host_user>:r`` run as owner during
-        ``_phase_credentials`` (which now executes AFTER ``_phase_acl_grant``).
+        Spec source: orchestrator-volumes' "Helper-CP Source Files
+        Daemon-Readable Pre-Recipe" requirement. The temp's recursive
+        ``rwX`` widening on ``secrets/`` is replaced by a partitioned
+        permission model:
+
+        - **BUG-A** (daemon RUNTIME READ on file contents): per-file
+          ``setfacl -m u:<host_user>:r <file>`` granted post-hydrate by
+          ``_phase_grant_helper_cp_files_daemon_read``.
+        - **BUG-B** (daemon PROVISIONING WRITE on the parent dir): the
+          dir-level ``setfacl -m u:<host_user>:rwx <secrets_dir>`` grant
+          asserted here. Required by helper-cp's ``mv /tmp/$f /p/$f``,
+          which needs write on the destination's parent so the daemon
+          can unlink the existing dest and rename the new inode in.
+
+        Together: dir-level ``rwx`` (BUG-B) + per-file ``r`` (BUG-A) is
+        strictly narrower than the temp's recursive ``rwX`` because the
+        recursive ``rwX`` granted daemon write on file CONTENTS too,
+        whereas this partition leaves contents at per-file ``r`` (read
+        only).
         """
         from cli.main import _acl_grant_plan
 
@@ -3574,17 +3595,31 @@ class TestACLPlanAsymmetry:
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
         secrets_entries = [
-            (args, desc) for args, desc in plan if "secrets dir traverse" in desc
+            (args, desc) for args, desc in plan if "secrets dir provisioning write" in desc
         ]
-        assert secrets_entries, "secrets dir traverse entry missing"
+        assert secrets_entries, "secrets dir provisioning-write entry missing"
         args, _desc = secrets_entries[0]
         joined = " ".join(args)
         assert "-R" not in args, f"secrets/ grant must NOT be recursive: {joined}"
         assert "rwX" not in joined, f"secrets/ grant must NOT carry rwX: {joined}"
-        assert "u:sandbox:rX" in joined, f"secrets/ grant must be u:<daemon>:rX: {joined}"
+        assert "u:sandbox:rwx" in joined, (
+            f"secrets/ grant must be dir-level u:<daemon>:rwx (provisioning write for BUG-B): "
+            f"{joined}"
+        )
 
-        # Default ACL granting daemon r on inherited entries — closes the
-        # "Secrets Inherit Daemon-Readable Default ACL" scenario.
+        # No recursive grant on secrets/ anywhere in the plan. Match
+        # description prefixes that begin "secrets " (avoid false-matching
+        # paths that contain "secrets" as a substring).
+        for cmd, desc in plan:
+            if desc.startswith("secrets "):
+                assert "-R" not in cmd, (
+                    f"secrets/ entry must not be recursive (cluster-1 retires temp 0b35a53): "
+                    f"{cmd!r} {desc!r}"
+                )
+
+        # Default ACL granting daemon r on inherited entries — belt-and-
+        # suspenders for any future write path that does NOT chmod-after-
+        # create (per the requirement description).
         default_entries = [
             (args, desc) for args, desc in plan if "secrets default ACL" in desc
         ]
