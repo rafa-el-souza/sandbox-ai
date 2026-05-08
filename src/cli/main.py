@@ -2196,16 +2196,18 @@ def stop(
     # Compose down
     _compose_down(instance_dir, project_name, host_user, config, volumes=clean, auth=auth)
 
+    # Recipe-symmetry partner of phase 5d: unlink helper-cp-managed files so
+    # next start's hydration can re-render them as dev-owned via O_CREAT.
+    # Runs before ACL revoke so the recursive setfacl walk doesn't encounter
+    # consumer-owned files (dev lacks CAP_FOWNER to setfacl them).
+    unlink_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
+    for w in unlink_warnings:
+        console.print(f"⚠ {w}", style="yellow")
+
     # ACL revocation (Pattern A) — fault-isolated (D5), per-workspace fan-out
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
     for w in acl_warnings:
-        console.print(f"⚠ {w}", style="yellow")
-
-    # Recipe-symmetry partner of phase 5d: unlink helper-cp-managed files so
-    # next start's hydration can re-render them as dev-owned via O_CREAT.
-    unlink_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
-    for w in unlink_warnings:
         console.print(f"⚠ {w}", style="yellow")
 
     _release_lock(lock_fd)
