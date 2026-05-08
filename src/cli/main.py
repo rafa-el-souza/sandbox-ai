@@ -770,9 +770,6 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
 # The helper-cp+chown phase chowns each group's files to (host_id_for_in_container(uid), 0).
 
 RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
-    # Core (agent) entrypoint — bind-mounted at /usr/local/bin/entrypoint.sh.
-    # Owner-only r-x; the consumer is the only reader/exec.
-    ("docker/core", ("entrypoint.sh",), 1000, 0o500),
     # CoreDNS rendered config
     ("config/coredns", ("Corefile",), 65532, 0o640),
     # dnsdist rendered config
@@ -803,7 +800,23 @@ RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
     # Secrets — admin consumer (human) — mode 0600
     ("secrets", ("ipc_known_hosts", "ipc_ssh_key"), 1000, 0o600),
 )
-"""Single source of truth for the helper-cp+chown phase and dry-run preview."""
+"""Single source of truth (ro config + secrets) for the helper-cp+chown phase and dry-run preview."""
+
+
+EXEC_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # Core (agent) entrypoint — bind-mounted at /usr/local/bin/entrypoint.sh.
+    # Owner-only r-x (mode 0500); the consumer is the sole reader/exec.
+    # The executable-script kind is structurally distinct from RO_FILE_RECIPES
+    # (mode 0640 for ro configs, 0600 for secrets): owner-only and exec-bit set.
+    ("docker/core", ("entrypoint.sh",), 1000, 0o500),
+)
+"""Sibling of RO_FILE_RECIPES for executable-script (mode 0500 owner-only) entries.
+
+Distinct from ro config / secrets recipes because the entrypoint scripts need
+the exec bit and a tighter access set. Consumed alongside RO_FILE_RECIPES by
+:func:`_helper_cp_chown_plan` so the helper-cp+chown phase processes both
+tables in a single pass.
+"""
 
 
 CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -849,7 +862,7 @@ def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, 
             host_gid_for_in_container(consumer_uid, host_user),
             mode,
         )
-        for parent, files, consumer_uid, mode in RO_FILE_RECIPES
+        for parent, files, consumer_uid, mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES)
     ]
 
 
