@@ -290,6 +290,12 @@ def _container_status(
     if not os.path.exists(compose_file):
         return []
 
+    # Ensure the daemon can read --env-file: a prior `sandbox stop` (or a
+    # mid-lifecycle helper-cp+chown) may have left .sandbox.env without the
+    # daemon's named ACL. Best-effort, idempotent, no-op if the file is
+    # missing.
+    _ensure_env_file_readable_by_daemon(instance_dir, host_user)
+
     compose_files = _build_compose_files(instance_dir, config)
     files_str = " ".join(compose_files)
 
