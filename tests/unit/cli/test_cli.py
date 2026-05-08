@@ -509,9 +509,14 @@ class TestStartWorkspaceBridgeMissing:
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
-            patch("cli.main._phase_credentials", return_value="pass"),
             patch(
-                "cli.main._phase_hydrate",
+                # Post-reorder, _phase_workspace_shared_group runs FIRST among
+                # the bridge-group-touching phases (per the
+                # "Workspace Shared-Group Phase Ordering" requirement and the
+                # "Phase Order Contract" reorder for finding 8.D alt #1), so
+                # the WorkspaceBridgeGroupMissingError surfaces here, not from
+                # _phase_hydrate.
+                "cli.main._phase_workspace_shared_group",
                 side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
             ),
             patch("cli.main._release_lock") as mock_release,
@@ -596,12 +601,20 @@ class TestStartSshKeypairGeneration:
             assert calls[0] == call(str(tmp_path), "auth")
             assert calls[1] == call(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
 
-    def test_phase_credentials_makes_secrets_daemon_group_readable(self, tmp_path: Path) -> None:
-        """When host_user is supplied, freshly-written secrets are chgrp'd to daemon and chmod'd to 0640.
+    def test_phase_credentials_grants_daemon_read_via_setfacl_as_owner(self, tmp_path: Path) -> None:
+        """Freshly-written secrets receive a ``u:<host_user>:r`` named ACL entry.
 
-        Cluster 1 structural fix for finding 8.D: replaces the recursive
-        ``rwX`` ACL widening on ``secrets/`` with chgrp + chmod at
-        credential-phase write-time.
+        Cluster 1 structural fix for finding 8.D, alternative #1: replaces
+        the rejected chgrp-to-daemon-gid approach (broken — orchestrator
+        runs as ``dev`` which is intentionally NOT a member of the
+        daemon's primary group) with a per-file ``setfacl -m u:<host_user>:r``
+        run as the file owner. setfacl-as-owner is permitted without
+        privilege.
+
+        The default ACL on ``secrets/`` set by ``_phase_acl_grant`` covers
+        future write paths; this per-file step exists because the current
+        ``write_restricted`` write path does fchmod(0o600) which zeroes
+        the ACL ``mask::`` and would mask out an inherited named entry.
         """
         from cli.main import _phase_credentials
 
@@ -609,100 +622,82 @@ class TestStartSshKeypairGeneration:
         proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
-        # Pre-create representative secret files (mimics what generate_ssh_keypair
-        # would emit) so the chgrp/chmod loop has something to act on.
+        # Pre-create representative secret files (mimics what
+        # ``generate_ssh_keypair`` would emit).
         for name in ("authorized_keys", "ipc_host_key"):
             (secrets_dir / name).write_text("dummy")
 
-        chowns: list[tuple[str, int, int]] = []
-        chmods: list[tuple[str, int]] = []
+        recorded: list[list[str]] = []
 
-        def _record_chown(path: str, uid: int, gid: int, **_kw: object) -> None:
-            chowns.append((path, uid, gid))
-
-        def _record_chmod(path: str, mode: int) -> None:
-            chmods.append((path, mode))
+        def _record(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            recorded.append(list(args))
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         with (
             patch("cli.main.write_htpasswd"),
             patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.host_user_primary_gid", return_value=991) as mock_resolver,
-            patch("cli.main.os.chown", side_effect=_record_chown),
-            patch("cli.main.os.chmod", side_effect=_record_chmod),
+            patch("cli.main.subprocess.run", side_effect=_record),
         ):
-            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3", host_user="claude-sandbox")
-        mock_resolver.assert_called_once_with("claude-sandbox")
-        # Both secret files received chgrp -1:991 and chmod 0o640.
-        chowned_paths = {p for p, _uid, gid in chowns if gid == 991}
-        assert str(secrets_dir / "authorized_keys") in chowned_paths
-        assert str(secrets_dir / "ipc_host_key") in chowned_paths
-        chmod_targets = {(p, m) for p, m in chmods}
-        assert (str(secrets_dir / "authorized_keys"), 0o640) in chmod_targets
-        assert (str(secrets_dir / "ipc_host_key"), 0o640) in chmod_targets
+            _phase_credentials(
+                str(tmp_path),
+                core_ipc_ip="10.100.6.3",
+                host_user="claude-sandbox",
+            )
 
-    def test_phase_credentials_skips_daemon_readability_when_host_user_none(self, tmp_path: Path) -> None:
-        """Back-compat: ``host_user=None`` skips the daemon-readability transform."""
-        from cli.main import _phase_credentials
+        per_file = {tuple(args) for args in recorded}
+        for fname in ("authorized_keys", "ipc_host_key"):
+            expected = (
+                "setfacl",
+                "-m",
+                "u:claude-sandbox:r",
+                str(secrets_dir / fname),
+            )
+            assert expected in per_file, f"missing setfacl for {fname}: got {recorded!r}"
 
-        proxy_dir = tmp_path / "config" / "proxy"
-        proxy_dir.mkdir(parents=True)
-        secrets_dir = tmp_path / "secrets"
-        secrets_dir.mkdir(parents=True)
-
-        with (
-            patch("cli.main.write_htpasswd"),
-            patch("cli.main.generate_ssh_keypair"),
-            patch("cli.main.host_user_primary_gid") as mock_resolver,
-        ):
-            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3")
-        mock_resolver.assert_not_called()
-
-    def test_make_secrets_daemon_group_readable_no_secrets_dir(self, tmp_path: Path) -> None:
+    def test_grant_secrets_daemon_read_no_secrets_dir(self, tmp_path: Path) -> None:
         """No-op when ``secrets/`` does not exist."""
-        from cli.main import _make_secrets_daemon_group_readable
+        from cli.main import _grant_secrets_daemon_read
 
-        with patch("cli.main.host_user_primary_gid", return_value=991):
-            # Should not raise — instance dir without secrets/ is tolerated.
-            _make_secrets_daemon_group_readable(str(tmp_path), "claude-sandbox")
+        # Should not raise — instance dir without secrets/ is tolerated.
+        _grant_secrets_daemon_read(str(tmp_path), "claude-sandbox")
 
-    def test_make_secrets_daemon_group_readable_skips_subdirs(self, tmp_path: Path) -> None:
-        """Subdirectories under ``secrets/`` are skipped (defensive — none exist today)."""
-        from cli.main import _make_secrets_daemon_group_readable
+    def test_grant_secrets_daemon_read_skips_subdirs(self, tmp_path: Path) -> None:
+        """Subdirectories under ``secrets/`` are skipped (defensive)."""
+        from cli.main import _grant_secrets_daemon_read
 
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir()
         (secrets_dir / "subdir").mkdir()
         (secrets_dir / "file").write_text("k")
 
-        chowns: list[tuple[str, int]] = []
+        recorded: list[list[str]] = []
 
-        def _record_chown(path: str, _uid: int, gid: int, **_kw: object) -> None:
-            chowns.append((path, gid))
+        def _record(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            recorded.append(list(args))
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        with (
-            patch("cli.main.host_user_primary_gid", return_value=991),
-            patch("cli.main.os.chown", side_effect=_record_chown),
-            patch("cli.main.os.chmod"),
-        ):
-            _make_secrets_daemon_group_readable(str(tmp_path), "claude-sandbox")
-        # Only the file was chowned; the subdirectory was skipped.
-        assert chowns == [(str(secrets_dir / "file"), 991)]
+        with patch("cli.main.subprocess.run", side_effect=_record):
+            _grant_secrets_daemon_read(str(tmp_path), "claude-sandbox")
+        # Only the file targeted; subdirectory skipped.
+        assert recorded == [["setfacl", "-m", "u:claude-sandbox:r", str(secrets_dir / "file")]]
 
-    def test_make_secrets_daemon_group_readable_propagates_oserror(self, tmp_path: Path) -> None:
-        """A failed chown/chmod surfaces as SandboxExecutionError (no silent skip)."""
-        from cli.main import _make_secrets_daemon_group_readable
+    def test_grant_secrets_daemon_read_propagates_setfacl_failure(self, tmp_path: Path) -> None:
+        """A failed setfacl surfaces as SandboxExecutionError (no silent skip)."""
+        from cli.main import _grant_secrets_daemon_read
         from core.exceptions import SandboxExecutionError
 
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir()
         (secrets_dir / "ipc_ssh_key").write_text("k")
 
+        def _fail(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(returncode=1, cmd=args, stderr="EPERM")
+
         with (
-            patch("cli.main.host_user_primary_gid", return_value=991),
-            patch("cli.main.os.chown", side_effect=OSError("EPERM")),
-            pytest.raises(SandboxExecutionError, match="daemon-group-readable"),
+            patch("cli.main.subprocess.run", side_effect=_fail),
+            pytest.raises(SandboxExecutionError, match="grant daemon read"),
         ):
-            _make_secrets_daemon_group_readable(str(tmp_path), "claude-sandbox")
+            _grant_secrets_daemon_read(str(tmp_path), "claude-sandbox")
 
     def test_phase_ipc_setup_not_in_start(self) -> None:
         """_phase_ipc_setup function no longer exists in cli.main."""
@@ -1495,7 +1490,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
             warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
-            assert mock_run.call_count == 7
+            assert mock_run.call_count == 8
             assert warnings == []
 
     def test_partial_failure_continues_and_collects_warnings(self) -> None:
@@ -1514,7 +1509,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run", side_effect=side_effect):
             warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
-        assert call_count == 7
+        assert call_count == 8
         assert len(warnings) == 1
         assert "No such file" in warnings[0]
 
@@ -1525,7 +1520,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
             warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
-        assert len(warnings) == 7
+        assert len(warnings) == 8
         assert all("setfacl not found" in w for w in warnings)
 
 
@@ -3554,11 +3549,12 @@ class TestACLPlanAsymmetry:
     def test_acl_grant_plan_secrets_dir_is_not_recursive_rwx(self, tmp_path: Path) -> None:
         """Cluster 1 structural fix for finding 8.D: secrets/ is dir-level rX only.
 
-        Spec source: orchestrator-volumes' new "Secrets Group-Readable to
-        Daemon" requirement. The temp's recursive ``rwX`` widening on
-        ``secrets/`` is replaced by chgrp <daemon-gid> + chmod 0640 on
-        each secret file at credential-phase time; the named-ACL grant
-        on the dir is non-recursive ``rX`` (traverse only).
+        Spec source: orchestrator-volumes' "Secrets Inherit Daemon-Readable
+        Default ACL" requirement. The temp's recursive ``rwX`` widening on
+        ``secrets/`` is replaced by (a) a dir-level ``rX`` traverse grant,
+        (b) a default ACL ``u:<host_user>:r`` for future-proofing, and
+        (c) per-file ``setfacl -m u:<host_user>:r`` run as owner during
+        ``_phase_credentials`` (which now executes AFTER ``_phase_acl_grant``).
         """
         from cli.main import _acl_grant_plan
 
@@ -3578,6 +3574,16 @@ class TestACLPlanAsymmetry:
         assert "-R" not in args, f"secrets/ grant must NOT be recursive: {joined}"
         assert "rwX" not in joined, f"secrets/ grant must NOT carry rwX: {joined}"
         assert "u:sandbox:rX" in joined, f"secrets/ grant must be u:<daemon>:rX: {joined}"
+
+        # Default ACL granting daemon r on inherited entries — closes the
+        # "Secrets Inherit Daemon-Readable Default ACL" scenario.
+        default_entries = [
+            (args, desc) for args, desc in plan if "secrets default ACL" in desc
+        ]
+        assert default_entries, "secrets default ACL entry missing"
+        d_args, _ = default_entries[0]
+        assert d_args[:3] == ["setfacl", "-d", "-m"], d_args
+        assert any("u:sandbox:r" in tok for tok in d_args), d_args
 
     def test_exec_file_recipes_table_emits_mode_0500(self) -> None:
         """Cluster 1 regression for findings 8.K + 8.L: EXEC_FILE_RECIPES sibling table.

@@ -43,7 +43,6 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
-    host_user_primary_gid,
     machinectl_cmd,
     sandbox_ai_home,
     state_lock_path,
@@ -398,16 +397,23 @@ def _phase_credentials(
 ) -> str:
     """Phase 3: Generate proxy credentials and SSH keypairs.
 
-    Returns proxy password. Credential ownership matching is handled
-    separately by _phase_credential_ownership() after ACL grants.
+    Returns proxy password. The named-ACL grant on ``secrets/`` (dir-level
+    ``rX`` traverse plus a default entry ``u:<host_user>:r``) is
+    established by :func:`_phase_acl_grant` BEFORE this phase runs.
+    However, ``core.crypto.generate_ssh_keypair`` writes via
+    ``write_restricted`` which performs ``os.open(O_CREAT, 0o600)`` +
+    ``os.fchmod(0o600)``; both steps zero the ACL ``mask::`` to ``---``,
+    which would mask out the inherited named entry. We therefore call
+    ``setfacl -m u:<host_user>:r`` on each freshly-written secret to
+    add the named entry with a recomputed mask. ``setfacl`` is
+    permitted to the file *owner* (``dev``) without any escalated
+    privilege — preserving the intent of finding 8.D alternative #1
+    (no chgrp-to-foreign-group, no host_user_primary_gid resolver).
 
-    When ``host_user`` is provided, freshly-written secrets under
-    ``secrets/`` are chgrp'd to the daemon user's primary gid and chmod'd
-    to mode 0640 so the gofer (running as ``host_user``) can read them
-    via group permission. The dir-level named-ACL on ``secrets/`` stays
-    at non-recursive ``rX`` traverse (the
-    "Secrets Group-Readable to Daemon" requirement under
-    orchestrator-volumes).
+    The named entry remains effective until the helper-cp recipe later
+    chowns each secret to the consumer subuid; at that point inheritance
+    from ``secrets/``'s default ACL re-establishes daemon read access on
+    the post-helper-cp inode.
     """
     password = generate_credential()
     hashed = hash_proxy_password(password)
@@ -420,20 +426,27 @@ def _phase_credentials(
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
 
     if host_user is not None:
-        _make_secrets_daemon_group_readable(instance_dir, host_user)
+        _grant_secrets_daemon_read(instance_dir, host_user)
 
     return password
 
 
-def _make_secrets_daemon_group_readable(instance_dir: str, host_user: str) -> None:
-    """Chgrp secrets/* to the daemon's primary gid and chmod to 0640.
+def _grant_secrets_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Add a ``u:<host_user>:r`` named ACL entry to each freshly-written secret.
 
-    The gofer reads files on the daemon's behalf using traditional DAC
-    (no CAP_DAC_OVERRIDE on the host side); group=daemon + mode 0640
-    gives it read access without exposing the secrets to "other" and
-    without requiring a recursive ACL widening on the parent dir.
+    Runs as the file owner (``dev``) — no escalated privilege required;
+    contrast with the rejected chgrp-to-daemon-gid approach which fails
+    EPERM because ``dev`` is intentionally not a member of the daemon's
+    primary group (the privilege boundary is load-bearing).
+
+    The dir-level default ACL on ``secrets/`` (set by
+    :func:`_acl_grant_plan`) covers any future write path that does NOT
+    chmod-after-create; this per-file step covers the current
+    ``write_restricted`` write path which fchmod-resets the mask.
+
+    Subdirectories under ``secrets/`` are skipped (defensive — none
+    exist in the current schema).
     """
-    daemon_gid = host_user_primary_gid(host_user)
     secrets_dir = os.path.join(instance_dir, "secrets")
     if not os.path.isdir(secrets_dir):
         return
@@ -442,11 +455,16 @@ def _make_secrets_daemon_group_readable(instance_dir: str, host_user: str) -> No
         if not os.path.isfile(path):
             continue
         try:
-            os.chown(path, -1, daemon_gid, follow_symlinks=False)
-            os.chmod(path, 0o640)
-        except OSError as exc:
+            subprocess.run(
+                ["setfacl", "-m", f"u:{host_user}:r", path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             raise SandboxExecutionError(
-                f"Failed to make secret {path} daemon-group-readable: {exc}"
+                f"Failed to grant daemon read on secret {path}: {stderr}"
             ) from exc
 
 
@@ -511,7 +529,9 @@ def _acl_grant_plan(
     - docker/: ``rX`` recursive
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
-    - secrets/: dir-level ``rX`` traverse (per-file daemon read via group=daemon + mode 0640)
+    - secrets/: dir-level ``rX`` traverse + default ACL ``u:<host_user>:r``
+      so files created inside (by ``_phase_credentials``) inherit a
+      daemon-readable named entry without an after-the-fact chgrp/chown.
     - per-workspace named-ACL: effective ``rwx`` plus default with named entry on each ``workspace.path``
 
     Cache/log Option-B grants are intentionally absent — replaced by the
@@ -573,15 +593,30 @@ def _acl_grant_plan(
         )
     )
 
-    # secrets/ — dir-level traverse only. Per-file daemon read access comes
-    # from chgrp <daemon-gid> + chmod 0640 applied during _phase_credentials
-    # (the "Secrets Group-Readable to Daemon" requirement). Recursive widening
+    # secrets/ — dir-level traverse + default ACL granting the daemon a
+    # named ``r`` entry on every file created inside. _phase_credentials
+    # runs AFTER this phase (per Phase Order Contract), so each
+    # generate_ssh_keypair() open(..., O_CREAT) inherits the named entry
+    # automatically (the "Secrets Inherit Daemon-Readable Default ACL"
+    # requirement; closes finding 8.D alternative #1). Recursive widening
     # is NOT used here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
             ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
             f"secrets dir traverse: {secrets_dir}",
+        )
+    )
+    plan.append(
+        (
+            [
+                "setfacl",
+                "-d",
+                "-m",
+                f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r",
+                secrets_dir,
+            ],
+            f"secrets default ACL: {secrets_dir}",
         )
     )
 
@@ -719,12 +754,19 @@ def _acl_revoke_plan(
         )
     )
 
-    # secrets/ dir-level traverse
+    # secrets/ dir-level traverse + symmetric default-ACL revocation
+    # (the "Secrets Inherit Daemon-Readable Default ACL" requirement).
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
             ["setfacl", "-x", f"u:{host_user}", secrets_dir],
             f"secrets dir traverse: {secrets_dir}",
+        )
+    )
+    plan.append(
+        (
+            ["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir],
+            f"secrets default ACL: {secrets_dir}",
         )
     )
 
@@ -1793,22 +1835,20 @@ def start(
         raise typer.Exit(code=1)
 
     acl_granted = False
+    dev_user = os.environ.get("USER")
+    ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     try:
         # Phase 2: IPAM
         base_index = _phase_ipam(inst)
         console.print("✓ IPAM — network allocation complete")
 
-        # Phase 3: Credentials (generation + daemon-group readability for secrets)
-        proxy_password = _phase_credentials(
-            instance_dir,
-            core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
-            host_user=host_user,
-        )
-        console.print("✓ Credentials — proxy auth + SSH keypairs configured")
-
-        # Phase 4: Hydration
+        # Phase 3a: workspace shared-group recipe — runs BEFORE Phase-3b named-ACL
+        # grants so chmod 2770 lands on a non-extended-ACL inode and group::
+        # propagates correctly (the "Workspace Shared-Group Phase Ordering"
+        # requirement; closes the bug class fixed by temp commit 6f1831e).
         try:
-            _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
+            for ws_path in ws_paths:
+                _phase_workspace_shared_group(ws_path, host_settings, dev_user)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -1818,28 +1858,44 @@ def start(
             if lock_fd is not None:
                 _release_lock(lock_fd)
             raise typer.Exit(code=1) from None
-        console.print("✓ Hydration — templates rendered")
-
-        # Phase 5a: workspace shared-group recipe — runs BEFORE Phase-5 named-ACL
-        # grants so chmod 2770 lands on a non-extended-ACL inode and group::
-        # propagates correctly (the "Workspace Shared-Group Phase Ordering"
-        # requirement; closes the bug class fixed by temp commit 6f1831e).
-        dev_user = os.environ.get("USER")
-        ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
-        for ws_path in ws_paths:
-            _phase_workspace_shared_group(ws_path, host_settings, dev_user)
         console.print("✓ Workspace — shared-group recipe applied")
 
-        # Phase 5b: ACL grants (Pattern A) — fan out across [workspaces].
-        acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
+        # Phase 3b: ACL grants (Pattern A) — fan out across [workspaces]. Runs
+        # BEFORE _phase_credentials so the default ACL on `secrets/` is in place
+        # when generate_ssh_keypair() opens new files inside it; the named
+        # entry `u:<host_user>:r` then inherits onto each freshly-created
+        # secret without an after-the-fact chgrp/chown (the "Secrets Inherit
+        # Daemon-Readable Default ACL" requirement, closing finding 8.D
+        # alternative #1).
+        acl_granted = True  # set BEFORE grant — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
-        # Phase 5c: helper-mkdir+chown for cache/log leaves
+        # Phase 4: Credentials. The default ACL on `secrets/` (set in Phase 3b
+        # above) covers future write paths; for the current
+        # write_restricted-based path we additionally setfacl-as-owner each
+        # freshly-written secret to defeat write_restricted's fchmod mask reset.
+        proxy_password = _phase_credentials(
+            instance_dir,
+            core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
+            host_user=host_user,
+        )
+        console.print("✓ Credentials — proxy auth + SSH keypairs configured")
+
+        # Phase 5: Hydration. WorkspaceBridgeGroupMissingError is caught by
+        # _phase_workspace_shared_group above (it runs first); when ws_paths
+        # is empty AND hydrate raises, the outer SandboxExecutionError
+        # handler catches it (WorkspaceBridgeGroupMissingError subclass) and
+        # surfaces the [FATAL] message without the doctor hint — acceptable
+        # for the empty-workspaces edge case.
+        _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
+        console.print("✓ Hydration — templates rendered")
+
+        # Phase 6a: helper-mkdir+chown for cache/log leaves
         _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
         console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
-        # Phase 5d: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
+        # Phase 6b: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
 
