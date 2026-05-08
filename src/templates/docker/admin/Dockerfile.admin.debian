@@ -66,8 +66,8 @@ ENV EDITOR=/usr/bin/nano
 ENV VISUAL=/usr/bin/nano
 
 USER root
-COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod a+rx /usr/local/bin/entrypoint.sh
+COPY --chown=human:human entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0500 /usr/local/bin/entrypoint.sh
 
 USER ${USERNAME}
 

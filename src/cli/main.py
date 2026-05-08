@@ -771,8 +771,8 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
 
 RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
     # Core (agent) entrypoint — bind-mounted at /usr/local/bin/entrypoint.sh.
-    # Needs read+exec for the in-container agent user (uid 1000).
-    ("docker/core", ("entrypoint.sh",), 1000, 0o755),
+    # Owner-only r-x; the consumer is the only reader/exec.
+    ("docker/core", ("entrypoint.sh",), 1000, 0o500),
     # CoreDNS rendered config
     ("config/coredns", ("Corefile",), 65532, 0o640),
     # dnsdist rendered config
