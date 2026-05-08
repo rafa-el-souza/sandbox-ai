@@ -511,7 +511,7 @@ def _acl_grant_plan(
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
         (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir],
+            ["setfacl", "-R", "-m", f"u:{host_user}:rwX", config_dir],
             f"config files: {config_dir}",
         )
     )
