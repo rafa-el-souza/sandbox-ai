@@ -911,6 +911,7 @@ def _workspace_shared_group_plan(
     return [
         (f"chgrp {bridge_gid}", workspace_path),
         ("chmod 2770", workspace_path),
+        ("setfacl -m g::rwx", workspace_path),
         (f"setfacl -m u:{host_user}:rwx", workspace_path),
         (f"setfacl -d -m {default_entry}", workspace_path),
     ]
@@ -954,6 +955,7 @@ def _phase_workspace_shared_group(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     for args, label in (
+        (["setfacl", "-m", "g::rwx", workspace_path], "owning-group rwx"),
         (["setfacl", "-m", f"u:{host_user}:rwx", workspace_path], "effective"),
         (["setfacl", "-d", "-m", default_entry, workspace_path], "default"),
     ):
