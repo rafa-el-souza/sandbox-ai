@@ -374,3 +374,88 @@ The `sandbox start` command SHALL refuse to operate when the per-user state tree
 - **WHEN** the start command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home` so the operator can verify which path was checked
 
+### Requirement: Handover TTY Autodetect
+
+The `sandbox start` command SHALL gate `_phase_handover` on the
+process's stdin TTY status. When `_stdin_is_tty()` returns False, the
+command MUST skip `_phase_handover` entirely, print the attach hint
+`Sandbox '<inst>' started. Attach with: sandbox attach <inst>`, and
+return successfully (exit code 0).
+
+The TTY check MUST use the `_stdin_is_tty()` wrapper (which calls
+`sys.stdin.isatty()`); inlining `sys.stdin.isatty()` or `os.isatty(0)`
+is forbidden because typer's `CliRunner` replaces `sys.stdin` and
+breaks those forms.
+
+#### Scenario: Non-TTY stdin skips handover and prints hint
+
+- **WHEN** `sandbox start <inst>` is invoked with `_stdin_is_tty()`
+  returning False (CI runner, redirected stdin, scripted probe)
+- **THEN** `_phase_handover` is NOT called, the printed output
+  contains `attach with: sandbox attach <inst>` (case-insensitive),
+  and the command returns exit code 0
+
+#### Scenario: TTY stdin proceeds to handover
+
+- **WHEN** `sandbox start <inst>` is invoked with `_stdin_is_tty()`
+  returning True and `--no-handover` not passed
+- **THEN** `_phase_handover` is called and the printed output
+  contains `handing over` (case-insensitive)
+
+### Requirement: --no-handover Flag
+
+The `sandbox start` command SHALL accept a `--no-handover` boolean
+flag. When passed, the command MUST skip `_phase_handover` regardless
+of TTY status, print the attach hint, and return successfully (exit
+code 0).
+
+The flag's effect MUST be a logical OR with the non-TTY autodetect:
+either predicate short-circuits the handover. Operators on a TTY
+session who want to start-and-go pass `--no-handover`; the autodetect
+covers callers who never had a TTY.
+
+#### Scenario: --no-handover skips handover on a TTY session
+
+- **WHEN** `sandbox start <inst> --no-handover` is invoked with
+  `_stdin_is_tty()` returning True
+- **THEN** `_phase_handover` is NOT called, the printed output
+  contains `attach with: sandbox attach <inst>` (case-insensitive),
+  and the command returns exit code 0
+
+#### Scenario: Flag is documented in --help
+
+- **WHEN** `sandbox start --help` is invoked
+- **THEN** the help output lists `--no-handover` with a description
+  noting that it skips the interactive admin-shell handover and
+  prints the attach hint
+
+### Requirement: Handover Default Direction
+
+The `sandbox start` command SHALL default to invoking
+`_phase_handover` when stdin is a TTY and `--no-handover` is not
+passed. This preserves the operator-friendly workflow where `sandbox
+start <inst>` drops the operator into the admin shell ready to work.
+
+The default direction is recorded normatively so any future flip
+(e.g. opt-in `--handover` flag, or moving the shell-drop to a
+separate `sandbox shell` command) requires a spec change rather than
+silently shipping under a refactor. The alternative considered
+(default OFF + opt-in flag, or `sandbox shell` split) is documented
+in this change's `design.md` under Open Questions.
+
+#### Scenario: Default-on handover for interactive operator
+
+- **WHEN** an operator runs `sandbox start <inst>` from an
+  interactive terminal with no flags
+- **THEN** after all phases succeed, `_phase_handover` is invoked
+  and the operator is dropped into the admin container's zsh
+
+#### Scenario: Spec change required to flip default
+
+- **WHEN** a maintainer wishes to change the default direction
+  (handover OFF by default; require `--handover` to opt in, or
+  introduce `sandbox shell`)
+- **THEN** the maintainer MUST submit a new OpenSpec change that
+  modifies this requirement; ad-hoc flips in a refactor are
+  prohibited
+
