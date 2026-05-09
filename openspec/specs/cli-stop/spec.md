@@ -100,9 +100,9 @@ Revocation SHALL use fault-isolated execution — each target attempted independ
 - **WHEN** `sandbox stop <inst>` completes
 - **THEN** cache/log leaves remain owned by the consumer subuid; agent state is preserved for the next start
 
-#### Scenario: Ro-file consumer-uid:0 ownership preserved across stop
+#### Scenario: Ro-file consumer-uid:consumer-gid ownership preserved across stop
 - **WHEN** `sandbox stop <inst>` completes
-- **THEN** ro single-files (Corefile, dnsdist conf, proxy files, dotfiles, secrets) remain owned by `<consumer-uid>:0` with their respective modes
+- **THEN** ro single-files (Corefile, dnsdist conf, proxy files, dotfiles, secrets) remain owned by `<consumer-uid>:<consumer-gid>` (consumer's host subuid + host subgid pair, per `orchestrator-volumes`'s `Ro single-files on-disk gid matches consumer's host subgid` scenario) with their respective modes
 
 #### Scenario: Per-workspace shared-group state preserved across stop
 - **WHEN** `sandbox stop <inst>` completes for an instance with multiple workspaces
