@@ -730,25 +730,55 @@ class TestStartSshKeypairGeneration:
             _phase_grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
             mock_helper.assert_called_once_with(str(tmp_path), "claude-sandbox")
 
-    def test_daemon_read_direct_files_includes_compose_and_extras(self) -> None:
+    def test_daemon_read_direct_files_includes_compose_inputs_and_build_context(self) -> None:
         """DAEMON_READ_DIRECT_FILES is the canonical source-of-truth for the
         post-hydrate setfacl pass on dev-created files the daemon reads in
-        place (no helper-cp ownership transfer).
+        place (no helper-cp ownership transfer). Spans two sub-categories:
 
-        The constant's contents must match what ``_build_compose_files``
-        produces (compose.yml unconditionally + conditional db-postgres /
-        mcp-firecrawl extras). If a new compose ``--file`` path is added
-        anywhere in cli.main, this list must be extended in lockstep.
+        1. **Compose YAML inputs** consumed via ``docker compose -f``.
+           Must match ``_build_compose_files``'s output: ``compose.yml``
+           unconditionally + conditional ``db-postgres.yml`` /
+           ``mcp-firecrawl.yml`` extras.
+        2. **Build context** consumed by buildkit during
+           ``docker compose up --build``: rendered/copied Dockerfiles
+           + their local-COPY sources (e.g. ``admin/entrypoint.sh``).
+           Must match every ``COPY <src>`` (without ``--from=<stage>``)
+           in any Dockerfile under ``src/templates/docker/``.
+
+        If a new compose ``--file`` path is added to
+        ``_build_compose_files``, OR a new local-COPY source is added to
+        any Dockerfile, this list must be extended in lockstep.
         """
         from cli.main import DAEMON_READ_DIRECT_FILES
 
         flat = {(parent, fname) for parent, files in DAEMON_READ_DIRECT_FILES for fname in files}
+
+        # Compose YAML inputs.
         assert ("docker", "compose.yml") in flat, (
             "compose.yml is the canonical daemon-read direct file; "
             "removing it re-breaks `compose -f compose.yml up`"
         )
         assert ("docker/extras", "db-postgres.yml") in flat
         assert ("docker/extras", "mcp-firecrawl.yml") in flat
+
+        # Build context — Dockerfiles. Empirical symptom of missing any
+        # of these: `target <svc>: failed to solve: the Dockerfile
+        # cannot be empty` (buildkit treats an unreadable Dockerfile
+        # as empty). All four service Dockerfiles must be present.
+        assert ("docker/core", "Dockerfile.core") in flat
+        assert ("docker/admin", "Dockerfile.admin") in flat
+        assert ("docker/coredns", "Dockerfile.coredns") in flat
+        assert ("docker/extras", "Dockerfile.mcp-firecrawl") in flat
+
+        # Build context — local-COPY sources. admin/entrypoint.sh is
+        # COPY'd by Dockerfile.admin during the build (baked into the
+        # image, NOT bind-mounted at runtime; therefore NOT in
+        # EXEC_FILE_RECIPES). It is dev-created by hydrate's static
+        # _copy_file and needs explicit daemon-read on the host.
+        assert ("docker/admin", "entrypoint.sh") in flat, (
+            "admin/entrypoint.sh is COPY'd into the admin image during "
+            "build; without daemon read, buildkit's COPY step fails"
+        )
 
     def test_phase_ipc_setup_not_in_start(self) -> None:
         """_phase_ipc_setup function no longer exists in cli.main."""

@@ -969,24 +969,65 @@ DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # (skip-if-missing for the conditional compose extras whose presence
     # depends on InstanceConfig component flags).
     #
+    # ── Compose YAML inputs ───────────────────────────────────────────
     # Consumed by ``docker compose -f <path> ...`` invocations whose
     # canonical path-set is built by ``_build_compose_files`` and used by
     # ``_phase_compose_up``, ``_compose_down``, and the ``docker compose
     # ps`` callsites in ``_container_status`` / ``_render_status_detailed``.
     ("docker", ("compose.yml",)),
-    # Conditional extras — present iff the instance enables the component.
-    # Listed unconditionally; the post-hydrate phase skips entries whose
-    # files do not exist on disk. Same skip-if-missing semantics as
-    # ``_grant_post_hydrate_daemon_read`` for `RO_FILE_RECIPES`.
+    # Conditional compose extras — present iff the instance enables the
+    # component. Listed unconditionally; the post-hydrate phase skips
+    # entries whose files do not exist on disk. Same skip-if-missing
+    # semantics as ``_grant_post_hydrate_daemon_read`` for `RO_FILE_RECIPES`.
     ("docker/extras", ("db-postgres.yml", "mcp-firecrawl.yml")),
+    # ── Build context (compose up --build) ────────────────────────────
+    # Buildkit (running as the daemon) reads each Dockerfile + any local
+    # COPY sources from the build context during ``docker compose up
+    # --build``. These files are dev-created by hydrate (rendered or
+    # static-copied — see ``core.hydration.render_templates``) and never
+    # transferred via helper-cp; they stay dev-owned forever, so the
+    # daemon needs explicit DAC read via a named ACL entry. The empirical
+    # symptom of missing this category was
+    # ``target coredns: failed to solve: the Dockerfile cannot be empty``
+    # (the daemon's open(Dockerfile) returned EACCES; buildkit treats an
+    # unreadable Dockerfile as empty).
+    #
+    # The Dockerfile.<distro>.<family> source files are NOT listed —
+    # those live inside the templates wheel and are consumed via Jinja2
+    # PackageLoader, not on the per-instance host filesystem. What lands
+    # on disk per-instance is the rendered ``Dockerfile.core`` /
+    # ``Dockerfile.admin`` (no distro suffix) plus the static
+    # ``Dockerfile.coredns`` / ``Dockerfile.mcp-firecrawl`` copies.
+    ("docker/core", ("Dockerfile.core",)),
+    # admin/entrypoint.sh is COPY'd by Dockerfile.admin during the build;
+    # it is NOT in ``EXEC_FILE_RECIPES`` (the admin entrypoint is baked
+    # into the image, never bind-mounted at runtime). docker/core's
+    # entrypoint.sh IS in ``EXEC_FILE_RECIPES`` and is therefore covered
+    # by the helper-cp branch of the post-hydrate setfacl pass.
+    ("docker/admin", ("Dockerfile.admin", "entrypoint.sh")),
+    ("docker/coredns", ("Dockerfile.coredns",)),
+    # Conditional extras Dockerfile — present iff ``mcp_firecrawl`` is
+    # enabled. Skip-if-missing covers the disabled case.
+    ("docker/extras", ("Dockerfile.mcp-firecrawl",)),
 )
 """Authoritative inventory of dev-created files the daemon reads in place.
 
 Single source of truth for the post-hydrate daemon-read setfacl pass on
-files that are NOT subject to helper-cp ownership transfer. The compose
-extras (`db-postgres.yml`, `mcp-firecrawl.yml`) are conditional on
-``InstanceConfig`` component flags — the post-hydrate phase iterates and
-skips non-existent paths defensively.
+files that are NOT subject to helper-cp ownership transfer. Spans two
+sub-categories:
+
+1. **Compose YAML inputs**: ``compose.yml`` + the conditional compose
+   extras (``db-postgres.yml``, ``mcp-firecrawl.yml``). Consumed via
+   ``docker compose -f``.
+2. **Build context**: Dockerfiles + their local-COPY sources, consumed
+   by buildkit during ``docker compose up --build``. The current
+   inventory is ``Dockerfile.core``, ``Dockerfile.admin`` +
+   ``admin/entrypoint.sh``, ``Dockerfile.coredns``, and the conditional
+   ``Dockerfile.mcp-firecrawl``.
+
+If a future Dockerfile gains a new local-COPY source (anything not
+``COPY --from=<stage>``), that source MUST be added here in lockstep
+with the template change.
 """
 
 
