@@ -1567,10 +1567,12 @@ class TestComposeDownDirect:
 class TestRevokeACLsDirect:
     """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings.
 
-    Post-acl-ownership-recipes: cache/log Option-B grants are gone; workspace
-    named-ACL is now revoked. Plan entries when user_project_root is provided:
-    instance root + docker/ + config/ + .sandbox.env + secrets/ + workspace
-    (effective + default named-entry) = 7.
+    Post-cluster-3 (Acl Revoke Plan Excludes Persistent Grants): the
+    .sandbox.env named-ACL is now `granted-once, persistent` (Environment
+    File Read ACL) and is excluded from revoke. Plan entries when
+    workspace_paths is provided: instance root + docker/ + config/ +
+    secrets/ dir + secrets/ default ACL + workspace (effective + default
+    named-entry) = 7.
     """
 
     def test_revoke_acls_calls_setfacl_for_all_plan_entries(self) -> None:
@@ -1579,7 +1581,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
             warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
-            assert mock_run.call_count == 8
+            assert mock_run.call_count == 7
             assert warnings == []
 
     def test_partial_failure_continues_and_collects_warnings(self) -> None:
@@ -1598,7 +1600,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run", side_effect=side_effect):
             warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
-        assert call_count == 8
+        assert call_count == 7
         assert len(warnings) == 1
         assert "No such file" in warnings[0]
 
@@ -1609,7 +1611,7 @@ class TestRevokeACLsDirect:
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
             warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
 
-        assert len(warnings) == 8
+        assert len(warnings) == 7
         assert all("setfacl not found" in w for w in warnings)
 
 
@@ -3413,8 +3415,13 @@ class TestACLPlanAsymmetry:
         descriptions = [desc for _, desc in plan]
         assert not any("ancestor" in d for d in descriptions)
 
-    def test_both_plans_include_env_file(self, tmp_path: Path) -> None:
-        """Both plans include .sandbox.env."""
+    def test_grant_plan_includes_env_file_revoke_excludes(self, tmp_path: Path) -> None:
+        """Grant plan includes .sandbox.env; revoke plan excludes it because
+        the named-ACL on .sandbox.env is `granted-once, persistent` (cluster 3
+        — Environment File Read ACL). Asymmetry is the structural fix that
+        eliminated the env-ACL re-grant rituals in `_container_status` and
+        `destroy`'s preflight.
+        """
         from cli.main import _acl_grant_plan, _acl_revoke_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3429,7 +3436,7 @@ class TestACLPlanAsymmetry:
         grant_descs = [d for _, d in grant]
         revoke_descs = [d for _, d in revoke]
         assert any("env file" in d for d in grant_descs)
-        assert any("env file" in d for d in revoke_descs)
+        assert not any("env file" in d for d in revoke_descs)
 
     def test_grant_plan_includes_instance_root(self, tmp_path: Path) -> None:
         """Grant plan includes instance root with r-x."""
@@ -4816,35 +4823,6 @@ class TestStopACLWarningEmission:
             assert "ACL revoke warning" in result.output
 
 
-class TestEnsureEnvFileReadableByDaemon:
-    """destroy preflight that re-grants daemon read on .sandbox.env."""
-
-    def test_skips_when_env_file_missing(self, tmp_path: Path) -> None:
-        from cli.main import _ensure_env_file_readable_by_daemon
-
-        with patch("cli.main.subprocess.run") as mock_run:
-            _ensure_env_file_readable_by_daemon(str(tmp_path), "claude-sandbox")
-        mock_run.assert_not_called()
-
-    def test_invokes_setfacl_when_file_present(self, tmp_path: Path) -> None:
-        from cli.main import _ensure_env_file_readable_by_daemon
-
-        env_file = tmp_path / ".sandbox.env"
-        env_file.write_text("CORE_X=1")
-        with patch("cli.main.subprocess.run") as mock_run:
-            _ensure_env_file_readable_by_daemon(str(tmp_path), "claude-sandbox")
-        mock_run.assert_called_once()
-        argv = mock_run.call_args[0][0]
-        assert argv[0] == "setfacl"
-        assert "u:claude-sandbox:r" in argv
-
-    def test_swallows_oserror(self, tmp_path: Path) -> None:
-        from cli.main import _ensure_env_file_readable_by_daemon
-
-        env_file = tmp_path / ".sandbox.env"
-        env_file.write_text("CORE_X=1")
-        with patch("cli.main.subprocess.run", side_effect=OSError("setfacl missing")):
-            _ensure_env_file_readable_by_daemon(str(tmp_path), "claude-sandbox")
 
 
 class TestStopUnlinkConsumerFiles:
@@ -4913,6 +4891,206 @@ class TestStopUnlinkConsumerFiles:
             assert len(warnings) == 1
             assert "Corefile" in warnings[0]
             assert "locked down" in warnings[0]
+
+
+class TestCluster3TeardownSymmetry:
+    """Cluster 3 (orchestrator-volumes-teardown-symmetry) — regression tests
+    for the structural fixes: revoke-plan excludes persistent grants, env-file
+    ACL is persistent, shared `_phase_stop_teardown` between stop+destroy.
+    """
+
+    def test_revoke_plan_excludes_helper_cp_managed_paths(self, tmp_path: Path) -> None:
+        """ADDED requirement: Acl Revoke Plan Excludes Persistent Grants.
+
+        The revoke plan MUST NOT contain entries that recurse into helper-cp
+        parent directories (the recursive `setfacl -R -x` would EPERM on
+        consumer-uid-owned files inside).
+        """
+        from cli.main import RO_FILE_RECIPES, _acl_revoke_plan
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox")
+        helper_cp_parents = {
+            os.path.join(str(instance_dir), parent).rstrip("/") for parent, _, _, _ in RO_FILE_RECIPES
+        }
+        for args, desc in plan:
+            if "-R" not in args:
+                continue
+            target = args[-1].rstrip("/")
+            assert target not in helper_cp_parents, (
+                f"revoke plan contains recursive entry on helper-cp parent {target}: {desc}"
+            )
+
+    def test_revoke_plan_excludes_recursive_walks(self, tmp_path: Path) -> None:
+        """The revoke plan MUST NOT use `-R` recursive flag at all post-cluster-3.
+
+        The pre-cluster-3 plan recursively setfacl-x'd `docker/` and `config/`,
+        which walked into consumer-owned files (helper-cp recipe + EXEC_FILE_RECIPES)
+        and emitted EPERM warnings on every entry. Cluster 3's structural fix:
+        revoke is dir-level only; helper-cp managed files are unlinked separately
+        by `_phase_stop_unlink_consumer_files`.
+        """
+        from cli.main import _acl_revoke_plan
+
+        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
+        for args, desc in plan:
+            assert "-R" not in args, f"revoke plan contains recursive walk: {desc} → {args}"
+
+    def test_revoke_plan_excludes_ancestor_traverse(self, tmp_path: Path) -> None:
+        """Ancestor traverse ACLs are `granted-once, persistent` and MUST NOT
+        appear in the revoke plan (re-revoking would break the next start's
+        ability to traverse to the instance dir).
+        """
+        from cli.main import _acl_revoke_plan
+
+        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
+        for _args, desc in plan:
+            assert "ancestor" not in desc
+
+    def test_revoke_plan_excludes_workspace_shared_group_persistent(self, tmp_path: Path) -> None:
+        """Workspace shared-group state (chgrp/chmod 2770/setgid + g::rwx
+        default) is `granted-once, persistent` and MUST NOT appear in the
+        revoke plan. Only the per-user named-ACL portion is revoked.
+        """
+        from cli.main import _acl_revoke_plan
+
+        ws = tmp_path / "ws"
+        plan = _acl_revoke_plan("/inst", "sandbox", [str(ws)])
+        joined_descs = " ".join(d for _, d in plan)
+        assert "chgrp" not in joined_descs
+        assert "setgid" not in joined_descs
+        for args, desc in plan:
+            if "-d" in args and "workspace" in desc:
+                assert "-x" in args
+                idx = args.index("-x")
+                target = args[idx + 1]
+                assert target.startswith("u:"), f"workspace default revoke not named-entry-only: {args}"
+
+    def test_revoke_plan_excludes_env_file_persistent(self, tmp_path: Path) -> None:
+        """The .sandbox.env named-ACL is `granted-once, persistent` (cluster 3
+        — Environment File Read ACL) and MUST NOT appear in the revoke plan.
+        It survives stop and is removed only by destroy's rmtree.
+        """
+        from cli.main import _acl_revoke_plan
+
+        plan = _acl_revoke_plan("/inst", "sandbox")
+        for args, desc in plan:
+            assert ".sandbox.env" not in desc, f"revoke plan touches .sandbox.env: {desc}"
+            assert not any(".sandbox.env" in a for a in args), f"revoke plan args touch .sandbox.env: {args}"
+
+    def test_phase_stop_teardown_orders_compose_then_unlink_then_revoke(self, tmp_path: Path) -> None:
+        """ADDED requirement: Teardown Sequence.
+
+        `_phase_stop_teardown` MUST invoke compose-down → unlink-helper-cp-managed
+        → revoke-acls in that order. Verifies the ordering invariant via mock
+        call sequence (not just presence).
+        """
+        from cli.main import _phase_stop_teardown
+        from core.host_config import MachinectlAuth
+
+        calls: list[str] = []
+        config = MagicMock()
+
+        def _track_compose(*_a: object, **_kw: object) -> None:
+            calls.append("compose_down")
+
+        def _track_unlink(*_a: object, **_kw: object) -> list[str]:
+            calls.append("unlink")
+            return []
+
+        def _track_revoke(*_a: object, **_kw: object) -> list[str]:
+            calls.append("revoke")
+            return []
+
+        with (
+            patch("cli.main._compose_down", side_effect=_track_compose),
+            patch("cli.main._phase_stop_unlink_consumer_files", side_effect=_track_unlink),
+            patch("cli.main._revoke_acls", side_effect=_track_revoke),
+        ):
+            _phase_stop_teardown(
+                "/inst", "proj", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
+            )
+        assert calls == ["compose_down", "unlink", "revoke"]
+
+    def test_stop_invokes_phase_stop_teardown(self, runner: CliRunner) -> None:
+        """`sandbox stop` delegates to `_phase_stop_teardown` (shared helper)."""
+        inst = "myproject"
+        _register_instance(inst)
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_stop_teardown", return_value=[]) as mock_teardown,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop", inst])
+        assert result.exit_code == 0, result.output
+        mock_teardown.assert_called_once()
+        assert mock_teardown.call_args.kwargs["volumes"] is False
+
+    def test_stop_clean_passes_volumes_true_to_teardown(self, runner: CliRunner) -> None:
+        """`sandbox stop --clean` propagates volumes=True to the shared helper."""
+        inst = "myproject"
+        _register_instance(inst)
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_stop_teardown", return_value=[]) as mock_teardown,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop", inst, "--clean"])
+        assert result.exit_code == 0, result.output
+        assert mock_teardown.call_args.kwargs["volumes"] is True
+
+    def test_destroy_invokes_phase_stop_teardown(self, runner: CliRunner) -> None:
+        """`sandbox destroy` D5+D6 delegates to `_phase_stop_teardown`."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+        from cli.main import app
+
+        with (
+            patch("cli.main._compose_down"),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._release_lock"),
+            patch("cli.main._phase_stop_teardown", return_value=[]) as mock_teardown,
+        ):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 0, result.output
+        assert mock_teardown.call_args.kwargs["volumes"] is True
+
+    def test_container_status_does_not_re_grant_env_acl(self, tmp_path: Path) -> None:
+        """`_container_status` MUST NOT defensively re-grant the .sandbox.env
+        ACL — that ACL is now persistent, so the temp `_ensure_env_file_readable_by_daemon`
+        ritual was retired. Verifies absence of the helper symbol.
+        """
+        import cli.main as main_mod
+
+        assert not hasattr(main_mod, "_ensure_env_file_readable_by_daemon")
+
+    def test_acl_revoke_plan_is_strict_subset_of_grant_plan_paths(self, tmp_path: Path) -> None:
+        """Cross-cutting invariant: every `setfacl -x` target in the revoke
+        plan SHALL correspond to a `setfacl -m` target in the grant plan
+        (asymmetry direction: grant ⊇ revoke). Persistent grants are in grant
+        but not revoke; the reverse MUST NOT occur.
+        """
+        from cli.main import _acl_grant_plan, _acl_revoke_plan
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        grant = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws)], dev_user="dev")
+        revoke = _acl_revoke_plan(str(instance_dir), "sandbox", [str(ws)])
+        grant_targets = {args[-1] for args, _ in grant}
+        for args, desc in revoke:
+            assert args[-1] in grant_targets, (
+                f"revoke target {args[-1]!r} ({desc}) is not in grant plan — asymmetry direction violated"
+            )
 
 
 class TestDestroyFaultIsolationWarnings:

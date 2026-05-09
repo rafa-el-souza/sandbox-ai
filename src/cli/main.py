@@ -290,11 +290,10 @@ def _container_status(
     if not os.path.exists(compose_file):
         return []
 
-    # Ensure the daemon can read --env-file: a prior `sandbox stop` (or a
-    # mid-lifecycle helper-cp+chown) may have left .sandbox.env without the
-    # daemon's named ACL. Best-effort, idempotent, no-op if the file is
-    # missing.
-    _ensure_env_file_readable_by_daemon(instance_dir, host_user)
+    # NOTE: the daemon's `u:<host_user>:r` ACL on `.sandbox.env` is granted
+    # once at start and is `granted-once, persistent` per cluster 3's
+    # Environment File Read ACL requirement. It survives `sandbox stop`, so
+    # no idempotent re-grant is needed here before the compose-ps query.
 
     compose_files = _build_compose_files(instance_dir, config)
     files_str = " ".join(compose_files)
@@ -813,15 +812,36 @@ def _acl_revoke_plan(
     host_user: str,
     workspace_paths: list[str] | None = None,
 ) -> list[tuple[list[str], str]]:
-    """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
+    """Build the ACL revoke plan — strict subset of revertible operations.
 
-    Ancestors are NOT revoked (D3 — grant-only model). Returns a list of
-    (setfacl_args, description) tuples for: instance root, docker/ (recursive),
-    config/ (recursive), .sandbox.env, secrets/ dir, and the workspace
-    named-ACL (effective + default entry portion).
+    The revoke plan is NOT a 1:1 inverse of the grant plan. It excludes every
+    grant whose lifecycle is `granted-once, persistent` or whose mechanism is
+    not the named-ACL (cluster 3 — Acl Revoke Plan Excludes Persistent Grants).
 
-    Cache/log entries are intentionally absent post-change-4 — there is no
-    named ACL on those paths to revoke.
+    Excluded by lifecycle/mechanism:
+    - Ancestor traverse ACLs (granted-once, persistent — required for next start
+      to find the instance directory)
+    - Workspace shared-group chmod 2770 + group ownership (granted-once,
+      persistent — only the named-ACL portion is revoked)
+    - Cache/log subuid chowns (mechanism is chown, not setfacl; preserved
+      across stop/start cycles by design)
+    - Helper-cp parent default ACLs and recursive entries that would walk into
+      consumer-owned files (the recursive `setfacl -R -x` walk EPERMs because
+      dev lacks CAP_FOWNER on consumer-uid-owned files; helper-cp managed files
+      are unlinked separately by `_phase_stop_unlink_consumer_files` and the
+      parent default ACL is granted-once / re-applied idempotently on next
+      start)
+    - `.sandbox.env` named ACL (cluster 3 — Environment File Read ACL is now
+      `granted-once, persistent`; survives stop, removed only by destroy's
+      rmtree)
+
+    Included (`granted-at-start, revoked-at-stop`):
+    - Instance root named-ACL
+    - docker/ dir-level named-ACL (NOT recursive — consumer-owned files inside
+      are handled by the helper-cp unlink pass)
+    - config/ dir-level named-ACL (NOT recursive — same rationale)
+    - secrets/ dir-level traverse named-ACL
+    - Per-workspace effective + default-ACL named entries
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -833,35 +853,31 @@ def _acl_revoke_plan(
         )
     )
 
-    # docker/ — recursive
+    # docker/ — dir-level only (NOT recursive: consumer-owned files inside
+    # would EPERM under setfacl from dev; the recursive walk was the source
+    # of the cluster-3 stop-time setfacl warnings).
     docker_dir = os.path.join(instance_dir, "docker/")
     plan.append(
         (
-            ["setfacl", "-R", "-x", f"u:{host_user}", docker_dir],
+            ["setfacl", "-x", f"u:{host_user}", docker_dir],
             f"docker config: {docker_dir}",
         )
     )
 
-    # config/ — recursive
+    # config/ — dir-level only (NOT recursive: same rationale as docker/).
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
         (
-            ["setfacl", "-R", "-x", f"u:{host_user}", config_dir],
+            ["setfacl", "-x", f"u:{host_user}", config_dir],
             f"config files: {config_dir}",
         )
     )
 
-    # .sandbox.env
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    plan.append(
-        (
-            ["setfacl", "-x", f"u:{host_user}", env_file],
-            f"env file: {env_file}",
-        )
-    )
-
     # secrets/ dir-level traverse + symmetric default-ACL revocation
-    # (the "Secrets Inherit Daemon-Readable Default ACL" requirement).
+    # (per cluster 2's "Secrets Inherit Daemon-Readable Default ACL"
+    # requirement, which sets the default ACL at start and revokes it at
+    # stop). The named per-user entries are dev-applied and dev-revocable
+    # — no consumer-owned files are at the dir level here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
@@ -1438,26 +1454,6 @@ def _phase_handover(
 # ─── Compose down / ACL revoke ──────────────────────────────────────────────
 
 
-def _ensure_env_file_readable_by_daemon(instance_dir: str, host_user: str) -> None:
-    """Best-effort idempotent re-grant of `u:<host_user>:r` on `.sandbox.env`.
-
-    Used by destroy to avoid a `permission denied` warning during compose-down
-    when a prior `sandbox stop` revoked the daemon's ACL on the env file.
-    Missing file or setfacl failure is silently ignored.
-    """
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    if not os.path.exists(env_file):
-        return
-    try:
-        subprocess.run(
-            ["setfacl", "-m", f"u:{host_user}:r", env_file],
-            check=False,
-            capture_output=True,
-        )
-    except OSError:
-        return
-
-
 def _compose_down(
     instance_dir: str,
     project_name: str,
@@ -1504,6 +1500,38 @@ def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] |
                 warnings.append(f"ACL revoke warning for {description}: {detail}")
         except OSError as e:
             warnings.append(f"ACL revoke warning for {description}: {e}")
+    return warnings
+
+
+def _phase_stop_teardown(
+    instance_dir: str,
+    project_name: str,
+    host_user: str,
+    config: InstanceConfig,
+    workspace_paths: list[str] | None,
+    *,
+    volumes: bool,
+    auth: MachinectlAuth,
+) -> list[str]:
+    """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
+    Sequence requirement).
+
+    Executes the load-bearing ordering:
+      1. ``compose down [-v]`` (with volumes flag controlled by caller)
+      2. unlink helper-cp-managed files (so the recursive ACL revoke and the
+         next start's hydration both see dev-owned parents only)
+      3. revoke named-ACLs via :func:`_revoke_acls`
+
+    Steps 2 and 3 are fault-isolated; their warnings are returned to the caller
+    as a list of human-readable strings. Step 1 may raise
+    :class:`SandboxExecutionError` and is not caught here — callers wrap
+    individually because `stop` and `destroy` differ in how they treat a failed
+    compose-down (stop propagates, destroy demotes to a warning).
+    """
+    warnings: list[str] = []
+    _compose_down(instance_dir, project_name, host_user, config, volumes=volumes, auth=auth)
+    warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
+    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths))
     return warnings
 
 
@@ -2219,21 +2247,13 @@ def stop(
         )
         raise typer.Exit(code=1)
 
-    # Compose down
-    _compose_down(instance_dir, project_name, host_user, config, volumes=clean, auth=auth)
-
-    # Recipe-symmetry partner of phase 5d: unlink helper-cp-managed files so
-    # next start's hydration can re-render them as dev-owned via O_CREAT.
-    # Runs before ACL revoke so the recursive setfacl walk doesn't encounter
-    # consumer-owned files (dev lacks CAP_FOWNER to setfacl them).
-    unlink_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
-    for w in unlink_warnings:
-        console.print(f"⚠ {w}", style="yellow")
-
-    # ACL revocation (Pattern A) — fault-isolated (D5), per-workspace fan-out
+    # Teardown sequence — compose down → unlink helper-cp-managed →
+    # revoke named-ACLs. Shared with `destroy`'s D5 phase via
+    # `_phase_stop_teardown` (cluster 3 — Teardown Sequence requirement).
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
-    acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
-    for w in acl_warnings:
+    for w in _phase_stop_teardown(
+        instance_dir, project_name, host_user, config, ws_paths, volumes=clean, auth=auth
+    ):
         console.print(f"⚠ {w}", style="yellow")
 
     _release_lock(lock_fd)
@@ -2421,10 +2441,10 @@ def destroy(
     with acquire_backup_lock(inst):
         _release_lock(gate_lock_fd)
 
-        # Re-grant daemon read on .sandbox.env in case a prior `sandbox stop`
-        # revoked it; compose-down needs to read --env-file as the daemon.
-        # Idempotent and best-effort; missing file or no-ACL-support is a no-op.
-        _ensure_env_file_readable_by_daemon(instance_dir, host_user)
+        # NOTE: the daemon's `u:<host_user>:r` ACL on `.sandbox.env` is
+        # `granted-once, persistent` (cluster 3 — Environment File Read ACL),
+        # so it survives a prior `sandbox stop` and no defensive re-grant is
+        # needed before compose-down here.
 
         # D3: compose down (REVERSIBLE).
         try:
@@ -2465,21 +2485,30 @@ def destroy(
             raise typer.Exit(code=1) from None
 
         try:
+            # D5+D6: shared teardown sequence with `stop` (cluster 3 —
+            # Teardown Sequence). compose down -v + unlink helper-cp-managed
+            # + named-ACL revoke, in that ordering. compose-down failures are
+            # demoted to warnings here (destroy proceeds with rmtree
+            # regardless), unlike `stop` which propagates.
+            ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
             try:
-                _compose_down(instance_dir, project_name, host_user, config, volumes=True, auth=auth)
+                teardown_warnings = _phase_stop_teardown(
+                    instance_dir,
+                    project_name,
+                    host_user,
+                    config,
+                    ws_paths,
+                    volumes=True,
+                    auth=auth,
+                )
             except SandboxExecutionError as e:
                 console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
-
-            # Recipe-symmetry partner of phase 5d (mirrors stop's Change I):
-            # unlink helper-cp-managed files before the ACL revoke walks them.
-            # Without this, the recursive setfacl in _revoke_acls EPERMs on
-            # every consumer-owned file (~16 warnings on a normal destroy).
-            for w in _phase_stop_unlink_consumer_files(instance_dir, host_user):
-                console.print(f"⚠ {w}", style="yellow")
-
-            # D6: ACL revocation — per-workspace fan-out, fault-isolated.
-            ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
-            for w in _revoke_acls(instance_dir, host_user, ws_paths):
+                # Compose-down failed but the rest of the destroy MUST proceed
+                # (rmtree is irreversible by design). Run the post-compose
+                # phases separately so warnings still surface.
+                teardown_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
+                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths))
+            for w in teardown_warnings:
                 console.print(f"⚠ {w}", style="yellow")
 
             # D7: rmtree(instances/<inst>/).
