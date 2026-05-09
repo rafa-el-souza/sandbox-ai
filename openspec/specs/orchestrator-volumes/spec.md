@@ -189,19 +189,63 @@ The system SHALL grant read-execute (`r-x`) ACL on the instance root directory s
 - **THEN** `setfacl -x u:<host_unprivileged_user> <sandbox_ai_home()>/instances/<inst>/` is applied
 
 ### Requirement: Environment File Read ACL
-The system SHALL grant read-only ACL on `.sandbox.env` so the sandbox user's `docker compose` process can parse `env_file:` directives and `--env-file` interpolation. The `.sandbox.env` lives at `<sandbox_ai_home()>/instances/<inst>/.sandbox.env`.
+
+The system SHALL grant a read-only named ACL on `.sandbox.env` so the
+sandbox user's `docker compose` process can parse `env_file:`
+directives and `--env-file` interpolation. The `.sandbox.env` lives at
+`<sandbox_ai_home()>/instances/<inst>/.sandbox.env`.
+
+The named-ACL on `.sandbox.env` is `granted-once, persistent` (cluster
+3 — `Acl Revoke Plan Excludes Persistent Grants`): it is applied at
+every `sandbox start` (idempotently — re-running `setfacl -m
+u:<host_user>:r` on an already-granted file is a no-op), survives
+`sandbox stop`, and is removed only when `sandbox destroy` rmtrees the
+instance directory.
+
+The lifecycle reclassification eliminates the previous defensive
+re-grant rituals at `_container_status` (`docker compose ps` could not
+read `--env-file` after a stop) and `destroy`'s preflight (`docker
+compose down` could not read `--env-file` after a stop). Those
+rituals — implemented temporarily as `_ensure_env_file_readable_by_daemon`
+calls before each read-side touchpoint — are deleted; the persistent
+classification is the structural fix.
 
 #### Scenario: .sandbox.env ACL granted at start
 - **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
-- **THEN** `setfacl -m u:<host_unprivileged_user>:r <sandbox_ai_home()>/instances/<inst>/.sandbox.env` is applied
+- **THEN** `setfacl -m u:<host_unprivileged_user>:r
+  <sandbox_ai_home()>/instances/<inst>/.sandbox.env` is applied
 
-#### Scenario: .sandbox.env ACL revoked at stop
-- **WHEN** `sandbox stop <inst>` executes ACL revocation
-- **THEN** `setfacl -x u:<host_unprivileged_user> <sandbox_ai_home()>/instances/<inst>/.sandbox.env` is applied
+#### Scenario: .sandbox.env ACL is NOT revoked at stop
+- **WHEN** `sandbox stop <inst>` executes the teardown sequence
+- **THEN** the named ACL on `.sandbox.env` is NOT touched: the entry
+  is absent from `_acl_revoke_plan` output and `_revoke_acls` issues no
+  setfacl call against `.sandbox.env`
 
-#### Scenario: Missing .sandbox.env fails explicitly
+#### Scenario: .sandbox.env ACL survives stop/start cycles
+- **WHEN** the lifecycle `start → stop → start → stop` is exercised
+- **THEN** at each transition the named ACL on `.sandbox.env` remains
+  present; `_container_status`, `_compose_down`, and the
+  `docker compose up` invocation can each read `--env-file` without a
+  defensive re-grant ritual
+
+#### Scenario: .sandbox.env ACL removed only by destroy rmtree
+- **WHEN** `sandbox destroy <inst>` rmtrees the instance directory at
+  D7
+- **THEN** the named ACL is removed implicitly via the file's deletion;
+  no explicit `setfacl -x u:<host>` call against `.sandbox.env` runs
+  during destroy
+
+#### Scenario: Missing .sandbox.env fails explicitly at start
 - **WHEN** `.sandbox.env` does not exist at Phase 5
-- **THEN** `setfacl` fails and the error is surfaced as a `SandboxExecutionError` indicating instance corruption (no silent skip)
+- **THEN** `setfacl` fails and the error is surfaced as a
+  `SandboxExecutionError` indicating instance corruption (no silent
+  skip)
+
+#### Scenario: Defensive env-ACL re-grant helper is removed
+- **WHEN** the `cli.main` module is imported
+- **THEN** there is no symbol `_ensure_env_file_readable_by_daemon`;
+  `_container_status` and `destroy`'s preflight contain no defensive
+  setfacl on `.sandbox.env`
 
 ### Requirement: ACL Grant Plan as Single Source of Truth
 
@@ -708,4 +752,153 @@ from the container's stderr stream.
 - **WHEN** the squid template is read
 - **THEN** the directives ``access_log stdio:/dev/stderr`` and
   ``cache_log stderr`` are both present
+
+### Requirement: Teardown Sequence
+
+The system SHALL implement a single shared teardown sequence
+`_phase_stop_teardown(instance_dir, project_name, host_user, config,
+workspace_paths, *, volumes, auth) -> list[str]` invoked by both
+`sandbox stop` and `sandbox destroy` (D5+D6 phase). The sequence runs
+exactly three phases in this order:
+
+1. `_compose_down(..., volumes=<arg>, ...)` — `docker compose down [-v]`
+   via `machinectl shell`. May raise `SandboxExecutionError`.
+2. `_phase_stop_unlink_consumer_files(instance_dir, host_user)` —
+   unlinks every helper-cp-managed file enumerated in
+   `_helper_cp_chown_plan`. Fault-isolated; returns warning strings.
+3. `_revoke_acls(instance_dir, host_user, workspace_paths)` — runs
+   `_acl_revoke_plan` entries with `check=False`. Fault-isolated;
+   returns warning strings.
+
+Steps 2 and 3 SHALL run in this order so the named-ACL revoke (step 3)
+operates on dev-owned parents only. Step 1 is the caller-controlled
+phase: `stop` propagates a failed compose-down (the lifecycle is
+recoverable); `destroy` demotes it to a warning AND still runs steps 2
+and 3 inline (the destroy path is irreversible by design and MUST
+proceed to rmtree regardless).
+
+#### Scenario: Helper enforces compose-down → unlink → revoke ordering
+- **WHEN** `_phase_stop_teardown` is invoked
+- **THEN** `_compose_down` is called first, then
+  `_phase_stop_unlink_consumer_files`, then `_revoke_acls`, in that
+  exact order; the call-sequence is verifiable via mocked side-effects
+  appending to a list
+
+#### Scenario: stop delegates to the shared helper
+- **WHEN** `sandbox stop <inst>` runs (instance is warm)
+- **THEN** the inline compose-down + unlink + revoke is replaced by a
+  single `_phase_stop_teardown(..., volumes=<clean>, ...)` call;
+  `volumes=False` for default stop, `volumes=True` for `--clean`
+
+#### Scenario: destroy D5 delegates to the shared helper
+- **WHEN** `sandbox destroy <inst> --force` reaches D5 (compose down -v)
+- **THEN** D5+D6 are implemented via
+  `_phase_stop_teardown(..., volumes=True, ...)`; aggregated warnings
+  are emitted via the existing `⚠ <warning>` channel
+
+#### Scenario: destroy proceeds when compose-down fails
+- **WHEN** `_compose_down` inside `_phase_stop_teardown` raises
+  `SandboxExecutionError` during destroy
+- **THEN** destroy catches the exception, demotes it to a warning, AND
+  still invokes `_phase_stop_unlink_consumer_files` and `_revoke_acls`
+  inline so the on-disk cleanup proceeds; the subsequent rmtree
+  (irreversible D7) is unaffected
+
+### Requirement: Acl Revoke Plan Excludes Persistent Grants
+
+The `_acl_revoke_plan` function SHALL be a strict subset of the
+`_acl_grant_plan` output by lifecycle: only grants whose lifecycle is
+`granted-at-start, revoked-at-stop` are revoked. Grants with lifecycle
+`granted-once, persistent` or `applied-on-every-start, idempotent,
+never-revoked` SHALL NOT appear in the revoke plan.
+
+Concretely, the revoke plan SHALL NOT contain:
+
+- Ancestor traverse entries (`u:<host_user>:--x` on `_compute_ancestors`).
+- Recursive walks (`-R` flag) on `docker/` or `config/`. Both are
+  dir-level only because the recursive walk would EPERM on
+  consumer-uid-owned files inside (dev lacks `CAP_FOWNER`).
+- Workspace shared-group `chgrp`/`chmod 2770`/`setgid` operations or
+  default-mask resets (`m::`, `g::`, `o::`). Only the named per-user
+  `setfacl -x u:<host>` portion of the workspace ACL is revoked.
+- Cache/log entries (mechanism is `subuid-chown`, never `named-acl`;
+  there is nothing to setfacl-revoke).
+- The `.sandbox.env` named-ACL entry (now persistent — see
+  `Environment File Read ACL`).
+
+The revoke plan SHALL contain dir-level `setfacl -x u:<host>` entries
+for: instance root, `docker/` (dir-level), `config/` (dir-level),
+`secrets/` (dir-level traverse), and per-workspace named-ACL +
+default named-entry.
+
+#### Scenario: Revoke plan contains no recursive walks
+- **WHEN** `_acl_revoke_plan` is called for any instance dir
+- **THEN** no entry's argv contains the `-R` flag
+
+#### Scenario: Revoke plan does not touch helper-cp parents
+- **WHEN** `_acl_revoke_plan` is called and the helper-cp parent set
+  `{config/coredns, config/dnsdist, config/proxy, config/core,
+  config/admin, secrets}` is enumerated
+- **THEN** no recursive entry's target equals any of those paths
+
+#### Scenario: Revoke plan excludes ancestor traverse
+- **WHEN** `_acl_revoke_plan` is called
+- **THEN** no entry description contains the substring "ancestor"
+
+#### Scenario: Revoke plan excludes workspace shared-group persistent ops
+- **WHEN** `_acl_revoke_plan` is called with workspace_paths
+- **THEN** no entry description contains "chgrp" or "setgid"; the only
+  `-d` entries on workspace paths revoke a single named user entry
+  (argv contains `-x u:<host_user>`), never a default-mask reset
+
+#### Scenario: Revoke plan excludes the env file
+- **WHEN** `_acl_revoke_plan` is called
+- **THEN** no entry description contains `.sandbox.env` and no entry's
+  argv mentions `.sandbox.env`
+
+#### Scenario: Revoke plan is a strict subset of grant plan paths
+- **WHEN** both `_acl_grant_plan` and `_acl_revoke_plan` are called
+  with the same arguments
+- **THEN** every revoke target path appears as a grant target path
+  (revoke ⊆ grant by path); the converse asymmetry is the load-bearing
+  direction (grant has persistent entries that revoke does not)
+
+### Requirement: Consumer-Uid-0-Chown Revoke Spec
+
+The system SHALL revoke the `consumer-uid-0-chown` mechanism (used by
+helper-cp-managed files in `RO_FILE_RECIPES` and `EXEC_FILE_RECIPES`)
+via `unlink at stop + recreate-via-hydrate at next start`, NOT via
+setfacl. `_phase_stop_unlink_consumer_files` is the recipe-symmetry
+partner of `_phase_helper_cp_chown_ro_files`. On the next `sandbox
+start`, hydration's `O_CREAT|O_TRUNC` creates fresh dev-owned files;
+the helper-cp+chown phase then re-transfers ownership to the consumer
+subuid. The consumer-uid-0-chown lifecycle is therefore:
+
+- **Lifecycle**: `granted-at-start, revoked-at-stop`.
+- **Mechanism**: `unlink + rehydrate` (NOT `setfacl -x`; consumer files
+  are owned by an unmapped subuid, so dev lacks `CAP_FOWNER` to setfacl
+  them).
+- **Symmetry partner**: every file that
+  `_phase_helper_cp_chown_ro_files` writes at start is unlinked by
+  `_phase_stop_unlink_consumer_files` at stop.
+
+#### Scenario: helper-cp file inventory has a 1:1 stop counterpart
+- **WHEN** `_helper_cp_chown_plan` is the source of truth at start
+- **THEN** `_phase_stop_unlink_consumer_files` iterates the same plan
+  output and unlinks every `(parent_abs, file)` pair, fault-isolated;
+  per-file FileNotFoundError is silent, per-file OSError aggregates
+  into a returned warning string
+
+#### Scenario: stop unlink runs before named-ACL revoke
+- **WHEN** `_phase_stop_teardown` runs the teardown sequence
+- **THEN** `_phase_stop_unlink_consumer_files` runs before
+  `_revoke_acls` so the named-ACL revoke walks dev-owned parents only
+  (consumer-owned files have already been removed)
+
+#### Scenario: hydration recreates the files on next start
+- **WHEN** `sandbox start <inst>` runs after a `sandbox stop` cycle
+- **THEN** the hydrate phase's `O_CREAT|O_TRUNC` re-creates each
+  helper-cp-managed file as dev-owned; the helper-cp+chown phase then
+  re-transfers ownership to the consumer subuid; the lifecycle is
+  fully recoverable across stop/start
 
