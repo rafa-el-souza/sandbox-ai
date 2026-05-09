@@ -207,16 +207,21 @@ The system SHALL grant read-only ACL on `.sandbox.env` so the sandbox user's `do
 
 The system SHALL define ACL grant targets in a single function (`_acl_grant_plan`) consumed by both the execution path and the dry-run preview. The grant plan SHALL include named-acl operations only; helper-recipe phases (subuid-chown, consumer-uid-0-chown, shared-group) are separate phases with their own plans (`_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan`). Each plan is its own single source of truth for its mechanism. Plans iterate `[workspaces]` (sorted by name) where applicable.
 
-The grant on `config/` is a dir-level `rX` traverse (not recursive `rwX`)
-in the design-clean target state: per-file ownership of config files is
-handled by the `consumer-uid-0-chown` recipe, and the helper-cp phase
-re-installs replacements via a daemon-private scratch-dir + inode-swap
-rename pattern (owned by the `Helper Recipe Phases` requirement in
-sibling cluster `orchestrator-volumes-helper-cp-recipe-correctness`).
-Until that helper-side change lands, the runtime grant on `config/` is
-recursive `rwX` so the helper-cp's current cross-fs `mv` succeeds; the
-spec records the dir-level `rX` intent as the canonical state and notes
-the cluster-2 dependency that retires the runtime widening.
+The grant on `config/` is recursive `rX` (read + conditional execute,
+NOT write). Daemon host-level write on file CONTENTS is not required
+because the helper-cp recipe (per the `Helper Recipe Phases
+(unlink+cp+chmod+chown discipline)` requirement) performs unlink+cp
+inside the helper container under `cap_dac_override`. The recursive
+`rwX` widening from temp commit `6c3bcb4` is retired by this cluster.
+
+The grant plan SHALL emit a per-helper-cp-parent dir-level `rwx`
+entry for each `config/<subdir>` listed in `RO_FILE_RECIPES`
+(`config/coredns`, `config/dnsdist`, `config/proxy`, `config/core`,
+`config/admin`). This is BUG-B for config/ — provisioning write on
+the parent dir, required so the helper-cp bind mount of
+`config/<subdir>` is mountable read-write into the helper container.
+Parallel to the existing `docker/core` and `secrets/` dir-level rwx
+grants.
 
 #### Scenario: Grant plan consumed by execution
 - **WHEN** `_phase_acl_grant` executes Phase 5
@@ -234,9 +239,13 @@ the cluster-2 dependency that retires the runtime widening.
 - **WHEN** `_acl_revoke_plan()` is called
 - **THEN** the returned target set includes named-acl entries on instance root, docker/, config/ (dir-level), secrets/ (dir-level), .sandbox.env, AND named-acl entries on EACH workspace.path (effective + default ACL host_user portion); it does NOT include ancestor directories or any chown/chmod operation, NOR any path under `_backups/`
 
-#### Scenario: config/ dir-level rX grant is the canonical target state
+#### Scenario: config/ recursive grant is dir-level rX (not rwX)
 - **WHEN** the spec is read end-to-end as the design-clean target
-- **THEN** the named-ACL grant on `config/` is dir-level `rX` (traverse only); per-file mutability inside is handled exclusively by the `consumer-uid-0-chown` recipe and helper-cp's daemon-private-scratch + inode-swap-rename phases. The runtime widening to recursive `rwX` is preserved in `cli/main.py` only until cluster `orchestrator-volumes-helper-cp-recipe-correctness` lands the helper-side change; the runtime ACL retires to dir-level `rX` in the same change that lands the helper-side inode-swap rename.
+- **THEN** the recursive named-ACL grant on `config/` is `u:<host_user>:rX` (read + conditional execute only); per-file mutability inside is handled exclusively by the `consumer-uid-0-chown` recipe AND the helper-cp recipe's in-helper unlink+cp pair under `cap_dac_override` (no host-level daemon write on file CONTENTS is required); the runtime grant in `cli/main.py` MUST NOT carry the temp commit `6c3bcb4` `rwX` widening
+
+#### Scenario: per-helper-cp-parent dir-level rwx grants present
+- **WHEN** `_acl_grant_plan` is queried with a populated instance dir
+- **THEN** the plan contains a `setfacl -m u:<host_user>:rwx <parent>` entry for each of `config/coredns`, `config/dnsdist`, `config/proxy`, `config/core`, `config/admin`; each entry is dir-level (NOT recursive) AND is parallel to the existing dir-level rwx entries on `docker/core` and `secrets/`
 
 ### Requirement: Fault-Isolated ACL Revocation
 The system SHALL execute each ACL revocation independently with `check=False`. Failures SHALL be collected and reported as warnings. All targets SHALL be attempted regardless of individual failures.
@@ -603,4 +612,100 @@ The `secrets/` directory additionally carries a default ACL `setfacl -d -m u::rw
 #### Scenario: setfacl failure surfaces as SandboxExecutionError
 - **WHEN** the per-file `setfacl -m u:<host_user>:r <path>` fails (e.g., EPERM, ENOENT) for any post-hydrate target
 - **THEN** `_grant_post_hydrate_daemon_read` raises `SandboxExecutionError` mentioning the path and "grant daemon read on post-hydrate target"; the failure is not silently swallowed
+
+### Requirement: Helper Recipe Phases (unlink+cp+chmod+chown discipline)
+
+The system SHALL implement the helper-cp file ownership transfer as an
+in-helper-container shell sequence with the explicit ordering
+``cp /p/$f /tmp/$f && unlink /p/$f && cp /tmp/$f /p/$f && chmod
+<mode> /p/$f && chown <uid>:<gid> /p/$f``. Cross-filesystem ``mv`` MUST
+NOT be used (it strips extended ACLs from the destination). ``chmod``
+MUST precede ``chown`` (post-userns translation, in-container root
+cannot chmod a foreign-owned file even with ``cap_dac_override``).
+
+#### Scenario: helper_chown_files inner shell ordering
+- **WHEN** ``core.helper_container.helper_chown_files`` is invoked
+- **THEN** the inner shell command run inside the helper container
+  contains, in order, ``cp /p/"$f" /tmp/"$f"``, ``unlink /p/"$f"``,
+  ``cp /tmp/"$f" /p/"$f"``, ``chmod <mode> /p/"$f"``, ``chown
+  <uid>:<gid> /p/"$f"``, AND does NOT contain ``mv`` for any per-file
+  step
+
+#### Scenario: chmod precedes chown
+- **WHEN** the helper-cp recipe runs against a file destined for a
+  consumer subuid
+- **THEN** the ``chmod`` step appears in the inner shell BEFORE the
+  ``chown`` step, so the chmod runs while the file is still owned by
+  in-container root and does not EPERM under ``cap_dac_override``
+
+#### Scenario: unlink preserves parent default ACL
+- **WHEN** the helper recipe re-creates a file inside a parent dir that
+  carries a default ACL ``u:<host_user>:r``
+- **THEN** the new inode inherits the parent's default ACL because the
+  pair (``unlink`` + ``cp``) creates a fresh inode within the same
+  filesystem (no cross-fs copy that would strip extended ACLs)
+
+### Requirement: Helper-Cp Default ACL Inheritance
+
+The system SHALL grant a default ACL ``u:<host_user>:r`` on each
+helper-cp parent directory listed in ``RO_FILE_RECIPES`` (``config/coredns``,
+``config/dnsdist``, ``config/proxy``, ``config/core``, ``config/admin``,
+``secrets``). The default ACL is defense-in-depth for write paths that
+do not trigger ``write_restricted``'s ``fchmod`` mask reset; it
+complements (does not replace) the post-hydrate setfacl pass owned by
+the ``Helper-CP Source Files Daemon-Readable Pre-Recipe`` requirement.
+
+#### Scenario: default-ACL grant present per helper-cp parent
+- **WHEN** ``_acl_grant_plan`` is queried with a populated instance dir
+- **THEN** for each helper-cp parent dir listed above, the plan
+  contains a ``setfacl -d -m u:<host_user>:r <parent>`` entry
+
+#### Scenario: default-ACL is defense-in-depth, not load-bearing
+- **WHEN** a file is created inside a helper-cp parent via the
+  ``write_restricted`` path (which fchmods immediately after open)
+- **THEN** the inherited default-ACL named entry is masked out by
+  ``mask::---`` AND the post-hydrate setfacl pass (from sibling
+  requirement ``Helper-CP Source Files Daemon-Readable Pre-Recipe``)
+  is required to restore effective daemon read; the default-ACL alone
+  is sufficient ONLY for write paths that preserve inherited ACLs
+
+### Requirement: Consumer-Uid-Only Sidecar Mechanism
+
+The system SHALL declare ``user: "13:13"`` and pin ``entrypoint:
+["/usr/sbin/squid"]`` for the proxy service in ``compose.yml`` so the
+container starts directly as the in-container ``squid`` uid (= host
+subuid 13 post-userns translation) and bypasses the OCI image's stock
+entrypoint. Required because under gVisor + ``read_only: true`` the
+stock entrypoint's start-as-root + drop-to-worker pattern EPERMs
+reading the helper-cp-transferred ``squid.conf`` (mode ``0640`` owned
+by the consumer uid).
+
+#### Scenario: proxy compose declares uid 13:13 directly
+- **WHEN** the rendered ``compose.yml`` template is read
+- **THEN** the ``proxy`` service block contains ``user: "13:13"``
+
+#### Scenario: proxy compose pins direct squid entrypoint
+- **WHEN** the rendered ``compose.yml`` template is read
+- **THEN** the ``proxy`` service block contains ``entrypoint:
+  ["/usr/sbin/squid"]`` (the OCI image's stock entrypoint is NOT
+  invoked)
+
+### Requirement: Read-Only Rootfs Sidecar Configuration
+
+The system SHALL pin the squid template directives ``pid_filename
+none``, ``access_log stdio:/dev/stderr``, and ``cache_log stderr``.
+Required because the proxy container runs ``read_only: true`` plus a
+fixed tmpfs set; squid's default pid file (``/var/run/squid/squid.pid``)
+and log paths under ``/var/log/squid/`` are not writable by the
+post-uid-pivot worker. Logs are captured by docker's logging driver
+from the container's stderr stream.
+
+#### Scenario: squid template disables on-disk pid recording
+- **WHEN** the squid template is read
+- **THEN** the directive ``pid_filename none`` is present
+
+#### Scenario: squid template redirects logs to stderr
+- **WHEN** the squid template is read
+- **THEN** the directives ``access_log stdio:/dev/stderr`` and
+  ``cache_log stderr`` are both present
 
