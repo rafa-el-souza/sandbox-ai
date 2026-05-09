@@ -1365,8 +1365,9 @@ class TestHelperCpChownRoFiles:
 
         monkeypatch.setattr("cli.main.helper_chown_files", _fake)
         _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
-        # One invocation per RO_FILE_RECIPES entry (8 groups).
-        assert len(invocations) == 8
+        # One invocation per (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES)
+        # entry: 7 RO + 1 EXEC + 1 RW = 9 groups (cluster 5 added the RW recipe).
+        assert len(invocations) == 9
 
     def test_phase_propagates_helper_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files
@@ -3744,6 +3745,91 @@ class TestACLPlanAsymmetry:
         ro_parents = [(p, files) for p, files, _, _ in RO_FILE_RECIPES]
         assert ("docker/core", ("entrypoint.sh",)) not in ro_parents, (
             "entrypoint.sh must live in EXEC_FILE_RECIPES, not RO_FILE_RECIPES"
+        )
+
+    def test_rw_file_recipes_table_includes_claude_json_at_mode_0660(self) -> None:
+        """Cluster 5 ADDED requirement: RW Config File Recipes.
+
+        Spec source: orchestrator-volumes' "RW Config File Recipes"
+        requirement. Dev-created files compose mounts as ``:rw`` MUST be
+        transferred to the consumer's host subuid+subgid via the helper-cp
+        recipe with mode 0660 (group-rw matching consumer's primary group).
+        Today the only entry is ``config/core/.claude.json`` (consumer
+        agent uid 1000 inside the core container).
+
+        Pre-fix symptom: the host file is dev-owned (host uid 1000),
+        unmapped in the agent container's userns, so it presents as
+        ``nobody:nobody`` ``---`` to the agent → ``echo {} > .claude.json``
+        as agent fails with EACCES even though compose mount is ``:rw``.
+        """
+        from cli.main import EXEC_FILE_RECIPES, RO_FILE_RECIPES, RW_FILE_RECIPES
+
+        entries = list(RW_FILE_RECIPES)
+        assert entries, "RW_FILE_RECIPES must be non-empty"
+        match = next(
+            (e for e in entries if e[0] == "config/core" and ".claude.json" in e[1]),
+            None,
+        )
+        assert match is not None, "config/core/.claude.json missing from RW_FILE_RECIPES"
+        _parent, _files, consumer_uid, mode = match
+        assert consumer_uid == 1000
+        assert mode == 0o660, f".claude.json must be mode 0660 (consumer-rw); got 0o{mode:03o}"
+        # RW kind MUST NOT be duplicated in RO_FILE_RECIPES or EXEC_FILE_RECIPES.
+        ro_files = {(p, fname) for p, files, _, _ in RO_FILE_RECIPES for fname in files}
+        exec_files = {(p, fname) for p, files, _, _ in EXEC_FILE_RECIPES for fname in files}
+        assert ("config/core", ".claude.json") not in ro_files, (
+            ".claude.json must live in RW_FILE_RECIPES, not RO_FILE_RECIPES"
+        )
+        assert ("config/core", ".claude.json") not in exec_files, (
+            ".claude.json must live in RW_FILE_RECIPES, not EXEC_FILE_RECIPES"
+        )
+
+    def test_helper_cp_chown_plan_includes_rw_file_recipes(self) -> None:
+        """Cluster 5: ``_helper_cp_chown_plan`` MUST iterate RW_FILE_RECIPES too.
+
+        Without this, ``.claude.json`` stays dev-owned and the agent sees
+        ``nobody:nobody`` ``---`` from inside the userns. The plan is the
+        single source of truth for both the helper-cp execution phase
+        (`_phase_helper_cp_chown_ro_files`) and the stop-time unlink
+        (`_phase_stop_unlink_consumer_files`); RW files MUST appear in
+        both via the shared plan.
+        """
+        from cli.main import RW_FILE_RECIPES, _helper_cp_chown_plan
+
+        plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
+        # Find the RW entry for config/core/.claude.json in the plan.
+        rw_entries = [
+            (parent_abs, files, mode)
+            for parent_abs, files, _uid, _gid, mode in plan
+            if parent_abs.endswith("/config/core") and ".claude.json" in files
+        ]
+        assert rw_entries, f"RW recipe for .claude.json missing from plan; got {plan}"
+        # At least one entry must carry mode 0660 (the RW recipe).
+        assert any(mode == 0o660 for _p, _f, mode in rw_entries), (
+            f"RW recipe entry must use mode 0660; got {[mode for _p, _f, mode in rw_entries]}"
+        )
+        # Sanity: the recipe table itself drives the inclusion.
+        assert any(parent == "config/core" and ".claude.json" in files for parent, files, _, _ in RW_FILE_RECIPES)
+
+    def test_post_hydrate_daemon_read_targets_includes_rw_recipe_files(self, tmp_path: Path) -> None:
+        """Cluster 5 MODIFIED requirement: Helper-CP Source Files Daemon-Readable Pre-Recipe.
+
+        The post-hydrate setfacl pass MUST cover RW recipe source files
+        (in addition to RO + EXEC + DAEMON_READ_DIRECT). Otherwise the
+        helper-cp ``cp /p/.claude.json /tmp/.claude.json`` step EACCES'es
+        because the daemon (host_user) lacks DAC read on the dev-owned
+        source after ``write_restricted``'s fchmod resets the ACL mask.
+        """
+        from cli.main import _post_hydrate_daemon_read_targets
+
+        instance_dir = tmp_path / "inst"
+        (instance_dir / "config" / "core").mkdir(parents=True)
+        claude_json = instance_dir / "config" / "core" / ".claude.json"
+        claude_json.write_text("{}\n")
+
+        targets = _post_hydrate_daemon_read_targets(str(instance_dir))
+        assert str(claude_json) in targets, (
+            f"RW recipe source .claude.json missing from post-hydrate targets; got {targets}"
         )
 
     def test_workspace_shared_group_runs_before_named_acl_grant(

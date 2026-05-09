@@ -455,7 +455,7 @@ def _post_hydrate_daemon_read_targets(instance_dir: str) -> list[str]:
     matching component).
     """
     paths: list[str] = []
-    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES):
         parent_abs = os.path.join(instance_dir, parent)
         for fname in files:
             path = os.path.join(parent_abs, fname)
@@ -1024,6 +1024,43 @@ tables in a single pass.
 """
 
 
+RW_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # Agent (core) `.claude.json` — bind-mounted RW at /home/agent/.claude.json
+    # so Claude Code's CLI can persist its session/state. Consumer is uid 1000
+    # inside the container (mapped to claude-sandbox subuid 165536+999=166535
+    # on host). Mode 0660 so the consumer's primary group (matching subgid)
+    # also gets read+write — this matches the bind mount's RW intent.
+    #
+    # Distinct from RO_FILE_RECIPES (mode 0640, daemon-readable r--) and
+    # EXEC_FILE_RECIPES (mode 0500 owner r-x): RW config files MUST be
+    # consumer-writable, which requires owner and group write bits and
+    # consumer-uid ownership transfer (otherwise the file presents as
+    # ``nobody:nobody`` ``---`` to the agent and silently fails RW).
+    ("config/core", (".claude.json",), 1000, 0o660),
+)
+"""Single source of truth for dev-created RW config files transferred to consumer.
+
+Sibling of RO_FILE_RECIPES + EXEC_FILE_RECIPES. The structural distinction is
+that compose mounts these files RW (not RO), so the in-container consumer must
+be able to write them. Today the only entry is ``config/core/.claude.json``.
+
+Treatment matches RO_FILE_RECIPES in every dimension except mode:
+- Pre-helper-cp: included in :func:`_post_hydrate_daemon_read_targets` so the
+  per-file ``setfacl -m u:<host_user>:r`` lets the daemon (and thus the
+  helper container's bind-mount source) read the dev-owned source during the
+  helper-cp ``cp /p/<file> /tmp/<file>`` step.
+- Helper-cp: :func:`_helper_cp_chown_plan` iterates this table alongside
+  RO_FILE_RECIPES + EXEC_FILE_RECIPES, transferring ownership to the
+  consumer's host subuid+subgid with the per-file mode.
+- Stop-time: :func:`_phase_stop_unlink_consumer_files` iterates the same
+  plan, so RW files are unlinked before the next start's hydrate writes
+  fresh dev-owned replacements.
+
+If a future bind mount adds a new dev-created RW single-file mount, add it
+here in lockstep with the compose template change.
+"""
+
+
 DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Files the daemon (host_user) reads in-place from the orchestrator-owned
     # tree, with NO ownership transfer through helper-cp. Distinct from
@@ -1145,7 +1182,7 @@ def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, 
             host_gid_for_in_container(consumer_uid, host_user),
             mode,
         )
-        for parent, files, consumer_uid, mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES)
+        for parent, files, consumer_uid, mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES)
     ]
 
 
@@ -1624,9 +1661,10 @@ def _dry_run_pipeline(inst: str) -> None:
 
     # Post-hydrate setfacl-as-owner pass — covers the write_restricted
     # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
-    # file (RO_FILE_RECIPES + EXEC_FILE_RECIPES) AND each daemon-read
-    # direct file (DAEMON_READ_DIRECT_FILES — compose.yml + extras).
-    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+    # file (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES) AND
+    # each daemon-read direct file (DAEMON_READ_DIRECT_FILES — compose.yml
+    # + extras).
+    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES):
         parent_abs = os.path.join(instance_dir, parent)
         for fname in files:
             console.print(
