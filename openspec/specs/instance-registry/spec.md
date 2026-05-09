@@ -1,14 +1,12 @@
 ## Purpose
 
 This specification defines the instance registry that maps instance names (per-user globally unique) to instance metadata, enabling multi-instance discovery and lifecycle management.
-
 ## Requirements
-
 ### Requirement: Compose Project Name Prefix
 
 The daemon-side compose project name for instance `<inst>` SHALL be `<sanitized(dev-username)>-<inst>`, where the dev username is sanitized via `re.sub(r'[^a-z0-9]', '-', name).strip('-')`. Operator-facing names in CLI output and registry entries remain `<inst>` (without prefix); the prefixed name is daemon-side only and appears in `docker compose` invocations and container names.
 
-This prefix prevents cross-user compose project collisions on multi-user hosts where the rootless docker daemon runs under a single shared `<docker_unprivileged_user>`. The legacy `<inst>-<hash>` suffix scheme (which masked the same risk via per-CWD hash salting) is dropped per change 5.
+This prefix prevents cross-user compose project collisions on multi-user hosts where the rootless docker daemon runs under a single shared `<docker_unprivileged_user>`. The legacy `<inst>-<hash>` suffix scheme (which masked the same risk via per-CWD hash salting) was dropped when CWD-based instance discovery was removed: with explicit `<inst>` arguments and a registry keyed by `<inst>`, per-CWD salting no longer applies and the dev-username prefix is the simpler load-bearing collision boundary.
 
 The instance name length cap of 30 characters (per `instance-workspace-model`'s "Instance Name Validation") together with sanitized-username truncation keeps the worst-case container name `<dev>-<inst>-<service>-<idx>` within docker's 64-char container-name limit.
 
@@ -146,3 +144,4 @@ The system SHALL remove the registry entry for a destroyed instance to free the 
 #### Scenario: Destroy removes registry entry
 - **WHEN** `sandbox destroy <inst>` completes successfully
 - **THEN** the `instances.json` entry keyed by `<inst>` is removed
+

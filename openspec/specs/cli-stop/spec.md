@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox stop` command lifecycle, governing container shutdown, named volume preservation/removal, and ACL revocation.
-
 ## Requirements
-
 ### Requirement: Explicit Instance Argument
 
 `sandbox stop <inst>` SHALL require the instance name as a positional argument. CWD-based instance discovery is removed.
@@ -68,13 +66,14 @@ The system SHALL remove all named Docker volumes when `sandbox stop --clean` is 
 - **THEN** `docker compose down -v` has been executed and all named volumes for the instance are absent from the Docker volume list
 
 ### Requirement: ACL Revocation After Shutdown
-The system SHALL revoke the `<host_unprivileged_user>` named-ACL grants applied during Phase 5 of `sandbox start`, after containers are confirmed down. The revoke set is the output of `_acl_revoke_plan()`, which covers:
+
+The system SHALL revoke the `<host_unprivileged_user>` named-ACL grants applied during `_phase_acl_grant` of `sandbox start`, after containers are confirmed down. The revoke set is the output of `_acl_revoke_plan()`, which covers:
 - Instance root, `docker/` (recursive), `config/` (dir-level traverse), `secrets/` (dir-level traverse), `.sandbox.env`.
 - For EACH workspace in `sandbox.toml [workspaces]`: BOTH the effective entry on `workspace.path` AND the named-entry portion of the workspace's default ACL (i.e., `setfacl -x u:<host_user> <ws.path>` and `setfacl -d -x u:<host_user> <ws.path>`).
 
-The persistent portion of each workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is NOT revoked (per the change-4 lifecycle: persistent identity properties).
+The persistent portion of each workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is NOT revoked; per `orchestrator-volumes`'s `UID Paradox ACL Default Overrides` lifecycle taxonomy, the workspace shared-group state (chgrp + chmod 2770 + setgid + persistent default-ACL portion) is in the `granted-once, persistent` lifecycle.
 
-The cache/log rw bind-mount sources (per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement) are NOT in the revoke set (subuid-chowned per change 4; no `u:<host_unprivileged_user>` named ACL exists on them).
+The cache/log rw bind-mount sources (per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement) are NOT in the revoke set: they are subuid-chowned by the cache/log helper-recipe phase (in the `applied-on-every-start, idempotent, never-revoked` lifecycle) and carry no `u:<host_unprivileged_user>` named ACL to revoke.
 
 Revocation SHALL use fault-isolated execution — each target attempted independently with failures reported as warnings.
 
@@ -109,7 +108,6 @@ Revocation SHALL use fault-isolated execution — each target attempted independ
 - **WHEN** `sandbox stop <inst>` completes for an instance with multiple workspaces
 - **THEN** EACH workspace retains its bridge-group ownership, mode 2770 + setgid, and persistent default ACL portion; only the named ACLs (effective + default named entry) on each workspace are revoked
 
-
 ### Requirement: Per-User State Initialization Required
 The `sandbox stop` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
 
@@ -120,3 +118,4 @@ The `sandbox stop` command SHALL refuse to operate when the per-user state tree 
 #### Scenario: Resolved home in error message
 - **WHEN** the stop command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home`
+

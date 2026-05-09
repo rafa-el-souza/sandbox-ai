@@ -244,31 +244,11 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 
 ### Requirement: ACL Grants for rw Bind-Mount Sources
 
-The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unprivileged_user` on rw bind-mount source subdirectories during Phase 5. These grants — formerly Pattern B / Option B — are empirically dead under runsc (named ACLs are stripped at the gofer/directfs boundary per `temp/bug-tracker/2026-05-04.md` finding 1) and are replaced by the cache/log helper-recipe phase (subuid-chown + parent default ACL `u:dev:rwx`) for the cache/log leaves per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement. Each workspace's bind-mount source (every `workspace.path` in `[workspaces]`) is handled by the per-workspace shared-group phase plus a granted/revoked named-ACL applied per-workspace.
+The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unprivileged_user` on rw bind-mount source subdirectories during `_phase_acl_grant`. These grants — formerly known as Pattern B / Option B — are empirically dead under runsc (named POSIX ACLs are stripped at the gofer/directfs boundary, so the named entry never reaches the in-container process and cannot grant access; the `--add-cap` and supplementary-group mechanisms are what actually carry permission). They are replaced by the cache/log helper-recipe phase (subuid-chown + parent default ACL `u:dev:rwx`) for the cache/log leaves per `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement. Each workspace's bind-mount source (every `workspace.path` in `[workspaces]`) is handled by the per-workspace shared-group phase plus a granted/revoked named-ACL applied per-workspace.
 
 #### Scenario: rw bind-mount source directories do NOT receive the prior effective ACLs
 - **WHEN** `_acl_grant_plan()` is called for an instance
 - **THEN** the returned plan does NOT include `setfacl -R -m u:<host_user>:rwX <target>` entries for any leaf in `orchestrator-volumes`'s "Cache/Log Leaf Inventory"
-
-#### Scenario: rw bind-mount source directories do NOT receive the prior default ACLs
-- **WHEN** `_acl_grant_plan()` is called for an instance
-- **THEN** the returned plan does NOT include `setfacl -R -d -m u:<host_user>:rwX <target>` entries for the same paths (the cache/log leaves per `orchestrator-volumes`'s "Cache/Log Leaf Inventory")
-
-#### Scenario: Cache/log access is provided by the helper-recipe phase instead
-- **WHEN** `sandbox start` reaches `_phase_helper_mkdir_chown_cache_log`
-- **THEN** the cache/log leaves are chowned to the consumer subuid; the in-container agent reads/writes via owner check (runsc-compatible); dev reads via the parent's inherited `u:dev:rwx`
-
-#### Scenario: Workspace access is provided by per-workspace shared-group + named-ACL phases
-- **WHEN** `sandbox start <inst>` reaches the workspace phases for an instance with workspaces `main` and `scratch`
-- **THEN** EACH workspace.path has `chgrp <bridge-group>`, `chmod 2770`, the persistent default ACL portion, and the granted-at-start named ACL `u:<host_user>:rwx`; the in-container agent reads/writes via group bits (sb-ws supplementary gid); dev reads/writes via group bits (dev's sb-ws membership)
-
-#### Scenario: Non-bind-mounted log directories excluded from grants
-- **WHEN** `_acl_grant_plan()` is called for an instance
-- **THEN** the returned plan does NOT include entries for `log/proxy` or `log/orchestrator` (these directories are not bind-mounted into containers and are NOT in the "Cache/Log Leaf Inventory")
-
-#### Scenario: rw bind-mount ACLs absent from dry-run preview
-- **WHEN** `sandbox start <inst> --dry-run` is invoked
-- **THEN** the command preview does NOT include the prior rw bind-mount source ACL entries; instead, the preview shows the helper-recipe phase plans and per-workspace shared-group plans
 
 ### Requirement: Phase Order Includes Helper-Recipe Phases
 
@@ -446,9 +426,7 @@ start <inst>` drops the operator into the admin shell ready to work.
 The default direction is recorded normatively so any future flip
 (e.g. opt-in `--handover` flag, or moving the shell-drop to a
 separate `sandbox shell` command) requires a spec change rather than
-silently shipping under a refactor. The alternative considered
-(default OFF + opt-in flag, or `sandbox shell` split) is documented
-in this change's `design.md` under Open Questions.
+silently shipping under a refactor.
 
 #### Scenario: Default-on handover for interactive operator
 

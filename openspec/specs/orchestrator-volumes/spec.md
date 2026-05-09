@@ -256,7 +256,8 @@ NOT write). Daemon host-level write on file CONTENTS is not required
 because the helper-cp recipe (per the `Helper Recipe Phases
 (unlink+cp+chmod+chown discipline)` requirement) performs unlink+cp
 inside the helper container under `cap_dac_override`. The recursive
-`rwX` widening from temp commit `6c3bcb4` is retired by this cluster.
+`u:<host_user>:rwX` widening on `config/` from earlier orchestrator
+versions has been retired; the runtime grant MUST NOT carry it.
 
 The grant plan SHALL emit a per-helper-cp-parent dir-level `rwx`
 entry for each `config/<subdir>` listed in `RO_FILE_RECIPES`
@@ -268,7 +269,7 @@ Parallel to the existing `docker/core` and `secrets/` dir-level rwx
 grants.
 
 #### Scenario: Grant plan consumed by execution
-- **WHEN** `_phase_acl_grant` executes Phase 5
+- **WHEN** `_phase_acl_grant` runs
 - **THEN** it iterates over the output of `_acl_grant_plan()` to apply each named-acl operation, including per-workspace effective + default-ACL grants
 
 #### Scenario: Grant plan consumed by dry-run preview
@@ -285,7 +286,7 @@ grants.
 
 #### Scenario: config/ recursive grant is dir-level rX (not rwX)
 - **WHEN** the spec is read end-to-end as the design-clean target
-- **THEN** the recursive named-ACL grant on `config/` is `u:<host_user>:rX` (read + conditional execute only); per-file mutability inside is handled exclusively by the `consumer-uid-0-chown` recipe AND the helper-cp recipe's in-helper unlink+cp pair under `cap_dac_override` (no host-level daemon write on file CONTENTS is required); the runtime grant in `cli/main.py` MUST NOT carry the temp commit `6c3bcb4` `rwX` widening
+- **THEN** the recursive named-ACL grant on `config/` is `u:<host_user>:rX` (read + conditional execute only); per-file mutability inside is handled exclusively by the `consumer-uid-0-chown` recipe AND the helper-cp recipe's in-helper unlink+cp pair under `cap_dac_override` (no host-level daemon write on file CONTENTS is required); the runtime grant in `cli/main.py` MUST NOT carry a recursive `u:<host_user>:rwX` widening on `config/`
 
 #### Scenario: per-helper-cp-parent dir-level rwx grants present
 - **WHEN** `_acl_grant_plan` is queried with a populated instance dir
@@ -583,7 +584,7 @@ The `cli.main` module SHALL define `EXEC_FILE_RECIPES` as a sibling-table consta
 
 ### Requirement: Workspace Shared-Group Phase Ordering
 
-The workspace shared-group recipe (`_phase_workspace_shared_group`, `_workspace_shared_group_plan`) SHALL run BEFORE the Phase-5 named-ACL grant phase (`_phase_acl_grant`) so `chmod 2770` lands on a non-extended-ACL inode and the `group::` entry propagates from the mode bits without requiring a separate `setfacl -m g::rwx` call. The plan and phase MUST NOT contain an explicit `setfacl -m g::rwx` step on the workspace root — its presence indicates the temp workaround (commit 6f1831e) has resurfaced and the phase ordering has regressed.
+The workspace shared-group recipe (`_phase_workspace_shared_group`, `_workspace_shared_group_plan`) SHALL run BEFORE the named-ACL grant phase (`_phase_acl_grant`) so `chmod 2770` lands on a non-extended-ACL inode and the `group::` entry propagates from the mode bits without requiring a separate `setfacl -m g::rwx` call. The plan and phase MUST NOT contain an explicit `setfacl -m g::rwx` step on the workspace root — its presence indicates the prior workaround (which set the entry explicitly because chmod ran after named-ACL grants had already extended the inode's ACL) has resurfaced and the phase ordering has regressed.
 
 #### Scenario: Plan omits explicit owning-group setfacl step
 - **WHEN** `_workspace_shared_group_plan(workspace, bridge_gid, dev_user, host_user)` is called
@@ -595,12 +596,12 @@ The workspace shared-group recipe (`_phase_workspace_shared_group`, `_workspace_
 
 ### Requirement: Helper-CP Source Files Daemon-Readable Pre-Recipe
 
-The system SHALL grant the daemon partitioned permission bits across two distinct categories of dev-created files, replacing the temp's recursive `rwX` widening on `secrets/`:
+The system SHALL grant the daemon partitioned permission bits across two distinct categories of dev-created files, replacing the prior recursive `setfacl -R -m u:<host_user>:rwX <secrets>` widening on `secrets/` (which was discarded for granting daemon write on every secret's contents):
 
 - **BUG-A — daemon RUNTIME READ on file CONTENTS.** Every file enumerated by `RO_FILE_RECIPES`, `EXEC_FILE_RECIPES`, AND `RW_FILE_RECIPES` (the authoritative helper-cp source-file inventory under `cli.main`) AND every file enumerated by `DAEMON_READ_DIRECT_FILES` (the authoritative inventory of dev-created files the daemon reads in place forever — `docker/compose.yml` plus the conditional compose extras `docker/extras/db-postgres.yml` and `docker/extras/mcp-firecrawl.yml`) SHALL receive a `u:<host_user>:r` named POSIX ACL entry on its inode BEFORE the daemon reads it. The mechanism is a unified post-hydrate setfacl-as-owner pass — `cli.main._phase_grant_post_hydrate_daemon_read(instance_dir, host_user)` — that iterates ALL FOUR inventories (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES), runs `setfacl -m u:<host_user>:r <path>` against each existing file, and skips files that do not yet exist on disk (defensive; covers the conditional compose extras whose presence depends on `InstanceConfig` component flags).
-- **BUG-B — daemon PROVISIONING WRITE on the parent dir.** `_acl_grant_plan` SHALL emit a dir-level `setfacl -m u:<host_user>:rwx <secrets_dir>` grant on `secrets/`. The dir-level write bit is required by the helper-cp recipe's `mv /tmp/$f /p/$f` install step, which atomically replaces the destination by unlinking the existing dest and renaming the new inode in. Without write on the parent the unlink (or, equivalently, the cross-fs `mv`'s rename phase) returns EPERM. The grant is dir-level only — it does NOT widen write to file contents (those remain at per-file `r` per BUG-A). This partition is strictly narrower than the temp commit `0b35a53`'s recursive `setfacl -R -m u:<host_user>:rwX <secrets>`, which incorrectly granted daemon write on every secret's contents.
+- **BUG-B — daemon PROVISIONING WRITE on the parent dir.** `_acl_grant_plan` SHALL emit a dir-level `setfacl -m u:<host_user>:rwx <secrets_dir>` grant on `secrets/`. The dir-level write bit is required by the helper-cp recipe's `mv /tmp/$f /p/$f` install step, which atomically replaces the destination by unlinking the existing dest and renaming the new inode in. Without write on the parent the unlink (or, equivalently, the cross-fs `mv`'s rename phase) returns EPERM. The grant is dir-level only — it does NOT widen write to file contents (those remain at per-file `r` per BUG-A). This partition is strictly narrower than the prior recursive `setfacl -R -m u:<host_user>:rwX <secrets>` widening it replaces.
 
-The two grants together replace the recursive `rwX` widening from temp commit `0b35a53`, which MUST NOT appear in `_acl_grant_plan`.
+The two grants together replace the prior recursive `rwX` widening on `secrets/`, which MUST NOT appear in `_acl_grant_plan`.
 
 The BUG-A inventory is divided into two structurally distinct categories:
 
@@ -619,14 +620,14 @@ A failure of the per-file BUG-A `setfacl` MUST raise `SandboxExecutionError` men
 
 Why this is necessary even with the helper container's `--cap-add DAC_OVERRIDE`: in rootless docker the daemon runs as `host_user`; `cap_dac_override` held inside a user namespace bypasses DAC only for files whose owner uid/gid is mapped INSIDE that namespace. Files written by `dev` (host uid 1000, NOT mapped in the daemon's userns) appear as the overflow uid to in-container kernel checks; `cap_dac_override` does NOT apply. The same kernel rule applies to the compose-up case: `docker compose` running as the daemon user reads `compose.yml` from the host filesystem under the daemon's identity, not via cap_dac_override, so the daemon needs an explicit DAC grant on `compose.yml` (and any extras) — provided here by the named ACL entry. The same kernel rule applies to BUG-B: the helper container's `mv /tmp/$f /p/$f` step is gated by host-level write on `secrets/` and `cap_dac_override` does NOT bypass it; the dir-level `rwx` named entry granted to `host_user` is what makes the unlink+rename succeed. Post-helper-cp the helper-cp destination files are owned by the consumer's subuid (mapped in the userns), so `cap_dac_override` handles runtime reads on those files without further per-file ACL.
 
-The recursive `rwX` widening on `config/` (originally introduced by temp commit `0d8af00`) has been retired: `_acl_grant_plan` now emits dir-level `rX` on `config/` plus per-helper-cp-parent dir-level `rwx` on each `config/<subdir>` (BUG-B parallel to `secrets/`), per the `ACL Grant Plan as Single Source of Truth` requirement. The same BUG-A/BUG-B partition therefore applies uniformly across all helper-cp source-file parents (`config/<subdir>`, `secrets/`, `docker/core`).
+The recursive `rwX` widening on `config/` (introduced as a temporary fix in earlier orchestrator versions) has been retired: `_acl_grant_plan` now emits dir-level `rX` on `config/` plus per-helper-cp-parent dir-level `rwx` on each `config/<subdir>` (BUG-B parallel to `secrets/`), per the `ACL Grant Plan as Single Source of Truth` requirement. The same BUG-A/BUG-B partition therefore applies uniformly across all helper-cp source-file parents (`config/<subdir>`, `secrets/`, `docker/core`).
 
 The `secrets/` directory additionally carries a default ACL `setfacl -d -m u::rw-,g::---,o::---,m::r--,u:<host_user>:r <secrets_dir>` — belt-and-suspenders for any future write path that does NOT chmod-after-create; the load-bearing mechanism for BUG-A on existing helper-cp source files is the unified setfacl-as-owner pass above. The default ACL revocation entry `setfacl -d -x u:<host_user> <secrets_dir>` SHALL appear in `_acl_revoke_plan` (symmetric with the grant).
 
 #### Scenario: secrets/ ACL grant is dir-level rwx (not recursive rwX) — BUG-B
 
 - **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
-- **THEN** the entry whose description is `"secrets dir provisioning write: <abs-path>"` is `setfacl -m u:<host_user>:rwx <secrets-dir>` — NOT recursive (`-R`) and NOT `rwX`. The recursive `rwX` widening from temp commit 0b35a53 MUST NOT appear in the plan. The dir-level `w` is the load-bearing bit for the helper-cp `mv` install step; the dir-level grant does NOT widen write to file contents (per BUG-A files retain per-file `r`-only).
+- **THEN** the entry whose description is `"secrets dir provisioning write: <abs-path>"` is `setfacl -m u:<host_user>:rwx <secrets-dir>` — NOT recursive (`-R`) and NOT `rwX`. A recursive `setfacl -R -m u:<host_user>:rwX <secrets>` widening MUST NOT appear in the plan. The dir-level `w` is the load-bearing bit for the helper-cp `mv` install step; the dir-level grant does NOT widen write to file contents (per BUG-A files retain per-file `r`-only).
 
 #### Scenario: secrets/ default ACL grants daemon read on inherited entries
 

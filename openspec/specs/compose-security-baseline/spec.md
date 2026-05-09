@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the shared Docker Compose security baseline anchor (`x-security-baseline`) that centralizes scalar hardening properties across all services, and the per-service overrides and IP forwarding controls.
-
 ## Requirements
-
 ### Requirement: Shared Security Baseline YAML Anchor
 The `compose.yml` template SHALL declare an `x-security-baseline` YAML extension field with a `&security-baseline` anchor containing scalar hardening properties shared across all services. Each service SHALL merge the baseline via `<<: *security-baseline`.
 
@@ -185,11 +183,11 @@ The rendered `compose.yml` SHALL include `group_add` (or compose-equivalent) ent
 
 #### Scenario: Numeric group_add only — no in-image group required
 - **WHEN** the agent images are inspected
-- **THEN** they do NOT need to define an internal `sb-ws` (or similarly-named) group at the bridge gid; Linux access checks operate on numeric gids per change 4 Decision 12
+- **THEN** they do NOT need to define an internal `sb-ws` (or similarly-named) group at the bridge gid; Linux access checks operate on numeric gids — supplementary group membership conferred via `group_add` is sufficient regardless of whether a named group exists in `/etc/group` inside the image
 
 ### Requirement: Agent Shell Init Sets Restrictive Umask for Workspace Writes
 
-The agent shell init files (`templates/config/core/.bashrc`, `templates/config/admin/.zshrc`) SHALL set `umask 007` so that files created by the agent under any workspace land at mode `0660` group `<bridge-group>` (via setgid + supplementary group inheritance). Behavior is unchanged from change 4; this requirement is restated to confirm it remains applicable across multi-workspace mounts.
+The agent shell init files (`templates/config/core/.bashrc`, `templates/config/admin/.zshrc`) SHALL set `umask 007` so that files created by the agent under any workspace land at mode `0660` group `<bridge-group>` (via setgid + supplementary group inheritance). The umask is set across all workspace mounts (not per-workspace); a single shell-init umask covers every `/workspaces/<ws>` bind mount.
 
 #### Scenario: Core .bashrc sets umask 007
 - **WHEN** the rendered `templates/config/core/.bashrc` is inspected
