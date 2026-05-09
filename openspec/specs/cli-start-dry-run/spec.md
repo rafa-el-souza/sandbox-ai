@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox start --dry-run` simulation pipeline, which validates the full start lifecycle without side effects — covering instance resolution, IPAM slot preview, template validation, tooling plane file verification, and command preview.
-
 ## Requirements
-
 ### Requirement: Dry-Run Flag on Start
 The system SHALL accept a `--dry-run` flag on `sandbox start <inst>` that simulates the full start pipeline without side effects.
 
@@ -72,7 +70,13 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 - **THEN** dry-run reports the missing file path and exits with code 1
 
 ### Requirement: Command Preview
-The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately (named-ACL grants from `_acl_grant_plan`; cache/log mkdir+chown from `_helper_mkdir_chown_plan`; ro-file cp+chown from `_helper_cp_chown_plan`; per-workspace shared-group operations from `_workspace_shared_group_plan` — fanned out per workspace in `[workspaces]`).
+The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately, in the canonical phase order owned by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`:
+
+- per-workspace shared-group operations from `_workspace_shared_group_plan` (fanned out per workspace in `[workspaces]`);
+- named-ACL grants from `_acl_grant_plan` (instance-dir set + helper-recipe parent grants + per-workspace named-ACL effective + default);
+- the post-hydrate daemon-read setfacl pass (the per-target `setfacl -m u:<host_user>:r <path>` operations enumerated by `_post_hydrate_daemon_read_targets` — covers `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES`);
+- cache/log mkdir+chown from `_helper_mkdir_chown_plan`;
+- the helper-cp file plan from `_helper_cp_chown_plan` (covering all three helper-cp source classes: ro-files, exec-files, and rw config files such as `.claude.json`).
 
 The `docker compose up` command displayed by the preview SHALL be obtained from the same `_compose_up_cmd_plan` helper that `_phase_compose_up` uses for live execution (per `cli-start`'s "Compose Environment File Flag" requirement). The displayed inner `bash -c` command string SHALL be byte-identical to what the live path would execute given the same `(instance_dir, project_name, config)` inputs. The preview SHALL NOT reconstruct the compose command from local variables in the dry-run helper-recipe loops; in particular, no inner-loop variable in the helper-mkdir or helper-cp preview blocks SHALL shadow the compose-files string.
 
@@ -87,7 +91,7 @@ The `docker compose up` command displayed by the preview SHALL be obtained from 
 
 #### Scenario: Helper-cp preview does not corrupt the compose preview
 
-- **WHEN** dry-run runs against an instance whose hydration emits one or more helper-cp groups (e.g., `ipc_known_hosts`, `ipc_ssh_key`)
+- **WHEN** dry-run runs against an instance whose hydration emits one or more helper-cp groups (e.g., `ipc_known_hosts`, `ipc_ssh_key`, `.claude.json`)
 - **THEN** the rendered compose up command contains `docker compose -f <instance_dir>/docker/compose.yml [...]` and does NOT contain helper-cp filenames joined by `, ` in place of compose file flags
 
 #### Scenario: Handover command displayed (sudo mode)
@@ -104,7 +108,11 @@ The `docker compose up` command displayed by the preview SHALL be obtained from 
 
 #### Scenario: Helper-recipe operations displayed with per-workspace fan-out
 - **WHEN** dry-run completes validation
-- **THEN** the cache/log helper-mkdir+chown plan and the ro-files helper-cp+chown plan are displayed with their resolved consumer-uid:gid and mode values; the per-workspace shared-group plan is displayed with the resolved bridge-gid AND the list of workspace paths each operation will be applied to
+- **THEN** the cache/log helper-mkdir+chown plan and the helper-cp file plan (covering ro-files, exec-files, and rw config files) are displayed with their resolved consumer-uid:gid and mode values; the per-workspace shared-group plan is displayed with the resolved bridge-gid AND the list of workspace paths each operation will be applied to
+
+#### Scenario: Post-hydrate daemon-read setfacl pass displayed
+- **WHEN** dry-run completes validation
+- **THEN** the preview enumerates the per-target `setfacl -m u:<host_user>:r <path>` operations from the post-hydrate daemon-read pass, covering each existing file in `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES`; missing files are skipped without aborting the preview (matching the live path's defensive skip)
 
 #### Scenario: Helper-recipe plans degrade gracefully when unresolvable
 - **WHEN** dry-run runs on a host where the bridge group or subuid range cannot be resolved
@@ -124,3 +132,4 @@ The `IPAMLedger` class SHALL provide a `peek_next_slot(instance_id)` method that
 #### Scenario: Peek on exhausted ledger
 - **WHEN** `peek_next_slot` is called for a new instance and all 5,705 slots are consumed
 - **THEN** it raises `IPAMExhaustedError`
+

@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the Pydantic + Jinja2 hydration pipeline that renders infrastructure templates from the packaged `templates` Python module into per-instance directories on every `sandbox start`. Template paths in this spec are package-relative (e.g., `templates/docker/compose.yml` resolves to `importlib.resources.files("templates").joinpath("docker/compose.yml")`); the discovery mechanism is owned by the `templates-packaging` capability.
-
 ## Requirements
-
 ### Requirement: Workspaces Context Key
 
 The Jinja2 context returned by `build_jinja_context()` SHALL include a `workspaces` key whose value is a list of dicts, one per workspace in `[workspaces]`, sorted lexicographically by workspace name. Each dict SHALL have at minimum:
@@ -335,9 +333,15 @@ The system SHALL include all seven subnet CIDR strings and all multi-network con
 
 The system SHALL generate `.claude.json` programmatically in `render_templates()` using `json.dump`, with conditional `mcpServers` registration. The file lands at `<sandbox_ai_home()>/instances/<inst>/config/core/.claude.json`. This follows the existing pattern for `allowed_domains.txt` and `read_only_domains.txt`.
 
+`.claude.json` is the canonical example of the **rw config file recipe class** (`RW_FILE_RECIPES` in `cli.main`): hydration writes the file at the same restrictive mode used by ro-files (`0o640` via `write_restricted` / `os.open(O_WRONLY | O_CREAT | O_EXCL, 0o640)`), bypassing the orchestrator process's umask. The helper-cp recipe later chowns the file to `agent:agent` and chmods it to `0o660` (the rw recipe target mode) so the agent in core can write to it at runtime. The hydration-time mode is therefore restrictive (`0o640`); the helper-cp post-recipe mode is `0o660`. Both are documented in `orchestrator-volumes`'s `Helper-CP Source Files Daemon-Readable Pre-Recipe` requirement (RW recipe sub-table).
+
 #### Scenario: .claude.json generated during render_templates
 - **WHEN** `render_templates()` completes
 - **THEN** `<sandbox_ai_home()>/instances/<inst>/config/core/.claude.json` exists and contains valid JSON
+
+#### Scenario: .claude.json written at restrictive mode
+- **WHEN** `render_templates()` writes `.claude.json`
+- **THEN** the file is created via `write_restricted(path, content, 0o640)` (which delegates to `os.open(path, O_WRONLY | O_CREAT | O_EXCL, 0o640)` and `os.write`); the on-disk mode at hydration time is `0o640` (NOT respecting the orchestrator's umask). The helper-cp recipe subsequently chmods it to `0o660` per `RW_FILE_RECIPES`'s target mode.
 
 #### Scenario: Firecrawl MCP registered when enabled
 - **WHEN** `render_templates()` runs with `mcp_firecrawl_enabled = True`
@@ -401,3 +405,4 @@ Hydration SHALL write sensitive files at restrictive modes from creation, bypass
 #### Scenario: Programmatically-generated ro files also use restrictive mode
 - **WHEN** `render_templates()` programmatically generates `allowed_domains.txt`, `read_only_domains.txt`, or `.htpasswd`
 - **THEN** the same `os.open` + explicit mode 0640 pattern is used
+

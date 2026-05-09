@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox destroy` command lifecycle, governing confirmation, opt-in workspace backups, unconditional volume teardown, IPAM/registry cleanup, and safe instance directory removal.
-
 ## Requirements
-
 ### Requirement: Explicit Instance Argument
 
 `sandbox destroy <inst>` SHALL require the instance name as a positional argument.
@@ -175,7 +173,6 @@ The system SHALL verify the instance directory path before deletion. The path pr
 - **WHEN** `shutil.rmtree(instance_dir)` raises `PermissionError`
 - **THEN** the error propagates to the caller (defense-in-depth — operator must investigate)
 
-
 ### Requirement: Per-User State Initialization Required
 The `sandbox destroy` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
 
@@ -191,8 +188,8 @@ The `sandbox destroy` command SHALL refuse to operate when the per-user state tr
 
 `sandbox destroy <inst>` SHALL remove `<sandbox_ai_home()>/instances/<inst>/` via `shutil.rmtree`, which transitively removes:
 - Cache/log leaves (subuid-owned, with inherited `u:dev:rwx` letting dev's `rmtree` succeed)
-- Ro single-files (`<consumer-uid>:0` owned, removed via parent dir write+x which dev has via existing ACLs)
-- Secrets (consumer-uid:0 mode 0600, same removal path)
+- Ro single-files (`<consumer-uid>:<consumer-gid>` owned, removed via parent dir write+x which dev has via existing ACLs)
+- Secrets (`<consumer-uid>:<consumer-gid>` mode 0600, same removal path)
 - All other instance state
 
 No explicit helper-recipe revocation is invoked; the rmtree handles it. Workspace trees are rmtree'd separately (per the "Phase Order Preserves Recoverability Through Backup" sequence's D8); they live under `<sandbox_ai_home()>/workspaces/<inst>/<ws>/`, not under the instance dir.
@@ -201,10 +198,11 @@ No explicit helper-recipe revocation is invoked; the rmtree handles it. Workspac
 - **WHEN** `sandbox destroy <inst>` runs `shutil.rmtree(<sandbox_ai_home()>/instances/<inst>/)`
 - **THEN** the operation succeeds despite cache/log files being subuid-owned; dev's inherited `u:dev:rwx` ACL on agent-created files plus parent-dir write+x permissions are sufficient for unlink/rmdir
 
-#### Scenario: Destroy via rmtree handles consumer-uid:0 owned files in instance dir
+#### Scenario: Destroy via rmtree handles consumer-owned files in instance dir
 - **WHEN** `sandbox destroy <inst>` runs `shutil.rmtree(<sandbox_ai_home()>/instances/<inst>/)`
-- **THEN** the operation succeeds despite ro files being `<consumer-uid>:0` owned; dev has write+x on the parent dirs (own dirs in `instances/<inst>/`), which is what unlink requires
+- **THEN** the operation succeeds despite ro files being `<consumer-uid>:<consumer-gid>` owned (consumer's host subuid + host subgid pair, per `orchestrator-volumes`'s `Ro single-files on-disk gid matches consumer's host subgid` scenario); dev has write+x on the parent dirs (own dirs in `instances/<inst>/`), which is what unlink requires
 
 #### Scenario: Workspace trees removed separately from instance dir
 - **WHEN** `sandbox destroy <inst>` reaches phase D8 (workspace rmtree)
 - **THEN** `shutil.rmtree(<sandbox_ai_home()>/workspaces/<inst>/<ws>/)` is invoked for each workspace; these are a separate tree from the instance dir
+

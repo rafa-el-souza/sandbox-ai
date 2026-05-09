@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the deterministic execution constraints bounding the Python CLI architecture. It dictates the invariant orchestration logic required to safely bootstrap the environment, isolate Host terminal contexts from unprivileged Daemon payloads utilizing `machinectl`, and manage asynchronous AI agent handovers strictly within POSIX containment parameters.
-
 ## Requirements
-
 ### Requirement: Python CLI Orchestrator Execution
 The system SHALL execute utilizing a strict Python `typer` interface to deterministically govern the `sandbox` operational lifecycle across the following commands: `init`, `start`, `stop`, `attach`, `destroy`, `doctor`, `status`, and the `workspace` subcommand group (`workspace add | remove | rename | restore | list`). Lifecycle commands (`start`, `stop`, `attach`, `destroy`, `status`, `workspace ...`) take an explicit `<inst>` argument; CWD-based discovery is removed.
 
@@ -13,7 +11,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start <inst>`
-- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight (including bridge-group existence and dev supplementary-group membership), validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet septuple, runs the Pydantic + Jinja2 hydration pipeline (with multi-workspace fan-out in compose template volumes), applies ACL grants per-workspace, executes the helper-recipe phases (cache/log, ro-files, per-workspace shared-group), executes `docker compose up -d --build --wait` via `machinectl`, and hands the terminal over to the admin container via `docker exec -it`, displaying progress for each phase
+- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight (including bridge-group existence and dev supplementary-group membership), validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet septuple, and executes the ownership-sensitive phase order owned by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`: `_phase_workspace_shared_group` (per-workspace chgrp/chmod 2770/setgid + persistent default ACL — runs BEFORE named-ACL grants so chmod 2770 lands on a non-extended-ACL inode), `_phase_acl_grant` (per-workspace named-ACL grants + instance-dir set + helper-recipe parent grants), `_phase_credentials` (SSH keypair + bcrypt htpasswd generation into `secrets/`), `_phase_hydrate` (Pydantic + Jinja2 hydration with multi-workspace fan-out in compose template volumes), `_phase_grant_post_hydrate_daemon_read` (unified setfacl-as-owner pass over `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES`), the helper-recipe phases (`_phase_helper_mkdir_chown_cache_log` for cache/log subuid-chown; `_phase_helper_cp_chown_ro_files` for ro/exec/rw consumer-uid-0-chown), and finally `_phase_compose_up` (`docker compose up -d --build --wait` via `machinectl`); progress is displayed for each phase. On all containers healthy, the CLI defaults to handing the terminal over to the admin container via `docker exec -it` when stdin is a TTY (suppress with `--no-handover`; per `cli-start`'s `Handover Default Direction` and `Handover TTY Autodetect`).
 
 #### Scenario: Instance State Query
 - **WHEN** the human operator executes `sandbox status [<inst>]`
@@ -21,7 +19,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Graceful Teardown
 - **WHEN** the human operator executes `sandbox stop <inst>`
-- **THEN** the CLI terminates running containers via `docker compose down` (or `down -v` with `--clean`), then revokes the `sandbox` user's named-ACL entries on the instance dir set (`<sandbox_ai_home()>/instances/<inst>/`, plus `docker/`, `config/`, `secrets/`, `.sandbox.env`) AND on each workspace's path (effective + default-ACL named-entry portion, per `cli-stop`)
+- **THEN** the CLI terminates running containers via `docker compose down` (or `down -v` with `--clean`), then revokes the `sandbox` user's named-ACL entries on the instance dir set (`<sandbox_ai_home()>/instances/<inst>/`, plus `docker/`, `config/`, `secrets/`) AND on each workspace's path (effective + default-ACL named-entry portion, per `cli-stop`). The `.sandbox.env` named-ACL entry is in the `granted-once, persistent` lifecycle and is NOT revoked at stop (per `orchestrator-volumes`'s `Environment File Read ACL` + `Acl Revoke Plan Excludes Persistent Grants`).
 
 #### Scenario: Workspace Lifecycle Operations
 - **WHEN** the human operator executes any of `sandbox workspace add | remove | rename | restore | list <inst> ...`
@@ -38,7 +36,6 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 #### Scenario: Opaque Error Bounds Trace
 - **WHEN** the orchestrator fails POSIX boundaries triggering native `CalledProcessError` exceptions
 - **THEN** the system raises a `SandboxExecutionError` masking host topology variables and rendering clinical error messages identifying the failed command without leaking environment state.
-
 
 ### Requirement: Sub-Process Privilege Bounding
 The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host`. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from host config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. All call sites SHALL use the centralized `machinectl_cmd()` builder from `core.host_config`.
@@ -107,3 +104,4 @@ The codebase SHALL include a regression test (e.g., `tests/unit/cli/test_markup_
 #### Scenario: Allowlist covers genuine style tokens
 - **WHEN** `console.print` calls use Rich style markup like `[red]`, `[bold]`, `[/red]`, `[green bold]`
 - **THEN** the markup-safety test passes for these calls because the bracketed tokens are in the enumerated allowlist; no `markup=False` is required for genuine style usage
+

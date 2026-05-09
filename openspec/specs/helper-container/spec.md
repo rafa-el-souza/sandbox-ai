@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the disposable-helper-container primitives used by the orchestrator's helper-recipe phases for ownership and directory creation operations that survive runsc's gofer/directfs boundary. Inline `docker run … busybox` invocations are forbidden; all such operations route through the two primitives in `core.helper_container`.
-
 ## Requirements
-
 ### Requirement: Helper Container Module Location
 
 The disposable-helper-container primitives SHALL reside in `src/core/helper_container.py` and expose two public functions: `helper_chown_files` and `helper_mkdir_chown_dirs`. All orchestrator code that needs to chown or mkdir as in-userns root SHALL invoke these primitives instead of constructing `docker run` commands inline.
@@ -78,7 +76,7 @@ CI execution of this test is NOT a requirement of this capability and is explici
 
 ### Requirement: helper_chown_files Primitive Contract
 
-`helper_chown_files(host_user, parent, files, owner_uid, owner_gid, mode, machinectl_auth)` SHALL run a single helper container that, for each file in `files`, executes `cp <parent>/<file> /tmp/<file> && chmod <mode> /tmp/<file> && chown <in_container_uid>:<in_container_gid> /tmp/<file> && mv /tmp/<file> <parent>/<file>`. The order of operations within the loop is significant on two axes: (i) the **chmod precedes the chown** because, post-userns-translation, the chown lands the file on a non-root in-container uid, and the helper's cap-add baseline (CHOWN + DAC_OVERRIDE, no CAP_FOWNER) means a subsequent chmod by in-container root would trip EPERM on a foreign-owned file; (ii) the **chown precedes the mv** so the destination's perceived ownership is the new owner from the moment of the rename. See design D7.
+`helper_chown_files(host_user, parent, files, owner_uid, owner_gid, mode, machinectl_auth)` SHALL run a single helper container that, for each file in `files`, executes `cp <parent>/<file> /tmp/<file> && unlink <parent>/<file> && cp /tmp/<file> <parent>/<file> && chmod <mode> <parent>/<file> && chown <in_container_uid>:<in_container_gid> <parent>/<file>`. Cross-filesystem `mv` MUST NOT be used — it strips POSIX extended ACLs from the destination, which would defeat the parent's default ACL inheritance that propagates daemon-readable named entries onto each new file. The order of operations within the loop is significant on three axes: (i) the **first cp followed by unlink** preserves the source content while creating space for the replacement at the canonical path; (ii) the **second cp creates a fresh inode within the same filesystem**, so the new inode inherits the parent's default ACL (cross-fs `mv` would NOT inherit because rename across filesystems falls back to copy+unlink that strips xattrs/ACLs); (iii) the **chmod precedes the chown** because, post-userns-translation, the chown lands the file on a non-root in-container uid, and the helper's cap-add baseline (CHOWN + DAC_OVERRIDE, no CAP_FOWNER) means a subsequent chmod by in-container root would trip EPERM on a foreign-owned file.
 
 The `owner_uid` and `owner_gid` parameters SHALL be interpreted as **host-absolute** values (the orchestrator's plan-time semantics). Before interpolation into the chown argv issued inside the container, the host-absolute values SHALL be translated to their in-container equivalents via `in_container_uid_for_host_uid(owner_uid, host_user)` and `in_container_gid_for_host_gid(owner_gid, host_user)` respectively. This translation crosses the userns boundary: the daemon's userns map then resolves the in-container values back to the host-absolute target on the underlying filesystem. The helper SHALL NOT pass host-absolute values directly into the chown argv (the in-container kernel rejects them with EINVAL when they fall outside the userns map), and SHALL NOT add `--userns=host` to the docker run command.
 
@@ -92,7 +90,7 @@ The `owner_uid` and `owner_gid` parameters SHALL be interpreted as **host-absolu
 
 #### Scenario: Idempotent on already-correct files
 - **WHEN** `helper_chown_files` is called against files that are already at the target owner/mode
-- **THEN** the operation completes successfully (cp/chmod/chown/mv are idempotent on already-correct values)
+- **THEN** the operation completes successfully (the cp + unlink + cp pair re-creates a fresh inode each call, the parent's default ACL is re-inherited, and the final chmod/chown are no-ops on already-correct values)
 
 #### Scenario: Host-absolute owner_uid is translated before chown interpolation
 - **WHEN** `helper_chown_files` is invoked with `owner_uid = 166535`, `owner_gid = 166535`, and `host_user = "claude-sandbox"` (where `/etc/subuid` and `/etc/subgid` have `claude-sandbox:165536:65536`)
@@ -101,10 +99,6 @@ The `owner_uid` and `owner_gid` parameters SHALL be interpreted as **host-absolu
 #### Scenario: Out-of-range owner_uid raises before docker run
 - **WHEN** `helper_chown_files` is invoked with an `owner_uid` outside the daemon user's subuid range (e.g., the daemon user's primary uid, or a value below the range)
 - **THEN** `in_container_uid_for_host_uid` raises `SubuidOutOfRangeError` (or `NoSubuidRangeError`) before any docker run is issued; no helper container is launched and no file is mutated
-
-#### Scenario: --userns=host is never added to the docker run command
-- **WHEN** `helper_chown_files` constructs its docker run command via `_hardened_docker_run`
-- **THEN** the command does NOT contain `--userns=host`; the helper inherits the daemon's default rootless userns map
 
 ### Requirement: helper_mkdir_chown_dirs Primitive Contract
 
@@ -163,3 +157,4 @@ The helper container SHALL be launched via the same `machinectl shell <docker_un
 #### Scenario: No bare docker invocation
 - **WHEN** the codebase is searched for direct `docker run` calls without a machinectl wrapper
 - **THEN** none exist in helper-related code paths
+
