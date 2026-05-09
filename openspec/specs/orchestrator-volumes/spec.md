@@ -597,14 +597,14 @@ The workspace shared-group recipe (`_phase_workspace_shared_group`, `_workspace_
 
 The system SHALL grant the daemon partitioned permission bits across two distinct categories of dev-created files, replacing the temp's recursive `rwX` widening on `secrets/`:
 
-- **BUG-A — daemon RUNTIME READ on file CONTENTS.** Every file enumerated by `RO_FILE_RECIPES` and `EXEC_FILE_RECIPES` (the authoritative helper-cp source-file inventory under `cli.main`) AND every file enumerated by `DAEMON_READ_DIRECT_FILES` (the authoritative inventory of dev-created files the daemon reads in place forever — `docker/compose.yml` plus the conditional compose extras `docker/extras/db-postgres.yml` and `docker/extras/mcp-firecrawl.yml`) SHALL receive a `u:<host_user>:r` named POSIX ACL entry on its inode BEFORE the daemon reads it. The mechanism is a unified post-hydrate setfacl-as-owner pass — `cli.main._phase_grant_post_hydrate_daemon_read(instance_dir, host_user)` — that iterates ALL THREE inventories (RO_FILE_RECIPES + EXEC_FILE_RECIPES + DAEMON_READ_DIRECT_FILES), runs `setfacl -m u:<host_user>:r <path>` against each existing file, and skips files that do not yet exist on disk (defensive; covers the conditional compose extras whose presence depends on `InstanceConfig` component flags).
+- **BUG-A — daemon RUNTIME READ on file CONTENTS.** Every file enumerated by `RO_FILE_RECIPES`, `EXEC_FILE_RECIPES`, AND `RW_FILE_RECIPES` (the authoritative helper-cp source-file inventory under `cli.main`) AND every file enumerated by `DAEMON_READ_DIRECT_FILES` (the authoritative inventory of dev-created files the daemon reads in place forever — `docker/compose.yml` plus the conditional compose extras `docker/extras/db-postgres.yml` and `docker/extras/mcp-firecrawl.yml`) SHALL receive a `u:<host_user>:r` named POSIX ACL entry on its inode BEFORE the daemon reads it. The mechanism is a unified post-hydrate setfacl-as-owner pass — `cli.main._phase_grant_post_hydrate_daemon_read(instance_dir, host_user)` — that iterates ALL FOUR inventories (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES), runs `setfacl -m u:<host_user>:r <path>` against each existing file, and skips files that do not yet exist on disk (defensive; covers the conditional compose extras whose presence depends on `InstanceConfig` component flags).
 - **BUG-B — daemon PROVISIONING WRITE on the parent dir.** `_acl_grant_plan` SHALL emit a dir-level `setfacl -m u:<host_user>:rwx <secrets_dir>` grant on `secrets/`. The dir-level write bit is required by the helper-cp recipe's `mv /tmp/$f /p/$f` install step, which atomically replaces the destination by unlinking the existing dest and renaming the new inode in. Without write on the parent the unlink (or, equivalently, the cross-fs `mv`'s rename phase) returns EPERM. The grant is dir-level only — it does NOT widen write to file contents (those remain at per-file `r` per BUG-A). This partition is strictly narrower than the temp commit `0b35a53`'s recursive `setfacl -R -m u:<host_user>:rwX <secrets>`, which incorrectly granted daemon write on every secret's contents.
 
 The two grants together replace the recursive `rwX` widening from temp commit `0b35a53`, which MUST NOT appear in `_acl_grant_plan`.
 
 The BUG-A inventory is divided into two structurally distinct categories:
 
-1. **Helper-cp source files** (`RO_FILE_RECIPES` + `EXEC_FILE_RECIPES`): the helper-cp recipe transfers ownership of these to a consumer subuid via a `cp /p/<f> /tmp/<f> ... mv /tmp/<f> /p/<f>` sequence inside a daemon-managed bind mount. The daemon reads the source path through the bind mount during the `cp` step.
+1. **Helper-cp source files** (`RO_FILE_RECIPES` + `EXEC_FILE_RECIPES` + `RW_FILE_RECIPES`): the helper-cp recipe transfers ownership of these to a consumer subuid via a `cp /p/<f> /tmp/<f> ... mv /tmp/<f> /p/<f>` sequence inside a daemon-managed bind mount. The daemon reads the source path through the bind mount during the `cp` step. The three sub-tables differ only in mode and bind-mount direction (RO/EXEC are `:ro` mounts; RW is `:rw` mounts) — the BUG-A mechanism is identical for all three.
 2. **Daemon-read direct files** (`DAEMON_READ_DIRECT_FILES`): NEVER transferred via helper-cp. The daemon reads these in place forever in two distinct sub-categories:
    - **Compose YAML inputs**: `compose.yml` plus the conditional compose extras (`db-postgres.yml`, `mcp-firecrawl.yml`), consumed via `docker compose -f <path>` invocations whose canonical path-set is built by `_build_compose_files` (used by `_phase_compose_up`, `_compose_down`, and the `docker compose ps` callsites in `_container_status` / `_render_status_detailed`).
    - **Build context**: every Dockerfile rendered or copied by `core.hydration.render_templates` (`Dockerfile.core`, `Dockerfile.admin`, `Dockerfile.coredns`, conditional `Dockerfile.mcp-firecrawl`) plus every local-COPY source those Dockerfiles reference (currently only `admin/entrypoint.sh` — `core/entrypoint.sh` is covered by `EXEC_FILE_RECIPES` because it is bind-mounted at runtime, distinct from the admin entrypoint which is COPY'd into the image during build). Read by buildkit (running as the daemon) during `docker compose up --build`.
@@ -619,41 +619,54 @@ A failure of the per-file BUG-A `setfacl` MUST raise `SandboxExecutionError` men
 
 Why this is necessary even with the helper container's `--cap-add DAC_OVERRIDE`: in rootless docker the daemon runs as `host_user`; `cap_dac_override` held inside a user namespace bypasses DAC only for files whose owner uid/gid is mapped INSIDE that namespace. Files written by `dev` (host uid 1000, NOT mapped in the daemon's userns) appear as the overflow uid to in-container kernel checks; `cap_dac_override` does NOT apply. The same kernel rule applies to the compose-up case: `docker compose` running as the daemon user reads `compose.yml` from the host filesystem under the daemon's identity, not via cap_dac_override, so the daemon needs an explicit DAC grant on `compose.yml` (and any extras) — provided here by the named ACL entry. The same kernel rule applies to BUG-B: the helper container's `mv /tmp/$f /p/$f` step is gated by host-level write on `secrets/` and `cap_dac_override` does NOT bypass it; the dir-level `rwx` named entry granted to `host_user` is what makes the unlink+rename succeed. Post-helper-cp the helper-cp destination files are owned by the consumer's subuid (mapped in the userns), so `cap_dac_override` handles runtime reads on those files without further per-file ACL.
 
-The recursive `rwX` widening on `config/` is preserved at runtime only until cluster `orchestrator-volumes-helper-cp-recipe-correctness` lands the helper-side change (cluster-2 dependency, per `ACL Grant Plan as Single Source of Truth`); the same BUG-A/BUG-B partition will eventually apply to the per-`config/<subdir>` parents but is owned by cluster 2, not cluster 1.
+The recursive `rwX` widening on `config/` (originally introduced by temp commit `0d8af00`) has been retired: `_acl_grant_plan` now emits dir-level `rX` on `config/` plus per-helper-cp-parent dir-level `rwx` on each `config/<subdir>` (BUG-B parallel to `secrets/`), per the `ACL Grant Plan as Single Source of Truth` requirement. The same BUG-A/BUG-B partition therefore applies uniformly across all helper-cp source-file parents (`config/<subdir>`, `secrets/`, `docker/core`).
 
 The `secrets/` directory additionally carries a default ACL `setfacl -d -m u::rw-,g::---,o::---,m::r--,u:<host_user>:r <secrets_dir>` — belt-and-suspenders for any future write path that does NOT chmod-after-create; the load-bearing mechanism for BUG-A on existing helper-cp source files is the unified setfacl-as-owner pass above. The default ACL revocation entry `setfacl -d -x u:<host_user> <secrets_dir>` SHALL appear in `_acl_revoke_plan` (symmetric with the grant).
 
 #### Scenario: secrets/ ACL grant is dir-level rwx (not recursive rwX) — BUG-B
+
 - **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
 - **THEN** the entry whose description is `"secrets dir provisioning write: <abs-path>"` is `setfacl -m u:<host_user>:rwx <secrets-dir>` — NOT recursive (`-R`) and NOT `rwX`. The recursive `rwX` widening from temp commit 0b35a53 MUST NOT appear in the plan. The dir-level `w` is the load-bearing bit for the helper-cp `mv` install step; the dir-level grant does NOT widen write to file contents (per BUG-A files retain per-file `r`-only).
 
 #### Scenario: secrets/ default ACL grants daemon read on inherited entries
+
 - **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
 - **THEN** the plan contains an entry whose description is `"secrets default ACL: <abs-path>"` whose command begins `setfacl -d -m` and includes a `u:<host_user>:r` named entry on the `secrets/` directory
 
 #### Scenario: secrets/ default ACL revocation is symmetric
+
 - **WHEN** `_acl_revoke_plan(instance_dir, host_user)` is called
 - **THEN** the plan contains a `setfacl -d -x u:<host_user> <secrets_dir>` entry alongside the existing `setfacl -x u:<host_user> <secrets_dir>` traverse-revocation entry
 
 #### Scenario: Phase order — unified setfacl pass runs after hydrate, before helper recipes
+
 - **WHEN** `sandbox start` runs the ownership-sensitive phases
-- **THEN** the invocation order is `_phase_acl_grant -> _phase_credentials -> _phase_hydrate -> _phase_grant_post_hydrate_daemon_read -> _phase_helper_mkdir_chown_cache_log -> _phase_helper_cp_chown_ro_files -> _phase_compose_up`; the unified setfacl pass runs after every helper-cp source file AND every daemon-read direct file is on disk, BEFORE the helper-cp recipe reads from `/p/` through the bind mount, AND BEFORE `docker compose -f <compose.yml>` opens the file under the daemon's identity
+- **THEN** the invocation order is `_phase_acl_grant -> _phase_credentials -> _phase_hydrate -> _phase_grant_post_hydrate_daemon_read -> _phase_helper_mkdir_chown_cache_log -> _phase_helper_cp_chown_ro_files -> _phase_compose_up`; the unified setfacl pass runs after every helper-cp source file (RO + EXEC + RW) AND every daemon-read direct file is on disk, BEFORE the helper-cp recipe reads from `/p/` through the bind mount, AND BEFORE `docker compose -f <compose.yml>` opens the file under the daemon's identity
 
 #### Scenario: Unified setfacl pass touches every helper-cp source file AND every daemon-read direct file
-- **WHEN** `_grant_post_hydrate_daemon_read(instance_dir, host_user)` is called against an instance where every file in `RO_FILE_RECIPES`, `EXEC_FILE_RECIPES`, and `DAEMON_READ_DIRECT_FILES` exists on disk
-- **THEN** for EACH `(parent, files, _consumer_uid, _mode)` tuple in `(*RO_FILE_RECIPES, *EXEC_FILE_RECIPES)` AND EACH `(parent, files)` tuple in `DAEMON_READ_DIRECT_FILES`, and for EACH `fname` in `files`, `setfacl -m u:<host_user>:r <instance_dir>/<parent>/<fname>` is executed against the file's path
+
+- **WHEN** `_grant_post_hydrate_daemon_read(instance_dir, host_user)` is called against an instance where every file in `RO_FILE_RECIPES`, `EXEC_FILE_RECIPES`, `RW_FILE_RECIPES`, and `DAEMON_READ_DIRECT_FILES` exists on disk
+- **THEN** for EACH `(parent, files, _consumer_uid, _mode)` tuple in `(*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES)` AND EACH `(parent, files)` tuple in `DAEMON_READ_DIRECT_FILES`, and for EACH `fname` in `files`, `setfacl -m u:<host_user>:r <instance_dir>/<parent>/<fname>` is executed against the file's path
 
 #### Scenario: DAEMON_READ_DIRECT_FILES inventory covers compose inputs AND build context
+
 - **WHEN** `cli.main.DAEMON_READ_DIRECT_FILES` is inspected
 - **THEN** it contains TWO sub-categories:
   1. **Compose YAML inputs** matching `_build_compose_files`'s enumeration: `("docker", ("compose.yml",))` (always present) AND `("docker/extras", ("db-postgres.yml", "mcp-firecrawl.yml"))` (conditional extras).
   2. **Build context** matching the Dockerfiles + their local-COPY sources rendered by `core.hydration.render_templates`: `("docker/core", ("Dockerfile.core",))`, `("docker/admin", ("Dockerfile.admin", "entrypoint.sh"))`, `("docker/coredns", ("Dockerfile.coredns",))`, AND `("docker/extras", ("Dockerfile.mcp-firecrawl",))` (conditional). The `admin/entrypoint.sh` entry is in this category — NOT `EXEC_FILE_RECIPES` — because it is COPY'd into the admin image during build (baked into the image, never bind-mounted at runtime). The `core/entrypoint.sh` is covered by the helper-cp branch via `EXEC_FILE_RECIPES` (bind-mounted at runtime). Empirical symptom of missing any build-context entry: `target <svc>: failed to solve: the Dockerfile cannot be empty` (buildkit treats an unreadable Dockerfile as empty).
 
+#### Scenario: RW recipe sources are covered by the post-hydrate setfacl pass
+
+- **WHEN** `_post_hydrate_daemon_read_targets(instance_dir)` is called against an instance where `config/core/.claude.json` exists on disk
+- **THEN** the returned target list includes the absolute path to `.claude.json`; the unified setfacl pass therefore grants the daemon `u:<host_user>:r` on the RW recipe source so the helper-cp recipe's `cp /p/.claude.json /tmp/.claude.json` step succeeds (the daemon process backing the bind mount has DAC read on the dev-owned source)
+
 #### Scenario: Missing files are skipped defensively
+
 - **WHEN** `_grant_post_hydrate_daemon_read` encounters a recipe-table entry OR a `DAEMON_READ_DIRECT_FILES` entry whose file does not exist on disk
 - **THEN** the helper skips that entry without raising; `setfacl` is not invoked for the missing path. (Covers the conditional compose extras when the matching `InstanceConfig` component flag is disabled.)
 
 #### Scenario: setfacl failure surfaces as SandboxExecutionError
+
 - **WHEN** the per-file `setfacl -m u:<host_user>:r <path>` fails (e.g., EPERM, ENOENT) for any post-hydrate target
 - **THEN** `_grant_post_hydrate_daemon_read` raises `SandboxExecutionError` mentioning the path and "grant daemon read on post-hydrate target"; the failure is not silently swallowed
 
@@ -901,4 +914,39 @@ subuid. The consumer-uid-0-chown lifecycle is therefore:
   helper-cp-managed file as dev-owned; the helper-cp+chown phase then
   re-transfers ownership to the consumer subuid; the lifecycle is
   fully recoverable across stop/start
+
+### Requirement: RW Config File Recipes
+
+The `cli.main` module SHALL define `RW_FILE_RECIPES` as a sibling-table constant alongside `RO_FILE_RECIPES` and `EXEC_FILE_RECIPES`. Each entry is `(parent_relative_to_instance, files, in_container_consumer_uid, mode)` with mode `0o660` (consumer user + primary group rw, "other" `---`). The RW kind is structurally distinct from `RO_FILE_RECIPES` (mode `0o640` ro configs / `0o600` secrets — bind-mounted `:ro`) and `EXEC_FILE_RECIPES` (mode `0o500` owner-only — bind-mounted `:ro`): RW recipe files are bind-mounted `:rw` into the consumer container and the consumer MUST be able to write them.
+
+`_helper_cp_chown_plan` SHALL iterate `RO_FILE_RECIPES`, `EXEC_FILE_RECIPES`, AND `RW_FILE_RECIPES` in a single pass so the helper-cp+chown phase processes all three kinds uniformly. The stop-time symmetry partner (`_phase_stop_unlink_consumer_files`) inherits the new entries automatically because it iterates the same plan singleton; RW files are unlinked at stop and recreated by hydration on the next start.
+
+The current entry is `("config/core", (".claude.json",), 1000, 0o660)`. `.claude.json` is dev-created by `core.hydration` (programmatic generation, not a static copy, because the firecrawl MCP endpoint is dynamic) and bind-mounted RW into the agent (core) container at `/home/agent/.claude.json`. Without consumer-uid ownership transfer the file presents as `nobody:nobody ---` from inside the agent's userns and the agent's write fails with EACCES even though the compose mount is `:rw` — the empirical symptom this requirement closes.
+
+If a future bind mount adds a new dev-created RW single-file mount, `RW_FILE_RECIPES` MUST be extended in lockstep with the compose template change. If the new entry's parent is NOT already a helper-cp parent (i.e., not present in the per-helper-cp-parent dir-level `rwx` grants under `ACL Grant Plan as Single Source of Truth`), `_acl_grant_plan` MUST also gain a dir-level `u:<host_user>:rwx` + helper-cp parent default ACL `u:<host_user>:r` pair for that parent, parallel to the existing helper-cp parents. Today's only entry shares `config/core` with the existing dotfile RO recipes, so no `_acl_grant_plan` change is required by this requirement.
+
+#### Scenario: RW_FILE_RECIPES contains .claude.json at mode 0660
+
+- **WHEN** `cli.main.RW_FILE_RECIPES` is inspected
+- **THEN** it contains `("config/core", (".claude.json",), 1000, 0o660)`; the consumer uid is 1000 (the in-container `agent` user) and the mode is `0o660` (consumer user + primary group rw)
+
+#### Scenario: RW recipes do not collide with RO or EXEC tables
+
+- **WHEN** `cli.main.RO_FILE_RECIPES` and `cli.main.EXEC_FILE_RECIPES` are inspected
+- **THEN** no entry has parent `config/core` and files containing `.claude.json`; the RW config kind belongs to `RW_FILE_RECIPES` exclusively (the bind-mount mode `:ro` vs `:rw` is the schema-level invariant separating the categories)
+
+#### Scenario: Helper-cp plan iterates the RW table alongside RO + EXEC
+
+- **WHEN** `_helper_cp_chown_plan(instance_dir, host_user)` is called
+- **THEN** the returned plan length is `len(RO_FILE_RECIPES) + len(EXEC_FILE_RECIPES) + len(RW_FILE_RECIPES)`; entries from all three tables appear, each with the consumer-mapped owner uid/gid and the table's stated mode; the RW entry for `config/core/.claude.json` is present at mode `0o660`
+
+#### Scenario: Stop-time unlink covers RW recipe files
+
+- **WHEN** `_phase_stop_unlink_consumer_files(instance_dir, host_user)` is invoked at stop or destroy
+- **THEN** it unlinks every file enumerated by `_helper_cp_chown_plan`, including the RW recipe entries; on the next `sandbox start`, hydration writes a fresh dev-owned restrictive-mode replacement and the helper-cp recipe re-installs consumer ownership at the RW recipe's mode
+
+#### Scenario: Compose-mount intent corresponds to recipe table
+
+- **WHEN** the compose template is inspected for dev-created single-file bind mounts
+- **THEN** every file mounted `:ro` from a dev-created path appears in `RO_FILE_RECIPES` or `EXEC_FILE_RECIPES`; every file mounted `:rw` from a dev-created path appears in `RW_FILE_RECIPES`. (Workspace `:rw` mounts and cache/log `:rw` directory mounts are NOT in scope for any of the file-recipe tables — they are handled by the workspace shared-group recipe and the helper-mkdir-chown recipe respectively.)
 
