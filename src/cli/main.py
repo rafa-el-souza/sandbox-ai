@@ -615,14 +615,44 @@ def _acl_grant_plan(
         )
     )
 
-    # config/ — recursive read + conditional execute
+    # config/ — recursive READ + conditional execute (NOT write). The temp
+    # commit ``6c3bcb4`` widened this to ``rwX`` so the helper-cp recipe's
+    # cross-fs ``mv`` could unlink the existing destination at the host
+    # level. With cluster-2's structural fixes this is no longer required:
+    #   - the helper recipe is now ``unlink+cp+chmod+chown`` inside the
+    #     helper container (helper_chown_files), running as in-container
+    #     root with ``cap_dac_override`` — host DAC is bypassed for the
+    #     unlink/create steps inside the helper.
+    #   - the daemon's host-level write requirement is narrowed to BUG-B
+    #     (provisioning write on each helper-cp parent dir), satisfied by
+    #     the per-parent dir-level ``rwx`` entries below.
+    # Read-only here keeps daemon DAC minimal-privilege on file CONTENTS
+    # (mirrors secrets/ where dir-level ``rwx`` was retained but recursive
+    # widening was rejected).
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
         (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rwX", config_dir],
+            ["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir],
             f"config files: {config_dir}",
         )
     )
+
+    # config/<subdir> — dir-level ``rwx`` on each helper-cp parent dir to
+    # satisfy BUG-B for config/ (parallel to the ``docker/core`` and
+    # ``secrets/`` rwx grants). The helper-cp recipe's host-level
+    # bind-mount of ``config/<subdir>`` lets the in-helper unlink reach
+    # the host inode; even with ``cap_dac_override`` inside the helper
+    # the on-host parent still needs the daemon write bit so the bind
+    # mount itself is mountable read-write into the helper. Without this
+    # the helper's unlink EPERMs.
+    for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core", "config/admin"):
+        helper_cp_parent = os.path.join(instance_dir, rel)
+        plan.append(
+            (
+                ["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent],
+                f"helper-cp parent: {helper_cp_parent}",
+            )
+        )
 
     # .sandbox.env — read only
     env_file = os.path.join(instance_dir, ".sandbox.env")
