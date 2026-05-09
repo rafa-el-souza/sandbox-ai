@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox start` command lifecycle, governing pre-lock warm state detection, concurrency lock acquisition, IPAM allocation, blocking healthcheck wait, and PTY handover.
-
 ## Requirements
-
 ### Requirement: Explicit Instance Argument
 
 `sandbox start <inst>` SHALL require the instance name as a positional argument. CWD-based instance discovery is removed; the command does NOT inspect the current working directory.
@@ -267,11 +265,27 @@ The system SHALL NOT grant `rwX` ACLs (effective or default) to the `host_unpriv
 
 ### Requirement: Phase Order Includes Helper-Recipe Phases
 
-`sandbox start <inst>` SHALL execute provisioning phases in the order: `_phase_ipam → _phase_credentials → _phase_hydrate → _phase_acl_grant → _phase_helper_mkdir_chown_cache_log → _phase_helper_cp_chown_ro_files → _phase_workspace_shared_group → _phase_compose_up`. The three helper-recipe phases between `_phase_acl_grant` and `_phase_compose_up` are inherited from change 4. Change 5 modifies `_phase_workspace_shared_group` to iterate workspaces (per the "Workspace Shared-Group Phase Iterates Workspaces" requirement).
+`sandbox start <inst>` SHALL execute provisioning phases in the order specified by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases` requirement (the canonical owner): `_phase_ipam → _phase_workspace_shared_group → _phase_acl_grant → _phase_credentials → _phase_hydrate → _phase_grant_post_hydrate_daemon_read → _phase_helper_mkdir_chown_cache_log → _phase_helper_cp_chown_ro_files → _phase_compose_up`.
 
-#### Scenario: Helper-recipe phases run after ACL grants and before compose up
-- **WHEN** `sandbox start <inst>` proceeds past Phase 5 (ACL grants)
-- **THEN** `_phase_helper_mkdir_chown_cache_log` runs, then `_phase_helper_cp_chown_ro_files`, then `_phase_workspace_shared_group`, then `_phase_compose_up`
+This requirement mirrors the canonical order at the CLI surface so dry-run output, per-phase logging, and error-handler rollback semantics align with the lifecycle×mechanism contract owned by `orchestrator-volumes`. The CLI MUST NOT define an alternative ordering; any change to the phase sequence SHALL update `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases` first and then ripple into this requirement.
+
+Three ordering invariants from the canonical contract surface at the CLI:
+
+1. `_phase_workspace_shared_group` runs BEFORE `_phase_acl_grant` so `chmod 2770` on each workspace root lands on a non-extended-ACL inode (the workspace-failure-pre-acl-grant case yields a teardown that does NOT invoke `_revoke_acls` because `acl_granted=False`).
+2. `_phase_acl_grant` runs BEFORE `_phase_credentials` so the default ACL on `secrets/` is in place before `generate_ssh_keypair` writes new files.
+3. `_phase_grant_post_hydrate_daemon_read` runs AFTER both `_phase_credentials` AND `_phase_hydrate`, AND BEFORE `_phase_helper_cp_chown_ro_files` AND `_phase_compose_up`, so every helper-cp source file (`RO_FILE_RECIPES + EXEC_FILE_RECIPES`) AND every daemon-read direct file (`DAEMON_READ_DIRECT_FILES`) carries the named ACL by the time the daemon reads them.
+
+#### Scenario: Phase invocation order matches the canonical contract
+- **WHEN** `sandbox start <inst>` runs
+- **THEN** the phase invocation order is: `_phase_ipam`, `_phase_workspace_shared_group`, `_phase_acl_grant`, `_phase_credentials`, `_phase_hydrate`, `_phase_grant_post_hydrate_daemon_read`, `_phase_helper_mkdir_chown_cache_log`, `_phase_helper_cp_chown_ro_files`, `_phase_compose_up`
+
+#### Scenario: Workspace shared-group precedes named-ACL grant
+- **WHEN** `sandbox start <inst>` proceeds through the ownership-sensitive phases
+- **THEN** `_phase_workspace_shared_group` is invoked BEFORE `_phase_acl_grant`; this ordering is what allows the workspace shared-group recipe to omit the explicit `setfacl -m g::rwx` step
+
+#### Scenario: Post-hydrate daemon-read pass runs between hydrate and helper-cp
+- **WHEN** `sandbox start <inst>` proceeds past `_phase_hydrate`
+- **THEN** `_phase_grant_post_hydrate_daemon_read` is invoked next (before `_phase_helper_mkdir_chown_cache_log` and `_phase_helper_cp_chown_ro_files`), iterating `RO_FILE_RECIPES + EXEC_FILE_RECIPES + DAEMON_READ_DIRECT_FILES` and emitting `setfacl -m u:<host_user>:r <path>` per existing target
 
 #### Scenario: Each helper phase is independently traceable in dry-run output
 - **WHEN** `sandbox start <inst> --dry-run` is invoked
@@ -349,7 +363,6 @@ The existing "ACL Cleanup on Start Failure" requirement SHALL be extended: if an
 - **WHEN** a helper-recipe phase fails partway through
 - **THEN** files/dirs already chowned by previous helper invocations remain in their post-helper state; the orchestrator does not attempt to chown them back
 
-
 ### Requirement: Per-User State Initialization Required
 The `sandbox start` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
 
@@ -360,3 +373,89 @@ The `sandbox start` command SHALL refuse to operate when the per-user state tree
 #### Scenario: Resolved home in error message
 - **WHEN** the start command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home` so the operator can verify which path was checked
+
+### Requirement: Handover TTY Autodetect
+
+The `sandbox start` command SHALL gate `_phase_handover` on the
+process's stdin TTY status. When `_stdin_is_tty()` returns False, the
+command MUST skip `_phase_handover` entirely, print the attach hint
+`Sandbox '<inst>' started. Attach with: sandbox attach <inst>`, and
+return successfully (exit code 0).
+
+The TTY check MUST use the `_stdin_is_tty()` wrapper (which calls
+`sys.stdin.isatty()`); inlining `sys.stdin.isatty()` or `os.isatty(0)`
+is forbidden because typer's `CliRunner` replaces `sys.stdin` and
+breaks those forms.
+
+#### Scenario: Non-TTY stdin skips handover and prints hint
+
+- **WHEN** `sandbox start <inst>` is invoked with `_stdin_is_tty()`
+  returning False (CI runner, redirected stdin, scripted probe)
+- **THEN** `_phase_handover` is NOT called, the printed output
+  contains `attach with: sandbox attach <inst>` (case-insensitive),
+  and the command returns exit code 0
+
+#### Scenario: TTY stdin proceeds to handover
+
+- **WHEN** `sandbox start <inst>` is invoked with `_stdin_is_tty()`
+  returning True and `--no-handover` not passed
+- **THEN** `_phase_handover` is called and the printed output
+  contains `handing over` (case-insensitive)
+
+### Requirement: --no-handover Flag
+
+The `sandbox start` command SHALL accept a `--no-handover` boolean
+flag. When passed, the command MUST skip `_phase_handover` regardless
+of TTY status, print the attach hint, and return successfully (exit
+code 0).
+
+The flag's effect MUST be a logical OR with the non-TTY autodetect:
+either predicate short-circuits the handover. Operators on a TTY
+session who want to start-and-go pass `--no-handover`; the autodetect
+covers callers who never had a TTY.
+
+#### Scenario: --no-handover skips handover on a TTY session
+
+- **WHEN** `sandbox start <inst> --no-handover` is invoked with
+  `_stdin_is_tty()` returning True
+- **THEN** `_phase_handover` is NOT called, the printed output
+  contains `attach with: sandbox attach <inst>` (case-insensitive),
+  and the command returns exit code 0
+
+#### Scenario: Flag is documented in --help
+
+- **WHEN** `sandbox start --help` is invoked
+- **THEN** the help output lists `--no-handover` with a description
+  noting that it skips the interactive admin-shell handover and
+  prints the attach hint
+
+### Requirement: Handover Default Direction
+
+The `sandbox start` command SHALL default to invoking
+`_phase_handover` when stdin is a TTY and `--no-handover` is not
+passed. This preserves the operator-friendly workflow where `sandbox
+start <inst>` drops the operator into the admin shell ready to work.
+
+The default direction is recorded normatively so any future flip
+(e.g. opt-in `--handover` flag, or moving the shell-drop to a
+separate `sandbox shell` command) requires a spec change rather than
+silently shipping under a refactor. The alternative considered
+(default OFF + opt-in flag, or `sandbox shell` split) is documented
+in this change's `design.md` under Open Questions.
+
+#### Scenario: Default-on handover for interactive operator
+
+- **WHEN** an operator runs `sandbox start <inst>` from an
+  interactive terminal with no flags
+- **THEN** after all phases succeed, `_phase_handover` is invoked
+  and the operator is dropped into the admin container's zsh
+
+#### Scenario: Spec change required to flip default
+
+- **WHEN** a maintainer wishes to change the default direction
+  (handover OFF by default; require `--handover` to opt in, or
+  introduce `sandbox shell`)
+- **THEN** the maintainer MUST submit a new OpenSpec change that
+  modifies this requirement; ad-hoc flips in a refactor are
+  prohibited
+

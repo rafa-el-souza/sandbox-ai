@@ -290,6 +290,11 @@ def _container_status(
     if not os.path.exists(compose_file):
         return []
 
+    # NOTE: the daemon's `u:<host_user>:r` ACL on `.sandbox.env` is granted
+    # once at start and is `granted-once, persistent` per cluster 3's
+    # Environment File Read ACL requirement. It survives `sandbox stop`, so
+    # no idempotent re-grant is needed here before the compose-ps query.
+
     compose_files = _build_compose_files(instance_dir, config)
     files_str = " ".join(compose_files)
 
@@ -396,8 +401,16 @@ def _phase_credentials(
 ) -> str:
     """Phase 3: Generate proxy credentials and SSH keypairs.
 
-    Returns proxy password. Credential ownership matching is handled
-    separately by _phase_credential_ownership() after ACL grants.
+    Returns proxy password. Per-file daemon read access on the freshly-
+    written secrets (and on the helper-cp ro/exec source files written
+    by :func:`_phase_hydrate`) is granted by
+    :func:`_phase_grant_post_hydrate_daemon_read` AFTER hydrate, in
+    one unified pass. The unified pass exists because
+    ``core.hydration.write_restricted`` does ``os.open(O_CREAT, mode)``
+    followed by ``os.fchmod(mode)``, which zero the ACL ``mask::`` to
+    match the new mode's group bits and would mask out any inherited
+    named entry; setfacl-as-owner post-write recomputes the mask so the
+    daemon's ``u:<host_user>:r`` named entry stays effective.
     """
     password = generate_credential()
     hashed = hash_proxy_password(password)
@@ -410,6 +423,94 @@ def _phase_credentials(
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
 
     return password
+
+
+def _post_hydrate_daemon_read_targets(instance_dir: str) -> list[str]:
+    """Return absolute paths the post-hydrate setfacl pass targets.
+
+    Aggregates two distinct categories of dev-created files the daemon
+    needs explicit DAC read on (cap_dac_override does NOT bypass DAC for
+    dev-owned, userns-unmapped inodes — see "Helper-CP Source Files
+    Daemon-Readable Pre-Recipe" rationale):
+
+    1. **Helper-cp source files** (``RO_FILE_RECIPES`` + ``EXEC_FILE_RECIPES``):
+       transferred to a consumer subuid by the helper-cp recipe. The
+       per-file ``setfacl -m u:<host_user>:r`` covers the daemon's read
+       through the bind mount during the recipe's ``cp /p/<file>`` step.
+    2. **Daemon-read direct files** (``DAEMON_READ_DIRECT_FILES``):
+       NEVER transferred — the daemon reads them in place forever. The
+       canonical case is ``docker compose -f <compose.yml>`` and its
+       conditional extras (``db-postgres.yml``, ``mcp-firecrawl.yml``);
+       paths are derived from the same single-source-of-truth that
+       ``_build_compose_files`` uses.
+
+    Both categories converge in one post-hydrate setfacl pass because
+    ``core.hydration.write_restricted`` zeros ``mask::`` via
+    ``os.fchmod(mode)`` (which would mask out any inherited named
+    entry); the per-file setfacl recomputes the mask so the named entry
+    stays effective.
+
+    Returns paths only for files that exist on disk (defensive — the
+    compose extras are present only when ``InstanceConfig`` enables the
+    matching component).
+    """
+    paths: list[str] = []
+    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES):
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            path = os.path.join(parent_abs, fname)
+            if os.path.isfile(path):
+                paths.append(path)
+    for parent, files in DAEMON_READ_DIRECT_FILES:
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            path = os.path.join(parent_abs, fname)
+            if os.path.isfile(path):
+                paths.append(path)
+    return paths
+
+
+def _grant_post_hydrate_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Add a ``u:<host_user>:r`` named ACL entry to every post-hydrate target.
+
+    See :func:`_post_hydrate_daemon_read_targets` for the file inventory
+    (helper-cp source files + daemon-read direct files like
+    ``docker/compose.yml``). Runs ``setfacl -m u:<host_user>:r <path>``
+    AS THE FILE OWNER (``dev``) on each target; setfacl-as-owner does
+    not require escalated privilege. ``setfacl`` recomputes ``mask::``
+    to cover the named entry, restoring effective daemon read access
+    against ``core.hydration.write_restricted``'s fchmod-zeroed mask.
+
+    Failures surface as ``SandboxExecutionError`` mentioning the
+    offending path and the phrase "grant daemon read on post-hydrate
+    target"; the failure is not silently swallowed.
+    """
+    for path in _post_hydrate_daemon_read_targets(instance_dir):
+        try:
+            subprocess.run(
+                ["setfacl", "-m", f"u:{host_user}:r", path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
+            raise SandboxExecutionError(
+                f"Failed to grant daemon read on post-hydrate target {path}: {stderr}"
+            ) from exc
+
+
+def _phase_grant_post_hydrate_daemon_read(instance_dir: str, host_user: str) -> None:
+    """Phase 5b: setfacl-as-owner pass on all post-hydrate daemon-read targets.
+
+    Thin wrapper over :func:`_grant_post_hydrate_daemon_read` that runs
+    after `_phase_hydrate` and `_phase_credentials` so every file the
+    daemon will read (helper-cp source files AND direct-read files like
+    ``docker/compose.yml``) has been written by then. Closes the
+    "Helper-CP Source Files Daemon-Readable Pre-Recipe" requirement
+    under orchestrator-volumes.
+    """
+    _grant_post_hydrate_daemon_read(instance_dir, host_user)
 
 
 def _phase_hydrate(
@@ -473,7 +574,9 @@ def _acl_grant_plan(
     - docker/: ``rX`` recursive
     - config/: ``rX`` recursive
     - .sandbox.env: ``r``
-    - secrets/: dir-level ``rX`` traverse
+    - secrets/: dir-level ``rX`` traverse + default ACL ``u:<host_user>:r``
+      so files created inside (by ``_phase_credentials``) inherit a
+      daemon-readable named entry without an after-the-fact chgrp/chown.
     - per-workspace named-ACL: effective ``rwx`` plus default with named entry on each ``workspace.path``
 
     Cache/log Option-B grants are intentionally absent — replaced by the
@@ -507,7 +610,30 @@ def _acl_grant_plan(
         )
     )
 
-    # config/ — recursive read + conditional execute
+    # docker/core/ — helper-cp target needs rwx on the parent so the recipe
+    # can unlink+recreate entrypoint.sh (added to RO_FILE_RECIPES).
+    docker_core_dir = os.path.join(instance_dir, "docker/core")
+    plan.append(
+        (
+            ["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir],
+            f"helper-cp parent: {docker_core_dir}",
+        )
+    )
+
+    # config/ — recursive READ + conditional execute (NOT write). The temp
+    # commit ``6c3bcb4`` widened this to ``rwX`` so the helper-cp recipe's
+    # cross-fs ``mv`` could unlink the existing destination at the host
+    # level. With cluster-2's structural fixes this is no longer required:
+    #   - the helper recipe is now ``unlink+cp+chmod+chown`` inside the
+    #     helper container (helper_chown_files), running as in-container
+    #     root with ``cap_dac_override`` — host DAC is bypassed for the
+    #     unlink/create steps inside the helper.
+    #   - the daemon's host-level write requirement is narrowed to BUG-B
+    #     (provisioning write on each helper-cp parent dir), satisfied by
+    #     the per-parent dir-level ``rwx`` entries below.
+    # Read-only here keeps daemon DAC minimal-privilege on file CONTENTS
+    # (mirrors secrets/ where dir-level ``rwx`` was retained but recursive
+    # widening was rejected).
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
         (
@@ -515,6 +641,23 @@ def _acl_grant_plan(
             f"config files: {config_dir}",
         )
     )
+
+    # config/<subdir> — dir-level ``rwx`` on each helper-cp parent dir to
+    # satisfy BUG-B for config/ (parallel to the ``docker/core`` and
+    # ``secrets/`` rwx grants). The helper-cp recipe's host-level
+    # bind-mount of ``config/<subdir>`` lets the in-helper unlink reach
+    # the host inode; even with ``cap_dac_override`` inside the helper
+    # the on-host parent still needs the daemon write bit so the bind
+    # mount itself is mountable read-write into the helper. Without this
+    # the helper's unlink EPERMs.
+    for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core", "config/admin"):
+        helper_cp_parent = os.path.join(instance_dir, rel)
+        plan.append(
+            (
+                ["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent],
+                f"helper-cp parent: {helper_cp_parent}",
+            )
+        )
 
     # .sandbox.env — read only
     env_file = os.path.join(instance_dir, ".sandbox.env")
@@ -525,14 +668,85 @@ def _acl_grant_plan(
         )
     )
 
-    # secrets/ — dir-level traverse only (per-file ownership handled by helper-cp+chown)
+    # secrets/ — dir-level ``rwx`` provisioning grant. The dir-level write
+    # bit is load-bearing for BUG-B (the daemon's helper-cp ``mv /tmp/$f
+    # /p/$f`` step requires write on the destination's parent so it can
+    # unlink the existing dest and rename the new inode in). The named
+    # entry's effect is partitioned along two axes that together replace
+    # the temp's recursive ``rwX`` (which over-widened by granting daemon
+    # write on file CONTENTS):
+    #   - dir-level ``rwx`` (this entry) covers BUG-B (provisioning write
+    #     on the parent — needed by ``mv``).
+    #   - per-file ``r`` (granted by ``_phase_grant_post_hydrate_daemon_read``
+    #     post-hydrate, iterating ``RO_FILE_RECIPES + EXEC_FILE_RECIPES``)
+    #     covers BUG-A (runtime read on each secret's contents). The
+    #     per-file pass also defeats ``write_restricted``'s ``fchmod``
+    #     mask-reset which would mask out any inherited named entry.
+    # The default ACL applied below is belt-and-suspenders / future-proof
+    # for any write path that ultimately leaves an extended ACL intact.
+    # The recursive ``rwX`` widening from temp commit ``0b35a53`` MUST
+    # NOT appear in the plan.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
-            ["setfacl", "-m", f"u:{host_user}:rX", secrets_dir],
-            f"secrets dir traverse: {secrets_dir}",
+            ["setfacl", "-m", f"u:{host_user}:rwx", secrets_dir],
+            f"secrets dir provisioning write: {secrets_dir}",
         )
     )
+    plan.append(
+        (
+            [
+                "setfacl",
+                "-d",
+                "-m",
+                f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r",
+                secrets_dir,
+            ],
+            f"secrets default ACL: {secrets_dir}",
+        )
+    )
+
+    # Helper-cp parents — default ACL `u:<host_user>:r` so newly-created
+    # replacement files (helper recipe re-creates each ro file from a tmpfs
+    # scratch via cp+unlink+cp) inherit a daemon-readable named entry.
+    for rel in (
+        "config/coredns",
+        "config/dnsdist",
+        "config/proxy",
+        "config/core",
+        "config/admin",
+        "secrets",
+    ):
+        parent_dir = os.path.join(instance_dir, rel)
+        plan.append(
+            (
+                ["setfacl", "-d", "-m", f"u:{host_user}:r", parent_dir],
+                f"helper-cp parent default ACL: {parent_dir}",
+            )
+        )
+
+    # Helper-recipe parents (cache/log) — grant <daemon>:rwx + matching default
+    # so the helper-mkdir+chown phase can create leaves inside them.
+    for rel in ("cache/core", "cache/admin", "log"):
+        parent_dir = os.path.join(instance_dir, rel)
+        plan.append(
+            (
+                ["setfacl", "-m", f"u:{host_user}:rwx", parent_dir],
+                f"helper-recipe parent: {parent_dir}",
+            )
+        )
+        plan.append(
+            (
+                [
+                    "setfacl",
+                    "-d",
+                    "-m",
+                    f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx",
+                    parent_dir,
+                ],
+                f"helper-recipe parent default ACL: {parent_dir}",
+            )
+        )
 
     # Workspace named-ACL — granted at start, revoked at stop. Provides the
     # rootless Docker daemon traverse + r/w access to the gofer-mounted /workspace.
@@ -598,15 +812,36 @@ def _acl_revoke_plan(
     host_user: str,
     workspace_paths: list[str] | None = None,
 ) -> list[tuple[list[str], str]]:
-    """Build the ACL revoke plan — intentionally asymmetric with grant plan (D4).
+    """Build the ACL revoke plan — strict subset of revertible operations.
 
-    Ancestors are NOT revoked (D3 — grant-only model). Returns a list of
-    (setfacl_args, description) tuples for: instance root, docker/ (recursive),
-    config/ (recursive), .sandbox.env, secrets/ dir, and the workspace
-    named-ACL (effective + default entry portion).
+    The revoke plan is NOT a 1:1 inverse of the grant plan. It excludes every
+    grant whose lifecycle is `granted-once, persistent` or whose mechanism is
+    not the named-ACL (cluster 3 — Acl Revoke Plan Excludes Persistent Grants).
 
-    Cache/log entries are intentionally absent post-change-4 — there is no
-    named ACL on those paths to revoke.
+    Excluded by lifecycle/mechanism:
+    - Ancestor traverse ACLs (granted-once, persistent — required for next start
+      to find the instance directory)
+    - Workspace shared-group chmod 2770 + group ownership (granted-once,
+      persistent — only the named-ACL portion is revoked)
+    - Cache/log subuid chowns (mechanism is chown, not setfacl; preserved
+      across stop/start cycles by design)
+    - Helper-cp parent default ACLs and recursive entries that would walk into
+      consumer-owned files (the recursive `setfacl -R -x` walk EPERMs because
+      dev lacks CAP_FOWNER on consumer-uid-owned files; helper-cp managed files
+      are unlinked separately by `_phase_stop_unlink_consumer_files` and the
+      parent default ACL is granted-once / re-applied idempotently on next
+      start)
+    - `.sandbox.env` named ACL (cluster 3 — Environment File Read ACL is now
+      `granted-once, persistent`; survives stop, removed only by destroy's
+      rmtree)
+
+    Included (`granted-at-start, revoked-at-stop`):
+    - Instance root named-ACL
+    - docker/ dir-level named-ACL (NOT recursive — consumer-owned files inside
+      are handled by the helper-cp unlink pass)
+    - config/ dir-level named-ACL (NOT recursive — same rationale)
+    - secrets/ dir-level traverse named-ACL
+    - Per-workspace effective + default-ACL named entries
     """
     plan: list[tuple[list[str], str]] = []
 
@@ -618,39 +853,42 @@ def _acl_revoke_plan(
         )
     )
 
-    # docker/ — recursive
+    # docker/ — dir-level only (NOT recursive: consumer-owned files inside
+    # would EPERM under setfacl from dev; the recursive walk was the source
+    # of the cluster-3 stop-time setfacl warnings).
     docker_dir = os.path.join(instance_dir, "docker/")
     plan.append(
         (
-            ["setfacl", "-R", "-x", f"u:{host_user}", docker_dir],
+            ["setfacl", "-x", f"u:{host_user}", docker_dir],
             f"docker config: {docker_dir}",
         )
     )
 
-    # config/ — recursive
+    # config/ — dir-level only (NOT recursive: same rationale as docker/).
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
         (
-            ["setfacl", "-R", "-x", f"u:{host_user}", config_dir],
+            ["setfacl", "-x", f"u:{host_user}", config_dir],
             f"config files: {config_dir}",
         )
     )
 
-    # .sandbox.env
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    plan.append(
-        (
-            ["setfacl", "-x", f"u:{host_user}", env_file],
-            f"env file: {env_file}",
-        )
-    )
-
-    # secrets/ dir-level traverse
+    # secrets/ dir-level traverse + symmetric default-ACL revocation
+    # (per cluster 2's "Secrets Inherit Daemon-Readable Default ACL"
+    # requirement, which sets the default ACL at start and revokes it at
+    # stop). The named per-user entries are dev-applied and dev-revocable
+    # — no consumer-owned files are at the dir level here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
         (
             ["setfacl", "-x", f"u:{host_user}", secrets_dir],
             f"secrets dir traverse: {secrets_dir}",
+        )
+    )
+    plan.append(
+        (
+            ["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir],
+            f"secrets default ACL: {secrets_dir}",
         )
     )
 
@@ -767,7 +1005,138 @@ RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
     # Secrets — admin consumer (human) — mode 0600
     ("secrets", ("ipc_known_hosts", "ipc_ssh_key"), 1000, 0o600),
 )
-"""Single source of truth for the helper-cp+chown phase and dry-run preview."""
+"""Single source of truth (ro config + secrets) for the helper-cp+chown phase and dry-run preview."""
+
+
+EXEC_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # Core (agent) entrypoint — bind-mounted at /usr/local/bin/entrypoint.sh.
+    # Owner-only r-x (mode 0500); the consumer is the sole reader/exec.
+    # The executable-script kind is structurally distinct from RO_FILE_RECIPES
+    # (mode 0640 for ro configs, 0600 for secrets): owner-only and exec-bit set.
+    ("docker/core", ("entrypoint.sh",), 1000, 0o500),
+)
+"""Sibling of RO_FILE_RECIPES for executable-script (mode 0500 owner-only) entries.
+
+Distinct from ro config / secrets recipes because the entrypoint scripts need
+the exec bit and a tighter access set. Consumed alongside RO_FILE_RECIPES by
+:func:`_helper_cp_chown_plan` so the helper-cp+chown phase processes both
+tables in a single pass.
+"""
+
+
+RW_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+    # Agent (core) `.claude.json` — bind-mounted RW at /home/agent/.claude.json
+    # so Claude Code's CLI can persist its session/state. Consumer is uid 1000
+    # inside the container (mapped to claude-sandbox subuid 165536+999=166535
+    # on host). Mode 0660 so the consumer's primary group (matching subgid)
+    # also gets read+write — this matches the bind mount's RW intent.
+    #
+    # Distinct from RO_FILE_RECIPES (mode 0640, daemon-readable r--) and
+    # EXEC_FILE_RECIPES (mode 0500 owner r-x): RW config files MUST be
+    # consumer-writable, which requires owner and group write bits and
+    # consumer-uid ownership transfer (otherwise the file presents as
+    # ``nobody:nobody`` ``---`` to the agent and silently fails RW).
+    ("config/core", (".claude.json",), 1000, 0o660),
+)
+"""Single source of truth for dev-created RW config files transferred to consumer.
+
+Sibling of RO_FILE_RECIPES + EXEC_FILE_RECIPES. The structural distinction is
+that compose mounts these files RW (not RO), so the in-container consumer must
+be able to write them. Today the only entry is ``config/core/.claude.json``.
+
+Treatment matches RO_FILE_RECIPES in every dimension except mode:
+- Pre-helper-cp: included in :func:`_post_hydrate_daemon_read_targets` so the
+  per-file ``setfacl -m u:<host_user>:r`` lets the daemon (and thus the
+  helper container's bind-mount source) read the dev-owned source during the
+  helper-cp ``cp /p/<file> /tmp/<file>`` step.
+- Helper-cp: :func:`_helper_cp_chown_plan` iterates this table alongside
+  RO_FILE_RECIPES + EXEC_FILE_RECIPES, transferring ownership to the
+  consumer's host subuid+subgid with the per-file mode.
+- Stop-time: :func:`_phase_stop_unlink_consumer_files` iterates the same
+  plan, so RW files are unlinked before the next start's hydrate writes
+  fresh dev-owned replacements.
+
+If a future bind mount adds a new dev-created RW single-file mount, add it
+here in lockstep with the compose template change.
+"""
+
+
+DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Files the daemon (host_user) reads in-place from the orchestrator-owned
+    # tree, with NO ownership transfer through helper-cp. Distinct from
+    # RO_FILE_RECIPES / EXEC_FILE_RECIPES (which transfer ownership to a
+    # consumer subuid via helper-cp) — these files stay dev-owned forever
+    # and the daemon needs explicit DAC read via a named ACL entry because
+    # cap_dac_override does not bypass DAC for dev-owned (host-uid-1000,
+    # unmapped-in-userns) inodes (per "Helper-CP Source Files
+    # Daemon-Readable Pre-Recipe" rationale).
+    #
+    # Each tuple: ``(parent_relative_to_instance, files)``. The
+    # post-hydrate setfacl pass iterates and runs
+    # ``setfacl -m u:<host_user>:r <path>`` on each existing file
+    # (skip-if-missing for the conditional compose extras whose presence
+    # depends on InstanceConfig component flags).
+    #
+    # ── Compose YAML inputs ───────────────────────────────────────────
+    # Consumed by ``docker compose -f <path> ...`` invocations whose
+    # canonical path-set is built by ``_build_compose_files`` and used by
+    # ``_phase_compose_up``, ``_compose_down``, and the ``docker compose
+    # ps`` callsites in ``_container_status`` / ``_render_status_detailed``.
+    ("docker", ("compose.yml",)),
+    # Conditional compose extras — present iff the instance enables the
+    # component. Listed unconditionally; the post-hydrate phase skips
+    # entries whose files do not exist on disk. Same skip-if-missing
+    # semantics as ``_grant_post_hydrate_daemon_read`` for `RO_FILE_RECIPES`.
+    ("docker/extras", ("db-postgres.yml", "mcp-firecrawl.yml")),
+    # ── Build context (compose up --build) ────────────────────────────
+    # Buildkit (running as the daemon) reads each Dockerfile + any local
+    # COPY sources from the build context during ``docker compose up
+    # --build``. These files are dev-created by hydrate (rendered or
+    # static-copied — see ``core.hydration.render_templates``) and never
+    # transferred via helper-cp; they stay dev-owned forever, so the
+    # daemon needs explicit DAC read via a named ACL entry. The empirical
+    # symptom of missing this category was
+    # ``target coredns: failed to solve: the Dockerfile cannot be empty``
+    # (the daemon's open(Dockerfile) returned EACCES; buildkit treats an
+    # unreadable Dockerfile as empty).
+    #
+    # The Dockerfile.<distro>.<family> source files are NOT listed —
+    # those live inside the templates wheel and are consumed via Jinja2
+    # PackageLoader, not on the per-instance host filesystem. What lands
+    # on disk per-instance is the rendered ``Dockerfile.core`` /
+    # ``Dockerfile.admin`` (no distro suffix) plus the static
+    # ``Dockerfile.coredns`` / ``Dockerfile.mcp-firecrawl`` copies.
+    ("docker/core", ("Dockerfile.core",)),
+    # admin/entrypoint.sh is COPY'd by Dockerfile.admin during the build;
+    # it is NOT in ``EXEC_FILE_RECIPES`` (the admin entrypoint is baked
+    # into the image, never bind-mounted at runtime). docker/core's
+    # entrypoint.sh IS in ``EXEC_FILE_RECIPES`` and is therefore covered
+    # by the helper-cp branch of the post-hydrate setfacl pass.
+    ("docker/admin", ("Dockerfile.admin", "entrypoint.sh")),
+    ("docker/coredns", ("Dockerfile.coredns",)),
+    # Conditional extras Dockerfile — present iff ``mcp_firecrawl`` is
+    # enabled. Skip-if-missing covers the disabled case.
+    ("docker/extras", ("Dockerfile.mcp-firecrawl",)),
+)
+"""Authoritative inventory of dev-created files the daemon reads in place.
+
+Single source of truth for the post-hydrate daemon-read setfacl pass on
+files that are NOT subject to helper-cp ownership transfer. Spans two
+sub-categories:
+
+1. **Compose YAML inputs**: ``compose.yml`` + the conditional compose
+   extras (``db-postgres.yml``, ``mcp-firecrawl.yml``). Consumed via
+   ``docker compose -f``.
+2. **Build context**: Dockerfiles + their local-COPY sources, consumed
+   by buildkit during ``docker compose up --build``. The current
+   inventory is ``Dockerfile.core``, ``Dockerfile.admin`` +
+   ``admin/entrypoint.sh``, ``Dockerfile.coredns``, and the conditional
+   ``Dockerfile.mcp-firecrawl``.
+
+If a future Dockerfile gains a new local-COPY source (anything not
+``COPY --from=<stage>``), that source MUST be added here in lockstep
+with the template change.
+"""
 
 
 CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -813,7 +1182,7 @@ def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, 
             host_gid_for_in_container(consumer_uid, host_user),
             mode,
         )
-        for parent, files, consumer_uid, mode in RO_FILE_RECIPES
+        for parent, files, consumer_uid, mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES)
     ]
 
 
@@ -943,6 +1312,31 @@ def _phase_helper_cp_chown_ro_files(
     """
     for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
         helper_chown_files(host_user, parent_abs, files, owner_uid, owner_gid, mode, auth)
+
+
+def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list[str]:
+    """Stop-time recipe symmetry partner of `_phase_helper_cp_chown_ro_files`.
+
+    Each helper-cp-managed file is owned by an unmapped consumer subuid after
+    start. On a subsequent start, hydration would EACCES trying to overwrite
+    those files as dev. We unlink them here so the next hydration's `O_CREAT`
+    creates fresh dev-owned files. ``unlink`` requires write+exec on the parent
+    only, which dev has on every helper-cp parent (parents are dev-owned).
+
+    Returns a list of human-readable warning strings (one per FileNotFoundError /
+    OSError encountered); the phase is fault-isolated, never raises.
+    """
+    warnings: list[str] = []
+    for parent_abs, files, _owner_uid, _owner_gid, _mode in _helper_cp_chown_plan(instance_dir, host_user):
+        for fname in files:
+            path = os.path.join(parent_abs, fname)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                warnings.append(f"unlink {path}: {exc}")
+    return warnings
 
 
 def _phase_helper_mkdir_chown_cache_log(
@@ -1146,6 +1540,38 @@ def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] |
     return warnings
 
 
+def _phase_stop_teardown(
+    instance_dir: str,
+    project_name: str,
+    host_user: str,
+    config: InstanceConfig,
+    workspace_paths: list[str] | None,
+    *,
+    volumes: bool,
+    auth: MachinectlAuth,
+) -> list[str]:
+    """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
+    Sequence requirement).
+
+    Executes the load-bearing ordering:
+      1. ``compose down [-v]`` (with volumes flag controlled by caller)
+      2. unlink helper-cp-managed files (so the recursive ACL revoke and the
+         next start's hydration both see dev-owned parents only)
+      3. revoke named-ACLs via :func:`_revoke_acls`
+
+    Steps 2 and 3 are fault-isolated; their warnings are returned to the caller
+    as a list of human-readable strings. Step 1 may raise
+    :class:`SandboxExecutionError` and is not caught here — callers wrap
+    individually because `stop` and `destroy` differ in how they treat a failed
+    compose-down (stop propagates, destroy demotes to a warning).
+    """
+    warnings: list[str] = []
+    _compose_down(instance_dir, project_name, host_user, config, volumes=volumes, auth=auth)
+    warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
+    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths))
+    return warnings
+
+
 # ─── Dry-Run Pipeline ───────────────────────────────────────────────────────
 
 
@@ -1216,11 +1642,42 @@ def _dry_run_pipeline(inst: str) -> None:
     # ── Command preview ──────────────────────────────────────────────────
     console.print("\n  [bold]Commands that would execute:[/bold]")
 
-    # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     dev_user = os.environ.get("USER")
     workspace_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+
+    # Workspace shared-group plan — runs BEFORE Phase-5 named-ACL grants per
+    # the "Workspace Shared-Group Phase Ordering" requirement.
+    try:
+        bridge_gid = workspace_bridge_gid(host_settings)
+        for ws_path in workspace_paths:
+            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
+                console.print(f"    workspace: {op} {target}", style="dim")
+    except SandboxExecutionError as exc:
+        console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
+
+    # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
+
+    # Post-hydrate setfacl-as-owner pass — covers the write_restricted
+    # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
+    # file (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES) AND
+    # each daemon-read direct file (DAEMON_READ_DIRECT_FILES — compose.yml
+    # + extras).
+    for parent, files, _consumer_uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES):
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            console.print(
+                f"    $ setfacl -m u:{host_user}:r {parent_abs}/{fname}  # helper-cp source",
+                style="dim",
+            )
+    for parent, files in DAEMON_READ_DIRECT_FILES:
+        parent_abs = os.path.join(instance_dir, parent)
+        for fname in files:
+            console.print(
+                f"    $ setfacl -m u:{host_user}:r {parent_abs}/{fname}  # daemon-read direct",
+                style="dim",
+            )
 
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
     try:
@@ -1238,15 +1695,6 @@ def _dry_run_pipeline(inst: str) -> None:
             )
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
-
-    # Workspace shared-group plan — fanned out per workspace
-    try:
-        bridge_gid = workspace_bridge_gid(host_settings)
-        for ws_path in workspace_paths:
-            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
-                console.print(f"    workspace: {op} {target}", style="dim")
-    except SandboxExecutionError as exc:
-        console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # Compose up — derived from the same plan helper _phase_compose_up uses
     machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
@@ -1616,6 +2064,11 @@ def init(
 def start(
     inst: str = typer.Argument(..., help="Instance name"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate start without side effects"),
+    no_handover: bool = typer.Option(
+        False,
+        "--no-handover",
+        help="Skip the interactive admin-shell handover; print attach hint and return.",
+    ),
 ) -> None:
     """Start the sandbox."""
     _require_per_user_state_initialized()
@@ -1701,21 +2154,20 @@ def start(
         raise typer.Exit(code=1)
 
     acl_granted = False
+    dev_user = os.environ.get("USER")
+    ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     try:
         # Phase 2: IPAM
         base_index = _phase_ipam(inst)
         console.print("✓ IPAM — network allocation complete")
 
-        # Phase 3: Credentials (generation only)
-        proxy_password = _phase_credentials(
-            instance_dir,
-            core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
-        )
-        console.print("✓ Credentials — proxy auth + SSH keypairs configured")
-
-        # Phase 4: Hydration
+        # Phase 3a: workspace shared-group recipe — runs BEFORE Phase-3b named-ACL
+        # grants so chmod 2770 lands on a non-extended-ACL inode and group::
+        # propagates correctly (the "Workspace Shared-Group Phase Ordering"
+        # requirement; closes the bug class fixed by temp commit 6f1831e).
         try:
-            _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
+            for ws_path in ws_paths:
+                _phase_workspace_shared_group(ws_path, host_settings, dev_user)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -1725,27 +2177,53 @@ def start(
             if lock_fd is not None:
                 _release_lock(lock_fd)
             raise typer.Exit(code=1) from None
-        console.print("✓ Hydration — templates rendered")
+        console.print("✓ Workspace — shared-group recipe applied")
 
-        # Phase 5: ACL grants (Pattern A) — fan out across [workspaces].
-        acl_granted = True  # set BEFORE Phase 5 — handles partial grants (D7)
-        dev_user = os.environ.get("USER")
-        ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
+        # Phase 3b: ACL grants (Pattern A) — fan out across [workspaces]. Runs
+        # BEFORE _phase_credentials so the default ACL on `secrets/` is in place
+        # when generate_ssh_keypair() opens new files inside it; the named
+        # entry `u:<host_user>:r` then inherits onto each freshly-created
+        # secret without an after-the-fact chgrp/chown (the "Secrets Inherit
+        # Daemon-Readable Default ACL" requirement, closing finding 8.D
+        # alternative #1).
+        acl_granted = True  # set BEFORE grant — handles partial grants (D7)
         _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
-        # Phase 5c: helper-mkdir+chown for cache/log leaves
+        # Phase 4: Credentials.
+        proxy_password = _phase_credentials(
+            instance_dir,
+            core_ipc_ip=derive_static_ips(base_index)["core_ipc_ip"],
+        )
+        console.print("✓ Credentials — proxy auth + SSH keypairs configured")
+
+        # Phase 5a: Hydration. WorkspaceBridgeGroupMissingError is caught by
+        # _phase_workspace_shared_group above (it runs first); when ws_paths
+        # is empty AND hydrate raises, the outer SandboxExecutionError
+        # handler catches it (WorkspaceBridgeGroupMissingError subclass) and
+        # surfaces the [FATAL] message without the doctor hint — acceptable
+        # for the empty-workspaces edge case.
+        _phase_hydrate(config, base_index, proxy_password, instance_dir, host_settings)
+        console.print("✓ Hydration — templates rendered")
+
+        # Phase 5b: setfacl-as-owner the helper-cp source files (config/<subdir>
+        # files written by hydrate + secrets/ files written by credentials)
+        # AND every dev-created file the daemon reads in place (compose.yml
+        # + conditional extras per DAEMON_READ_DIRECT_FILES). Required
+        # because `write_restricted`'s fchmod zeroes ACL mask, masking
+        # out any inherited named entry; per-file setfacl recomputes
+        # mask. Closes the "Helper-CP Source Files Daemon-Readable
+        # Pre-Recipe" requirement.
+        _phase_grant_post_hydrate_daemon_read(instance_dir, host_user)
+        console.print("✓ ACL — post-hydrate daemon-readable files")
+
+        # Phase 6a: helper-mkdir+chown for cache/log leaves
         _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
         console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
-        # Phase 5d: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
+        # Phase 6b: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
-
-        # Phase 5e: workspace shared-group recipe — per-workspace fan-out.
-        for ws_path in ws_paths:
-            _phase_workspace_shared_group(ws_path, host_settings, dev_user)
-        console.print("✓ Workspace — shared-group recipe applied")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase)
         with console.status("⟳ Compose — starting containers…"):
@@ -1770,6 +2248,10 @@ def start(
     # Phase 7: Handover — release lock first
     if lock_fd is not None:
         _release_lock(lock_fd)
+
+    if no_handover or not _stdin_is_tty():
+        console.print(f"Sandbox '{inst}' started. Attach with: sandbox attach {inst}")
+        return
 
     console.print("→ Handing over to admin shell")
     _phase_handover(project_name, host_user, config.instance.warmup_prompt, auth)
@@ -1812,13 +2294,13 @@ def stop(
         )
         raise typer.Exit(code=1)
 
-    # Compose down
-    _compose_down(instance_dir, project_name, host_user, config, volumes=clean, auth=auth)
-
-    # ACL revocation (Pattern A) — fault-isolated (D5), per-workspace fan-out
+    # Teardown sequence — compose down → unlink helper-cp-managed →
+    # revoke named-ACLs. Shared with `destroy`'s D5 phase via
+    # `_phase_stop_teardown` (cluster 3 — Teardown Sequence requirement).
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
-    acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
-    for w in acl_warnings:
+    for w in _phase_stop_teardown(
+        instance_dir, project_name, host_user, config, ws_paths, volumes=clean, auth=auth
+    ):
         console.print(f"⚠ {w}", style="yellow")
 
     _release_lock(lock_fd)
@@ -2006,6 +2488,11 @@ def destroy(
     with acquire_backup_lock(inst):
         _release_lock(gate_lock_fd)
 
+        # NOTE: the daemon's `u:<host_user>:r` ACL on `.sandbox.env` is
+        # `granted-once, persistent` (cluster 3 — Environment File Read ACL),
+        # so it survives a prior `sandbox stop` and no defensive re-grant is
+        # needed before compose-down here.
+
         # D3: compose down (REVERSIBLE).
         try:
             _compose_down(instance_dir, project_name, host_user, config, volumes=False, auth=auth)
@@ -2045,14 +2532,30 @@ def destroy(
             raise typer.Exit(code=1) from None
 
         try:
+            # D5+D6: shared teardown sequence with `stop` (cluster 3 —
+            # Teardown Sequence). compose down -v + unlink helper-cp-managed
+            # + named-ACL revoke, in that ordering. compose-down failures are
+            # demoted to warnings here (destroy proceeds with rmtree
+            # regardless), unlike `stop` which propagates.
+            ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
             try:
-                _compose_down(instance_dir, project_name, host_user, config, volumes=True, auth=auth)
+                teardown_warnings = _phase_stop_teardown(
+                    instance_dir,
+                    project_name,
+                    host_user,
+                    config,
+                    ws_paths,
+                    volumes=True,
+                    auth=auth,
+                )
             except SandboxExecutionError as e:
                 console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
-
-            # D6: ACL revocation — per-workspace fan-out, fault-isolated.
-            ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
-            for w in _revoke_acls(instance_dir, host_user, ws_paths):
+                # Compose-down failed but the rest of the destroy MUST proceed
+                # (rmtree is irreversible by design). Run the post-compose
+                # phases separately so warnings still surface.
+                teardown_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
+                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths))
+            for w in teardown_warnings:
                 console.print(f"⚠ {w}", style="yellow")
 
             # D7: rmtree(instances/<inst>/).

@@ -245,9 +245,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up") as mock_compose,
             patch("cli.main._phase_handover") as mock_handover,
             patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
@@ -298,6 +300,7 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -329,14 +332,76 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 0
             out = result.output.lower()
             assert "handing over" in out or "handover" in out or "admin shell" in out
+
+    def test_start_skips_handover_when_no_tty(self, runner: CliRunner) -> None:
+        """Non-TTY stdin: skip the interactive handover and print attach hint."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=False),
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 0
+            mock_handover.assert_not_called()
+            assert "attach with" in result.output.lower()
+
+    def test_start_no_handover_flag_skips_handover(self, runner: CliRunner) -> None:
+        """--no-handover: skip the interactive handover even with a TTY."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(app, ["start", inst, "--no-handover"])
+            assert result.exit_code == 0
+            mock_handover.assert_not_called()
+            assert "attach with" in result.output.lower()
 
 
 class TestStartSecretCompletenessGate:
@@ -414,6 +479,7 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -509,9 +575,14 @@ class TestStartWorkspaceBridgeMissing:
             patch("cli.main._warm_check", return_value=False),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._phase_ipam", return_value=0),
-            patch("cli.main._phase_credentials", return_value="pass"),
             patch(
-                "cli.main._phase_hydrate",
+                # Post-reorder, _phase_workspace_shared_group runs FIRST among
+                # the bridge-group-touching phases (per the
+                # "Workspace Shared-Group Phase Ordering" requirement and the
+                # "Phase Order Contract" reorder for finding 8.D alt #1), so
+                # the WorkspaceBridgeGroupMissingError surfaces here, not from
+                # _phase_hydrate.
+                "cli.main._phase_workspace_shared_group",
                 side_effect=WorkspaceBridgeGroupMissingError("group 'sb-ws' does not exist"),
             ),
             patch("cli.main._release_lock") as mock_release,
@@ -566,6 +637,7 @@ class TestStartComposeUnhealthy:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._release_lock") as mock_release,
         ):
@@ -595,6 +667,180 @@ class TestStartSshKeypairGeneration:
             calls = mock_ssh.call_args_list
             assert calls[0] == call(str(tmp_path), "auth")
             assert calls[1] == call(str(tmp_path), "host", core_ipc_ip="10.100.6.3")
+
+    def test_grant_post_hydrate_daemon_read_setfacls_helper_cp_and_direct_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Post-hydrate setfacl pass covers BOTH helper-cp source files
+        AND daemon-read direct files (DAEMON_READ_DIRECT_FILES).
+
+        Iteration 5 of the cluster-1 8.D structural fix. Empirical
+        evidence: iteration 4 made phases 1-8 green but compose-up
+        failed with ``open /…/docker/compose.yml: permission denied``
+        because compose.yml is dev-created (by hydrate's
+        write_restricted) and never transferred via helper-cp; the
+        previous unified pass only iterated RO_FILE_RECIPES +
+        EXEC_FILE_RECIPES.
+
+        The DAEMON_READ_DIRECT_FILES inventory is the single source of
+        truth for files the daemon reads in place forever (compose.yml
+        + conditional extras). The post-hydrate pass now setfacls each
+        existing file across both categories; missing files are skipped
+        defensively (covers conditional extras whose presence depends
+        on InstanceConfig component flags).
+        """
+        from cli.main import (
+            DAEMON_READ_DIRECT_FILES,
+            EXEC_FILE_RECIPES,
+            RO_FILE_RECIPES,
+            _grant_post_hydrate_daemon_read,
+        )
+
+        # Materialize every recipe file on disk so the helper iterates
+        # them; leave one helper-cp source file absent and one daemon-
+        # read direct file absent to verify the skip-if-missing branch
+        # on both code paths.
+        absent_recipe: tuple[str, str] | None = None
+        for parent, files, _uid, _mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+            parent_abs = tmp_path / parent
+            parent_abs.mkdir(parents=True, exist_ok=True)
+            for fname in files:
+                if absent_recipe is None:
+                    absent_recipe = (parent, fname)
+                    continue
+                (parent_abs / fname).write_text("dummy")
+
+        absent_direct: tuple[str, str] | None = None
+        for parent, files in DAEMON_READ_DIRECT_FILES:
+            parent_abs = tmp_path / parent
+            parent_abs.mkdir(parents=True, exist_ok=True)
+            for fname in files:
+                if absent_direct is None:
+                    absent_direct = (parent, fname)
+                    continue
+                (parent_abs / fname).write_text("dummy")
+
+        recorded: list[list[str]] = []
+
+        def _record(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            recorded.append(list(args))
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        with patch("cli.main.subprocess.run", side_effect=_record):
+            _grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
+
+        recorded_paths = {args[-1] for args in recorded}
+
+        # Both absent files were skipped on their respective code paths.
+        assert absent_recipe is not None and absent_direct is not None
+        absent_recipe_path = str(tmp_path / absent_recipe[0] / absent_recipe[1])
+        absent_direct_path = str(tmp_path / absent_direct[0] / absent_direct[1])
+        assert absent_recipe_path not in recorded_paths
+        assert absent_direct_path not in recorded_paths
+
+        # All present helper-cp source files setfacl'd.
+        for parent, files, _u, _m in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES):
+            for fname in files:
+                p = str(tmp_path / parent / fname)
+                if (parent, fname) == absent_recipe:
+                    continue
+                assert p in recorded_paths, f"missing setfacl on helper-cp source {p}"
+
+        # All present daemon-read direct files setfacl'd — including
+        # compose.yml (the iteration-5 regression).
+        for parent, files in DAEMON_READ_DIRECT_FILES:
+            for fname in files:
+                p = str(tmp_path / parent / fname)
+                if (parent, fname) == absent_direct:
+                    continue
+                assert p in recorded_paths, f"missing setfacl on daemon-read direct {p}"
+
+        # Every invocation has the canonical shape.
+        for args in recorded:
+            assert args[:3] == ["setfacl", "-m", "u:claude-sandbox:r"], args
+
+    def test_grant_post_hydrate_daemon_read_propagates_setfacl_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed setfacl surfaces as SandboxExecutionError (no silent skip)."""
+        from cli.main import _grant_post_hydrate_daemon_read
+        from core.exceptions import SandboxExecutionError
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "ipc_ssh_key").write_text("k")
+
+        def _fail(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.CalledProcessError(returncode=1, cmd=args, stderr="EPERM")
+
+        with (
+            patch("cli.main.subprocess.run", side_effect=_fail),
+            pytest.raises(SandboxExecutionError, match="grant daemon read on post-hydrate target"),
+        ):
+            _grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
+
+    def test_phase_grant_post_hydrate_daemon_read_is_thin_wrapper(self, tmp_path: Path) -> None:
+        """`_phase_grant_post_hydrate_daemon_read` is a thin wrapper.
+
+        Asserts the start command's phase entry-point exists and forwards
+        to the helper. The phase delegates so the start command can swap
+        in a no-op for tests that patch the wrapper.
+        """
+        from cli.main import _phase_grant_post_hydrate_daemon_read
+
+        with patch("cli.main._grant_post_hydrate_daemon_read") as mock_helper:
+            _phase_grant_post_hydrate_daemon_read(str(tmp_path), "claude-sandbox")
+            mock_helper.assert_called_once_with(str(tmp_path), "claude-sandbox")
+
+    def test_daemon_read_direct_files_includes_compose_inputs_and_build_context(self) -> None:
+        """DAEMON_READ_DIRECT_FILES is the canonical source-of-truth for the
+        post-hydrate setfacl pass on dev-created files the daemon reads in
+        place (no helper-cp ownership transfer). Spans two sub-categories:
+
+        1. **Compose YAML inputs** consumed via ``docker compose -f``.
+           Must match ``_build_compose_files``'s output: ``compose.yml``
+           unconditionally + conditional ``db-postgres.yml`` /
+           ``mcp-firecrawl.yml`` extras.
+        2. **Build context** consumed by buildkit during
+           ``docker compose up --build``: rendered/copied Dockerfiles
+           + their local-COPY sources (e.g. ``admin/entrypoint.sh``).
+           Must match every ``COPY <src>`` (without ``--from=<stage>``)
+           in any Dockerfile under ``src/templates/docker/``.
+
+        If a new compose ``--file`` path is added to
+        ``_build_compose_files``, OR a new local-COPY source is added to
+        any Dockerfile, this list must be extended in lockstep.
+        """
+        from cli.main import DAEMON_READ_DIRECT_FILES
+
+        flat = {(parent, fname) for parent, files in DAEMON_READ_DIRECT_FILES for fname in files}
+
+        # Compose YAML inputs.
+        assert ("docker", "compose.yml") in flat, (
+            "compose.yml is the canonical daemon-read direct file; "
+            "removing it re-breaks `compose -f compose.yml up`"
+        )
+        assert ("docker/extras", "db-postgres.yml") in flat
+        assert ("docker/extras", "mcp-firecrawl.yml") in flat
+
+        # Build context — Dockerfiles. Empirical symptom of missing any
+        # of these: `target <svc>: failed to solve: the Dockerfile
+        # cannot be empty` (buildkit treats an unreadable Dockerfile
+        # as empty). All four service Dockerfiles must be present.
+        assert ("docker/core", "Dockerfile.core") in flat
+        assert ("docker/admin", "Dockerfile.admin") in flat
+        assert ("docker/coredns", "Dockerfile.coredns") in flat
+        assert ("docker/extras", "Dockerfile.mcp-firecrawl") in flat
+
+        # Build context — local-COPY sources. admin/entrypoint.sh is
+        # COPY'd by Dockerfile.admin during the build (baked into the
+        # image, NOT bind-mounted at runtime; therefore NOT in
+        # EXEC_FILE_RECIPES). It is dev-created by hydrate's static
+        # _copy_file and needs explicit daemon-read on the host.
+        assert ("docker/admin", "entrypoint.sh") in flat, (
+            "admin/entrypoint.sh is COPY'd into the admin image during "
+            "build; without daemon read, buildkit's COPY step fails"
+        )
 
     def test_phase_ipc_setup_not_in_start(self) -> None:
         """_phase_ipc_setup function no longer exists in cli.main."""
@@ -643,6 +889,7 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -673,6 +920,7 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
             patch("cli.main._phase_handover"),
             patch("cli.main._release_lock"),
@@ -700,6 +948,7 @@ class TestStopWarm:
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls") as mock_revoke,
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
         ):
             result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
@@ -742,6 +991,7 @@ class TestStopClean:
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
         ):
             result = runner.invoke(app, ["stop", inst, "--clean"])
             assert result.exit_code == 0
@@ -805,6 +1055,7 @@ class TestDestroyConfirmation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down") as mock_down,
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -842,6 +1093,7 @@ class TestDestroyConfirmation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -882,6 +1134,7 @@ class TestDestroyIPAMAndRegistryCleanup:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
@@ -910,6 +1163,7 @@ class TestDestroyRmtree:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -1173,8 +1427,9 @@ class TestHelperCpChownRoFiles:
 
         monkeypatch.setattr("cli.main.helper_chown_files", _fake)
         _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
-        # One invocation per RO_FILE_RECIPES entry (7 groups)
-        assert len(invocations) == 7
+        # One invocation per (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES)
+        # entry: 7 RO + 1 EXEC + 1 RW = 9 groups (cluster 5 added the RW recipe).
+        assert len(invocations) == 9
 
     def test_phase_propagates_helper_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files
@@ -1375,10 +1630,12 @@ class TestComposeDownDirect:
 class TestRevokeACLsDirect:
     """Task 4.3: Fault-isolated _revoke_acls — partial failure, all targets, warnings.
 
-    Post-acl-ownership-recipes: cache/log Option-B grants are gone; workspace
-    named-ACL is now revoked. Plan entries when user_project_root is provided:
-    instance root + docker/ + config/ + .sandbox.env + secrets/ + workspace
-    (effective + default named-entry) = 7.
+    Post-cluster-3 (Acl Revoke Plan Excludes Persistent Grants): the
+    .sandbox.env named-ACL is now `granted-once, persistent` (Environment
+    File Read ACL) and is excluded from revoke. Plan entries when
+    workspace_paths is provided: instance root + docker/ + config/ +
+    secrets/ dir + secrets/ default ACL + workspace (effective + default
+    named-entry) = 7.
     """
 
     def test_revoke_acls_calls_setfacl_for_all_plan_entries(self) -> None:
@@ -3221,8 +3478,13 @@ class TestACLPlanAsymmetry:
         descriptions = [desc for _, desc in plan]
         assert not any("ancestor" in d for d in descriptions)
 
-    def test_both_plans_include_env_file(self, tmp_path: Path) -> None:
-        """Both plans include .sandbox.env."""
+    def test_grant_plan_includes_env_file_revoke_excludes(self, tmp_path: Path) -> None:
+        """Grant plan includes .sandbox.env; revoke plan excludes it because
+        the named-ACL on .sandbox.env is `granted-once, persistent` (cluster 3
+        — Environment File Read ACL). Asymmetry is the structural fix that
+        eliminated the env-ACL re-grant rituals in `_container_status` and
+        `destroy`'s preflight.
+        """
         from cli.main import _acl_grant_plan, _acl_revoke_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3237,7 +3499,7 @@ class TestACLPlanAsymmetry:
         grant_descs = [d for _, d in grant]
         revoke_descs = [d for _, d in revoke]
         assert any("env file" in d for d in grant_descs)
-        assert any("env file" in d for d in revoke_descs)
+        assert not any("env file" in d for d in revoke_descs)
 
     def test_grant_plan_includes_instance_root(self, tmp_path: Path) -> None:
         """Grant plan includes instance root with r-x."""
@@ -3271,7 +3533,6 @@ class TestACLPlanAsymmetry:
             for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
                 assert cache_log not in desc
                 assert not any(cache_log in arg for arg in args)
-            assert "rwX" not in " ".join(args), f"rwX Option-B grant survived: {desc}"
 
     def test_grant_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
         """Workspace named-ACL is granted when user_project_root is supplied."""
@@ -3349,8 +3610,14 @@ class TestACLPlanAsymmetry:
         # Should not have crashed; the workspace named-ACL is still queued.
         assert any("workspace named-ACL" in d for _, d in plan)
 
-    def test_grant_plan_includes_secrets_traverse(self, tmp_path: Path) -> None:
-        """Grant plan retains a dir-level traverse on secrets/."""
+    def test_grant_plan_includes_secrets_provisioning_write(self, tmp_path: Path) -> None:
+        """Grant plan emits a dir-level rwx provisioning grant on secrets/.
+
+        See ``test_acl_grant_plan_secrets_dir_is_dir_level_rwx_not_recursive_rwx``
+        for the BUG-A/BUG-B partition rationale; this thinner test pins
+        that the entry is present so refactors don't quietly drop the
+        provisioning grant.
+        """
         from cli.main import _acl_grant_plan
 
         instance_dir = tmp_path / "sandboxes" / "proj-abc"
@@ -3361,7 +3628,7 @@ class TestACLPlanAsymmetry:
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
         descriptions = [d for _, d in plan]
-        assert any("secrets dir traverse" in d for d in descriptions)
+        assert any("secrets dir provisioning write" in d for d in descriptions)
 
     def test_grant_plan_dedups_shared_ancestor_across_workspaces(self, tmp_path: Path) -> None:
         """Two workspaces under the same parent dir produce one ancestor-traverse entry per ancestor."""
@@ -3380,6 +3647,399 @@ class TestACLPlanAsymmetry:
         ancestor_targets = [args[-1] for args, desc in plan if desc.startswith("workspace ancestor traverse: ")]
         # Shared parent appears at most once even though both workspaces walk through it.
         assert ancestor_targets.count(str(ws_root)) == 1
+
+    def test_acl_grant_plan_includes_helper_parent_grants(self, tmp_path: Path) -> None:
+        """Cluster 1 regression: helper-recipe parents (cache/log) get u:<daemon>:rwx + matching default ACL.
+
+        Per orchestrator-volumes' "Helper-Recipe Parent ACL Grants" requirement:
+        scaffold creates cache/core, cache/admin, log/ as host dev:dev mode 0775;
+        the daemon's userns has dev unmapped, so CAP_DAC_OVERRIDE cannot bypass
+        DAC. Without the named-acl grant, the helper sees only "other" (r-x)
+        and EPERMs on mkdir for the helper-recipe leaves. The grant plan adds
+        an effective ``u:<daemon>:rwx`` plus a matching default ACL on each
+        helper-recipe parent so the helper recipe can create leaves inside.
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        for parent_rel in ("cache/core", "cache/admin", "log"):
+            parent_abs = str(instance_dir / parent_rel)
+            effective = [
+                args
+                for args, desc in plan
+                if desc == f"helper-recipe parent: {parent_abs}"
+            ]
+            assert effective, f"missing helper-recipe-parent effective grant for {parent_rel}"
+            assert any(arg == "u:sandbox:rwx" for arg in effective[0]), (
+                f"helper-recipe parent {parent_rel} missing u:<daemon>:rwx"
+            )
+            default_entries = [
+                args
+                for args, desc in plan
+                if desc == f"helper-recipe parent default ACL: {parent_abs}"
+            ]
+            assert default_entries, (
+                f"missing helper-recipe-parent default ACL grant for {parent_rel}"
+            )
+            joined = " ".join(default_entries[0])
+            assert "-d" in joined and "u:sandbox:rwx" in joined, (
+                f"helper-recipe parent {parent_rel} missing default-ACL daemon entry"
+            )
+
+    def test_workspace_shared_group_plan_omits_explicit_g_rwx_setfacl(self) -> None:
+        """Cluster 1 structural fix for finding 8.N: post-reorder, no explicit g::rwx setfacl.
+
+        Spec source: orchestrator-volumes' "Workspace Shared-Group Phase
+        Ordering" requirement. The structural fix runs the shared-group
+        recipe BEFORE Phase-5 named-ACL grants, so ``chmod 2770`` lands
+        on a non-extended-ACL inode and the ``group::`` entry propagates
+        from the mode bits without a separate setfacl call. Any
+        ``setfacl -m g::rwx`` step in the plan would indicate the temp
+        workaround has resurfaced.
+        """
+        from cli.main import _workspace_shared_group_plan
+
+        plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
+        ops = [op for op, _ in plan]
+        assert not any("setfacl -m g::rwx" in op for op in ops), (
+            "workspace shared-group plan must NOT emit explicit g::rwx setfacl post-reorder"
+        )
+
+    def test_acl_grant_plan_secrets_dir_is_dir_level_rwx_not_recursive_rwx(
+        self, tmp_path: Path
+    ) -> None:
+        """Cluster 1 structural fix for finding 8.D — partitioned BUG-A vs BUG-B.
+
+        Spec source: orchestrator-volumes' "Helper-CP Source Files
+        Daemon-Readable Pre-Recipe" requirement. The temp's recursive
+        ``rwX`` widening on ``secrets/`` is replaced by a partitioned
+        permission model:
+
+        - **BUG-A** (daemon RUNTIME READ on file contents): per-file
+          ``setfacl -m u:<host_user>:r <file>`` granted post-hydrate by
+          ``_phase_grant_helper_cp_files_daemon_read``.
+        - **BUG-B** (daemon PROVISIONING WRITE on the parent dir): the
+          dir-level ``setfacl -m u:<host_user>:rwx <secrets_dir>`` grant
+          asserted here. Required by helper-cp's ``mv /tmp/$f /p/$f``,
+          which needs write on the destination's parent so the daemon
+          can unlink the existing dest and rename the new inode in.
+
+        Together: dir-level ``rwx`` (BUG-B) + per-file ``r`` (BUG-A) is
+        strictly narrower than the temp's recursive ``rwX`` because the
+        recursive ``rwX`` granted daemon write on file CONTENTS too,
+        whereas this partition leaves contents at per-file ``r`` (read
+        only).
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        secrets_entries = [
+            (args, desc) for args, desc in plan if "secrets dir provisioning write" in desc
+        ]
+        assert secrets_entries, "secrets dir provisioning-write entry missing"
+        args, _desc = secrets_entries[0]
+        joined = " ".join(args)
+        assert "-R" not in args, f"secrets/ grant must NOT be recursive: {joined}"
+        assert "rwX" not in joined, f"secrets/ grant must NOT carry rwX: {joined}"
+        assert "u:sandbox:rwx" in joined, (
+            f"secrets/ grant must be dir-level u:<daemon>:rwx (provisioning write for BUG-B): "
+            f"{joined}"
+        )
+
+        # No recursive grant on secrets/ anywhere in the plan. Match
+        # description prefixes that begin "secrets " (avoid false-matching
+        # paths that contain "secrets" as a substring).
+        for cmd, desc in plan:
+            if desc.startswith("secrets "):
+                assert "-R" not in cmd, (
+                    f"secrets/ entry must not be recursive (cluster-1 retires temp 0b35a53): "
+                    f"{cmd!r} {desc!r}"
+                )
+
+        # Default ACL granting daemon r on inherited entries — belt-and-
+        # suspenders for any future write path that does NOT chmod-after-
+        # create (per the requirement description).
+        default_entries = [
+            (args, desc) for args, desc in plan if "secrets default ACL" in desc
+        ]
+        assert default_entries, "secrets default ACL entry missing"
+        d_args, _ = default_entries[0]
+        assert d_args[:3] == ["setfacl", "-d", "-m"], d_args
+        assert any("u:sandbox:r" in tok for tok in d_args), d_args
+
+    def test_exec_file_recipes_table_emits_mode_0500(self) -> None:
+        """Cluster 1 regression for findings 8.K + 8.L: EXEC_FILE_RECIPES sibling table.
+
+        Spec source: orchestrator-volumes' "Executable-Script File Recipes"
+        requirement. The entrypoint-script kind is structurally distinct
+        from RO_FILE_RECIPES (mode 0640 ro configs / 0600 secrets): mode
+        0500 owner-only with the consumer as the sole reader/exec. The
+        table maps ``docker/core/entrypoint.sh`` to (uid=1000, mode=0o500).
+        """
+        from cli.main import EXEC_FILE_RECIPES
+
+        # Exactly one entry today: docker/core/entrypoint.sh
+        entries = list(EXEC_FILE_RECIPES)
+        assert entries, "EXEC_FILE_RECIPES must be non-empty"
+        match = next(
+            (e for e in entries if e[0] == "docker/core" and "entrypoint.sh" in e[1]),
+            None,
+        )
+        assert match is not None, "docker/core/entrypoint.sh missing from EXEC_FILE_RECIPES"
+        parent, files, consumer_uid, mode = match
+        assert consumer_uid == 1000
+        assert mode == 0o500, f"entrypoint mode must be 0500 owner-only; got 0o{mode:03o}"
+        # Confirm executable-script kind is NOT duplicated in RO_FILE_RECIPES.
+        from cli.main import RO_FILE_RECIPES
+
+        ro_parents = [(p, files) for p, files, _, _ in RO_FILE_RECIPES]
+        assert ("docker/core", ("entrypoint.sh",)) not in ro_parents, (
+            "entrypoint.sh must live in EXEC_FILE_RECIPES, not RO_FILE_RECIPES"
+        )
+
+    def test_rw_file_recipes_table_includes_claude_json_at_mode_0660(self) -> None:
+        """Cluster 5 ADDED requirement: RW Config File Recipes.
+
+        Spec source: orchestrator-volumes' "RW Config File Recipes"
+        requirement. Dev-created files compose mounts as ``:rw`` MUST be
+        transferred to the consumer's host subuid+subgid via the helper-cp
+        recipe with mode 0660 (group-rw matching consumer's primary group).
+        Today the only entry is ``config/core/.claude.json`` (consumer
+        agent uid 1000 inside the core container).
+
+        Pre-fix symptom: the host file is dev-owned (host uid 1000),
+        unmapped in the agent container's userns, so it presents as
+        ``nobody:nobody`` ``---`` to the agent → ``echo {} > .claude.json``
+        as agent fails with EACCES even though compose mount is ``:rw``.
+        """
+        from cli.main import EXEC_FILE_RECIPES, RO_FILE_RECIPES, RW_FILE_RECIPES
+
+        entries = list(RW_FILE_RECIPES)
+        assert entries, "RW_FILE_RECIPES must be non-empty"
+        match = next(
+            (e for e in entries if e[0] == "config/core" and ".claude.json" in e[1]),
+            None,
+        )
+        assert match is not None, "config/core/.claude.json missing from RW_FILE_RECIPES"
+        _parent, _files, consumer_uid, mode = match
+        assert consumer_uid == 1000
+        assert mode == 0o660, f".claude.json must be mode 0660 (consumer-rw); got 0o{mode:03o}"
+        # RW kind MUST NOT be duplicated in RO_FILE_RECIPES or EXEC_FILE_RECIPES.
+        ro_files = {(p, fname) for p, files, _, _ in RO_FILE_RECIPES for fname in files}
+        exec_files = {(p, fname) for p, files, _, _ in EXEC_FILE_RECIPES for fname in files}
+        assert ("config/core", ".claude.json") not in ro_files, (
+            ".claude.json must live in RW_FILE_RECIPES, not RO_FILE_RECIPES"
+        )
+        assert ("config/core", ".claude.json") not in exec_files, (
+            ".claude.json must live in RW_FILE_RECIPES, not EXEC_FILE_RECIPES"
+        )
+
+    def test_helper_cp_chown_plan_includes_rw_file_recipes(self) -> None:
+        """Cluster 5: ``_helper_cp_chown_plan`` MUST iterate RW_FILE_RECIPES too.
+
+        Without this, ``.claude.json`` stays dev-owned and the agent sees
+        ``nobody:nobody`` ``---`` from inside the userns. The plan is the
+        single source of truth for both the helper-cp execution phase
+        (`_phase_helper_cp_chown_ro_files`) and the stop-time unlink
+        (`_phase_stop_unlink_consumer_files`); RW files MUST appear in
+        both via the shared plan.
+        """
+        from cli.main import RW_FILE_RECIPES, _helper_cp_chown_plan
+
+        plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
+        # Find the RW entry for config/core/.claude.json in the plan.
+        rw_entries = [
+            (parent_abs, files, mode)
+            for parent_abs, files, _uid, _gid, mode in plan
+            if parent_abs.endswith("/config/core") and ".claude.json" in files
+        ]
+        assert rw_entries, f"RW recipe for .claude.json missing from plan; got {plan}"
+        # At least one entry must carry mode 0660 (the RW recipe).
+        assert any(mode == 0o660 for _p, _f, mode in rw_entries), (
+            f"RW recipe entry must use mode 0660; got {[mode for _p, _f, mode in rw_entries]}"
+        )
+        # Sanity: the recipe table itself drives the inclusion.
+        assert any(parent == "config/core" and ".claude.json" in files for parent, files, _, _ in RW_FILE_RECIPES)
+
+    def test_post_hydrate_daemon_read_targets_includes_rw_recipe_files(self, tmp_path: Path) -> None:
+        """Cluster 5 MODIFIED requirement: Helper-CP Source Files Daemon-Readable Pre-Recipe.
+
+        The post-hydrate setfacl pass MUST cover RW recipe source files
+        (in addition to RO + EXEC + DAEMON_READ_DIRECT). Otherwise the
+        helper-cp ``cp /p/.claude.json /tmp/.claude.json`` step EACCES'es
+        because the daemon (host_user) lacks DAC read on the dev-owned
+        source after ``write_restricted``'s fchmod resets the ACL mask.
+        """
+        from cli.main import _post_hydrate_daemon_read_targets
+
+        instance_dir = tmp_path / "inst"
+        (instance_dir / "config" / "core").mkdir(parents=True)
+        claude_json = instance_dir / "config" / "core" / ".claude.json"
+        claude_json.write_text("{}\n")
+
+        targets = _post_hydrate_daemon_read_targets(str(instance_dir))
+        assert str(claude_json) in targets, (
+            f"RW recipe source .claude.json missing from post-hydrate targets; got {targets}"
+        )
+
+    def test_workspace_shared_group_runs_before_named_acl_grant(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """Cluster 1 phase-order regression for finding 8.N.
+
+        Spec source: orchestrator-volumes' "Workspace Shared-Group Phase
+        Ordering" requirement and the MODIFIED "Phase Order Contract for
+        Ownership-Sensitive Phases". The shared-group recipe MUST be
+        invoked before ``_phase_acl_grant`` so ``chmod 2770`` lands on a
+        non-extended-ACL inode and the ``group::`` entry propagates from
+        the mode bits.
+        """
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+        from core.exceptions import SandboxExecutionError
+
+        call_order: list[str] = []
+
+        def _record_workspace_shared(*_a: object, **_kw: object) -> None:
+            call_order.append("workspace_shared_group")
+
+        def _record_acl_grant(*_a: object, **_kw: object) -> None:
+            call_order.append("acl_grant")
+            # Abort early so we don't have to mock all subsequent phases.
+            raise SandboxExecutionError("stop after acl_grant")
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="pass"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_workspace_shared_group", side_effect=_record_workspace_shared),
+            patch("cli.main._phase_acl_grant", side_effect=_record_acl_grant),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 1
+        # Workspace shared-group ran first; acl_grant ran second.
+        assert call_order == ["workspace_shared_group", "acl_grant"], call_order
+
+    def test_acl_grant_plan_config_dir_is_recursive_rX_not_rwX(
+        self, tmp_path: Path
+    ) -> None:
+        """Cluster 2 retirement of cluster-1's deferred config/ rwX widening.
+
+        Spec source: orchestrator-volumes' MODIFIED "ACL Grant Plan as
+        Single Source of Truth" requirement. Temp commit ``6c3bcb4``
+        (cluster 1 cherry-pick) widened ``setfacl -R u:<host_user>:rX``
+        to ``rwX`` so the helper-cp cross-fs ``mv`` could host-level
+        unlink the destination. With cluster 2's structural fixes:
+
+        - The helper recipe is now ``cp+unlink+cp+chmod+chown`` running
+          in-helper as in-container root with ``cap_dac_override``; the
+          host DAC bypass occurs inside the helper, not at the daemon's
+          host level.
+        - Daemon host-level write requirement is narrowed to BUG-B
+          (provisioning write on each helper-cp parent dir), satisfied
+          by per-parent dir-level ``rwx`` entries (parallel to the
+          ``docker/core`` and ``secrets/`` rwx grants).
+
+        The recursive widening MUST be retired: the daemon's DAC on
+        config file CONTENTS is read-only post-cluster-2.
+
+        Pre-fix-failure recipe (recorded in tasks.md): on the cluster-1
+        baseline (sync v3) ``setfacl -R -m u:<host_user>:rwX`` is the
+        ``"config files"`` entry; this test fails on rwX.
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        config_entries = [
+            (args, desc) for args, desc in plan if desc.startswith("config files: ")
+        ]
+        assert config_entries, "config/ recursive grant entry missing"
+        args, _desc = config_entries[0]
+        joined = " ".join(args)
+        assert "-R" in args, f"config/ grant must be recursive: {joined}"
+        assert "rwX" not in joined, (
+            f"config/ recursive grant must NOT carry write (rwX retired): {joined}"
+        )
+        assert "u:sandbox:rX" in joined, (
+            f"config/ recursive grant must be u:<daemon>:rX (read-only on contents): {joined}"
+        )
+
+    def test_acl_grant_plan_helper_cp_parents_under_config_have_dir_level_rwx(
+        self, tmp_path: Path
+    ) -> None:
+        """Cluster 2 BUG-B grants for helper-cp parent dirs under config/.
+
+        Spec source: orchestrator-volumes' MODIFIED "ACL Grant Plan as
+        Single Source of Truth". Each ``config/<subdir>`` listed in
+        ``RO_FILE_RECIPES`` must carry an effective dir-level
+        ``u:<daemon>:rwx`` so the helper-cp recipe's host-level bind
+        mount of ``config/<subdir>`` is mountable read-write into the
+        helper, allowing the in-helper unlink+cp pair to land. Parallel
+        to the existing ``docker/core`` and ``secrets/`` rwx grants.
+
+        Pre-fix-failure recipe: on the cluster-1 baseline (sync v3)
+        helper-cp parents under config/ have NO dir-level rwx entry —
+        the recursive ``rwX`` was the only daemon-write coverage. This
+        test fails until the per-parent grants are added.
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        for parent_rel in (
+            "config/coredns",
+            "config/dnsdist",
+            "config/proxy",
+            "config/core",
+            "config/admin",
+        ):
+            parent_abs = str(instance_dir / parent_rel)
+            entries = [
+                args
+                for args, desc in plan
+                if desc == f"helper-cp parent: {parent_abs}"
+            ]
+            assert entries, (
+                f"missing helper-cp parent dir-level rwx grant for {parent_rel}"
+            )
+            args = entries[0]
+            assert "-R" not in args, (
+                f"helper-cp parent {parent_rel} must NOT be recursive: {args!r}"
+            )
+            assert any(arg == "u:sandbox:rwx" for arg in args), (
+                f"helper-cp parent {parent_rel} missing u:<daemon>:rwx (BUG-B)"
+            )
 
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
@@ -3904,6 +4564,7 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_hydrate"),
             patch("cli.main._phase_acl_grant", side_effect=track_acl),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=track_ownership),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
@@ -3940,6 +4601,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up", side_effect=SandboxExecutionError("unhealthy")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
@@ -3964,6 +4626,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_acl_grant"),
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=SandboxExecutionError("chown failed")),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
@@ -3989,6 +4652,7 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_acl_grant"),
             patch(
                 "cli.main._phase_helper_mkdir_chown_cache_log",
@@ -4001,10 +4665,14 @@ class TestStartErrorHandlerACLCleanup:
             assert result.exit_code == 1
             mock_revoke.assert_called_once()
 
-    def test_workspace_shared_group_failure_triggers_revoke(
+    def test_workspace_shared_group_failure_does_not_trigger_revoke(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """Section 10: workspace shared-group failure → ACL cleanup runs."""
+        """Section 10 + cluster-1 reorder: workspace shared-group runs BEFORE Phase-5
+        named-ACL grants per the "Workspace Shared-Group Phase Ordering" requirement,
+        so a workspace failure precedes ``acl_granted=True`` and no ACLs exist
+        to revoke. Test inverts the prior post-Phase-5-only assumption.
+        """
         inst = "myproject"
         _register_instance(inst)
 
@@ -4019,19 +4687,20 @@ class TestStartErrorHandlerACLCleanup:
             patch("cli.main._phase_ipam", return_value=0),
             patch("cli.main._phase_credentials", return_value="pass"),
             patch("cli.main._phase_hydrate"),
-            patch("cli.main._phase_acl_grant"),
-            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
-            patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch(
                 "cli.main._phase_workspace_shared_group",
                 side_effect=SandboxExecutionError("workspace setup failed"),
             ),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
             patch("cli.main._revoke_acls", return_value=[]) as mock_revoke,
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
-            mock_revoke.assert_called_once()
+            mock_revoke.assert_not_called()
 
     def test_ipam_failure_does_not_trigger_revoke(self, runner: CliRunner) -> None:
         """WHEN IPAM fails (pre-Phase-5), THEN _revoke_acls is NOT called."""
@@ -4070,6 +4739,7 @@ class TestStopLock:
             patch("cli.main._acquire_state_lock", return_value=99) as mock_lock,
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock") as mock_release,
         ):
             result = runner.invoke(app, ["stop", inst])
@@ -4111,6 +4781,7 @@ class TestDestroyFaultIsolation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down", side_effect=SandboxExecutionError("timeout")),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -4133,6 +4804,7 @@ class TestDestroyFaultIsolation:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree", side_effect=FileNotFoundError("gone")),
         ):
@@ -4291,11 +4963,282 @@ class TestStopACLWarningEmission:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=["ACL revoke warning for test: fail"]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["stop", inst])
             assert result.exit_code == 0
             assert "ACL revoke warning" in result.output
+
+
+
+
+class TestStopUnlinkConsumerFiles:
+    """Recipe-symmetry partner of helper-cp+chown phase: stop unlinks consumer files."""
+
+    def test_unlink_removes_existing_files(self, tmp_path: Path) -> None:
+        from cli.main import _phase_stop_unlink_consumer_files
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        (instance_dir / "config" / "coredns").mkdir(parents=True)
+        (instance_dir / "config" / "proxy").mkdir(parents=True)
+        (instance_dir / "config" / "coredns" / "Corefile").write_text("x")
+        (instance_dir / "config" / "proxy" / "squid.conf").write_text("y")
+        # `missing.txt` deliberately not created — covers FileNotFoundError branch.
+
+        with patch(
+            "cli.main._helper_cp_chown_plan",
+            return_value=[
+                (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
+                (str(instance_dir / "config" / "proxy"), ("squid.conf", "missing.txt"), 0, 0, 0o640),
+            ],
+        ):
+            warnings = _phase_stop_unlink_consumer_files(str(instance_dir), "claude-sandbox")
+        assert warnings == []
+        assert not (instance_dir / "config" / "coredns" / "Corefile").exists()
+        assert not (instance_dir / "config" / "proxy" / "squid.conf").exists()
+
+    def test_stop_emits_unlink_warnings(self, runner: CliRunner) -> None:
+        """stop emits warnings returned by _phase_stop_unlink_consumer_files."""
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch(
+                "cli.main._phase_stop_unlink_consumer_files",
+                return_value=["unlink /x: stale lock"],
+            ),
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop", inst])
+            assert result.exit_code == 0
+            assert "unlink /x: stale lock" in result.output
+
+    def test_unlink_aggregates_oserror_warnings(self, tmp_path: Path) -> None:
+        from cli.main import _phase_stop_unlink_consumer_files
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        with (
+            patch(
+                "cli.main._helper_cp_chown_plan",
+                return_value=[
+                    (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
+                ],
+            ),
+            patch("cli.main.os.unlink", side_effect=PermissionError("locked down")),
+        ):
+            warnings = _phase_stop_unlink_consumer_files(str(instance_dir), "claude-sandbox")
+            assert len(warnings) == 1
+            assert "Corefile" in warnings[0]
+            assert "locked down" in warnings[0]
+
+
+class TestCluster3TeardownSymmetry:
+    """Cluster 3 (orchestrator-volumes-teardown-symmetry) — regression tests
+    for the structural fixes: revoke-plan excludes persistent grants, env-file
+    ACL is persistent, shared `_phase_stop_teardown` between stop+destroy.
+    """
+
+    def test_revoke_plan_excludes_helper_cp_managed_paths(self, tmp_path: Path) -> None:
+        """ADDED requirement: Acl Revoke Plan Excludes Persistent Grants.
+
+        The revoke plan MUST NOT contain entries that recurse into helper-cp
+        parent directories (the recursive `setfacl -R -x` would EPERM on
+        consumer-uid-owned files inside).
+        """
+        from cli.main import RO_FILE_RECIPES, _acl_revoke_plan
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        plan = _acl_revoke_plan(str(instance_dir), "sandbox")
+        helper_cp_parents = {
+            os.path.join(str(instance_dir), parent).rstrip("/") for parent, _, _, _ in RO_FILE_RECIPES
+        }
+        for args, desc in plan:
+            if "-R" not in args:
+                continue
+            target = args[-1].rstrip("/")
+            assert target not in helper_cp_parents, (
+                f"revoke plan contains recursive entry on helper-cp parent {target}: {desc}"
+            )
+
+    def test_revoke_plan_excludes_recursive_walks(self, tmp_path: Path) -> None:
+        """The revoke plan MUST NOT use `-R` recursive flag at all post-cluster-3.
+
+        The pre-cluster-3 plan recursively setfacl-x'd `docker/` and `config/`,
+        which walked into consumer-owned files (helper-cp recipe + EXEC_FILE_RECIPES)
+        and emitted EPERM warnings on every entry. Cluster 3's structural fix:
+        revoke is dir-level only; helper-cp managed files are unlinked separately
+        by `_phase_stop_unlink_consumer_files`.
+        """
+        from cli.main import _acl_revoke_plan
+
+        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
+        for args, desc in plan:
+            assert "-R" not in args, f"revoke plan contains recursive walk: {desc} → {args}"
+
+    def test_revoke_plan_excludes_ancestor_traverse(self, tmp_path: Path) -> None:
+        """Ancestor traverse ACLs are `granted-once, persistent` and MUST NOT
+        appear in the revoke plan (re-revoking would break the next start's
+        ability to traverse to the instance dir).
+        """
+        from cli.main import _acl_revoke_plan
+
+        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
+        for _args, desc in plan:
+            assert "ancestor" not in desc
+
+    def test_revoke_plan_excludes_workspace_shared_group_persistent(self, tmp_path: Path) -> None:
+        """Workspace shared-group state (chgrp/chmod 2770/setgid + g::rwx
+        default) is `granted-once, persistent` and MUST NOT appear in the
+        revoke plan. Only the per-user named-ACL portion is revoked.
+        """
+        from cli.main import _acl_revoke_plan
+
+        ws = tmp_path / "ws"
+        plan = _acl_revoke_plan("/inst", "sandbox", [str(ws)])
+        joined_descs = " ".join(d for _, d in plan)
+        assert "chgrp" not in joined_descs
+        assert "setgid" not in joined_descs
+        for args, desc in plan:
+            if "-d" in args and "workspace" in desc:
+                assert "-x" in args
+                idx = args.index("-x")
+                target = args[idx + 1]
+                assert target.startswith("u:"), f"workspace default revoke not named-entry-only: {args}"
+
+    def test_revoke_plan_excludes_env_file_persistent(self, tmp_path: Path) -> None:
+        """The .sandbox.env named-ACL is `granted-once, persistent` (cluster 3
+        — Environment File Read ACL) and MUST NOT appear in the revoke plan.
+        It survives stop and is removed only by destroy's rmtree.
+        """
+        from cli.main import _acl_revoke_plan
+
+        plan = _acl_revoke_plan("/inst", "sandbox")
+        for args, desc in plan:
+            assert ".sandbox.env" not in desc, f"revoke plan touches .sandbox.env: {desc}"
+            assert not any(".sandbox.env" in a for a in args), f"revoke plan args touch .sandbox.env: {args}"
+
+    def test_phase_stop_teardown_orders_compose_then_unlink_then_revoke(self, tmp_path: Path) -> None:
+        """ADDED requirement: Teardown Sequence.
+
+        `_phase_stop_teardown` MUST invoke compose-down → unlink-helper-cp-managed
+        → revoke-acls in that order. Verifies the ordering invariant via mock
+        call sequence (not just presence).
+        """
+        from cli.main import _phase_stop_teardown
+        from core.host_config import MachinectlAuth
+
+        calls: list[str] = []
+        config = MagicMock()
+
+        def _track_compose(*_a: object, **_kw: object) -> None:
+            calls.append("compose_down")
+
+        def _track_unlink(*_a: object, **_kw: object) -> list[str]:
+            calls.append("unlink")
+            return []
+
+        def _track_revoke(*_a: object, **_kw: object) -> list[str]:
+            calls.append("revoke")
+            return []
+
+        with (
+            patch("cli.main._compose_down", side_effect=_track_compose),
+            patch("cli.main._phase_stop_unlink_consumer_files", side_effect=_track_unlink),
+            patch("cli.main._revoke_acls", side_effect=_track_revoke),
+        ):
+            _phase_stop_teardown(
+                "/inst", "proj", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
+            )
+        assert calls == ["compose_down", "unlink", "revoke"]
+
+    def test_stop_invokes_phase_stop_teardown(self, runner: CliRunner) -> None:
+        """`sandbox stop` delegates to `_phase_stop_teardown` (shared helper)."""
+        inst = "myproject"
+        _register_instance(inst)
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_stop_teardown", return_value=[]) as mock_teardown,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop", inst])
+        assert result.exit_code == 0, result.output
+        mock_teardown.assert_called_once()
+        assert mock_teardown.call_args.kwargs["volumes"] is False
+
+    def test_stop_clean_passes_volumes_true_to_teardown(self, runner: CliRunner) -> None:
+        """`sandbox stop --clean` propagates volumes=True to the shared helper."""
+        inst = "myproject"
+        _register_instance(inst)
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_stop_teardown", return_value=[]) as mock_teardown,
+            patch("cli.main._release_lock"),
+        ):
+            result = runner.invoke(app, ["stop", inst, "--clean"])
+        assert result.exit_code == 0, result.output
+        assert mock_teardown.call_args.kwargs["volumes"] is True
+
+    def test_destroy_invokes_phase_stop_teardown(self, runner: CliRunner) -> None:
+        """`sandbox destroy` D5+D6 delegates to `_phase_stop_teardown`."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+        from cli.main import app
+
+        with (
+            patch("cli.main._compose_down"),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._release_lock"),
+            patch("cli.main._phase_stop_teardown", return_value=[]) as mock_teardown,
+        ):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 0, result.output
+        assert mock_teardown.call_args.kwargs["volumes"] is True
+
+    def test_container_status_does_not_re_grant_env_acl(self, tmp_path: Path) -> None:
+        """`_container_status` MUST NOT defensively re-grant the .sandbox.env
+        ACL — that ACL is now persistent, so the temp `_ensure_env_file_readable_by_daemon`
+        ritual was retired. Verifies absence of the helper symbol.
+        """
+        import cli.main as main_mod
+
+        assert not hasattr(main_mod, "_ensure_env_file_readable_by_daemon")
+
+    def test_acl_revoke_plan_is_strict_subset_of_grant_plan_paths(self, tmp_path: Path) -> None:
+        """Cross-cutting invariant: every `setfacl -x` target in the revoke
+        plan SHALL correspond to a `setfacl -m` target in the grant plan
+        (asymmetry direction: grant ⊇ revoke). Persistent grants are in grant
+        but not revoke; the reverse MUST NOT occur.
+        """
+        from cli.main import _acl_grant_plan, _acl_revoke_plan
+
+        instance_dir = tmp_path / "inst"
+        instance_dir.mkdir()
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        grant = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws)], dev_user="dev")
+        revoke = _acl_revoke_plan(str(instance_dir), "sandbox", [str(ws)])
+        grant_targets = {args[-1] for args, _ in grant}
+        for args, desc in revoke:
+            assert args[-1] in grant_targets, (
+                f"revoke target {args[-1]!r} ({desc}) is not in grant plan — asymmetry direction violated"
+            )
 
 
 class TestDestroyFaultIsolationWarnings:
@@ -4313,6 +5256,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=["ACL warning: test"]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
         ):
@@ -4331,6 +5275,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.IPAMLedger.release", side_effect=RuntimeError("corrupt")),
@@ -4351,6 +5296,7 @@ class TestDestroyFaultIsolationWarnings:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.InstanceRegistry.remove", side_effect=KeyError("not found")),
@@ -4414,6 +5360,7 @@ class TestDestroyBackupFlows:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.create_backup") as mock_backup,
@@ -4474,6 +5421,7 @@ class TestDestroyBackupFlows:
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._compose_down"),
             patch("cli.main._revoke_acls", return_value=[]),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
             patch("cli.main._release_lock"),
             patch("shutil.rmtree"),
             patch("cli.main.create_backup") as mock_backup,
@@ -4486,6 +5434,33 @@ class TestDestroyBackupFlows:
             # confirm called once per workspace (myproject has "main").
             assert mock_confirm.call_count == 1
             assert mock_backup.call_count == 1
+
+
+class TestDestroyUnlinksConsumerFiles:
+    """destroy invokes the same unlink-before-revoke phase as stop (Change L)."""
+
+    def test_destroy_emits_unlink_warnings(self, runner: CliRunner) -> None:
+        """destroy emits warnings returned by _phase_stop_unlink_consumer_files."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._compose_down"),
+            patch("cli.main._revoke_acls", return_value=[]),
+            patch(
+                "cli.main._phase_stop_unlink_consumer_files",
+                return_value=["unlink /x: stale lock"],
+            ),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+        ):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+            assert result.exit_code == 0
+            assert "unlink /x: stale lock" in result.output
 
 
 class TestDestroyLockContention:

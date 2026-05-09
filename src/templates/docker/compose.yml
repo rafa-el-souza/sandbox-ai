@@ -163,6 +163,9 @@ services:
   proxy:
     <<: *security-baseline
     image: "{{ proxy_image }}"
+    user: "13:13"
+    entrypoint: ["/usr/sbin/squid"]
+    command: ["-f", "/etc/squid/squid.conf", "-NYC"]
     pids_limit: 100
     logging:
       driver: "json-file"

@@ -3,9 +3,7 @@
 ## Purpose
 
 This capability defines the conceptual separation between **instances** and **workspaces**, and the validation rules, schema, bootstrap modes, filesystem layout, and ancestor-walker safety rules that govern workspaces. An instance owns a compose stack, registry entry, IPAM allocation, and a single agent set. A workspace is a user code directory bind-mounted into the instance's containers; an instance has one or more workspaces.
-
 ## Requirements
-
 ### Requirement: Instance and Workspace Concept Separation
 
 The system SHALL distinguish between **instances** (sandbox units owning a compose stack, registry entry, instance dirs at `~/.sandbox-ai/instances/<inst>/`, IPAM allocation, and a single agent set) and **workspaces** (user code dirs, one or more per instance, bind-mounted at `/workspaces/<ws-name>` inside the container). One agent set per instance; multi-workspace fans out only the bind mounts and per-workspace shared-group recipe state.
@@ -100,7 +98,7 @@ The system SHALL support two bootstrap modes for workspace creation: `copy` (wor
 
 ### Requirement: Workspace Tree Location
 
-Workspace trees SHALL live under `~/.sandbox-ai/workspaces/<inst>/<ws>/`. The `~/.sandbox-ai/workspaces/` parent SHALL be mode `0700` dev:dev, lazily created on first workspace scaffold. The `<inst>/` parent SHALL be mode `0700` dev:dev, created when the instance's first workspace is scaffolded. The `<ws>/` directory SHALL be mode `0700` dev:dev at scaffold time; the `compose-security-baseline` capability's shared-group recipe transitions it to mode `2770` `<bridge-group>` on first start.
+Workspace trees SHALL live under `~/.sandbox-ai/workspaces/<inst>/<ws>/`. The `~/.sandbox-ai/workspaces/` parent SHALL be mode `0700` dev:dev, lazily created on first workspace scaffold. The `<inst>/` parent SHALL be mode `0700` dev:dev, created when the instance's first workspace is scaffolded. The `<ws>/` directory SHALL be mode `0700` dev:dev at scaffold time; the `orchestrator-volumes` capability's `Workspace Shared-Group Phase Ordering` recipe transitions it to mode `2770` `<bridge-group>` on first start.
 
 #### Scenario: Workspace parent created lazily
 - **WHEN** the first workspace is scaffolded under any instance
@@ -191,3 +189,4 @@ Each workspace listed in `sandbox.toml [workspaces]` SHALL be bind-mounted into 
 #### Scenario: No user_project_root in schema
 - **WHEN** `sandbox.toml` is parsed by the Pydantic model
 - **THEN** `instance.user_project_root` is NOT present (the field is removed from `SandboxInstanceSection`)
+
