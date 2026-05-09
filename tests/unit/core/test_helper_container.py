@@ -189,6 +189,62 @@ class TestHelperChownFiles:
         payload = captured_executor[0]["cmd"][-1]
         assert "chmod 0755" in payload
 
+    def test_inner_shell_uses_unlink_then_cp_then_chmod_then_chown_discipline(
+        self, subid_fixture: None, captured_executor: list[dict[str, Any]]
+    ) -> None:
+        """Cluster 2 regression for findings 8.G/8.H: helper_chown_files discipline.
+
+        Spec source: orchestrator-volumes' ADDED "Helper Recipe Phases
+        (unlink+cp+chmod+chown discipline)" requirement. The recipe must
+        be:
+
+            cp /p/$f /tmp/$f && unlink /p/$f && cp /tmp/$f /p/$f
+              && chmod <mode> /p/$f && chown <uid>:<gid> /p/$f
+
+        Two structural reasons:
+
+        1. ``unlink`` (not ``mv``) — cross-fs ``mv`` would copy and then
+           reset ACLs on the destination. ``unlink`` + fresh ``cp`` keeps
+           the parent dir's default ACL inheritance intact on the new
+           inode (formalizes temp ``d8936fb``).
+        2. ``chmod`` BEFORE ``chown`` — once chown lands the file on a
+           foreign owner, in-container root cannot chmod even with
+           ``cap_dac_override`` (formalizes temp ``35144cd``). chmod
+           must precede the ownership transfer.
+
+        Pre-fix-failure recipe: on the cluster-1 baseline (sync v3) the
+        helper does ``mv`` + chown-before-chmod; this test asserts the
+        post-cluster-2 ordering and substring set.
+        """
+        helper_chown_files(
+            _HOST_USER,
+            "/p",
+            ["myfile.conf"],
+            owner_uid=_HOST_UID,
+            owner_gid=_HOST_GID,
+            mode=0o640,
+            machinectl_auth=MachinectlAuth.SUDO,
+        )
+        payload = captured_executor[0]["cmd"][-1]
+        # Substring assertions
+        assert 'cp /p/"$f" /tmp/"$f"' in payload, payload
+        assert 'unlink /p/"$f"' in payload, payload
+        assert 'cp /tmp/"$f" /p/"$f"' in payload, payload
+        assert "mv " not in payload, (
+            f"helper recipe must NOT use cross-fs mv (ACL-stripping): {payload!r}"
+        )
+        # Ordering: each step appears before the next
+        cp_in = payload.index('cp /p/"$f" /tmp/"$f"')
+        unlink_at = payload.index('unlink /p/"$f"')
+        cp_back = payload.index('cp /tmp/"$f" /p/"$f"')
+        chmod_at = payload.index("chmod ")
+        chown_at = payload.index("chown ")
+        assert cp_in < unlink_at < cp_back < chmod_at < chown_at, (
+            f"discipline order broken — got positions cp_in={cp_in} "
+            f"unlink={unlink_at} cp_back={cp_back} chmod={chmod_at} "
+            f"chown={chown_at} in {payload!r}"
+        )
+
     def test_translation_host_absolute_to_in_container(
         self, subid_fixture: None, captured_executor: list[dict[str, Any]]
     ) -> None:

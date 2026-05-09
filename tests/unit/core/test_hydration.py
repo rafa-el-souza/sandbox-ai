@@ -519,6 +519,81 @@ class TestRenderTemplates:
         assert "rendered: testproject" in rendered
         assert "10.100.0.0/24" in rendered
 
+    def test_proxy_service_runs_as_uid_13_with_direct_squid_entrypoint(self) -> None:
+        """Cluster 2 regression for finding 8.I: proxy sidecar uid pivot.
+
+        Spec source: orchestrator-volumes' ADDED "Consumer-Uid-Only
+        Sidecar Mechanism" requirement. The proxy service MUST set
+        ``user: "13:13"`` and pin a direct ``entrypoint:
+        ["/usr/sbin/squid"]`` so the OCI image's stock entrypoint
+        (which expects to start as root and drop privileges) is
+        bypassed. Under gVisor + read-only rootfs the stock entrypoint
+        EPERMs reading ``/etc/squid/squid.conf`` because the post-drop
+        worker has no DAC bypass.
+
+        Asserted against the static template content (no Jinja
+        substitution required for this fragment).
+
+        Pre-fix-failure recipe: on the cluster-1 baseline (sync v3) the
+        proxy service has no ``user:`` directive (defaults to OCI image
+        spec) and uses the image entrypoint; this test fails until the
+        post-cluster-2 directives are pinned.
+        """
+        from importlib.resources import files
+
+        compose_tpl = (files("templates") / "docker" / "compose.yml").read_text()
+        # Locate the proxy service block.
+        proxy_idx = compose_tpl.index("\n  proxy:\n")
+        # Find next service definition or end of file.
+        next_svc_search = compose_tpl[proxy_idx + 1 :]
+        # Bound the proxy block at the next 2-space-indented service.
+        candidate_ends = [
+            next_svc_search.index(token)
+            for token in ("\n  core:\n", "\n  admin:\n", "\n  coredns:\n", "\n  dnsdist:\n")
+            if token in next_svc_search
+        ]
+        end = min(candidate_ends) if candidate_ends else len(next_svc_search)
+        proxy_block = next_svc_search[:end]
+        assert 'user: "13:13"' in proxy_block, (
+            f"proxy service must declare user 13:13 directly; got block:\n{proxy_block}"
+        )
+        assert 'entrypoint: ["/usr/sbin/squid"]' in proxy_block, (
+            f"proxy service must skip OCI entrypoint and invoke squid directly; got block:\n"
+            f"{proxy_block}"
+        )
+
+    def test_squid_template_pins_pid_and_log_paths_for_read_only_rootfs(self) -> None:
+        """Cluster 2 regression for finding 8.J: squid template directives.
+
+        Spec source: orchestrator-volumes' ADDED "Read-Only Rootfs
+        Sidecar Configuration" requirement. With the proxy container
+        running ``read_only: true`` and only the documented tmpfs
+        mounts, squid's default pid file path
+        (``/var/run/squid/squid.pid``) and log paths under ``/var/log``
+        are not writable. The template MUST therefore pin:
+
+        - ``pid_filename none`` — disable on-disk pid recording.
+        - ``access_log stdio:/dev/stderr`` — emit access logs to the
+          captured stderr stream.
+        - ``cache_log stderr`` — emit cache logs likewise.
+
+        Pre-fix-failure recipe: on the cluster-1 baseline (sync v3) the
+        squid template has none of these directives; this test fails
+        until they are pinned.
+        """
+        from importlib.resources import files
+
+        squid_tpl = (files("templates") / "config" / "proxy" / "squid.conf").read_text()
+        assert "pid_filename none" in squid_tpl, (
+            f"squid template must pin pid_filename none for read-only rootfs:\n{squid_tpl}"
+        )
+        assert "access_log stdio:/dev/stderr" in squid_tpl, (
+            f"squid template must redirect access_log to stderr stream:\n{squid_tpl}"
+        )
+        assert "cache_log stderr" in squid_tpl, (
+            f"squid template must redirect cache_log to stderr:\n{squid_tpl}"
+        )
+
     def test_renders_dockerfile_by_distro(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Dockerfile selected by base_distro_family, rendered as Dockerfile.core."""
         tooling, instance = tooling_and_instance

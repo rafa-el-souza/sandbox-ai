@@ -3779,6 +3779,107 @@ class TestACLPlanAsymmetry:
         # Workspace shared-group ran first; acl_grant ran second.
         assert call_order == ["workspace_shared_group", "acl_grant"], call_order
 
+    def test_acl_grant_plan_config_dir_is_recursive_rX_not_rwX(
+        self, tmp_path: Path
+    ) -> None:
+        """Cluster 2 retirement of cluster-1's deferred config/ rwX widening.
+
+        Spec source: orchestrator-volumes' MODIFIED "ACL Grant Plan as
+        Single Source of Truth" requirement. Temp commit ``6c3bcb4``
+        (cluster 1 cherry-pick) widened ``setfacl -R u:<host_user>:rX``
+        to ``rwX`` so the helper-cp cross-fs ``mv`` could host-level
+        unlink the destination. With cluster 2's structural fixes:
+
+        - The helper recipe is now ``cp+unlink+cp+chmod+chown`` running
+          in-helper as in-container root with ``cap_dac_override``; the
+          host DAC bypass occurs inside the helper, not at the daemon's
+          host level.
+        - Daemon host-level write requirement is narrowed to BUG-B
+          (provisioning write on each helper-cp parent dir), satisfied
+          by per-parent dir-level ``rwx`` entries (parallel to the
+          ``docker/core`` and ``secrets/`` rwx grants).
+
+        The recursive widening MUST be retired: the daemon's DAC on
+        config file CONTENTS is read-only post-cluster-2.
+
+        Pre-fix-failure recipe (recorded in tasks.md): on the cluster-1
+        baseline (sync v3) ``setfacl -R -m u:<host_user>:rwX`` is the
+        ``"config files"`` entry; this test fails on rwX.
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        config_entries = [
+            (args, desc) for args, desc in plan if desc.startswith("config files: ")
+        ]
+        assert config_entries, "config/ recursive grant entry missing"
+        args, _desc = config_entries[0]
+        joined = " ".join(args)
+        assert "-R" in args, f"config/ grant must be recursive: {joined}"
+        assert "rwX" not in joined, (
+            f"config/ recursive grant must NOT carry write (rwX retired): {joined}"
+        )
+        assert "u:sandbox:rX" in joined, (
+            f"config/ recursive grant must be u:<daemon>:rX (read-only on contents): {joined}"
+        )
+
+    def test_acl_grant_plan_helper_cp_parents_under_config_have_dir_level_rwx(
+        self, tmp_path: Path
+    ) -> None:
+        """Cluster 2 BUG-B grants for helper-cp parent dirs under config/.
+
+        Spec source: orchestrator-volumes' MODIFIED "ACL Grant Plan as
+        Single Source of Truth". Each ``config/<subdir>`` listed in
+        ``RO_FILE_RECIPES`` must carry an effective dir-level
+        ``u:<daemon>:rwx`` so the helper-cp recipe's host-level bind
+        mount of ``config/<subdir>`` is mountable read-write into the
+        helper, allowing the in-helper unlink+cp pair to land. Parallel
+        to the existing ``docker/core`` and ``secrets/`` rwx grants.
+
+        Pre-fix-failure recipe: on the cluster-1 baseline (sync v3)
+        helper-cp parents under config/ have NO dir-level rwx entry —
+        the recursive ``rwX`` was the only daemon-write coverage. This
+        test fails until the per-parent grants are added.
+        """
+        from cli.main import _acl_grant_plan
+
+        instance_dir = tmp_path / "sandboxes" / "proj-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "docker").mkdir()
+        (instance_dir / "config").mkdir()
+        (instance_dir / ".sandbox.env").write_text("")
+
+        plan = _acl_grant_plan(str(instance_dir), "sandbox")
+        for parent_rel in (
+            "config/coredns",
+            "config/dnsdist",
+            "config/proxy",
+            "config/core",
+            "config/admin",
+        ):
+            parent_abs = str(instance_dir / parent_rel)
+            entries = [
+                args
+                for args, desc in plan
+                if desc == f"helper-cp parent: {parent_abs}"
+            ]
+            assert entries, (
+                f"missing helper-cp parent dir-level rwx grant for {parent_rel}"
+            )
+            args = entries[0]
+            assert "-R" not in args, (
+                f"helper-cp parent {parent_rel} must NOT be recursive: {args!r}"
+            )
+            assert any(arg == "u:sandbox:rwx" for arg in args), (
+                f"helper-cp parent {parent_rel} missing u:<daemon>:rwx (BUG-B)"
+            )
+
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunHelperMkdirPlanFallback:
