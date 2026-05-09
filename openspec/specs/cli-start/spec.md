@@ -24,12 +24,14 @@ This specification defines the `sandbox start` command lifecycle, governing pre-
 
 ### Requirement: Workspace Shared-Group Phase Iterates Workspaces
 
-The system SHALL provide `_phase_workspace_shared_group` that, after `_phase_helper_cp_chown_ro_files`, iterates `[workspaces]` (sorted by name) and applies the shared-group recipe to each `workspace.path` per the drift-detection contract from change 4 (`orchestrator-volumes` capability).
+The system SHALL provide `_phase_workspace_shared_group` that runs as part of the canonical phase order (between `_phase_ipam` and `_phase_acl_grant`, per `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`), iterates `[workspaces]` (sorted by name), and applies the shared-group recipe to each `workspace.path`.
 
 For each workspace:
 - Drift detection: `os.stat(ws.path)` checks setgid bit + group ownership against `workspace_bridge_gid(host)`.
-- First-run / drift: recursive `chgrp -h -R <bridge-group> <ws.path>` (best-effort), `find ... -type d -exec chmod 2770`, `find ... -type f -exec chmod 0660`, `setfacl -R -P` (physical/no-follow) operations.
-- Steady-state: only ensures root state is correct (idempotent operations on the workspace root only).
+- First-run / drift: in-process recursive setup over `os.walk(ws.path)` — for every entry, `os.chown(path, -1, bridge_gid, follow_symlinks=False)` (best-effort; per-file EPERM on non-dev-owned files is collected and reported in aggregate, not escalated), then `os.chmod(path, 0o2770)` for directories and `os.chmod(path, 0o0660)` for non-symlink regular files. Then steady-state idempotent root setup: `os.chown` + `os.chmod` on `<ws.path>` itself, and `setfacl` (effective + default) for the persistent default-ACL portion `u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx[,u:dev:rwx]`.
+- Steady-state: only the root-state idempotent setup runs (drift detection signals no recursion needed).
+
+The recursive recipe is fully in-process — there are no subprocess `chgrp -R`, `find -exec chmod`, or `setfacl -R` invocations during the walk. Subprocess `setfacl` runs only on the workspace root (in steady-state and first-run alike), to install the default-ACL portion that the kernel inheritance does not derive from mode bits.
 
 The phase SHALL fail-fast if `workspace_bridge_gid(host)` raises (group missing or out of subgid range), surfacing the doctor remediation.
 
@@ -39,7 +41,7 @@ The phase SHALL fail-fast if `workspace_bridge_gid(host)` raises (group missing 
 
 #### Scenario: First-run on a fresh workspace triggers recursive setup
 - **WHEN** a workspace's root has no setgid bit set (typical: just-scaffolded workspace)
-- **THEN** the phase runs the recursive `chgrp -h -R`, mode-bit setting, and setfacl operations
+- **THEN** the phase walks `<ws.path>` in-process via `os.walk` and applies `os.chown(path, -1, bridge_gid, follow_symlinks=False)` + `os.chmod(path, 0o2770 for dirs / 0o0660 for non-symlink files)` to every entry, then runs the steady-state root setup on `<ws.path>` (chown + chmod 2770 + setfacl for the persistent default-ACL portion)
 
 #### Scenario: Steady-state skips recursion
 - **WHEN** a workspace's root already has setgid + correct group
@@ -143,27 +145,32 @@ The system SHALL validate instance readiness before beginning provisioning. Pre-
 - **THEN** no Docker commands are executed — ownership matching is deferred to the helper-recipe phases
 
 ### Requirement: ACL Cleanup on Start Failure
-The system SHALL revoke ACL grants if any phase after Phase 5 (ACL grants) has begun raises a fatal error. The cleanup scope is the named-ACL grants emitted by `_acl_grant_plan()`; helper-recipe operations themselves are not reverted (per `orchestrator-volumes`'s lifecycle taxonomy — Decision 4 of the acl-ownership-recipes design).
 
-#### Scenario: Phase 6 failure triggers ACL cleanup
-- **WHEN** `_phase_compose_up` raises `SandboxExecutionError` after Phase 5 has begun
+The system SHALL revoke ACL grants if any phase after `_phase_acl_grant` (the named-ACL grant phase) has begun raises a fatal error. The cleanup scope is the named-ACL grants emitted by `_acl_grant_plan()`; helper-recipe operations themselves are not reverted (per `orchestrator-volumes`'s `Lifecycle × Mechanism Matrix` — helper-recipe state is in the `applied-on-every-start, idempotent` lifecycle).
+
+#### Scenario: Compose-up failure triggers ACL cleanup
+- **WHEN** `_phase_compose_up` raises `SandboxExecutionError` after `_phase_acl_grant` has begun
 - **THEN** `_revoke_acls()` is called in the error handler before releasing the lock
 
 #### Scenario: Helper-recipe phase failure triggers ACL cleanup
-- **WHEN** any of `_phase_helper_mkdir_chown_cache_log`, `_phase_helper_cp_chown_ro_files`, or `_phase_workspace_shared_group` raises `SandboxExecutionError` after Phase 5 has begun
+- **WHEN** either `_phase_helper_mkdir_chown_cache_log` or `_phase_helper_cp_chown_ro_files` raises `SandboxExecutionError` (both run AFTER `_phase_acl_grant` per the canonical phase order)
 - **THEN** `_revoke_acls()` is called in the error handler before releasing the lock
 
-#### Scenario: Phase 5 partial failure triggers ACL cleanup
-- **WHEN** `_phase_acl_grant` raises `SandboxExecutionError` after some ACL grants have succeeded
-- **THEN** `_revoke_acls()` is called in the error handler (the phase sentinel is set before Phase 5 begins)
+#### Scenario: Post-hydrate daemon-read pass failure triggers ACL cleanup
+- **WHEN** `_phase_grant_post_hydrate_daemon_read` raises `SandboxExecutionError` (runs AFTER `_phase_acl_grant`)
+- **THEN** `_revoke_acls()` is called in the error handler before releasing the lock
 
-#### Scenario: Pre-Phase-5 failure does not attempt ACL cleanup
-- **WHEN** a phase before Phase 5 (IPAM, credentials, hydration) raises an error
-- **THEN** ACL revocation is NOT attempted (no ACLs to revoke)
+#### Scenario: ACL-grant partial failure triggers ACL cleanup
+- **WHEN** `_phase_acl_grant` raises `SandboxExecutionError` after some ACL grants have succeeded
+- **THEN** `_revoke_acls()` is called in the error handler (the `acl_granted` sentinel is set when `_phase_acl_grant` begins)
+
+#### Scenario: Pre-ACL-grant failure does not attempt ACL cleanup
+- **WHEN** a phase before `_phase_acl_grant` raises an error — under the canonical phase order, this is `_phase_ipam` or `_phase_workspace_shared_group`
+- **THEN** ACL revocation is NOT attempted (no ACLs have been granted; `acl_granted=False`)
 
 #### Scenario: Helper-recipe mutations not reverted on failure
-- **WHEN** a helper-recipe phase fails partway through after some chowns succeeded
-- **THEN** the chowned files remain in their post-helper state; only named-ACL grants are revoked. Per Decision 4, helper-recipe state is in the `applied-on-every-start, idempotent` lifecycle and is reapplied on the next start.
+- **WHEN** a post-`_phase_acl_grant` helper-recipe phase fails partway through after some chowns succeeded
+- **THEN** the chowned files remain in their post-helper state; only named-ACL grants are revoked. Helper-recipe state is in the `applied-on-every-start, idempotent` lifecycle and is reapplied on the next start.
 
 ### Requirement: ACL Grant Error Wrapping
 The system SHALL wrap `CalledProcessError` from `setfacl` subprocess calls in `SandboxExecutionError` so that ACL grant failures enter the start command's handled exception path.

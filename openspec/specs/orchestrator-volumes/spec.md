@@ -47,7 +47,7 @@ The ACL ancestor walker SHALL apply the seven safety rules defined in the `insta
 The system SHALL govern the `dev`/`<host_unprivileged_user>` filesystem boundary using a two-axis taxonomy: a **lifecycle** axis describing when an operation is applied and reversed, and a **mechanism** axis describing what host operation is performed. Each mount class is assigned a (lifecycle, mechanism) pair (or pairs, when a single mount carries multiple). The mapping is the source of truth for `_acl_grant_plan`, `_acl_revoke_plan`, and the helper-recipe phases.
 
 **Lifecycle axis values:**
-- `granted-at-start, revoked-at-stop` — operation applied during `sandbox start` Phase 5 and reversed during `sandbox stop` / `sandbox destroy` revocation.
+- `granted-at-start, revoked-at-stop` — operation applied during `sandbox start` (in `_phase_acl_grant`) and reversed during `sandbox stop` / `sandbox destroy` revocation.
 - `granted-once, persistent` — operation applied once (typically at first start, idempotent on subsequent runs); never reversed by orchestrator.
 - `applied-on-every-start, idempotent, never-revoked` — re-applied every start (idempotent in the steady state); never reversed by orchestrator; transitively undone only when the containing tree is removed by `sandbox destroy`.
 
@@ -79,7 +79,7 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
 - **THEN** the spec assigns it one or more (lifecycle, mechanism) pairs from the table; ad-hoc mechanisms outside the taxonomy are NOT introduced
 
 #### Scenario: Named-ACL grants — instance dirs — applied at start
-- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
+- **WHEN** `sandbox start <inst>` reaches `_phase_acl_grant`
 - **THEN** `setfacl -R -m u:<host_unprivileged_user>:rX` is applied to `instances/<inst>/docker/`; `setfacl -m u:<host_unprivileged_user>:rX` to `instances/<inst>/config/` (dir-level — individual files inside are chowned per the consumer-uid-0-chown class); `setfacl -m u:<host_unprivileged_user>:r-x` to `instances/<inst>/`; `setfacl -m u:<host_unprivileged_user>:r` to `instances/<inst>/.sandbox.env`
 
 #### Scenario: Named-ACL grants — instance dirs — revoked at stop
@@ -87,19 +87,19 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
 - **THEN** `setfacl -x u:<host_unprivileged_user>` is applied to `instances/<inst>/docker/`, `instances/<inst>/config/`, `instances/<inst>/`, and `instances/<inst>/.sandbox.env`, using fault-isolated revocation
 
 #### Scenario: Named-ACL grants — helper-recipe parents — applied at start
-- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants)
+- **WHEN** `sandbox start <inst>` reaches `_phase_acl_grant`
 - **THEN** for EACH helper-recipe parent in `("cache/core", "cache/admin", "log")`: `setfacl -m u:<host_user>:rwx <parent>` is applied (effective) AND a matching default ACL `u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx` is applied so children created inside inherit a daemon-rwx named entry
 
 #### Scenario: Cache/log subuid-chown recipe — applied every start
-- **WHEN** `sandbox start` reaches the cache/log helper-recipe phase (after Phase 5 ACL grants)
-- **THEN** for each cache/log leaf in the `Cache/Log Leaf Inventory` (the four-leaf set including log/core and log/admin): the parent dir's default ACL is set to `u::rwx,g::---,o::---,m::rwx,u:dev:rwx`; `helper_mkdir_chown_dirs` runs to ensure the leaf exists and is owned by `host_id_for_in_container(1000, host_user):host_gid_for_in_container(1000, host_user)`. Operation is idempotent: re-running on existing-correct state is a no-op.
+- **WHEN** `sandbox start` reaches the cache/log helper-recipe phase (`_phase_helper_mkdir_chown_cache_log`, after `_phase_acl_grant`)
+- **THEN** for each cache/log leaf in the `Cache/Log Leaf Inventory` (the four-leaf set including log/core and log/admin): the parent dir's default ACL is augmented (via `setfacl -d -m u::rwx,g::---,o::---,m::rwx,u:dev:rwx <parent>`) so dev retains rwx on agent-created files (additive over the Phase-`_phase_acl_grant` default ACL set on the same parent — named entries from both calls accumulate; base entries from the helper phase win on overlap); `helper_mkdir_chown_dirs` runs to ensure the leaf exists and is owned by `host_id_for_in_container(1000, host_user):host_gid_for_in_container(1000, host_user)`. Operation is idempotent: re-running on existing-correct state is a no-op.
 
 #### Scenario: Cache/log subuid-chown — never revoked on stop
 - **WHEN** `sandbox stop` executes
 - **THEN** cache/log leaves remain subuid-owned; the default ACL on the parent is preserved; agent state is preserved across stop/start cycles
 
 #### Scenario: Ro single-files consumer-uid-0-chown recipe — applied every start
-- **WHEN** `sandbox start` reaches the ro-files helper-recipe phase (after Phase 5 ACL grants)
+- **WHEN** `sandbox start` reaches the ro-files helper-recipe phase (`_phase_helper_cp_chown_ro_files`, after `_phase_acl_grant`)
 - **THEN** `helper_chown_files` is invoked once per (consumer-uid, mode) group, batching all files sharing the same target ownership/mode into a single helper container. The phase iterates entries from BOTH `RO_FILE_RECIPES` AND `EXEC_FILE_RECIPES` (per `Executable-Script File Recipes`)
 
 #### Scenario: Ro single-files mapping table
@@ -122,24 +122,24 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
 - **THEN** the resulting on-disk gid is `host_gid_for_in_container(<in-container uid from table>, host_user)` — i.e., the consumer's host subgid paired with the consumer's host subuid; it is NOT the daemon user's primary gid (the historic literal-0 pattern was removed because it was incompatible with the host-absolute helper API and provided no protection that `cap_dac_override` doesn't already grant)
 
 #### Scenario: Per-workspace named-ACL — applied at start
-- **WHEN** `sandbox start <inst>` reaches Phase 5 (ACL grants) for an instance with workspaces `main` and `scratch`
+- **WHEN** `sandbox start <inst>` reaches `_phase_acl_grant` for an instance with workspaces `main` and `scratch`
 - **THEN** for EACH workspace: `setfacl -m u:<host_unprivileged_user>:rwx <ws.path>` is applied (effective ACL); `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_unprivileged_user>:rwx,u:dev:rwx <ws.path>` is applied (default ACL containing the host_user named entry)
 
 #### Scenario: Per-workspace named-ACL revocation includes default ACL host_user entry
 - **WHEN** `sandbox stop <inst>` or `sandbox destroy <inst>` executes ACL revocation
-- **THEN** for EACH workspace: `setfacl -x u:<host_unprivileged_user> <ws.path>` removes the effective named entry AND `setfacl -d -x u:<host_unprivileged_user> <ws.path>` removes the default-ACL named entry (symmetric revocation per change 4 Decision 4); the persistent portion of each workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is preserved
+- **THEN** for EACH workspace: `setfacl -x u:<host_unprivileged_user> <ws.path>` removes the effective named entry AND `setfacl -d -x u:<host_unprivileged_user> <ws.path>` removes the default-ACL named entry; the persistent portion of each workspace's default ACL (`u::rwx, g::rwx, o::---, m::rwx, u:dev:rwx`) is preserved
 
 #### Scenario: Per-workspace shared-group state — applied once, persistent
-- **WHEN** `sandbox start <inst>` reaches `_phase_workspace_shared_group` and a workspace's root does NOT have setgid+correct-group state (drift detection per change 4 Decision 17)
-- **THEN** `chgrp -R <bridge-group> <ws.path>` (best-effort, dev-owned files only); `find <ws.path> -type d -exec chmod 2770 {} +`; `find <ws.path> -type f -exec chmod 0660 {} +`; the persistent portion of the default ACL (`u::rwx,g::rwx,o::---,m::rwx,u:dev:rwx`) is set on `<ws.path>` and provides `g::rwx` inheritance for children. The recipe runs BEFORE Phase-5 named-ACL grants (per `Workspace Shared-Group Phase Ordering`), so `chmod 2770` lands on a non-extended-ACL inode and the workspace root's `group::rwx` entry propagates from the mode bits without a runtime `setfacl -m g::rwx` step.
+- **WHEN** `sandbox start <inst>` reaches `_phase_workspace_shared_group` and a workspace's root does NOT have setgid+correct-group state (drift detection signal — `os.stat(ws.path)` shows missing setgid bit OR group ownership ≠ `workspace_bridge_gid(host)`)
+- **THEN** in-process recursive setup runs over `os.walk(<ws.path>)`: for every entry, `os.chown(path, -1, bridge_gid, follow_symlinks=False)` (best-effort; per-file EPERM on non-dev-owned files collected and reported in aggregate — the orchestrator does not escalate via sudo), then `os.chmod(path, 0o2770)` for directories and `os.chmod(path, 0o0660)` for non-symlink regular files. After the walk, the steady-state idempotent root setup runs on `<ws.path>` itself: `os.chown(ws.path, -1, bridge_gid, follow_symlinks=False)`, `os.chmod(ws.path, 0o2770)`, then subprocess `setfacl` (effective + default) installs the persistent default-ACL portion `u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx[,u:dev:rwx]` on `<ws.path>`. The recipe runs BEFORE `_phase_acl_grant` (per `Workspace Shared-Group Phase Ordering`), so `chmod 2770` lands on a non-extended-ACL inode and the workspace root's `group::rwx` entry propagates from the mode bits without a runtime `setfacl -m g::rwx` step. There are NO subprocess `chgrp -R`, `find -exec chmod`, or `setfacl -R` invocations during the recursive walk.
 
 #### Scenario: Per-workspace shared-group state — steady-state idempotency
 - **WHEN** `sandbox start <inst>` reaches the shared-group phase and a workspace's root already has setgid+correct-group
-- **THEN** the recursive operation is skipped for that workspace; only root-state idempotent assertions run (one stat call cost)
+- **THEN** the recursive walk is skipped for that workspace; only root-state idempotent operations run (one `os.stat` for drift detection, then `os.chown`+`os.chmod`+`setfacl` on the root only)
 
 #### Scenario: Per-workspace shared-group state — never revoked
 - **WHEN** `sandbox stop <inst>` or `sandbox destroy <inst>` executes
-- **THEN** chgrp, chmod 2770, setgid bit, and the persistent portion of the default ACL on EACH `<ws.path>` are NOT touched (per change 4 Decision 4: persistent identity properties)
+- **THEN** chgrp, chmod 2770, setgid bit, and the persistent portion of the default ACL on EACH `<ws.path>` are NOT touched; these state properties are in the `granted-once, persistent` lifecycle
 
 ### Requirement: Ancestor Directory Traverse ACLs
 

@@ -98,7 +98,7 @@ The system SHALL support two bootstrap modes for workspace creation: `copy` (wor
 
 ### Requirement: Workspace Tree Location
 
-Workspace trees SHALL live under `~/.sandbox-ai/workspaces/<inst>/<ws>/`. The `~/.sandbox-ai/workspaces/` parent SHALL be mode `0700` dev:dev, lazily created on first workspace scaffold. The `<inst>/` parent SHALL be mode `0700` dev:dev, created when the instance's first workspace is scaffolded. The `<ws>/` directory SHALL be mode `0700` dev:dev at scaffold time; the `orchestrator-volumes` capability's `Workspace Shared-Group Phase Ordering` recipe transitions it to mode `2770` `<bridge-group>` on first start.
+Workspace trees SHALL live under `~/.sandbox-ai/workspaces/<inst>/<ws>/`. The `~/.sandbox-ai/workspaces/` parent SHALL be mode `0700` dev:dev, lazily created on first workspace scaffold. The `<inst>/` parent SHALL be mode `0700` dev:dev, created when the instance's first workspace is scaffolded. The `<ws>/` directory SHALL be mode `0700` dev:dev at scaffold time; the `orchestrator-volumes` capability's `Workspace Recursive Setup via Drift Detection` recipe (executed by `_phase_workspace_shared_group`) transitions it to mode `2770` `<bridge-group>` on first start.
 
 #### Scenario: Workspace parent created lazily
 - **WHEN** the first workspace is scaffolded under any instance
