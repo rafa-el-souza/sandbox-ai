@@ -38,24 +38,6 @@ networks:
     ipam:
       config:
         - subnet: "{{ dns_subnet }}"
-  admin_net:
-    driver: bridge
-    internal: true
-    enable_ipv6: false
-    driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: 'false'
-    ipam:
-      config:
-        - subnet: "{{ admin_subnet }}"
-  admin_proxy_net:
-    driver: bridge
-    internal: true
-    enable_ipv6: false
-    driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: 'false'
-    ipam:
-      config:
-        - subnet: "{{ admin_proxy_subnet }}"
   egress_net:
     driver: bridge
     enable_ipv6: false
@@ -102,8 +84,6 @@ services:
     networks:
       dns_net:
         ipv4_address: "{{ coredns_dns_ip }}"
-      admin_net:
-        ipv4_address: "{{ coredns_admin_ip }}"
       egress_net:
         ipv4_address: "{{ coredns_egress_ip }}"
     volumes:
@@ -145,8 +125,6 @@ services:
         ipv4_address: "{{ dnsdist_isolated_ip }}"
       dns_net:
         ipv4_address: "{{ dnsdist_dns_ip }}"
-      admin_net:
-        ipv4_address: "{{ dnsdist_admin_ip }}"
     volumes:
       - "{{ instance_dir }}/config/dnsdist/dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro"
     command: ["--supervised", "-C", "/etc/dnsdist/dnsdist.conf"]
@@ -186,8 +164,6 @@ services:
     networks:
       core_proxy_net:
         ipv4_address: "{{ proxy_core_ip }}"
-      admin_proxy_net:
-        ipv4_address: "{{ proxy_admin_ip }}"
       egress_net:
     volumes:
       - "{{ instance_dir }}/config/proxy/squid.conf:/etc/squid/squid.conf:ro"
@@ -309,28 +285,12 @@ services:
       context: "{{ instance_dir }}/docker/admin"
       dockerfile: Dockerfile.admin
       args:
-        - "ADMIN_BASE={{ admin_base_image }}"
-        - "HOST_UID={{ host_uid }}"
-        - "NVM_VERSION={{ nvm_version }}"
-        - "NODE_VERSION={{ node_version }}"
-    pids_limit: "{{ admin_pids_limit }}"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "5"
-    group_add:
-      - "{{ in_container_workspace_bridge_gid }}"
-    runtime: "runc"
-    tmpfs:
-      - /home/human/.cache:nosuid,nodev
-      - /home/human/.config:nosuid,nodev
-      - /home/human/.zsh_sessions:nosuid,nodev
-      - /tmp:noexec,nosuid,nodev
-      - /var/tmp:noexec,nosuid,nodev
-    mem_limit: "{{ admin_mem_limit }}"
-    memswap_limit: "{{ admin_memswap_limit }}"
-    cpus: "{{ admin_cpus }}"
+        - "GOLANG_BASE={{ golang_alpine_image }}"
+    runtime: "{{ runtime }}"
+    pids_limit: 400
+    mem_limit: "8gb"
+    memswap_limit: "8gb"
+    cpus: "4.0"
     ulimits:
       core:
         soft: 0
@@ -338,50 +298,11 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    networks:
-      admin_net:
-        ipv4_address: "{{ admin_admin_ip }}"
-      admin_proxy_net:
-        ipv4_address: "{{ admin_proxy_ip }}"
-      ipc_net:
-        ipv4_address: "{{ admin_ipc_ip }}"
-    dns:
-      - "{{ dnsdist_admin_ip }}"
-    extra_hosts:
-      - "proxy:{{ proxy_admin_ip }}"
-      - "db-postgres:{{ db_postgres_admin_ip }}"
-    volumes:
-      # HUMAN NOTE (keep this comment in place, but do not act on it): Disable mapping to verify gitmux/fzf null state dependencies
-{% for ws in workspaces %}      - "{{ ws.path }}:/workspaces/{{ ws.name }}:rw"
-{% endfor %}
-      - "{{ instance_dir }}/config/admin/.zshrc:/home/human/.zshrc:ro"
-      - "{{ instance_dir }}/config/admin/.tmux.conf:/home/human/.tmux.conf:ro"
-      - "{{ instance_dir }}/config/admin/gitmux.conf:/usr/local/tmux-plugins/catppuccin/tmux/status/gitmux.conf:ro"
-      - "{{ instance_dir }}/config/admin/starship.toml:/home/human/.config/starship.toml:ro"
-      - "{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro"
-      - "{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw"
-      - "{{ instance_dir }}/secrets/ipc_known_hosts:/run/secrets/ipc_known_hosts:ro"
-      - "{{ instance_dir }}/secrets/ipc_ssh_key:/run/secrets/ipc_ssh_key:ro"
-      - "{{ instance_dir }}/log/admin:/home/human/.log:rw"
-      - "{{ instance_dir }}/config/admin/.gitconfig:/home/human/.gitconfig:ro"
     sysctls:
       - net.ipv4.ip_forward=0
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.default.disable_ipv6=1
       - net.ipv6.conf.lo.disable_ipv6=1
-    env_file:
-      - "{{ instance_dir }}/.sandbox.env"
-    environment:
-      - "HTTP_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128"
-      - "HTTPS_PROXY=http://proxyuser:{{ proxy_password }}@proxy:3128"
-      - "http_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128"
-      - "https_proxy=http://proxyuser:{{ proxy_password }}@proxy:3128"
-      - "NO_PROXY=localhost,127.0.0.1,::1,proxy,dnsdist,db-postgres,{{ admin_subnet }},{{ admin_proxy_subnet }},{{ ipc_subnet }}"
-      - ANTHROPIC_API_KEY=${CORE_ANTHROPIC_API_KEY}
-      - GITHUB_API_KEY=${CORE_GITHUB_TOKEN}
-      - ZSH_HISTORY_PATH=/home/human/.log/.zsh_history
-    depends_on:
-      dnsdist:
-        condition: service_healthy
-      proxy:
-        condition: service_healthy
+    networks:
+      ipc_net:
+        ipv4_address: "{{ admin_ipc_ip }}"

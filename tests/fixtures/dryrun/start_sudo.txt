@@ -7,12 +7,10 @@ Dry-run: sandbox start
     Isolated:    10.100.0.0/24
     Core Proxy:  10.100.1.0/24
     DNS:         10.100.2.0/24
-    Admin:       10.100.3.0/24
-    Admin Proxy: 10.100.4.0/24
-    Egress:      10.100.5.0/24
-    IPC:         10.100.6.0/24
+    Egress:      10.100.3.0/24
+    IPC:         10.100.4.0/24
 
-  Templates: 21 validated
+  Templates: 16 validated
 
   Missing/empty secrets:
     ⊘ CORE_ANTHROPIC_API_KEY
@@ -40,7 +38,6 @@ Dry-run: sandbox start
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/config/dnsdist  # helper-cp parent: <TMP>/.sandbox-ai/instances/fixture-inst/config/dnsdist
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/config/proxy  # helper-cp parent: <TMP>/.sandbox-ai/instances/fixture-inst/config/proxy
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/config/core  # helper-cp parent: <TMP>/.sandbox-ai/instances/fixture-inst/config/core
-    $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/config/admin  # helper-cp parent: <TMP>/.sandbox-ai/instances/fixture-inst/config/admin
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/.sandbox.env  # env file: <TMP>/.sandbox-ai/instances/fixture-inst/.sandbox.env
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/secrets/  # secrets dir provisioning write: <TMP>/.sandbox-ai/instances/fixture-inst/secrets/
     $ setfacl -d -m u::rw-,g::---,o::---,m::r--,u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets/  # secrets default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/secrets/
@@ -48,12 +45,9 @@ Dry-run: sandbox start
     $ setfacl -d -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/dnsdist  # helper-cp parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/config/dnsdist
     $ setfacl -d -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/proxy  # helper-cp parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/config/proxy
     $ setfacl -d -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/core  # helper-cp parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/config/core
-    $ setfacl -d -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/admin  # helper-cp parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/config/admin
     $ setfacl -d -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets  # helper-cp parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/secrets
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/core  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/cache/core
     $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/core  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/cache/core
-    $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin
-    $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/log  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/log
     $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/log  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/log
     $ setfacl -m u:sandbox:--x <PYTEST_ROOT>  # workspace ancestor traverse: <PYTEST_ROOT>
@@ -78,15 +72,8 @@ Dry-run: sandbox start
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/core/.gitconfig  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/core/CLAUDE.md  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/core/sshd_config  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/admin/.zshrc  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/admin/.tmux.conf  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/admin/.gitconfig  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/admin/gitmux.conf  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/admin/starship.toml  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets/authorized_keys  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets/ipc_host_key  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets/ipc_known_hosts  # helper-cp source
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets/ipc_ssh_key  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/core/entrypoint.sh  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/config/core/.claude.json  # helper-cp source
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/compose.yml  # daemon-read direct
@@ -94,23 +81,20 @@ Dry-run: sandbox start
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/mcp-firecrawl.yml  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/core/Dockerfile.core  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/admin/Dockerfile.admin  # daemon-read direct
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/admin/entrypoint.sh  # daemon-read direct
+    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/admin/fwd.go  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/coredns/Dockerfile.coredns  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/Dockerfile.mcp-firecrawl  # daemon-read direct
     helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/cache/core/{.claude} → 101000:201000
-    helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin/{tmux_resurrect} → 101000:201000
-    helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/log/{core, admin} → 101000:201000
+    helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/log/{core} → 101000:201000
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/coredns/{Corefile} → 165532:265532 640
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/dnsdist/{dnsdist.conf} → 100953:200953 640
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/proxy/{squid.conf, allowed_domains.txt, read_only_domains.txt, ERR_SANDBOX_403, .htpasswd} → 100013:200013 640
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/core/{.bashrc, .npmrc, .gitconfig, CLAUDE.md, sshd_config} → 101000:201000 640
-    helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/admin/{.zshrc, .tmux.conf, .gitconfig, gitmux.conf, starship.toml} → 101000:201000 640
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/secrets/{authorized_keys, ipc_host_key} → 101000:201000 600
-    helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/secrets/{ipc_known_hosts, ipc_ssh_key} → 101000:201000 600
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/docker/core/{entrypoint.sh} → 101000:201000 500
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/core/{.claude.json} → 101000:201000 660
     $ sudo machinectl shell sandbox@.host /bin/bash -c 'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=dev-fixture-inst docker compose -f <TMP>/.sandbox-ai/instances/fixture-inst/docker/compose.yml -f <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/db-postgres.yml --ansi never --env-file <TMP>/.sandbox-ai/instances/fixture-inst/.sandbox.env up -d --build --wait'
-    $ sudo machinectl shell sandbox@.host /usr/bin/docker exec -it dev-fixture-inst-admin-1 zsh
+    $ tlog-rec --writer=file --file-path=<sessions>/dev-fixture-inst/<UTC>.log -- ssh -i <inst>/secrets/ipc_ssh_key -o UserKnownHostsFile=<inst>/secrets/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand='systemd-run -q --pipe --uid=sandbox /usr/bin/docker exec -i dev-fixture-inst-admin-1 /fwd '"'"'<core_ipc_ip>:9999'"'"'' -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'
 
   Dry-run complete — all validations passed
 

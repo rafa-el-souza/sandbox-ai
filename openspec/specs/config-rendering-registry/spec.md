@@ -17,14 +17,14 @@ The system SHALL declare two module-level lists — `_JINJA_RENDERED_DOCKER` and
 
 #### Scenario: Registry covers all Jinja2-rendered config files
 - **WHEN** `_JINJA_RENDERED_CONFIG` is inspected
-- **THEN** it contains entries for `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `core/sshd_config`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`
+- **THEN** it contains entries for `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, and `core/sshd_config`
 
 ### Requirement: Static Config Minimization
 The system SHALL classify files as static (copied via `shutil.copy2`) only when they contain zero Jinja2 template syntax. Files containing `{{ }}` or `{% %}` markers SHALL be in `_JINJA_RENDERED_CONFIG`.
 
 #### Scenario: Reduced static config lists
-- **WHEN** `_STATIC_CONFIG_CORE`, `_STATIC_CONFIG_ADMIN`, and `_STATIC_CONFIG_PROXY` are inspected
-- **THEN** `_STATIC_CONFIG_CORE` is empty (`.claude.json` removed — now programmatically generated), `_STATIC_CONFIG_ADMIN` contains only `gitmux.conf` and `starship.toml`, and `_STATIC_CONFIG_PROXY` contains only `ERR_SANDBOX_403`
+- **WHEN** `_STATIC_CONFIG_CORE` and `_STATIC_CONFIG_PROXY` are inspected
+- **THEN** `_STATIC_CONFIG_CORE` is empty (`.claude.json` removed — now programmatically generated) and `_STATIC_CONFIG_PROXY` contains only `ERR_SANDBOX_403`; no `_STATIC_CONFIG_ADMIN` enumeration exists
 
 ### Requirement: Context Contract Enforcement
 The system SHALL resolve all template variable defaults in `build_jinja_context()`. Templates SHALL use bare `{{ var }}` without Jinja2 `| default()` filters. The `jinja2.StrictUndefined` configuration SHALL enforce completeness — any variable referenced in a template but absent from the context SHALL raise `UndefinedError` at render time and during `--dry-run` validation.

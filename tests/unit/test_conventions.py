@@ -52,7 +52,7 @@ _GRANDFATHERED_SUPPRESSIONS: frozenset[tuple[str, int]] = frozenset(
         # before an autouse patch replaces it. Removing the late import requires
         # redesigning the capture mechanism — non-trivial. Tracked in
         # openspec/deferred.md.
-        ("tests/unit/cli/test_cli.py", 95),
+        ("tests/unit/cli/test_cli.py", 86),
     }
 )
 
@@ -197,6 +197,88 @@ def _custom_marks_in_file(tree: ast.AST) -> list[tuple[int, str]]:
             if name not in _PYTEST_BUILTIN_MARKS:
                 out.append((node.lineno, name))
     return out
+
+
+def _systemd_run_string_literals(tree: ast.AST) -> list[tuple[int, ast.AST | None]]:
+    """Return ``(lineno, parent_function_or_None)`` for every string literal in
+    ``tree`` whose value is exactly ``systemd-run``.
+
+    Walks the module AST and records the enclosing ``FunctionDef`` (or
+    ``AsyncFunctionDef``) for each match, so the caller can assert the literal
+    only appears inside a specific function. Matching by AST string-literal
+    (not raw text) means comments like ``# avoid systemd-run`` or unrelated
+    identifiers would not produce false positives.
+    """
+    out: list[tuple[int, ast.AST | None]] = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.func_stack: list[ast.AST] = []
+
+        def _visit_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self.func_stack.append(node)
+            self.generic_visit(node)
+            self.func_stack.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_func(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_func(node)
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if isinstance(node.value, str) and "systemd-run" in node.value:
+                enclosing = self.func_stack[-1] if self.func_stack else None
+                out.append((node.lineno, enclosing))
+
+    Visitor().visit(tree)
+    return out
+
+
+def test_no_raw_systemd_run_outside_pipe_cmd() -> None:
+    """The literal ``systemd-run`` may only appear inside ``host_config.pipe_cmd``.
+
+    Mirrors the "Never hardcode `sudo machinectl`" gate but for the byte-pipe
+    primitive: every ``systemd-run`` invocation must go through
+    :func:`core.host_config.pipe_cmd` so call sites stay swappable and the
+    PAM-skip trade-off is documented in exactly one place. Docstring mentions
+    of ``systemd-run`` inside ``pipe_cmd`` are allowed — that IS the
+    canonical location.
+    """
+    pipe_cmd_path = _SRC_ROOT / "core" / "host_config.py"
+    offenders: list[tuple[Path, int, str]] = []
+
+    for src in _python_files(_SRC_ROOT):
+        tree = ast.parse(src.read_text(), filename=str(src))
+        matches = _systemd_run_string_literals(tree)
+        if not matches:
+            continue
+        if src != pipe_cmd_path:
+            for lineno, _fn in matches:
+                offenders.append((src, lineno, "literal outside core.host_config"))
+            continue
+        # Inside host_config.py: every match must be enclosed by `pipe_cmd`.
+        for lineno, fn in matches:
+            if not (isinstance(fn, ast.FunctionDef) and fn.name == "pipe_cmd"):
+                where = (
+                    f"function {fn.name!r}"
+                    if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef)
+                    else "module scope"
+                )
+                offenders.append((src, lineno, f"literal in {where}, expected pipe_cmd"))
+
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)}:{lineno}: {note}"
+            for p, lineno, note in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} raw 'systemd-run' literal(s) outside pipe_cmd.\n{details}\n\n"
+            "Fix: route the call through core.host_config.pipe_cmd(user). The "
+            "byte-pipe primitive is centralized so the PAM-skip trade-off is "
+            "documented in exactly one place; ad-hoc 'systemd-run' invocations "
+            "bypass that contract."
+        )
 
 
 def test_every_custom_marker_is_registered() -> None:

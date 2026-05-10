@@ -91,6 +91,11 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
         tag="1.36.1-musl",
         digest="sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213",
     ),
+    "golang_alpine": ImagePin(
+        ref="golang",
+        tag="1.23-alpine",
+        digest="sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f",
+    ),
 }
 
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
@@ -122,7 +127,6 @@ class SandboxInstanceSection(BaseModel):
 
     name: str
     host_uid: str
-    warmup_prompt: str = ""
 
 
 class CoreConfig(BaseModel):
@@ -136,17 +140,6 @@ class CoreConfig(BaseModel):
     base_distro_family: str = "wolfi"
     git_user: str = ""
     git_email: str = ""
-
-
-class AdminConfig(BaseModel):
-    """[admin] section of sandbox.toml."""
-
-    shm_size: str = "2gb"
-    pids_limit: int = 400
-    mem_limit: str = "8gb"
-    cpus: float = 4.0
-    base_image: str = IMAGE_REGISTRY["debian_trixie"].pinned
-    base_distro_family: str = "debian"
 
 
 class RuntimesConfig(BaseModel):
@@ -201,7 +194,6 @@ class InstanceConfig(BaseModel):
     instance: SandboxInstanceSection
     workspaces: dict[str, WorkspaceConfig] = Field(min_length=1)
     core: CoreConfig = CoreConfig()
-    admin: AdminConfig = AdminConfig()
     runtimes: RuntimesConfig = RuntimesConfig()
     runtimes_node: NodeConfig = NodeConfig()
     components: ComponentsConfig = ComponentsConfig()
@@ -221,7 +213,6 @@ class InstanceConfig(BaseModel):
             "instance": raw.get("instance", {}),
             "workspaces": raw.get("workspaces", {}),
             "core": raw.get("core", {}),
-            "admin": raw.get("admin", {}),
             "runtimes": {k: v for k, v in raw.get("runtimes", {}).items() if k != "node"},
             "runtimes_node": raw.get("runtimes", {}).get("node", {}),
             "components": {k: v for k, v in components_raw.items() if isinstance(v, bool)},
@@ -229,7 +220,31 @@ class InstanceConfig(BaseModel):
             "components_ingress": components_raw.get("ingress", {}),
             "proxy_whitelist": raw.get("proxy", {}).get("whitelist", {}),
         }
+        # Surface a legacy [admin] table (if present) so the model validator can
+        # reject it with an operator-friendly message. Per admin-reframe, the
+        # [admin] section is no longer recognized.
+        if "admin" in raw:
+            flat["admin"] = raw["admin"]
         return cls.model_validate(flat)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_admin_section(cls, data: Any) -> Any:
+        """Reject sandbox.toml inputs that carry a legacy [admin] section.
+
+        Per admin-reframe, admin is a static binary with no configurable runtime
+        knobs; the [admin] table is no longer recognized. Surface a concrete
+        operator-facing message rather than Pydantic's generic "extra fields"
+        text.
+        """
+        if isinstance(data, dict) and "admin" in data:
+            raise ValueError(
+                "Legacy [admin] section detected in sandbox.toml. Per "
+                "admin-reframe, the [admin] table is no longer recognized — "
+                "admin is a static binary with no configurable runtime knobs. "
+                "Remove the [admin] section from the file and re-run."
+            )
+        return data
 
 
 # ─── Jinja2 Context Builder ──────────────────────────────────────────────────
@@ -265,7 +280,7 @@ def build_jinja_context(
     missing or out-of-range) propagate so hydration aborts before rendering;
     callers should translate to a "run sandbox doctor" message.
     """
-    isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(base_index)
+    isolated, core_proxy, dns, egress, ipc = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
 
     extra: dict[str, Any] = {}
@@ -276,12 +291,10 @@ def build_jinja_context(
         )
 
     return {
-        # Network — 7-subnet topology
+        # Network — 5-subnet topology
         "isolated_subnet": isolated,
         "core_proxy_subnet": core_proxy,
         "dns_subnet": dns,
-        "admin_subnet": admin,
-        "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
         "ipc_subnet": ipc,
         **ips,
@@ -300,12 +313,9 @@ def build_jinja_context(
             for name, ws in sorted(config.workspaces.items())
         ],
         "custom_config_core": "/home/agent/.sandbox/custom",
-        "custom_config_admin": "/home/human/.sandbox/custom",
-        "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",
         # Project
         "instance_name": config.instance.name,
         "host_uid": config.instance.host_uid,
-        "warmup_prompt": config.instance.warmup_prompt,
         # Git identity
         "git_user": config.core.git_user or "Agent",
         "git_email": config.core.git_email or "agent@sandbox.local",
@@ -317,14 +327,6 @@ def build_jinja_context(
         "core_mem_limit": config.core.mem_limit,
         "core_memswap_limit": config.core.mem_limit,
         "core_cpus": str(config.core.cpus),
-        # Admin
-        "admin_base_image": config.admin.base_image,
-        "admin_distro_family": config.admin.base_distro_family,
-        "admin_pids_limit": config.admin.pids_limit,
-        "admin_shm_size": config.admin.shm_size,
-        "admin_mem_limit": config.admin.mem_limit,
-        "admin_memswap_limit": config.admin.mem_limit,
-        "admin_cpus": str(config.admin.cpus),
         # Runtimes
         "runtimes": {
             "python": config.runtimes.python,
@@ -340,6 +342,7 @@ def build_jinja_context(
         "proxy_image": IMAGE_REGISTRY["squid"].pinned,
         "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
         "busybox_image": IMAGE_REGISTRY["busybox_musl"].pinned,
+        "golang_alpine_image": IMAGE_REGISTRY["golang_alpine"].pinned,
         # Images — user-configurable
         "db_postgres_image": config.components_db_postgres.image,
         # Proxy whitelist
@@ -376,13 +379,9 @@ _JINJA_RENDERED_CONFIG = [
     ("core/.bashrc", "config/core/.bashrc"),
     ("core/CLAUDE.md", "config/core/CLAUDE.md"),
     ("core/sshd_config", "config/core/sshd_config"),
-    ("admin/.zshrc", "config/admin/.zshrc"),
-    ("admin/.tmux.conf", "config/admin/.tmux.conf"),
-    ("admin/.gitconfig", "config/admin/.gitconfig"),
 ]
 
 # Static files copied as-is (no Jinja2 processing)
-_STATIC_CONFIG_ADMIN = ["gitmux.conf", "starship.toml"]
 _STATIC_CONFIG_CORE: list[str] = []
 _STATIC_CONFIG_PROXY = ["ERR_SANDBOX_403"]
 
@@ -427,19 +426,11 @@ def render_templates(
         context,
     )
 
-    admin_family = context["admin_distro_family"]
-    _render_file(
-        env,
-        f"docker/admin/Dockerfile.admin.{admin_family}",
-        instance_dir,
-        "docker/admin/Dockerfile.admin",
-        context,
-    )
-
     # ── Static copies (no Jinja2 rendering) ───────────────────────────────
 
+    _copy_file("docker/admin/Dockerfile.admin", instance_dir, "docker/admin/Dockerfile.admin")
+    _copy_file("docker/admin/fwd.go", instance_dir, "docker/admin/fwd.go")
     _copy_file("docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
-    _copy_file("docker/admin/entrypoint.sh", instance_dir, "docker/admin/entrypoint.sh")
     _copy_file("docker/coredns/Dockerfile.coredns", instance_dir, "docker/coredns/Dockerfile.coredns")
 
     # ── Feature-gated extras ──────────────────────────────────────────────
@@ -480,9 +471,6 @@ def render_templates(
 
     for filename in _STATIC_CONFIG_PROXY:
         _copy_file(f"config/proxy/{filename}", instance_dir, f"config/proxy/{filename}")
-
-    for filename in _STATIC_CONFIG_ADMIN:
-        _copy_file(f"config/admin/{filename}", instance_dir, f"config/admin/{filename}")
 
     # ── Programmatic .claude.json ─────────────────────────────────────────
     # Generated (not copied) so firecrawl MCP endpoint can be injected
@@ -598,7 +586,6 @@ def validate_templates(
         + [f"config/{src_rel}" for src_rel, _ in _JINJA_RENDERED_CONFIG]
         + [
             f"docker/core/Dockerfile.core.{context.get('core_distro_family', 'wolfi')}",
-            f"docker/admin/Dockerfile.admin.{context.get('admin_distro_family', 'debian')}",
         ]
     )
 
@@ -622,9 +609,10 @@ def validate_templates(
     # Verify static files exist in the templates package
     static_files = (
         [f"config/proxy/{f}" for f in _STATIC_CONFIG_PROXY]
-        + [f"config/admin/{f}" for f in _STATIC_CONFIG_ADMIN]
         + [f"config/core/{f}" for f in _STATIC_CONFIG_CORE]
-        + ["docker/core/entrypoint.sh", "docker/admin/entrypoint.sh"]
+        + ["docker/core/entrypoint.sh"]
+        + ["docker/admin/Dockerfile.admin"]
+        + ["docker/admin/fwd.go"]
         + ["docker/coredns/Dockerfile.coredns"]
     )
     if mcp_firecrawl:

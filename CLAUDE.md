@@ -29,7 +29,16 @@ The CLI entrypoint is `sandbox = "cli.main:app"` (typer). Run as `uv run sandbox
 
 ### Privilege boundary (load-bearing)
 
-Everything Docker-related crosses from the dev user into an unprivileged `sandbox` systemd user via `machinectl shell <user>@.host`. The prefix is built by `core.host_config.machinectl_cmd(user, auth)` and is either `["sudo", "machinectl", ...]` (SUDO mode) or `["machinectl", ...]` (POLKIT mode). **Never hardcode `sudo machinectl`** — always go through `machinectl_cmd()` so the auth mode from `sandbox-ai.toml` is respected. Recent commits (`f7ac8da`, `1648323`) refactored the codebase to enforce this; preserve it.
+Everything Docker-related crosses from the dev user into an unprivileged `sandbox` systemd user via `machinectl shell <user>@.host`. The prefix is built by `core.host_config.machinectl_cmd(user, auth)` and is either `["sudo", "machinectl", ...]` (SUDO mode) or `["machinectl", ...]` (POLKIT mode). **Never hardcode `sudo machinectl` or `systemd-run`** — always go through `machinectl_cmd()` / `pipe_cmd()` so the auth mode from `sandbox-ai.toml` is respected and the two primitives stay swappable. Recent commits (`f7ac8da`, `1648323`) refactored the codebase to enforce this; preserve it.
+
+Two boundary primitives, picked by call-site shape:
+
+- `machinectl_cmd(user, auth)` — PTY-allocating crossing. Used wherever the consumer expects a real TTY (today's interactive handoffs, helper-container `exec` paths whose stdin/stdout are TTYs).
+- `pipe_cmd(user)` — byte-pipe crossing. Returns `["systemd-run", "-q", "--pipe", f"--uid={user}"]`. Used for programmatic byte transports — most notably the SSH `ProxyCommand` path in `cli-attach`. Auth-mode independent: `systemd-run`'s `manage-units` polkit action is the only authorization layer; the per-host `machinectl_authentication` setting does not apply.
+
+PAM-skip trade-off (`pipe_cmd` only): `systemd-run` does NOT invoke PAM, so policies on `pam_limits.conf` and similar do not apply to processes started via `pipe_cmd`. Acceptable for our use case — programmatic byte-pipe transport over a session-bounded lifetime — where the call site is a fixed audited orchestrator path, not a user-typed command. `machinectl_cmd` retains the full PAM stack and remains the right choice for any path that should respect those policies.
+
+PTY consequence (`machinectl_cmd` only): the allocated PTY's `onlcr` line discipline rewrites every `\n` byte in either direction to `\r\n`. Captured stdout from `machinectl shell` therefore has CRLF line endings, even when the underlying command emits LF. Code that captures output (e.g., `docker inspect ... | head -1`) MUST strip the `\r` (`tr -d '\r'` or read in text mode) before using the value as a filename, IP, hostname, or argv element — passing a `<value>\r` to a downstream command silently fails. This is also the reason `pipe_cmd` exists: paths that carry binary frames (SSH, gRPC, raw TCP) MUST NOT cross the boundary via `machinectl_cmd` because `onlcr` would corrupt every `0x0a` byte in the stream.
 
 ### Two configuration scopes
 
@@ -40,7 +49,7 @@ Everything Docker-related crosses from the dev user into an unprivileged `sandbo
 
 - `executor.py` — sterile POSIX subprocess execution (the only sanctioned way to shell out).
 - `registry.py` — instance registry as fcntl-locked JSON at `<sandbox_ai_home()>/state/instances.json`.
-- `ipam.py` — `/24` subnet septuple allocator (isolated, core_proxy, dns, admin, admin_proxy, egress, ipc) over 10.100.0.0–10.255.255.0 with lowest-slot scan and slot reuse (`MAX_SLOTS = 5705`).
+- `ipam.py` — `/24` subnet quintuple allocator (isolated, core_proxy, dns, egress, ipc) over 10.100.0.0–10.255.255.0 with lowest-slot scan and slot reuse (`MAX_SLOTS = 7987`).
 - `hydration.py` — `InstanceConfig` Pydantic model → `build_jinja_context` → `render_templates` → `validate_templates`. Templates live in `src/templates/config/` and `src/templates/docker/` (the immutable tooling/config plane), shipped with the wheel as the top-level `templates` Python package and discovered via `jinja2.PackageLoader("templates", package_path="")` / `importlib.resources`.
 - `scaffold.py` — bootstraps `<sandbox_ai_home()>/instances/<inst>/` (dirs, `.sandbox.env`, `sandbox.toml`, default ACLs, sentinel) plus per-workspace trees under `<sandbox_ai_home()>/workspaces/<inst>/`. `mutate_workspaces()` rewrites the `[workspaces]` block on add/remove/rename without disturbing operator hand-edits to other sections. `INSTANCE_SUBDIRS` excludes helper-recipe-owned leaves (the cache/log leaves enumerated in `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement); those are created by the helper recipe on first start, per the "Scaffold-vs-Helper Boundary" rule that prevents the userns-EPERM bug class.
 - `crypto.py` — bcrypt htpasswd, SSH keypair, credential generation for the proxy sidecar.

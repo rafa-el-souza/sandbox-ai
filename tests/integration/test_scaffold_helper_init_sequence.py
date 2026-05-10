@@ -74,7 +74,6 @@ _PROBE_TIMEOUT_S = 10
 # to *create*, so they are out of scope for this regression test.
 HELPER_RECIPE_CACHE_LEAVES: tuple[tuple[str, str], ...] = (
     ("cache/core", ".claude"),
-    ("cache/admin", "tmux_resurrect"),
 )
 
 

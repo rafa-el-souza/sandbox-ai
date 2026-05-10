@@ -11,7 +11,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start <inst>`
-- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight (including bridge-group existence and dev supplementary-group membership), validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet septuple, and executes the ownership-sensitive phase order owned by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`: `_phase_workspace_shared_group` (per-workspace chgrp/chmod 2770/setgid + persistent default ACL — runs BEFORE named-ACL grants so chmod 2770 lands on a non-extended-ACL inode), `_phase_acl_grant` (per-workspace named-ACL grants + instance-dir set + helper-recipe parent grants), `_phase_credentials` (SSH keypair + bcrypt htpasswd generation into `secrets/`), `_phase_hydrate` (Pydantic + Jinja2 hydration with multi-workspace fan-out in compose template volumes), `_phase_grant_post_hydrate_daemon_read` (unified setfacl-as-owner pass over `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES`), the helper-recipe phases (`_phase_helper_mkdir_chown_cache_log` for cache/log subuid-chown; `_phase_helper_cp_chown_ro_files` for ro/exec/rw consumer-uid-0-chown), and finally `_phase_compose_up` (`docker compose up -d --build --wait` via `machinectl`); progress is displayed for each phase. On all containers healthy, the CLI defaults to handing the terminal over to the admin container via `docker exec -it` when stdin is a TTY (suppress with `--no-handover`; per `cli-start`'s `Handover Default Direction` and `Handover TTY Autodetect`).
+- **THEN** the CLI verifies the `.initialized` sentinel exists, runs doctor Chain 1 pre-flight (including bridge-group existence and dev supplementary-group membership), validates secret completeness, then performs a pre-lock warm state check, acquires `state.lock` and the IPAM lock, allocates a `/24` subnet quintuple, and executes the ownership-sensitive phase order owned by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`: `_phase_workspace_shared_group` (per-workspace chgrp/chmod 2770/setgid + persistent default ACL — runs BEFORE named-ACL grants so chmod 2770 lands on a non-extended-ACL inode), `_phase_acl_grant` (per-workspace named-ACL grants + instance-dir set + helper-recipe parent grants), `_phase_credentials` (SSH keypair + bcrypt htpasswd generation into `secrets/`), `_phase_hydrate` (Pydantic + Jinja2 hydration with multi-workspace fan-out in compose template volumes), `_phase_grant_post_hydrate_daemon_read` (unified setfacl-as-owner pass over `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES + DAEMON_READ_DIRECT_FILES`), the helper-recipe phases (`_phase_helper_mkdir_chown_cache_log` for cache/log subuid-chown; `_phase_helper_cp_chown_ro_files` for ro/exec/rw consumer-uid-0-chown), and finally `_phase_compose_up` (`docker compose up -d --build --wait` via `machinectl`); progress is displayed for each phase. On all containers healthy, the CLI defaults to handing the terminal over to **core** (as `agent`) via the `cli-attach` command shape (`tlog-rec → ssh → ProxyCommand → /fwd`) when stdin is a TTY (suppress with `--no-handover`; per `cli-start`'s `Handover Default Direction` and `Handover TTY Autodetect`).
 
 #### Scenario: Instance State Query
 - **WHEN** the human operator executes `sandbox status [<inst>]`
@@ -38,7 +38,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 - **THEN** the system raises a `SandboxExecutionError` masking host topology variables and rendering clinical error messages identifying the failed command without leaking environment state.
 
 ### Requirement: Sub-Process Privilege Bounding
-The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host`. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from host config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. All call sites SHALL use the centralized `machinectl_cmd()` builder from `core.host_config`.
+The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host` for PTY-needing paths and `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) for byte-pipe paths. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from host config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. All call sites SHALL use the centralized `machinectl_cmd()` builder from `core.host_config`. Byte-pipe call sites (notably the operator-handover `ProxyCommand`) SHALL use `pipe_cmd()` from `core.host_config`; `pipe_cmd` is polkit-authenticated via the `manage-units` action and is NEVER prefixed with `sudo` regardless of `machinectl_authentication` mode.
 
 #### Scenario: Non-Interactive Daemon Interaction (sudo mode)
 - **WHEN** the Python orchestrator needs to execute a non-interactive Docker command and `machinectl_authentication` is `"sudo"`
@@ -49,12 +49,12 @@ The system SHALL isolate all Docker command execution across the `dev`/`sandbox`
 - **THEN** it invokes: `subprocess.run(["machinectl", "shell", "<user>@.host", "/bin/bash", "-c", "<command>"])` with `capture_output=True`
 
 #### Scenario: Interactive PTY Execution (sudo mode)
-- **WHEN** the orchestrator hands the terminal to the admin container and `machinectl_authentication` is `"sudo"`
-- **THEN** it invokes: `subprocess.run(["sudo", "machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited
+- **WHEN** the orchestrator hands the terminal to core and `machinectl_authentication` is `"sudo"`
+- **THEN** it invokes: `subprocess.run(["tlog-rec", "--writer=file", "--file-path=<host-side log path>", "--", "ssh", "-i", "<inst_dir>/secrets/ipc_ssh_key", "-o", "UserKnownHostsFile=<inst_dir>/secrets/ipc_known_hosts", "-o", "StrictHostKeyChecking=yes", "-o", "ProxyCommand=systemd-run -q --pipe --uid=<docker_unprivileged_user> /usr/bin/docker exec -i <inst>-admin-1 /fwd <core_ipc_ip>:9999", "-p", "9999", "-t", "agent@<core_ipc_ip>", "cd /workspaces/<ws> && exec bash -l"])` with stdin/stdout/stderr inherited; the `ProxyCommand` is NOT prefixed with `sudo` even in sudo mode because it uses `pipe_cmd` (polkit), not `machinectl_cmd`
 
 #### Scenario: Interactive PTY Execution (polkit mode)
-- **WHEN** the orchestrator hands the terminal to the admin container and `machinectl_authentication` is `"polkit"`
-- **THEN** it invokes: `subprocess.run(["machinectl", "shell", "<user>@.host", "/usr/bin/docker", "exec", "-it", "<name>-admin-1", "zsh"])` with stdin/stdout/stderr inherited
+- **WHEN** the orchestrator hands the terminal to core and `machinectl_authentication` is `"polkit"`
+- **THEN** it invokes the same argv as the sudo-mode scenario above (byte-identical), because the `ProxyCommand` uses `pipe_cmd` (polkit) regardless of `machinectl_authentication`
 
 ### Requirement: Host Config Loading in CLI Commands
 All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`, all `workspace ...` subcommands) SHALL load per-host config from `<sandbox_ai_home()>/config/sandbox-ai.toml` via `HostConfig.from_toml()` and read `docker_unprivileged_user`, `machinectl_authentication`, and `workspace_bridge_group` from it. The canonical path is resolved internally; CWD is no longer consulted.
@@ -68,15 +68,11 @@ All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`, all 
 - **THEN** the CLI exits with an error directing the user to run `sandbox init`
 
 ### Requirement: Automated AI Handover
-The system SHALL deliver an interactive shell session in the admin container to the operator after containers are confirmed healthy, optionally auto-starting the agent if a warmup prompt is configured.
+The system SHALL deliver an interactive shell session on **core** (as `agent`) to the operator after containers are confirmed healthy. The handover uses the canonical `cli-attach` invocation (`tlog-rec → ssh → ProxyCommand → /fwd`), landing the operator in `/workspaces/<ws>` via the ssh remote command suffix.
 
 #### Scenario: PTY Execution Bounding
 - **WHEN** `docker compose up --wait` returns successfully (all healthchecks pass)
-- **THEN** `state.lock` is released and the CLI executes `docker exec -it <name>-admin-1 zsh` via machinectl, transferring terminal ownership to the admin container shell session
-
-#### Scenario: Warmup Prompt Injection
-- **WHEN** `sandbox.toml` declares a non-empty `instance.warmup_prompt`
-- **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this env var on init to invoke `claude -p "<value>" --dangerously-skip-permissions` before dropping to an interactive prompt
+- **THEN** `state.lock` is released and the CLI executes the canonical `tlog-rec → ssh → ProxyCommand → /fwd` invocation defined by `cli-attach`'s "Terminal handed to core via ssh-through-admin" scenario, transferring terminal ownership to core's interactive shell session as `agent`
 
 ### Requirement: Rich Markup Safety in Console Output
 

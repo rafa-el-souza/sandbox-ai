@@ -63,6 +63,7 @@ _BINARY_PACKAGES: dict[str, str] = {
     "sudo": "sudo",
     "machinectl": "systemd-container",
     "setfacl": "acl",
+    "tlog": "tlog",
 }
 
 

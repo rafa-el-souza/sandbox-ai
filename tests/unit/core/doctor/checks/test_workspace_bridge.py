@@ -468,7 +468,7 @@ class TestCheckPreExistingInstanceLayout:
         from core.doctor import check_pre_existing_instance_layout
 
         inst = tmp_path / "inst"
-        for leaf in ("cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"):
+        for leaf in ("cache/core/.claude", "log/core"):
             (inst / leaf).mkdir(parents=True)
         target_uid = os.stat(inst / "cache/core/.claude").st_uid
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: target_uid)
@@ -482,9 +482,7 @@ class TestCheckPreExistingInstanceLayout:
         inst = tmp_path / "inst"
         leaves = (
             "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
             "log/core",
-            "log/admin",
         )
         for leaf in leaves:
             (inst / leaf).mkdir(parents=True)
@@ -493,7 +491,7 @@ class TestCheckPreExistingInstanceLayout:
         monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
-        assert "4 cache/log leaf(s)" in result.detail
+        assert "2 cache/log leaf(s)" in result.detail
         remediation = result.remediation or ""
         for leaf in leaves:
             assert f"rm -rf {inst}/{leaf}" in remediation
@@ -504,7 +502,7 @@ class TestCheckPreExistingInstanceLayout:
 
         inst = tmp_path / "inst"
         consumer_leaf = inst / "cache/core/.claude"
-        legacy_leaf = inst / "cache/admin/tmux_resurrect"
+        legacy_leaf = inst / "log/core"
         consumer_leaf.mkdir(parents=True)
         legacy_leaf.mkdir(parents=True)
 
@@ -538,7 +536,7 @@ class TestCheckPreExistingInstanceLayout:
         inst_a = tmp_path / "a"
         inst_b = tmp_path / "b"
         (inst_a / "log/core").mkdir(parents=True)
-        (inst_b / "log/admin").mkdir(parents=True)
+        (inst_b / "cache/core/.claude").mkdir(parents=True)
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
         monkeypatch.setattr(
@@ -550,7 +548,7 @@ class TestCheckPreExistingInstanceLayout:
         assert "2 cache/log leaf(s)" in result.detail
         remediation = result.remediation or ""
         assert f"rm -rf {inst_a}/log/core" in remediation
-        assert f"rm -rf {inst_b}/log/admin" in remediation
+        assert f"rm -rf {inst_b}/cache/core/.claude" in remediation
 
     def test_pass_when_partial_layout_resolves_correctly(self, tmp_path: Any, monkeypatch: Any) -> None:
         from core.doctor import check_pre_existing_instance_layout

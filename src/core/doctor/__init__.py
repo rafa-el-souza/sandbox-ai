@@ -35,6 +35,7 @@ from core.doctor.checks.privilege_boundary import check_runsc_registered as chec
 from core.doctor.checks.privilege_boundary import check_runsc_runtimeargs as check_runsc_runtimeargs
 from core.doctor.checks.privilege_boundary import check_sudo as check_sudo
 from core.doctor.checks.privilege_boundary import check_systemd_machined as check_systemd_machined
+from core.doctor.checks.privilege_boundary import check_tlog as check_tlog
 from core.doctor.checks.privilege_boundary import check_user_exists as check_user_exists
 from core.doctor.checks.repo_integrity import check_state_dir_writable as check_state_dir_writable
 from core.doctor.checks.repo_integrity import check_tooling_plane as check_tooling_plane
@@ -117,6 +118,7 @@ __all__ = [
     "check_subuid_resolver_works",
     "check_sudo",
     "check_systemd_machined",
+    "check_tlog",
     "check_tooling_plane",
     "check_user_exists",
     "check_workspace_bridge_group_exists",

@@ -317,9 +317,7 @@ def check_pre_existing_instance_layout(
     # Inventory" requirement. Stays in sync with that spec.
     cache_log_leaves = (
         "cache/core/.claude",
-        "cache/admin/tmux_resurrect",
         "log/core",
-        "log/admin",
     )
     try:
         consumer_subuid = host_id_for_in_container(1000, host_user)

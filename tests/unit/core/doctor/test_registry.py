@@ -37,9 +37,10 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 34
+        assert len(checks) == 35
         ids = [c.id for c in checks]
         assert "sudo" in ids
+        assert "tlog" in ids
         assert "machinectl_reachable" in ids
         assert "docker_rootless" in ids
         assert "runsc_runtimeargs" in ids
@@ -293,7 +294,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
         assert "sudo" not in ids
-        assert len(checks) == 33
+        assert len(checks) == 34
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
@@ -302,7 +303,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 34
+        assert len(checks) == 35
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
@@ -359,7 +360,7 @@ class TestPolkitRegistry:
 
         checks = build_check_registry()
         pb_checks = [c for c in checks if c.category == "Privilege Boundary"]
-        assert len(pb_checks) == 11
+        assert len(pb_checks) == 12
 
     def test_image_digests_registered_in_supply_chain(self) -> None:
         from core.doctor import build_check_registry

@@ -77,15 +77,49 @@ The system SHALL provide a `machinectl_cmd(user, auth)` function that returns th
 
 ### Requirement: Module Location
 
-The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. The legacy `_resolve_sandbox_ai_home()` helper is removed.
+The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl_cmd` function, `pipe_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. The legacy `_resolve_sandbox_ai_home()` helper is removed.
 
 #### Scenario: Import path
-- **WHEN** other modules need host config, machinectl prefix building, subuid resolution, or bridge-group resolution
+- **WHEN** other modules need host config, machinectl prefix building, pipe-cmd prefix building, subuid resolution, or bridge-group resolution
 - **THEN** they import from `core.host_config`
 
 #### Scenario: Legacy resolver absent
 - **WHEN** `core.host_config` is inspected
 - **THEN** there is NO `_resolve_sandbox_ai_home()` symbol; callers use `sandbox_ai_home()` from the `per-user-state-layout` capability
+
+#### Scenario: Public symbols enumerated
+- **WHEN** the public surface of `core.host_config` is inspected
+- **THEN** it includes `HostConfig`, `MachinectlAuth`, `HostSettings`, `machinectl_cmd`, `pipe_cmd`, the subuid/subgid parsers, the forward/inverse userns mappers, `workspace_bridge_gid`, and `autodetect_workspace_bridge_gid_recommendation`
+
+### Requirement: Pipe Command Helper
+
+The system SHALL provide a `pipe_cmd(user)` function in `core.host_config` that returns the byte-pipe-capable boundary-crossing prefix as a `list[str]`. The function SHALL return `["systemd-run", "-q", "--pipe", f"--uid={user}"]`. All non-PTY byte-pipe boundary-crossings (e.g., the `ProxyCommand` constructed by `cli.attach`) SHALL use this function instead of constructing the prefix directly. The discipline "Never hardcode `sudo machinectl`" extends to "Never hardcode `systemd-run`."
+
+#### Scenario: Pipe command prefix for sandbox user
+- **WHEN** `pipe_cmd("sandbox")` is called
+- **THEN** it returns `["systemd-run", "-q", "--pipe", "--uid=sandbox"]`
+
+#### Scenario: Pipe command prefix for arbitrary user
+- **WHEN** `pipe_cmd("claude-sandbox")` is called
+- **THEN** it returns `["systemd-run", "-q", "--pipe", "--uid=claude-sandbox"]`
+
+#### Scenario: Attach ProxyCommand uses pipe_cmd helper
+- **WHEN** the `cli.attach` implementation that constructs the ssh `ProxyCommand` argument is inspected
+- **THEN** it composes the boundary-crossing prefix via `pipe_cmd(host_config.host.docker_unprivileged_user)` rather than embedding the literal string `"systemd-run"` or its flags directly in the argv
+
+### Requirement: Pipe Command vs Machinectl Command Distinction
+
+The system SHALL maintain two distinct boundary-crossing primitives in `core.host_config`: `machinectl_cmd(user, auth)` for paths that require a PTY (e.g., the interactive `docker exec -it` handover, helper-container exec where stdin is a real TTY) and `pipe_cmd(user)` for paths that require a non-PTY byte pipe (e.g., the `ProxyCommand` in the new attach path). The choice of primitive at each call site SHALL be principled and load-bearing: PTY-needed call sites SHALL use `machinectl_cmd`; byte-pipe-needed call sites SHALL use `pipe_cmd`.
+
+The `pipe_cmd` primitive SKIPS PAM by design — `systemd-run`'s `manage-units` polkit action does not invoke the PAM stack. PAM-enforced policies on the `dev → <sbuser>` transition (e.g., `pam_limits.conf` resource ceilings, custom session-class restrictions, audit subsystem login UID via `pam_loginuid`) DO NOT apply to `pipe_cmd` invocations. This trade-off SHALL be documented in `CLAUDE.md`'s "Privilege boundary" section alongside the existing `machinectl_cmd` discipline.
+
+#### Scenario: CLAUDE.md documents both primitives
+- **WHEN** the project's `CLAUDE.md` "Privilege boundary" section is inspected
+- **THEN** it names both `machinectl_cmd(user, auth)` (for PTY paths) and `pipe_cmd(user)` (for byte-pipe paths), and states that `pipe_cmd` skips PAM whereas `machinectl_cmd` runs the full PAM stack
+
+#### Scenario: Hardcoded systemd-run forbidden outside helper
+- **WHEN** the codebase outside `core/host_config.py` is searched for the literal string `"systemd-run"`
+- **THEN** no hits appear in source paths that construct boundary-crossing argv (the only references permitted are inside `pipe_cmd` itself or in tests asserting `pipe_cmd`'s return value)
 
 ### Requirement: Subuid/Subgid Range Parsers
 

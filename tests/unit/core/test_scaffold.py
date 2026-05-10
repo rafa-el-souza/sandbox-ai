@@ -31,7 +31,6 @@ EXPECTED_DIRS = [
     "docker/core",
     "docker/admin",
     "docker/extras",
-    "config/admin",
     "config/core",
     "config/coredns",
     "config/dnsdist",
@@ -39,8 +38,6 @@ EXPECTED_DIRS = [
     "log/proxy",
     "log/orchestrator",
     "cache/core",
-    "cache/admin",
-    "custom/config/admin",
     "custom/config/core",
 ]
 
@@ -119,6 +116,20 @@ class TestCreateInstanceDirs:
         assert "log/core" not in INSTANCE_SUBDIRS
         assert "log/admin" not in INSTANCE_SUBDIRS
 
+    def test_admin_config_cache_custom_excluded_from_instance_subdirs(self) -> None:
+        """admin's config/cache/custom dirs MUST NOT appear in INSTANCE_SUBDIRS.
+
+        Per ``admin-reframe``: the admin container is operator-facing tooling,
+        not a user-configurable runtime, so its config/cache/custom-config
+        scaffold dirs are dropped. ``docker/admin`` (the build-context dir)
+        is retained — compose still references it.
+        """
+        assert "config/admin" not in INSTANCE_SUBDIRS
+        assert "cache/admin" not in INSTANCE_SUBDIRS
+        assert "custom/config/admin" not in INSTANCE_SUBDIRS
+        # docker/admin retained — build context still required by compose
+        assert "docker/admin" in INSTANCE_SUBDIRS
+
     def test_idempotent(self, tmp_path: Path) -> None:
         """Calling twice does not raise."""
         instance_dir = tmp_path / "sandboxes" / "myproject-abc123"
@@ -181,6 +192,28 @@ class TestWriteSandboxToml:
 
         content = (instance_dir / "sandbox.toml").read_text()
         assert f'host_uid = "{os.getuid()}"' in content
+
+    def test_no_admin_section(self, tmp_path: Path) -> None:
+        """Rendered sandbox.toml has no [admin] section and no admin_base_image placeholder.
+
+        Per ``sandbox-toml-schema``'s Schema Generation requirement, the admin
+        container's runtime knobs are derived from ``[core]`` rather than
+        operator-configurable, so the scaffold MUST NOT emit an ``[admin]``
+        section. ``admin_base_image`` is similarly removed from the template's
+        format placeholders.
+        """
+        instance_dir = tmp_path / "sandboxes" / "myproject-abc123"
+        instance_dir.mkdir(parents=True)
+
+        write_sandbox_toml(
+            instance_dir=str(instance_dir),
+            instance_name="myproject",
+            workspaces=self._ws(),
+        )
+
+        content = (instance_dir / "sandbox.toml").read_text()
+        assert "[admin]" not in content
+        assert "admin_base_image" not in content
 
 
 class TestCreateEnvFile:

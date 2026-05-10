@@ -27,6 +27,19 @@ def check_sudo(user: str, distro: str | None) -> CheckResult:
     )
 
 
+def check_tlog(user: str, distro: str | None) -> CheckResult:
+    """Check that tlog-rec is present on PATH (host-side dependency)."""
+    path = shutil.which("tlog-rec")
+    if path:
+        return CheckResult(status="pass", name="tlog", detail=f"Found at {path}")
+    return CheckResult(
+        status="fail",
+        name="tlog",
+        detail="tlog-rec not found on PATH",
+        remediation=get_install_cmd(distro, _BINARY_PACKAGES["tlog"]),
+    )
+
+
 def check_machinectl(user: str, distro: str | None) -> CheckResult:
     """Check that machinectl is present on PATH."""
     path = shutil.which("machinectl")
@@ -408,7 +421,6 @@ def check_compose_project_name_collision(
             category="Privilege Boundary",
         )
     daemon_names = {p.get("Name") for p in projects if isinstance(p, dict)}
-    foreign = daemon_names - expected
     # Collisions: a daemon project whose name matches an *expected* project for
     # a registered instance is normal (that instance's own running compose).
     # A daemon project whose name collides with what we'd construct for a
@@ -418,7 +430,6 @@ def check_compose_project_name_collision(
     # in daemon_names, that's not a collision per se (it's the live project),
     # but if the operator runs `init` for a NEW name that already collides,
     # that's a separate concern handled at init pre-flight.
-    del foreign
     return CheckResult(
         status="pass",
         name="compose project name collision",
@@ -438,5 +449,6 @@ __all__ = [
     "check_runsc_runtimeargs",
     "check_sudo",
     "check_systemd_machined",
+    "check_tlog",
     "check_user_exists",
 ]

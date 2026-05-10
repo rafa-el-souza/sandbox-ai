@@ -54,10 +54,6 @@ The system SHALL provide a Jinja2-rendered `sshd_config` template with security-
 - **WHEN** the rendered `sshd_config` is inspected
 - **THEN** `AuthorizedKeysFile` is set to `/run/secrets/authorized_keys`
 
-#### Scenario: Warmup environment variable accepted
-- **WHEN** the rendered `sshd_config` is inspected
-- **THEN** `AcceptEnv SANDBOX_WARMUP_PROMPT` is set
-
 #### Scenario: Session limits configured
 - **WHEN** the rendered `sshd_config` is inspected
 - **THEN** `MaxSessions 10` and `ClientAliveInterval 300` and `ClientAliveCountMax 2` are set
@@ -90,7 +86,7 @@ The orchestrator SHALL generate two Ed25519 keypairs per instance during credent
 - **THEN** it contains `"secrets"` so that `create_instance_dirs()` creates `<sandbox_ai_home()>/instances/<inst>/secrets/` during `sandbox init`
 
 ### Requirement: SSH Credential Mounts
-The rendered `compose.yml` SHALL mount SSH credentials into core and admin containers via bind-mount volumes. Docker Compose `secrets:` syntax SHALL NOT be used — its `uid`, `gid`, `mode` directives are silently ignored under rootless Docker. A top-level `secrets:` block SHALL NOT exist in the compose template.
+The rendered `compose.yml` SHALL mount SSH credentials into the core container via bind-mount volumes. Docker Compose `secrets:` syntax SHALL NOT be used — its `uid`, `gid`, `mode` directives are silently ignored under rootless Docker. A top-level `secrets:` block SHALL NOT exist in the compose template. The admin container SHALL NOT receive any SSH-credential bind-mounts (the host's ssh client reads `ipc_ssh_key` and `ipc_known_hosts` directly from the host filesystem; admin holds zero credentials post-reframe).
 
 #### Scenario: Core receives host private key as bind-mount
 - **WHEN** the rendered `compose.yml` is inspected for the core service
@@ -104,55 +100,39 @@ The rendered `compose.yml` SHALL mount SSH credentials into core and admin conta
 - **WHEN** the rendered `compose.yml` is inspected for the core service
 - **THEN** it includes a volume mount `{{ instance_dir }}/secrets/authorized_keys:/run/secrets/authorized_keys:ro`
 
-#### Scenario: Admin receives auth private key as bind-mount
-- **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** it includes a volume mount `{{ instance_dir }}/secrets/ipc_ssh_key:/run/secrets/ipc_ssh_key:ro`
-
-#### Scenario: Admin does not use Docker secrets for SSH key
-- **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** it does NOT include a `secrets:` entry for `ipc_ssh_key`
-
-#### Scenario: Admin receives known_hosts
-- **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** it includes a volume mount `{{ instance_dir }}/secrets/ipc_known_hosts:/run/secrets/ipc_known_hosts:ro`
-
 #### Scenario: No top-level secrets block
 - **WHEN** the `compose.yml` template source is inspected
 - **THEN** it does NOT contain a top-level `secrets:` block
 
-### Requirement: Admin SSH Client Configuration
-The admin container SHALL connect to core via SSH with host key pinning and public key authentication. The admin container SHALL have `openssh-client` installed.
+### Requirement: IPC Client Credential Ownership
 
-#### Scenario: Admin connects with strict host key checking
-- **WHEN** the admin SSH client invocation is inspected
-- **THEN** it includes `-o StrictHostKeyChecking=yes` and `-o UserKnownHostsFile=/run/secrets/ipc_known_hosts`
+The orchestrator SHALL materialize `ipc_ssh_key` and `ipc_known_hosts` as **dev-owned** files (uid matches the current operator running the `sandbox` CLI) with mode `0600` and **no extended ACL entries**. This SHALL be achieved by **excluding** these two files from `cli.main.RO_FILE_RECIPES` so that the consumer-uid-0-chown helper-cp recipe does NOT touch them. The host's ssh client (invoked by `sandbox attach`) reads these files directly via `-i <inst>/secrets/ipc_ssh_key` and `-o UserKnownHostsFile=<inst>/secrets/ipc_known_hosts`.
 
-#### Scenario: Admin authenticates with private key
-- **WHEN** the admin SSH client invocation is inspected
-- **THEN** it includes `-i /run/secrets/ipc_ssh_key`
+Per design.md decision D3 (Fix B'), the **server-side** credentials (`authorized_keys` and `ipc_host_key`) SHALL keep their existing `consumer-uid-0-chown` lifecycle (mode 0600, owned by the host subuid that maps to in-container uid 0 — typically `166535:166535` for `claude-sandbox`); those are read by core's in-container sshd, not by the host.
 
-#### Scenario: Admin requests PTY allocation
-- **WHEN** the admin SSH client invocation is inspected
-- **THEN** it includes `-t` for PTY allocation
+#### Scenario: ipc_ssh_key dev-owned at mode 0600
+- **WHEN** `_phase_credentials` has run and `<inst>/secrets/ipc_ssh_key` is inspected
+- **THEN** the file is owned by the current operator's uid:gid (the dev user invoking the CLI) with mode `0600`
 
-#### Scenario: openssh-client installed in admin image
-- **WHEN** the admin container is inspected
-- **THEN** `ssh -V` returns an OpenSSH version string
+#### Scenario: ipc_known_hosts dev-owned at mode 0600
+- **WHEN** `_phase_credentials` has run and `<inst>/secrets/ipc_known_hosts` is inspected
+- **THEN** the file is owned by the current operator's uid:gid with mode `0600`
 
-### Requirement: Warmup Prompt via SSH SendEnv
-The admin container's warmup flow SHALL use SSH `SendEnv` to transport the warmup prompt to core, eliminating shell interpolation boundaries.
+#### Scenario: No extended ACL entries on client-side credentials
+- **WHEN** `getfacl <inst>/secrets/ipc_ssh_key` and `getfacl <inst>/secrets/ipc_known_hosts` are inspected
+- **THEN** neither file has any named-user or named-group ACL entries beyond the standard POSIX `user::rw-`, `group::---`, `other::---` triple
 
-#### Scenario: Warmup prompt transported via SSH environment
-- **WHEN** `SANDBOX_WARMUP_PROMPT` is set and the admin `.zshrc` warmup block executes
-- **THEN** the SSH command includes `-o SendEnv=SANDBOX_WARMUP_PROMPT`
+#### Scenario: ipc_ssh_key excluded from RO_FILE_RECIPES
+- **WHEN** `cli.main.RO_FILE_RECIPES` is inspected
+- **THEN** it does NOT contain an entry whose source basename is `ipc_ssh_key`
 
-#### Scenario: Warmup invokes interactive claude session
-- **WHEN** the warmup SSH command is inspected
-- **THEN** the remote command is `claude --dangerously-skip-permissions "$SANDBOX_WARMUP_PROMPT"` (interactive mode, not `claude -p` one-shot mode)
+#### Scenario: ipc_known_hosts excluded from RO_FILE_RECIPES
+- **WHEN** `cli.main.RO_FILE_RECIPES` is inspected
+- **THEN** it does NOT contain an entry whose source basename is `ipc_known_hosts`
 
-#### Scenario: Warmup variable unset after use
-- **WHEN** the warmup SSH session completes
-- **THEN** `unset SANDBOX_WARMUP_PROMPT` is executed in the admin shell
+#### Scenario: Server-side credentials retain consumer-uid-0-chown recipe
+- **WHEN** `cli.main.RO_FILE_RECIPES` is inspected
+- **THEN** it still contains entries for `authorized_keys` and `ipc_host_key`, both targeting the consumer's uid 0 mapping with mode 0600
 
 ### Requirement: Core Dockerfile USER for Non-Root sshd
 The core container Dockerfile SHALL set `USER ${USERNAME}` for the final stage entrypoint. Non-root sshd (euid ≠ 0) skips privilege separation entirely — no `chroot()`, no `setuid()`, no `setgid()`. This eliminates the need for `CAP_SYS_CHROOT`, `CAP_SETUID`, and `CAP_SETGID`.

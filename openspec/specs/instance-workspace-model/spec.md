@@ -18,7 +18,7 @@ The system SHALL distinguish between **instances** (sandbox units owning a compo
 
 ### Requirement: Workspace Name Validation
 
-Workspace names SHALL match the regex `[a-z0-9_-]+`, MUST NOT start with `-` or `_`, MUST be ≤32 characters, MUST be non-empty, and MUST NOT match any reserved name in the set `{_backups, default, all, none, system}` plus the seven subnet names (`isolated`, `core_proxy`, `dns`, `admin`, `admin_proxy`, `egress`, `ipc`). Workspace names SHALL be unique within their containing instance.
+Workspace names SHALL match the regex `[a-z0-9_-]+`, MUST NOT start with `-` or `_`, MUST be ≤32 characters, MUST be non-empty, and MUST NOT match any reserved name in the set `{_backups, default, all, none, system}` plus the five subnet names (`isolated`, `core_proxy`, `dns`, `egress`, `ipc`). Workspace names SHALL be unique within their containing instance.
 
 #### Scenario: Valid workspace name accepted
 - **WHEN** a workspace name `main`, `backend-api`, or `scratch_2` is supplied

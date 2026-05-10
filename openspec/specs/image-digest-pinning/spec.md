@@ -59,15 +59,11 @@ The system SHALL use `IMAGE_REGISTRY[key].pinned` values in `build_jinja_context
 - **THEN** it does NOT contain `IMAGE_DIGESTS["coredns"]`, `IMAGE_DIGESTS["squid"]`, or `IMAGE_DIGESTS["dnsdist"]`
 
 ### Requirement: User-Configurable Image Digest Defaults
-The system SHALL use `IMAGE_REGISTRY[key].pinned` values as Pydantic field defaults for user-configurable images (`CoreConfig.base_image`, `AdminConfig.base_image`, `DbPostgresConfig.image`). Users MAY override these in `sandbox.toml`.
+The system SHALL use `IMAGE_REGISTRY[key].pinned` values as Pydantic field defaults for user-configurable images (`CoreConfig.base_image`, `DbPostgresConfig.image`). Users MAY override these in `sandbox.toml`.
 
 #### Scenario: Core base image default is digest-pinned
 - **WHEN** `CoreConfig` is instantiated without an explicit `base_image`
 - **THEN** `base_image` defaults to `IMAGE_REGISTRY["wolfi_base"].pinned`
-
-#### Scenario: Admin base image default is digest-pinned
-- **WHEN** `AdminConfig` is instantiated without an explicit `base_image`
-- **THEN** `base_image` defaults to `IMAGE_REGISTRY["debian_trixie"].pinned`
 
 #### Scenario: Postgres image default is digest-pinned
 - **WHEN** `DbPostgresConfig` is instantiated without an explicit `image`
@@ -78,7 +74,7 @@ The system SHALL use `IMAGE_REGISTRY[key].pinned` values as Pydantic field defau
 - **THEN** the Pydantic model accepts the mutable tag without validation error (backward compatible)
 
 #### Scenario: Legacy IMAGE_DIGESTS accessor absent from Pydantic defaults
-- **WHEN** the `CoreConfig`, `AdminConfig`, and `DbPostgresConfig` source is inspected
+- **WHEN** the `CoreConfig` and `DbPostgresConfig` source is inspected
 - **THEN** default values use `IMAGE_REGISTRY["..."].pinned`, not `IMAGE_DIGESTS["..."]`
 
 ### Requirement: Postgres Template Image Templatization

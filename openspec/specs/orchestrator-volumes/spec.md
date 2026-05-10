@@ -4,11 +4,11 @@ This specification governs the absolute filesystem boundary constraints separati
 ## Requirements
 ### Requirement: Multi-Workspace Bind Mount Layout
 
-The compose template SHALL emit one read-write bind mount per workspace, sourced from `<workspace.path>` and targeting `/workspaces/<workspace-name>:rw` on each agent service (core and admin). The bind-mount loop iterates `[workspaces]` (sorted by name lexicographically) for render determinism. The legacy single `/workspace` mount SHALL NOT be present.
+The compose template SHALL emit one read-write bind mount per workspace, sourced from `<workspace.path>` and targeting `/workspaces/<workspace-name>:rw` on the core service. The bind-mount loop iterates `[workspaces]` (sorted by name lexicographically) for render determinism. The legacy single `/workspace` mount SHALL NOT be present. The admin service SHALL NOT receive any workspace bind mount (admin is a stdio↔TCP bridge with no workspace-touching role; see the `admin-reframe` design D1).
 
-#### Scenario: One bind mount per workspace per service
+#### Scenario: One bind mount per workspace on core only
 - **WHEN** the compose template is rendered for an instance with N workspaces
-- **THEN** core and admin services each contain exactly N bind-mount entries of the form `<workspace.path>:/workspaces/<workspace-name>:rw`
+- **THEN** the core service contains exactly N bind-mount entries of the form `<workspace.path>:/workspaces/<workspace-name>:rw`; the admin service contains zero workspace bind mounts
 
 #### Scenario: Render determinism via lexicographic sort
 - **WHEN** the same instance's compose template is rendered twice
@@ -62,15 +62,17 @@ The system SHALL govern the `dev`/`<host_unprivileged_user>` filesystem boundary
 | Mount class | Lifecycle | Mechanism |
 | --- | --- | --- |
 | Instance root, `docker/` (recursive), `config/` (dir-level traverse), `secrets/` (dir-level traverse), `.sandbox.env` | granted-at-start, revoked-at-stop | named-acl |
-| Helper-recipe parents `cache/core`, `cache/admin`, `log/` (per `Helper-Recipe Parent ACL Grants`) | granted-at-start, revoked-at-stop | named-acl (`u:<host_user>:rwx` effective + matching default ACL) |
+| Helper-recipe parents `cache/core`, `log/` (per `Helper-Recipe Parent ACL Grants`) | granted-at-start, revoked-at-stop | named-acl (`u:<host_user>:rwx` effective + matching default ACL) |
 | Ancestor traverse `--x` chain (above the instance dir AND each workspace path, walking up to the ownership boundary; deduplicated at execution) | granted-once, persistent | named-acl |
-| Cache/log dir leaves (per the four-leaf `Cache/Log Leaf Inventory`) | applied-on-every-start, idempotent, never-revoked | subuid-chown + parent default ACL `u:dev:rwx` |
-| Ro single-files (Corefile, dnsdist conf, all 5 proxy files, core/admin dotfiles, sshd_config) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0640) |
-| Secrets (authorized_keys, ipc_*) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0600) |
+| Cache/log dir leaves (per the two-leaf `Cache/Log Leaf Inventory`) | applied-on-every-start, idempotent, never-revoked | subuid-chown + parent default ACL `u:dev:rwx` |
+| Ro single-files (Corefile, dnsdist conf, all 5 proxy files, core dotfiles, sshd_config) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0640) |
+| Server-side IPC secrets (`authorized_keys`, `ipc_host_key`) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0600) |
 | Executable-script entrypoints (per `Executable-Script File Recipes`; current entry: `docker/core/entrypoint.sh`) | applied-on-every-start, idempotent, never-revoked | consumer-uid-0-chown (mode 0500 owner-only) |
 | **Each workspace's** named ACL on its `path` (effective AND default-ACL named entries) | granted-at-start, revoked-at-stop | named-acl |
 | **Each workspace's** shared-group state on its `path` (chgrp, chmod 2770+setgid, persistent default ACL portion `u::rwx,g::rwx,o::---,m::rwx,u:dev:rwx`) | granted-once, persistent | shared-group |
 | `_backups/` tree (lazy-created on first backup, dev-owned mode 0700) | none | none (excluded from ACL/recipe planning per "_backups Tree Excluded" requirement) |
+
+The IPC SSH client-side credentials (`ipc_ssh_key`, `ipc_known_hosts`) are NOT in any consumer-uid recipe row above: they are dev-owned mode 0600 by hydration and read directly by the host's ssh client (per `admin-reframe` design D3 — Fix B'). They participate in no helper-cp recipe, no `consumer-uid-0-chown` mechanism, and no `RO_FILE_RECIPES` enumeration.
 
 A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace is the load-bearing example: its named ACL is granted-at-start/revoked-at-stop, while its group/mode/persistent-default-ACL is granted-once/persistent.
 
@@ -88,11 +90,11 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
 
 #### Scenario: Named-ACL grants — helper-recipe parents — applied at start
 - **WHEN** `sandbox start <inst>` reaches `_phase_acl_grant`
-- **THEN** for EACH helper-recipe parent in `("cache/core", "cache/admin", "log")`: `setfacl -m u:<host_user>:rwx <parent>` is applied (effective) AND a matching default ACL `u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx` is applied so children created inside inherit a daemon-rwx named entry
+- **THEN** for EACH helper-recipe parent in `("cache/core", "log")`: `setfacl -m u:<host_user>:rwx <parent>` is applied (effective) AND a matching default ACL `u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx` is applied so children created inside inherit a daemon-rwx named entry
 
 #### Scenario: Cache/log subuid-chown recipe — applied every start
 - **WHEN** `sandbox start` reaches the cache/log helper-recipe phase (`_phase_helper_mkdir_chown_cache_log`, after `_phase_acl_grant`)
-- **THEN** for each cache/log leaf in the `Cache/Log Leaf Inventory` (the four-leaf set including log/core and log/admin): the parent dir's default ACL is augmented (via `setfacl -d -m u::rwx,g::---,o::---,m::rwx,u:dev:rwx <parent>`) so dev retains rwx on agent-created files (additive over the Phase-`_phase_acl_grant` default ACL set on the same parent — named entries from both calls accumulate; base entries from the helper phase win on overlap); `helper_mkdir_chown_dirs` runs to ensure the leaf exists and is owned by `host_id_for_in_container(1000, host_user):host_gid_for_in_container(1000, host_user)`. Operation is idempotent: re-running on existing-correct state is a no-op.
+- **THEN** for each cache/log leaf in the `Cache/Log Leaf Inventory` (the two-leaf set `cache/core/.claude` and `log/core`): the parent dir's default ACL is augmented (via `setfacl -d -m u::rwx,g::---,o::---,m::rwx,u:dev:rwx <parent>`) so dev retains rwx on agent-created files (additive over the Phase-`_phase_acl_grant` default ACL set on the same parent — named entries from both calls accumulate; base entries from the helper phase win on overlap); `helper_mkdir_chown_dirs` runs to ensure the leaf exists and is owned by `host_id_for_in_container(1000, host_user):host_gid_for_in_container(1000, host_user)`. Operation is idempotent: re-running on existing-correct state is a no-op.
 
 #### Scenario: Cache/log subuid-chown — never revoked on stop
 - **WHEN** `sandbox stop` executes
@@ -112,10 +114,10 @@ A single mount may carry multiple (lifecycle, mechanism) pairs. Each workspace i
   | `config/dnsdist/dnsdist.conf` | 953 | 0640 |
   | `config/proxy/{squid.conf,allowed_domains.txt,read_only_domains.txt,ERR_SANDBOX_403,.htpasswd}` | 13 | 0640 |
   | `config/core/{.bashrc,.npmrc,.gitconfig,CLAUDE.md,sshd_config}` | 1000 | 0640 |
-  | `config/admin/{.zshrc,.tmux.conf,.gitconfig,gitmux.conf,starship.toml}` | 1000 | 0640 |
   | `secrets/{authorized_keys,ipc_host_key}` | 1000 | 0600 |
-  | `secrets/{ipc_known_hosts,ipc_ssh_key}` | 1000 | 0600 |
   | `docker/core/entrypoint.sh` (executable-script kind, per `Executable-Script File Recipes`) | 1000 | 0500 |
+
+  The IPC client-side files `secrets/ipc_ssh_key` and `secrets/ipc_known_hosts` are NOT in this table: they remain dev-owned mode 0600 (hydration default) for the host's ssh client to read directly (per `admin-reframe` design D3).
 
 #### Scenario: Ro single-files on-disk gid matches consumer's host subgid
 - **WHEN** any file in the consumer-uid-0-chown recipe table has been chowned by `helper_chown_files`
@@ -261,12 +263,14 @@ versions has been retired; the runtime grant MUST NOT carry it.
 
 The grant plan SHALL emit a per-helper-cp-parent dir-level `rwx`
 entry for each `config/<subdir>` listed in `RO_FILE_RECIPES`
-(`config/coredns`, `config/dnsdist`, `config/proxy`, `config/core`,
-`config/admin`). This is BUG-B for config/ — provisioning write on
-the parent dir, required so the helper-cp bind mount of
-`config/<subdir>` is mountable read-write into the helper container.
-Parallel to the existing `docker/core` and `secrets/` dir-level rwx
-grants.
+(`config/coredns`, `config/dnsdist`, `config/proxy`, `config/core`).
+This is BUG-B for config/ — provisioning write on the parent dir,
+required so the helper-cp bind mount of `config/<subdir>` is mountable
+read-write into the helper container. Parallel to the existing
+`docker/core` and `secrets/` dir-level rwx grants. Post `admin-reframe`,
+`config/admin` is no longer present (admin has no in-container config);
+the per-helper-cp-parent set is `{config/coredns, config/dnsdist,
+config/proxy, config/core}`.
 
 #### Scenario: Grant plan consumed by execution
 - **WHEN** `_phase_acl_grant` runs
@@ -290,7 +294,7 @@ grants.
 
 #### Scenario: per-helper-cp-parent dir-level rwx grants present
 - **WHEN** `_acl_grant_plan` is queried with a populated instance dir
-- **THEN** the plan contains a `setfacl -m u:<host_user>:rwx <parent>` entry for each of `config/coredns`, `config/dnsdist`, `config/proxy`, `config/core`, `config/admin`; each entry is dir-level (NOT recursive) AND is parallel to the existing dir-level rwx entries on `docker/core` and `secrets/`
+- **THEN** the plan contains a `setfacl -m u:<host_user>:rwx <parent>` entry for each of `config/coredns`, `config/dnsdist`, `config/proxy`, `config/core`; each entry is dir-level (NOT recursive) AND is parallel to the existing dir-level rwx entries on `docker/core` and `secrets/`. `config/admin` is NOT in this set (post `admin-reframe`, admin has no `config/admin` directory).
 
 ### Requirement: Fault-Isolated ACL Revocation
 The system SHALL execute each ACL revocation independently with `check=False`. Failures SHALL be collected and reported as warnings. All targets SHALL be attempted regardless of individual failures.
@@ -407,8 +411,8 @@ The system SHALL enforce separation between the immutable tooling plane (the pac
 - **THEN** the backup tree is written exclusively under `<sandbox_ai_home()>/workspaces/_backups/<inst>/<ws>/<ts>/`, which is dev-owned with mode 0700 and no ACL state; this plane is distinct from both the instance plane and the live workspace plane
 
 #### Scenario: Shell History Isolation via Directory Mount
-- **WHEN** the admin and core containers are started
-- **THEN** the bind mounts for shell history are at the **directory** level (`<sandbox_ai_home()>/instances/<inst>/log/admin/` and `<sandbox_ai_home()>/instances/<inst>/log/core/`), and the `HISTFILE` environment variable inside each container points to a specific path within that mounted directory
+- **WHEN** the core container is started
+- **THEN** the bind mount for shell history is at the **directory** level (`<sandbox_ai_home()>/instances/<inst>/log/core/`), and the `HISTFILE` environment variable inside the core container points to a specific path within that mounted directory. Admin has no shell-history bind mount post `admin-reframe` (admin runs only `/fwd` from a `FROM scratch` rootfs and has no shell).
 
 #### Scenario: SSH Credentials in Secrets Directory
 - **WHEN** the hydration pipeline runs
@@ -438,47 +442,33 @@ The system SHALL support volume removal on explicit operator request, scoped str
 - **THEN** no service contains a volume mount referencing `/sock`
 
 ### Requirement: Custom Config Override Bind Mounts
-The rendered `compose.yml` SHALL include read-only bind mounts provisioning the custom config override directories inside each container. Without these mounts, the override hooks in `.bashrc`, `.gitconfig`, `.zshrc`, and `.tmux.conf` would silently no-op.
+The rendered `compose.yml` SHALL include a read-only bind mount provisioning the custom config override directory inside the core container. Without this mount, the override hooks in `.bashrc` and `.gitconfig` would silently no-op. Admin has no custom-config bind mount post `admin-reframe` (admin runs only `/fwd` from a `FROM scratch` rootfs; there is no in-container directory tree to override).
 
 #### Scenario: Core custom config mount
 - **WHEN** the rendered `compose.yml` is inspected for the core service
 - **THEN** it contains a volume entry `{{ instance_dir }}/custom/config/core:{{ custom_config_core }}:ro`
 
-#### Scenario: Admin custom config mount
+#### Scenario: Admin has no custom config mount
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** it contains a volume entry `{{ instance_dir }}/custom/config/admin:{{ custom_config_admin }}:ro`
-
-### Requirement: Tmux Resurrect State Bind Mount
-
-The rendered `compose.yml` SHALL include a read-write bind mount for the tmux resurrect session state directory in the admin container, sourced from the `cache/admin/tmux_resurrect` instance subdirectory. This relocates the plugin state from the agent-writable workspace.
-
-The bind-mount source path (`{{ instance_dir }}/cache/admin/tmux_resurrect`) is the **host-side** location. The corresponding **in-container** target path is provided by `hydration-pipeline`'s Jinja context value `tmux_resurrect_dir` (typically `/home/human/.sandbox/tmux_resurrect`); the two paths are different sides of the same mount and are deliberately decoupled — host-side layout is governed by this spec, in-container layout by the consumer's home-directory convention.
-
-#### Scenario: Tmux resurrect mount in admin service
-- **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** it contains a volume entry `{{ instance_dir }}/cache/admin/tmux_resurrect:{{ tmux_resurrect_dir }}:rw`
+- **THEN** it contains NO volume entry sourced from `{{ instance_dir }}/custom/config/admin`; admin's `volumes:` section is empty
 
 ### Requirement: Container-Namespaced Cache Directory
 
-The `cache/` subtree under each instance dir SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`). The tmux resurrect cache directory SHALL be at `cache/admin/tmux_resurrect` (not `cache/tmux_resurrect`). Paths are relative to the instance dir at `<sandbox_ai_home()>/instances/<inst>/`.
+The `cache/` subtree under each instance dir SHALL follow a container-namespaced convention. The Claude Code cache directory SHALL be at `cache/core/.claude` (not `cache/.claude`). Paths are relative to the instance dir at `<sandbox_ai_home()>/instances/<inst>/`.
 
-The cache subtree splits between scaffold-created parents and helper-recipe-created leaves per the "Scaffold-vs-Helper Boundary" requirement: `core.scaffold.INSTANCE_SUBDIRS` includes `cache/core` and `cache/admin` (parent dirs) but NOT the leaves `cache/core/.claude` and `cache/admin/tmux_resurrect`. The leaves are created by `_phase_helper_mkdir_chown_cache_log` on first start (per the "Cache/Log Leaf Inventory" requirement).
+The cache subtree splits between scaffold-created parents and helper-recipe-created leaves per the "Scaffold-vs-Helper Boundary" requirement: `core.scaffold.INSTANCE_SUBDIRS` includes `cache/core` (parent dir) but NOT the leaf `cache/core/.claude`. The leaf is created by `_phase_helper_mkdir_chown_cache_log` on first start (per the "Cache/Log Leaf Inventory" requirement). Post `admin-reframe`, `cache/admin` is no longer in `INSTANCE_SUBDIRS` and the previous `cache/admin/tmux_resurrect` leaf is gone (admin has no tmux).
 
-#### Scenario: Scaffold creates namespaced cache parents only
+#### Scenario: Scaffold creates namespaced cache parent only
 - **WHEN** `sandbox init` runs `core.scaffold.create_instance_dirs()`
-- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/core/` and `<sandbox_ai_home()>/instances/<inst>/cache/admin/` are created (mode `0775` dev:dev) but the leaves `cache/core/.claude` and `cache/admin/tmux_resurrect` are NOT created at scaffold time
+- **THEN** `<sandbox_ai_home()>/instances/<inst>/cache/core/` is created (mode `0775` dev:dev) but the leaf `cache/core/.claude` is NOT created at scaffold time. `cache/admin/` is NOT created (admin has no cache).
 
-#### Scenario: Helper recipe creates namespaced cache leaves on first start
+#### Scenario: Helper recipe creates namespaced cache leaf on first start
 - **WHEN** `_phase_helper_mkdir_chown_cache_log` runs for the first time on a freshly-init'd instance
-- **THEN** the helper container creates `cache/core/.claude` and `cache/admin/tmux_resurrect` as in-container root and chowns each to the consumer's host subuid; the on-disk paths exist post-phase
+- **THEN** the helper container creates `cache/core/.claude` as in-container root and chowns it to the consumer's host subuid; the on-disk path exists post-phase
 
 #### Scenario: Compose mount references namespaced cache path
 - **WHEN** the rendered `compose.yml` is inspected for the core service
 - **THEN** the `.claude` directory mount references `{{ instance_dir }}/cache/core/.claude` (not `{{ instance_dir }}/cache/.claude`)
-
-#### Scenario: Compose mount references namespaced tmux path
-- **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** the tmux resurrect mount references `{{ instance_dir }}/cache/admin/tmux_resurrect` (not `{{ instance_dir }}/cache/tmux_resurrect`)
 
 ### Requirement: Cache/Log Leaf Inventory
 
@@ -489,31 +479,34 @@ The inventory:
 | Leaf path (relative to `<sandbox_ai_home()>/instances/<inst>/`) | Container service consuming the mount |
 | --- | --- |
 | `cache/core/.claude` | core (Claude Code agent cache) |
-| `cache/admin/tmux_resurrect` | admin (tmux session resurrect state) |
 | `log/core` | core (agent log output) |
-| `log/admin` | admin (admin shell log output) |
 
-All four leaves are owned end-to-end by the helper-recipe (per the
-`Scaffold-vs-Helper Boundary` requirement); none of them appear in
-`core.scaffold.INSTANCE_SUBDIRS`. The log leaves were added to the
-helper-recipe-owned set in cluster
-`orchestrator-volumes-scaffold-helper-acl-completeness` after the
-empirical descent (Finding 8.A) demonstrated the same userns-EPERM
-trap that motivated the original cache-leaf exclusion.
+Both leaves are owned end-to-end by the helper-recipe (per the
+`Scaffold-vs-Helper Boundary` requirement); neither appears in
+`core.scaffold.INSTANCE_SUBDIRS`. The previous four-leaf set
+(`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`,
+`log/admin`) collapses to this two-leaf set post `admin-reframe`:
+admin no longer runs tmux or any shell, so `cache/admin/tmux_resurrect`
+and `log/admin` have neither producer nor consumer and are removed
+from the inventory.
 
 The inventory's authoritative *runtime* source is the bind-mount inventory rendered in `compose.yml`; this spec enumeration is documentary. If the runtime inventory ever diverges from this enumeration, the spec is updated in the same change that adds or removes a leaf in `compose.yml` / its templates.
 
-#### Scenario: Inventory enumerates exactly the four cache/log leaves
+#### Scenario: Inventory enumerates exactly the two cache/log leaves
 - **WHEN** the inventory is consulted by `_phase_helper_mkdir_chown_cache_log`, `_acl_grant_plan`, `_acl_revoke_plan`, or any doctor check
-- **THEN** the consulted set is exactly `{cache/core/.claude, cache/admin/tmux_resurrect, log/core, log/admin}`; no consumer constructs a different list inline
+- **THEN** the consulted set is exactly `{cache/core/.claude, log/core}`; no consumer constructs a different list inline
 
 #### Scenario: Other specs reference inventory by name
 - **WHEN** `cli-start` or `cli-stop` or any cross-referencing spec describes behavior over the cache/log leaves
-- **THEN** the spec text refers to "the cache/log leaves per `orchestrator-volumes`'s 'Cache/Log Leaf Inventory' requirement" rather than re-enumerating the four paths inline
+- **THEN** the spec text refers to "the cache/log leaves per `orchestrator-volumes`'s 'Cache/Log Leaf Inventory' requirement" rather than re-enumerating the paths inline
 
-#### Scenario: All four leaves are helper-recipe-owned end-to-end
+#### Scenario: Both leaves are helper-recipe-owned end-to-end
 - **WHEN** `core.scaffold.INSTANCE_SUBDIRS` is inspected
-- **THEN** none of the four leaves (`cache/core/.claude`, `cache/admin/tmux_resurrect`, `log/core`, `log/admin`) appears in the list; their parents (`cache/core`, `cache/admin`, `log`) are present so the helper recipe creates the leaves on first start as in-container root and chowns them to the consumer subuid
+- **THEN** neither of the two leaves (`cache/core/.claude`, `log/core`) appears in the list; their parents (`cache/core`, `log`) are present so the helper recipe creates the leaves on first start as in-container root and chowns them to the consumer subuid
+
+#### Scenario: Admin cache and log leaves absent from inventory
+- **WHEN** the inventory is enumerated
+- **THEN** `cache/admin/tmux_resurrect` and `log/admin` are NOT in the inventory; the corresponding parent directories `cache/admin/` and `log/admin/` are NOT created by `core.scaffold.create_instance_dirs()` (they are absent from `INSTANCE_SUBDIRS`)
 
 ### Requirement: Scaffold-vs-Helper Boundary
 
@@ -521,15 +514,14 @@ Directories subject to a helper-recipe `subuid-chown` or `consumer-uid-0-chown` 
 
 The rationale is enforceable by kernel rule: `CAP_CHOWN` in a user namespace authorizes `chown` only when the file's current owner uid is mapped in the userns. `sandbox init` runs as the dev user (host uid `1000`), which is unmapped in the helper container's userns; a scaffold-pre-created leaf would be permanently unreachable to the helper recipe.
 
-The boundary applies to ALL four leaves in the `Cache/Log Leaf
-Inventory` (the original two cache leaves and the two log leaves added
-by cluster `orchestrator-volumes-scaffold-helper-acl-completeness`).
-Any future helper-recipe leaf added to the inventory is similarly
-excluded from `INSTANCE_SUBDIRS`.
+The boundary applies to ALL leaves in the `Cache/Log Leaf Inventory`
+(post `admin-reframe`: `cache/core/.claude` and `log/core`). Any future
+helper-recipe leaf added to the inventory is similarly excluded from
+`INSTANCE_SUBDIRS`.
 
 #### Scenario: INSTANCE_SUBDIRS excludes helper-recipe-owned leaves
 - **WHEN** `core.scaffold.INSTANCE_SUBDIRS` is inspected
-- **THEN** the list contains `cache/core` and `cache/admin` (parents) but NOT `cache/core/.claude` or `cache/admin/tmux_resurrect` (helper-owned cache leaves); the list also EXCLUDES `log/core` and `log/admin` (helper-owned log leaves added per the extended `Cache/Log Leaf Inventory`)
+- **THEN** the list contains `cache/core` (parent) but NOT `cache/core/.claude` (helper-owned cache leaf); the list also EXCLUDES `log/core` (helper-owned log leaf). The list does NOT contain `cache/admin`, `cache/admin/tmux_resurrect`, `log/admin`, or `config/admin` (admin has no scaffold-side directories post `admin-reframe`).
 
 #### Scenario: Helper recipe creates the leaf on first start
 - **WHEN** `_phase_helper_mkdir_chown_cache_log` runs against a freshly-init'd instance whose cache/log leaves do not yet exist on disk
@@ -552,15 +544,20 @@ The following files in `templates/config/proxy/` SHALL be absent from the toolin
 
 ### Requirement: Helper-Recipe Parent ACL Grants
 
-The `_acl_grant_plan` function SHALL emit a named-ACL grant `setfacl -m u:<host_unprivileged_user>:rwx` plus a matching default ACL on each helper-recipe parent directory under the instance dir. The helper-recipe parents are `cache/core`, `cache/admin`, and `log/` (the parents of the four leaves enumerated in the `Cache/Log Leaf Inventory` requirement). Without these grants the helper-mkdir+chown phase cannot create leaves inside the parents (the daemon's userns has the host dev uid unmapped, so DAC for files owned by host dev resolves only to "other" perms `r-x`, blocking `mkdir`).
+The `_acl_grant_plan` function SHALL emit a named-ACL grant `setfacl -m u:<host_unprivileged_user>:rwx` plus a matching default ACL on each helper-recipe parent directory under the instance dir. The helper-recipe parents are `cache/core` and `log/` (the parents of the two leaves enumerated in the `Cache/Log Leaf Inventory` requirement). Without these grants the helper-mkdir+chown phase cannot create leaves inside the parents (the daemon's userns has the host dev uid unmapped, so DAC for files owned by host dev resolves only to "other" perms `r-x`, blocking `mkdir`).
+
+Post `admin-reframe`, `cache/admin` is no longer a helper-recipe parent
+(admin has no helper-recipe-owned cache leaf); the parent set has
+collapsed from `("cache/core", "cache/admin", "log")` to `("cache/core",
+"log")`.
 
 #### Scenario: Helper-recipe parent receives effective named-ACL grant
 - **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
-- **THEN** the returned plan contains an entry whose command is `setfacl -m u:<host_user>:rwx <instance_dir>/<parent>` for EACH parent in `("cache/core", "cache/admin", "log")`, with description `"helper-recipe parent: <abs-path>"`
+- **THEN** the returned plan contains an entry whose command is `setfacl -m u:<host_user>:rwx <instance_dir>/<parent>` for EACH parent in `("cache/core", "log")`, with description `"helper-recipe parent: <abs-path>"`. No entry exists for `cache/admin` (admin has no cache leaf post `admin-reframe`).
 
 #### Scenario: Helper-recipe parent receives matching default ACL
 - **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
-- **THEN** for EACH parent in `("cache/core", "cache/admin", "log")` the plan contains a default-ACL grant `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx <instance_dir>/<parent>` with description `"helper-recipe parent default ACL: <abs-path>"`
+- **THEN** for EACH parent in `("cache/core", "log")` the plan contains a default-ACL grant `setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:<host_user>:rwx <instance_dir>/<parent>` with description `"helper-recipe parent default ACL: <abs-path>"`
 
 ### Requirement: Executable-Script File Recipes
 
@@ -577,10 +574,6 @@ The `cli.main` module SHALL define `EXEC_FILE_RECIPES` as a sibling-table consta
 #### Scenario: Entrypoint absent from RO_FILE_RECIPES
 - **WHEN** `cli.main.RO_FILE_RECIPES` is inspected
 - **THEN** no entry has parent `docker/core` and files containing `entrypoint.sh`; the entrypoint kind belongs to `EXEC_FILE_RECIPES` exclusively
-
-#### Scenario: Admin Dockerfile uses owner-only mode
-- **WHEN** `templates/docker/admin/Dockerfile.admin.debian` is inspected
-- **THEN** the entrypoint is installed with `COPY --chown=human:human entrypoint.sh /usr/local/bin/entrypoint.sh` followed by `chmod 0500 /usr/local/bin/entrypoint.sh` (owner-only r-x)
 
 ### Requirement: Workspace Shared-Group Phase Ordering
 
@@ -605,10 +598,10 @@ The two grants together replace the prior recursive `rwX` widening on `secrets/`
 
 The BUG-A inventory is divided into two structurally distinct categories:
 
-1. **Helper-cp source files** (`RO_FILE_RECIPES` + `EXEC_FILE_RECIPES` + `RW_FILE_RECIPES`): the helper-cp recipe transfers ownership of these to a consumer subuid via a `cp /p/<f> /tmp/<f> + unlink /p/<f> + cp /tmp/<f> /p/<f> + chmod /p/<f> + chown /p/<f>` sequence inside a daemon-managed bind mount (per `helper-container`'s `helper_chown_files Primitive Contract`). The daemon reads the source path through the bind mount during the first `cp` step. The three sub-tables differ only in mode and bind-mount direction (RO/EXEC are `:ro` mounts; RW is `:rw` mounts) — the BUG-A mechanism is identical for all three.
+1. **Helper-cp source files** (`RO_FILE_RECIPES` + `EXEC_FILE_RECIPES` + `RW_FILE_RECIPES`): the helper-cp recipe transfers ownership of these to a consumer subuid via a `cp /p/<f> /tmp/<f> + unlink /p/<f> + cp /tmp/<f> /p/<f> + chmod /p/<f> + chown /p/<f>` sequence inside a daemon-managed bind mount (per `helper-container`'s `helper_chown_files Primitive Contract`). The daemon reads the source path through the bind mount during the first `cp` step. The three sub-tables differ only in mode and bind-mount direction (RO/EXEC are `:ro` mounts; RW is `:rw` mounts) — the BUG-A mechanism is identical for all three. Post `admin-reframe`, the IPC SSH client-side files (`secrets/ipc_ssh_key`, `secrets/ipc_known_hosts`) are NOT in `RO_FILE_RECIPES`: they are dev-owned mode 0600 by hydration and read directly by the host's ssh client, never participating in the helper-cp pipeline (per design D3, Fix B'). The cascade through `_phase_stop_unlink_consumer_files` (which iterates `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES`) is automatic — those two files are not unlinked at stop and therefore survive stop/start cycles as dev-owned 0600.
 2. **Daemon-read direct files** (`DAEMON_READ_DIRECT_FILES`): NEVER transferred via helper-cp. The daemon reads these in place forever in two distinct sub-categories:
    - **Compose YAML inputs**: `compose.yml` plus the conditional compose extras (`db-postgres.yml`, `mcp-firecrawl.yml`), consumed via `docker compose -f <path>` invocations whose canonical path-set is built by `_build_compose_files` (used by `_phase_compose_up`, `_compose_down`, and the `docker compose ps` callsites in `_container_status` / `_render_status_detailed`).
-   - **Build context**: every Dockerfile rendered or copied by `core.hydration.render_templates` (`Dockerfile.core`, `Dockerfile.admin`, `Dockerfile.coredns`, conditional `Dockerfile.mcp-firecrawl`) plus every local-COPY source those Dockerfiles reference (currently only `admin/entrypoint.sh` — `core/entrypoint.sh` is covered by `EXEC_FILE_RECIPES` because it is bind-mounted at runtime, distinct from the admin entrypoint which is COPY'd into the image during build). Read by buildkit (running as the daemon) during `docker compose up --build`.
+   - **Build context**: every Dockerfile rendered or copied by `core.hydration.render_templates` (`Dockerfile.core`, `Dockerfile.admin`, `Dockerfile.coredns`, conditional `Dockerfile.mcp-firecrawl`) plus every local-COPY source those Dockerfiles reference. Post `admin-reframe`, `Dockerfile.admin` is a multi-stage build (golang:1.23-alpine builder → scratch) whose only local-COPY source is `templates/docker/admin/fwd.go`; the previous `admin/entrypoint.sh` local-COPY no longer exists. `core/entrypoint.sh` remains covered by `EXEC_FILE_RECIPES` (bind-mounted at runtime). Read by buildkit (running as the daemon) during `docker compose up --build`.
 
    If a new compose `--file` path is added to `_build_compose_files`, OR a new local-COPY source is added to any Dockerfile, OR a new Dockerfile is rendered by hydrate, `DAEMON_READ_DIRECT_FILES` MUST be extended in lockstep so the post-hydrate setfacl pass covers it. The empirical symptom of missing any build-context entry is `target <svc>: failed to solve: the Dockerfile cannot be empty` (buildkit treats an unreadable Dockerfile as empty).
 
@@ -654,7 +647,7 @@ The `secrets/` directory additionally carries a default ACL `setfacl -d -m u::rw
 - **WHEN** `cli.main.DAEMON_READ_DIRECT_FILES` is inspected
 - **THEN** it contains TWO sub-categories:
   1. **Compose YAML inputs** matching `_build_compose_files`'s enumeration: `("docker", ("compose.yml",))` (always present) AND `("docker/extras", ("db-postgres.yml", "mcp-firecrawl.yml"))` (conditional extras).
-  2. **Build context** matching the Dockerfiles + their local-COPY sources rendered by `core.hydration.render_templates`: `("docker/core", ("Dockerfile.core",))`, `("docker/admin", ("Dockerfile.admin", "entrypoint.sh"))`, `("docker/coredns", ("Dockerfile.coredns",))`, AND `("docker/extras", ("Dockerfile.mcp-firecrawl",))` (conditional). The `admin/entrypoint.sh` entry is in this category — NOT `EXEC_FILE_RECIPES` — because it is COPY'd into the admin image during build (baked into the image, never bind-mounted at runtime). The `core/entrypoint.sh` is covered by the helper-cp branch via `EXEC_FILE_RECIPES` (bind-mounted at runtime). Empirical symptom of missing any build-context entry: `target <svc>: failed to solve: the Dockerfile cannot be empty` (buildkit treats an unreadable Dockerfile as empty).
+  2. **Build context** matching the Dockerfiles + their local-COPY sources rendered by `core.hydration.render_templates`: `("docker/core", ("Dockerfile.core",))`, `("docker/admin", ("Dockerfile.admin", "fwd.go"))`, `("docker/coredns", ("Dockerfile.coredns",))`, AND `("docker/extras", ("Dockerfile.mcp-firecrawl",))` (conditional). Post `admin-reframe`, the admin entry's local-COPY source is `fwd.go` (a Go source compiled by the multi-stage builder), NOT `entrypoint.sh` (deleted with the rest of `templates/config/admin/`). The `core/entrypoint.sh` is covered by the helper-cp branch via `EXEC_FILE_RECIPES` (bind-mounted at runtime). Empirical symptom of missing any build-context entry: `target <svc>: failed to solve: the Dockerfile cannot be empty` (buildkit treats an unreadable Dockerfile as empty).
 
 #### Scenario: RW recipe sources are covered by the post-hydrate setfacl pass
 
@@ -670,6 +663,11 @@ The `secrets/` directory additionally carries a default ACL `setfacl -d -m u::rw
 
 - **WHEN** the per-file `setfacl -m u:<host_user>:r <path>` fails (e.g., EPERM, ENOENT) for any post-hydrate target
 - **THEN** `_grant_post_hydrate_daemon_read` raises `SandboxExecutionError` mentioning the path and "grant daemon read on post-hydrate target"; the failure is not silently swallowed
+
+#### Scenario: IPC client-side credentials are absent from RO_FILE_RECIPES
+
+- **WHEN** `cli.main.RO_FILE_RECIPES` is inspected post `admin-reframe`
+- **THEN** no entry has parent `secrets` and files containing `ipc_ssh_key` or `ipc_known_hosts`; those two files participate in no helper-cp recipe and remain dev-owned mode 0600 (Fix B'). The server-side IPC credentials (`authorized_keys`, `ipc_host_key`) remain in `RO_FILE_RECIPES` with consumer uid 1000 mode 0600 (unchanged).
 
 ### Requirement: Helper Recipe Phases (unlink+cp+chmod+chown discipline)
 
@@ -707,16 +705,23 @@ cannot chmod a foreign-owned file even with ``cap_dac_override``).
 
 The system SHALL grant a default ACL ``u:<host_user>:r`` on each
 helper-cp parent directory listed in ``RO_FILE_RECIPES`` (``config/coredns``,
-``config/dnsdist``, ``config/proxy``, ``config/core``, ``config/admin``,
-``secrets``). The default ACL is defense-in-depth for write paths that
+``config/dnsdist``, ``config/proxy``, ``config/core``, ``secrets``).
+The default ACL is defense-in-depth for write paths that
 do not trigger ``write_restricted``'s ``fchmod`` mask reset; it
 complements (does not replace) the post-hydrate setfacl pass owned by
 the ``Helper-CP Source Files Daemon-Readable Pre-Recipe`` requirement.
 
+Post `admin-reframe`, ``config/admin`` is no longer a helper-cp parent
+(admin has no in-container config files); the parent set has collapsed
+from ``{config/coredns, config/dnsdist, config/proxy, config/core,
+config/admin, secrets}`` to ``{config/coredns, config/dnsdist,
+config/proxy, config/core, secrets}``.
+
 #### Scenario: default-ACL grant present per helper-cp parent
 - **WHEN** ``_acl_grant_plan`` is queried with a populated instance dir
 - **THEN** for each helper-cp parent dir listed above, the plan
-  contains a ``setfacl -d -m u:<host_user>:r <parent>`` entry
+  contains a ``setfacl -d -m u:<host_user>:r <parent>`` entry; no entry
+  exists for ``config/admin``
 
 #### Scenario: default-ACL is defense-in-depth, not load-bearing
 - **WHEN** a file is created inside a helper-cp parent via the
@@ -851,9 +856,10 @@ default named-entry.
 
 #### Scenario: Revoke plan does not touch helper-cp parents
 - **WHEN** `_acl_revoke_plan` is called and the helper-cp parent set
-  `{config/coredns, config/dnsdist, config/proxy, config/core,
-  config/admin, secrets}` is enumerated
-- **THEN** no recursive entry's target equals any of those paths
+  `{config/coredns, config/dnsdist, config/proxy, config/core, secrets}`
+  is enumerated
+- **THEN** no recursive entry's target equals any of those paths.
+  `config/admin` is NOT in the helper-cp parent set post `admin-reframe`.
 
 #### Scenario: Revoke plan excludes ancestor traverse
 - **WHEN** `_acl_revoke_plan` is called
@@ -983,4 +989,32 @@ This requirement is ADDED rather than MODIFIED on an existing requirement (such 
 - **AND** the corresponding `_phase_*` function iterates the same plan (or a re-invocation that returns equivalent items) and calls `.execute(ctx)` on each item
 - **THEN** the inputs read by `.describe()` (target path, command argv, description string) are the same fields read by `.execute(ctx)` — there is no parallel reconstruction of the argv inside `.execute()`
 - **AND** the `cli-start` capability's "Live and dry-run derive compose up from a shared plan helper" requirement is satisfied structurally: the `ComposeUpAction.inner_command` field is the single carrier consumed by both code paths
+
+### Requirement: Bind-Mount Inode Stability
+
+Any code path that mutates a host file referenced by a Docker bind mount (`-v <host_path>:<container_path>`) SHALL preserve the file's inode across the mutation. Docker resolves bind-mount sources to inodes at container-start (not at access-time); inode-changing replacement leaves the container's mount pointing at the original (now possibly unlinked) inode until the container restarts.
+
+The following operations are PERMITTED on bind-mounted host files:
+
+- `open(<path>, O_TRUNC)` followed by writing the new content (preserves the inode; the write lands on the same on-disk inode the bind mount was resolved against).
+- `cp <src> <dst>` over an existing destination (semantically equivalent to truncate-then-write).
+
+The following operations are FORBIDDEN on bind-mounted host files because they replace the inode:
+
+- `rm <path>` followed by re-creating `<path>` (creates a new inode).
+- `os.replace(<src>, <dst>)`, `mv`, `install` (atomic-rename operations that produce a new inode).
+
+The rule applies to every host file that appears as a bind-mount source in any `compose.yml` `volumes:` entry, including secrets (`<inst>/secrets/*`), config files (`<inst>/config/*`), and entrypoint scripts.
+
+#### Scenario: Truncate-in-place is permitted
+- **WHEN** code in `cli/main.py` or `core/scaffold.py` mutates a bind-mounted host file (e.g., `secrets/ipc_ssh_key`, `config/core/.bashrc`)
+- **THEN** the mutation uses `open(<path>, O_TRUNC | O_WRONLY)` (or `cp <src> <dst>` over an existing destination); the on-disk inode number reported by `os.stat(<path>).st_ino` is unchanged across the mutation
+
+#### Scenario: Inode-changing operations are absent from bind-mount mutators
+- **WHEN** the code paths that mutate any file in `RO_FILE_RECIPES`, `EXEC_FILE_RECIPES`, `RW_FILE_RECIPES`, or `DAEMON_READ_DIRECT_FILES` are inspected
+- **THEN** those code paths contain NO `os.replace`, NO `os.rename`, NO `shutil.move`, NO `subprocess` invocation of `mv` or `install`, AND NO `os.unlink` followed by re-creation of the same path
+
+#### Scenario: Container retains a fresh view after permitted mutation
+- **WHEN** a bind-mounted file is mutated via `open(O_TRUNC)` while the consumer container is running
+- **THEN** the consumer container reads the new content on its next open of the bind-mount target (the mount points at the same inode, whose contents have been replaced in place)
 

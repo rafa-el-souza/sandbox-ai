@@ -31,7 +31,7 @@ class TestCheckImageDigests:
         with patch("subprocess.run", return_value=mock_result):
             result = check_image_digests("sandbox", None)
             assert result.status == "pass"
-            assert "7" in result.detail
+            assert "8" in result.detail
 
     def test_stale_digest_detected_fail(self) -> None:
         from core.doctor import check_image_digests

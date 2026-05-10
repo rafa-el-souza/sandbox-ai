@@ -1,4 +1,4 @@
-"""Tests for the IPAM /24-septuple allocator with slot reuse and overflow detection."""
+"""Tests for the IPAM /24-quintuple allocator with slot reuse and overflow detection."""
 
 import json
 from pathlib import Path
@@ -60,10 +60,10 @@ class TestIPAMLedger:
         ledger.release("nonexistent")
 
     def test_overflow_detection(self, isolated_sandbox_ai_home: Path) -> None:
-        """IPAMExhaustedError raised when all 5705 slots consumed."""
+        """IPAMExhaustedError raised when all 7987 slots consumed."""
         ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {f"p{i}": i for i in range(5705)}
+        data = {f"p{i}": i for i in range(7987)}
         ledger_path.write_text(json.dumps(data))
 
         ledger = IPAMLedger()
@@ -95,78 +95,68 @@ class TestIPAMLedger:
 
 
 class TestMaxSlots:
-    """Wave 4: MAX_SLOTS updated for 7-subnet topology."""
+    """MAX_SLOTS updated for 5-subnet topology."""
 
     def test_max_slots_value(self) -> None:
-        """MAX_SLOTS is 5705 for the 7-subnet-per-instance model."""
-        assert MAX_SLOTS == 5705
+        """MAX_SLOTS is 7987 for the 5-subnet-per-instance model."""
+        assert MAX_SLOTS == 7987
 
 
 class TestDeriveSubnets:
-    """Wave 4: derive_subnets returns 7-tuple (isolated, core_proxy, dns, admin, admin_proxy, egress, ipc)."""
+    """derive_subnets returns 5-tuple (isolated, core_proxy, dns, egress, ipc)."""
 
     def test_base_index_zero(self) -> None:
-        """base_index=0 → g=0: seven consecutive /24 subnets starting at 10.100.0.0."""
-        isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(0)
+        """base_index=0 → g=0: five consecutive /24 subnets starting at 10.100.0.0."""
+        isolated, core_proxy, dns, egress, ipc = derive_subnets(0)
         assert isolated == "10.100.0.0/24"
         assert core_proxy == "10.100.1.0/24"
         assert dns == "10.100.2.0/24"
-        assert admin == "10.100.3.0/24"
-        assert admin_proxy == "10.100.4.0/24"
-        assert egress == "10.100.5.0/24"
-        assert ipc == "10.100.6.0/24"
+        assert egress == "10.100.3.0/24"
+        assert ipc == "10.100.4.0/24"
 
     def test_base_index_one(self) -> None:
-        """base_index=1 → g=7: seven consecutive /24 subnets starting at 10.100.7.0."""
-        isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(1)
-        assert isolated == "10.100.7.0/24"
-        assert core_proxy == "10.100.8.0/24"
-        assert dns == "10.100.9.0/24"
-        assert admin == "10.100.10.0/24"
-        assert admin_proxy == "10.100.11.0/24"
-        assert egress == "10.100.12.0/24"
-        assert ipc == "10.100.13.0/24"
+        """base_index=1 → g=5: five consecutive /24 subnets starting at 10.100.5.0."""
+        isolated, core_proxy, dns, egress, ipc = derive_subnets(1)
+        assert isolated == "10.100.5.0/24"
+        assert core_proxy == "10.100.6.0/24"
+        assert dns == "10.100.7.0/24"
+        assert egress == "10.100.8.0/24"
+        assert ipc == "10.100.9.0/24"
 
     def test_base_index_max_valid(self) -> None:
-        """base_index=5704 → g=39928: verify correct subnet derivation."""
-        g = 5704 * 7
+        """base_index=7986 → g=39930: verify correct subnet derivation."""
+        g = 7986 * 5
         expected = []
-        for offset in range(7):
+        for offset in range(5):
             gn = g + offset
             expected.append(f"10.{100 + gn // 256}.{gn % 256}.0/24")
 
-        result = derive_subnets(5704)
-        assert len(result) == 7
-        for i in range(7):
+        result = derive_subnets(7986)
+        assert len(result) == 5
+        for i in range(5):
             assert result[i] == expected[i]
 
     def test_overflow_raises_value_error(self) -> None:
-        """derive_subnets(5705) raises ValueError — bounds check guard."""
+        """derive_subnets(7987) raises ValueError — bounds check guard."""
         with pytest.raises(ValueError):
-            derive_subnets(5705)
+            derive_subnets(7987)
 
 
 class TestDeriveStaticIPs:
-    """Wave 4: derive_static_ips returns expanded 19-key dict across 7 subnets."""
+    """derive_static_ips returns the post-admin-reframe key set across 5 subnets."""
 
     def test_output_keys(self) -> None:
-        """derive_static_ips returns all 19 required IP keys."""
+        """derive_static_ips returns the expected IP keys."""
         ips = derive_static_ips(0)
         expected_keys = {
             "agent_isolated_ip",
             "agent_proxy_ip",
             "proxy_core_ip",
-            "proxy_admin_ip",
             "dnsdist_isolated_ip",
             "dnsdist_dns_ip",
-            "dnsdist_admin_ip",
             "coredns_dns_ip",
-            "coredns_admin_ip",
             "coredns_egress_ip",
-            "admin_admin_ip",
-            "admin_proxy_ip",
             "db_postgres_ip",
-            "db_postgres_admin_ip",
             "mcp_firecrawl_proxy_ip",
             "firecrawl_dns_ip",
             "core_ipc_ip",
@@ -176,12 +166,22 @@ class TestDeriveStaticIPs:
         assert set(ips.keys()) == expected_keys
 
     def test_legacy_keys_absent(self) -> None:
-        """Legacy keys from the 3-subnet model are removed."""
+        """Legacy keys from prior models are removed."""
         ips = derive_static_ips(0)
         assert "dns_sidecar_ip" not in ips
         assert "admin_isolated_ip" not in ips
         assert "mcp_firecrawl_isolated_ip" not in ips
         assert "proxy_ip" not in ips
+
+    def test_admin_reframe_keys_absent(self) -> None:
+        """Admin-network keys removed by the admin-reframe network shrink."""
+        ips = derive_static_ips(0)
+        assert "coredns_admin_ip" not in ips
+        assert "dnsdist_admin_ip" not in ips
+        assert "proxy_admin_ip" not in ips
+        assert "admin_admin_ip" not in ips
+        assert "admin_proxy_ip" not in ips
+        assert "db_postgres_admin_ip" not in ips
 
     def test_specific_values_at_index_zero(self) -> None:
         """Verify critical IP values at base_index=0 per spec scenarios."""
@@ -194,7 +194,7 @@ class TestDeriveStaticIPs:
         assert ips["dnsdist_isolated_ip"] == "10.100.0.56"
 
     def test_all_values_at_index_zero(self) -> None:
-        """Verify all 19 IP values at base_index=0."""
+        """Verify all IP values at base_index=0 across the quintuple."""
         ips = derive_static_ips(0)
         # isolated_net = 10.100.0.0/24
         assert ips["agent_isolated_ip"] == "10.100.0.3"
@@ -209,19 +209,11 @@ class TestDeriveStaticIPs:
         assert ips["coredns_dns_ip"] == "10.100.2.53"
         assert ips["dnsdist_dns_ip"] == "10.100.2.56"
         assert ips["firecrawl_dns_ip"] == "10.100.2.55"
-        # admin_net = 10.100.3.0/24
-        assert ips["admin_admin_ip"] == "10.100.3.2"
-        assert ips["dnsdist_admin_ip"] == "10.100.3.56"
-        assert ips["coredns_admin_ip"] == "10.100.3.53"
-        assert ips["db_postgres_admin_ip"] == "10.100.3.54"
-        # admin_proxy_net = 10.100.4.0/24
-        assert ips["admin_proxy_ip"] == "10.100.4.2"
-        assert ips["proxy_admin_ip"] == "10.100.4.254"
-        # egress_net = 10.100.5.0/24
-        assert ips["coredns_egress_ip"] == "10.100.5.53"
-        # ipc_net = 10.100.6.0/24
-        assert ips["core_ipc_ip"] == "10.100.6.3"
-        assert ips["admin_ipc_ip"] == "10.100.6.2"
+        # egress_net = 10.100.3.0/24
+        assert ips["coredns_egress_ip"] == "10.100.3.53"
+        # ipc_net = 10.100.4.0/24
+        assert ips["core_ipc_ip"] == "10.100.4.3"
+        assert ips["admin_ipc_ip"] == "10.100.4.2"
 
     def test_deterministic_across_calls(self) -> None:
         """Same base_index produces identical IPs across calls."""
@@ -229,9 +221,15 @@ class TestDeriveStaticIPs:
         ips2 = derive_static_ips(0)
         assert ips1 == ips2
 
+    def test_deterministic_across_restarts(self) -> None:
+        """Same base_index → same IP set on successive (simulated) restarts."""
+        # Multiple base_index values, each must be stable
+        for bi in (0, 1, 42, 7986):
+            assert derive_static_ips(bi) == derive_static_ips(bi)
+
 
 class TestPeekNextSlot:
-    """Task 11.1: peek_next_slot read-only slot preview."""
+    """peek_next_slot read-only slot preview."""
 
     def test_peek_new_project_returns_lowest_slot(self, ledger: IPAMLedger) -> None:
         """New instance: returns (0, False) — lowest available, not existing."""
@@ -264,10 +262,10 @@ class TestPeekNextSlot:
         assert is_existing is False
 
     def test_peek_exhausted_raises(self, isolated_sandbox_ai_home: Path) -> None:
-        """IPAMExhaustedError raised when all 5705 slots consumed."""
+        """IPAMExhaustedError raised when all 7987 slots consumed."""
         ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {f"p{i}": i for i in range(5705)}
+        data = {f"p{i}": i for i in range(7987)}
         ledger_path.write_text(json.dumps(data))
         ledger = IPAMLedger()
         with pytest.raises(IPAMExhaustedError):
@@ -275,18 +273,17 @@ class TestPeekNextSlot:
 
 
 class TestIpamEndToEnd:
-    """W4: End-to-end IPAM integration — subnet count, IP count,
-    IP-within-subnet containment."""
+    """End-to-end IPAM integration — subnet count, IP count, IP-within-subnet containment."""
 
-    def test_derive_subnets_returns_7(self) -> None:
-        """derive_subnets(0) produces exactly 7 subnets."""
+    def test_derive_subnets_returns_5(self) -> None:
+        """derive_subnets(0) produces exactly 5 subnets."""
         subnets = derive_subnets(0)
-        assert len(subnets) == 7
+        assert len(subnets) == 5
 
-    def test_derive_static_ips_returns_19(self) -> None:
-        """derive_static_ips(0) produces exactly 19 IP keys."""
+    def test_derive_static_ips_returns_13(self) -> None:
+        """derive_static_ips(0) produces exactly 13 IP keys."""
         ips = derive_static_ips(0)
-        assert len(ips) == 19
+        assert len(ips) == 13
 
     def test_all_ips_within_expected_subnets(self) -> None:
         """Every static IP falls within its expected subnet."""
@@ -297,8 +294,6 @@ class TestIpamEndToEnd:
             isolated,
             core_proxy,
             dns,
-            admin,
-            admin_proxy,
             egress,
             ipc,
         ) = subnets
@@ -309,17 +304,11 @@ class TestIpamEndToEnd:
             "agent_isolated_ip": isolated,
             "agent_proxy_ip": core_proxy,
             "proxy_core_ip": core_proxy,
-            "proxy_admin_ip": admin_proxy,
             "dnsdist_isolated_ip": isolated,
             "dnsdist_dns_ip": dns,
-            "dnsdist_admin_ip": admin,
             "coredns_dns_ip": dns,
-            "coredns_admin_ip": admin,
             "coredns_egress_ip": egress,
-            "admin_admin_ip": admin,
-            "admin_proxy_ip": admin_proxy,
             "db_postgres_ip": isolated,
-            "db_postgres_admin_ip": admin,
             "mcp_firecrawl_proxy_ip": core_proxy,
             "firecrawl_dns_ip": dns,
             "core_ipc_ip": ipc,
@@ -333,27 +322,27 @@ class TestIpamEndToEnd:
             assert addr in net, f"{ip_key}={ips[ip_key]} not in {subnet_cidr}"
 
 
-class TestIpam7Tuple:
-    """1.T RED: IPAM 7-tuple migration — septuple allocation with ipc_net."""
+class TestIpamQuintuple:
+    """Admin-reframe IPAM quintuple: 5-subnet allocation with ipc_net."""
 
-    def test_derive_subnets_returns_7_tuple(self) -> None:
-        """derive_subnets(0) returns a 7-tuple with ipc_net as the 7th element."""
+    def test_derive_subnets_returns_5_tuple(self) -> None:
+        """derive_subnets(0) returns a 5-tuple with ipc_net as the 5th element."""
         result = derive_subnets(0)
-        assert len(result) == 7
-        assert result[6] == "10.100.6.0/24"
+        assert len(result) == 5
+        assert result[4] == "10.100.4.0/24"
 
-    def test_derive_subnets_boundary_slot_5704(self) -> None:
-        """derive_subnets(5704) returns 7 valid subnets without raising."""
-        result = derive_subnets(5704)
-        assert len(result) == 7
+    def test_derive_subnets_boundary_slot_7986(self) -> None:
+        """derive_subnets(7986) returns 5 valid subnets without raising."""
+        result = derive_subnets(7986)
+        assert len(result) == 5
         # Verify each subnet is a valid /24
         for subnet in result:
             assert subnet.endswith(".0/24")
 
-    def test_derive_subnets_slot_5705_raises(self) -> None:
-        """derive_subnets(5705) raises ValueError — exceeds new MAX_SLOTS."""
+    def test_derive_subnets_slot_7987_raises(self) -> None:
+        """derive_subnets(7987) raises ValueError — exceeds new MAX_SLOTS."""
         with pytest.raises(ValueError):
-            derive_subnets(5705)
+            derive_subnets(7987)
 
     def test_derive_static_ips_includes_ipc_keys(self) -> None:
         """derive_static_ips(0) includes core_ipc_ip, admin_ipc_ip, firecrawl_isolated_ip."""
@@ -361,6 +350,11 @@ class TestIpam7Tuple:
         assert "core_ipc_ip" in ips
         assert "admin_ipc_ip" in ips
         assert "firecrawl_isolated_ip" in ips
+
+    def test_admin_ipc_ip_value(self) -> None:
+        """admin_ipc_ip is <ipc_base>.2 per spec scenario."""
+        ips = derive_static_ips(0)
+        assert ips["admin_ipc_ip"] == "10.100.4.2"
 
     def test_derive_static_ips_excludes_legacy_keys(self) -> None:
         """derive_static_ips must not contain removed legacy keys."""
@@ -370,15 +364,15 @@ class TestIpam7Tuple:
         assert "mcp_firecrawl_isolated_ip" not in ips
         assert "proxy_ip" not in ips
 
-    def test_max_slots_is_5705(self) -> None:
-        """MAX_SLOTS is 5705 for the 7-subnet-per-instance model."""
-        assert MAX_SLOTS == 5705
+    def test_max_slots_is_7987(self) -> None:
+        """MAX_SLOTS is 7987 for the 5-subnet-per-instance model."""
+        assert MAX_SLOTS == 7987
 
-    def test_ipam_exhausted_at_5705(self, isolated_sandbox_ai_home: Path) -> None:
-        """IPAMExhaustedError raised when all 5705 slots consumed."""
+    def test_ipam_exhausted_at_7987(self, isolated_sandbox_ai_home: Path) -> None:
+        """IPAMExhaustedError raised when all 7987 slots consumed."""
         ledger_path = _ledger_file(isolated_sandbox_ai_home)
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {f"p{i}": i for i in range(5705)}
+        data = {f"p{i}": i for i in range(7987)}
         ledger_path.write_text(json.dumps(data))
 
         ledger = IPAMLedger()

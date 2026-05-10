@@ -11,10 +11,12 @@ import fcntl
 import json as _json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pydantic
@@ -49,6 +51,7 @@ from core.host_config import (
     host_gid_for_in_container,
     host_id_for_in_container,
     machinectl_cmd,
+    pipe_cmd,
     sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
@@ -124,12 +127,10 @@ _RESERVED_NAMES: frozenset[str] = frozenset(
         "all",
         "none",
         "system",
-        # Subnet names from the IPAM septuple
+        # Subnet names from the IPAM quintuple
         "isolated",
         "core_proxy",
         "dns",
-        "admin",
-        "admin_proxy",
         "egress",
         "ipc",
     }
@@ -416,6 +417,14 @@ def _phase_credentials(
     match the new mode's group bits and would mask out any inherited
     named entry; setfacl-as-owner post-write recomputes the mask so the
     daemon's ``u:<host_user>:r`` named entry stays effective.
+
+    Also runs an idempotent ownership reconciliation pass over the IPC
+    client-side secrets (``ipc_ssh_key``, ``ipc_known_hosts``) per
+    `admin-reframe` Fix B': those two files are dev-owned mode 0600 and
+    read directly by the host's ssh client. Pre-Fix-B' instances may
+    have them owned by a consumer subuid (legacy ``RO_FILE_RECIPES``
+    pattern); the reconciliation brings them back to the operator's
+    ownership on every start. No-op when already correct.
     """
     password = generate_credential()
     hashed = hash_proxy_password(password)
@@ -426,6 +435,21 @@ def _phase_credentials(
     # SSH keypairs for IPC transport
     generate_ssh_keypair(instance_dir, "auth")
     generate_ssh_keypair(instance_dir, "host", core_ipc_ip=core_ipc_ip)
+
+    # Fix B' ownership reconciliation (admin-reframe design D3).
+    # MUST NOT use os.replace/mv/install on these files — bind-mount
+    # inode stability per orchestrator-volumes. We mutate the existing
+    # inode in place via os.chown / os.chmod so any active bind-mount
+    # source-fd remains valid across reconciliations.
+    operator_uid = os.geteuid()
+    operator_gid = os.getegid()
+    for fname in ("ipc_ssh_key", "ipc_known_hosts"):
+        path = os.path.join(instance_dir, "secrets", fname)
+        st = os.stat(path)
+        if st.st_uid != operator_uid:
+            os.chown(path, operator_uid, operator_gid)
+        if (st.st_mode & 0o7777) != 0o600:
+            os.chmod(path, 0o600)
 
     return password
 
@@ -689,7 +713,7 @@ def _acl_grant_plan(
     # the on-host parent still needs the daemon write bit so the bind
     # mount itself is mountable read-write into the helper. Without this
     # the helper's unlink EPERMs.
-    for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core", "config/admin"):
+    for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core"):
         helper_cp_parent = os.path.join(instance_dir, rel)
         plan.append(
             _g(
@@ -756,7 +780,6 @@ def _acl_grant_plan(
         "config/dnsdist",
         "config/proxy",
         "config/core",
-        "config/admin",
         "secrets",
     ):
         parent_dir = os.path.join(instance_dir, rel)
@@ -772,7 +795,7 @@ def _acl_grant_plan(
 
     # Helper-recipe parents (cache/log) — grant <daemon>:rwx + matching default
     # so the helper-mkdir+chown phase can create leaves inside them.
-    for rel in ("cache/core", "cache/admin", "log"):
+    for rel in ("cache/core", "log"):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
             _g(
@@ -1070,17 +1093,19 @@ RO_FILE_RECIPES: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
         1000,
         0o640,
     ),
-    # Human (admin) dotfiles + statusline assets
-    (
-        "config/admin",
-        (".zshrc", ".tmux.conf", ".gitconfig", "gitmux.conf", "starship.toml"),
-        1000,
-        0o640,
-    ),
-    # Secrets — core consumer (agent) — mode 0600
+    # Secrets — core consumer (agent) — mode 0600.
+    #
+    # Fix B' (admin-reframe design D3): the IPC client-side files
+    # ``ipc_ssh_key`` and ``ipc_known_hosts`` are NOT in this table.
+    # They remain dev-owned mode 0600 (hydration default) because the
+    # host's ssh client reads them directly during ``sandbox attach`` —
+    # they never participate in the helper-cp ownership transfer to a
+    # consumer subuid. The cascade through
+    # ``_phase_stop_unlink_consumer_files`` (which iterates this table
+    # plus EXEC_/RW_FILE_RECIPES) is automatic: those two files survive
+    # stop/start cycles as dev-owned 0600 and are reconciled idempotently
+    # by ``_phase_credentials`` on every start.
     ("secrets", ("authorized_keys", "ipc_host_key"), 1000, 0o600),
-    # Secrets — admin consumer (human) — mode 0600
-    ("secrets", ("ipc_known_hosts", "ipc_ssh_key"), 1000, 0o600),
 )
 """Single source of truth (ro config + secrets) for the helper-cp+chown phase and dry-run preview."""
 
@@ -1184,12 +1209,12 @@ DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ``Dockerfile.admin`` (no distro suffix) plus the static
     # ``Dockerfile.coredns`` / ``Dockerfile.mcp-firecrawl`` copies.
     ("docker/core", ("Dockerfile.core",)),
-    # admin/entrypoint.sh is COPY'd by Dockerfile.admin during the build;
-    # it is NOT in ``EXEC_FILE_RECIPES`` (the admin entrypoint is baked
-    # into the image, never bind-mounted at runtime). docker/core's
-    # entrypoint.sh IS in ``EXEC_FILE_RECIPES`` and is therefore covered
-    # by the helper-cp branch of the post-hydrate setfacl pass.
-    ("docker/admin", ("Dockerfile.admin", "entrypoint.sh")),
+    # admin/fwd.go is COPY'd by Dockerfile.admin during the build;
+    # the admin image is a static Go forwarder (no shell entrypoint and
+    # nothing bind-mounted at runtime). docker/core's entrypoint.sh IS in
+    # ``EXEC_FILE_RECIPES`` and is therefore covered by the helper-cp
+    # branch of the post-hydrate setfacl pass.
+    ("docker/admin", ("Dockerfile.admin", "fwd.go")),
     ("docker/coredns", ("Dockerfile.coredns",)),
     # Conditional extras Dockerfile — present iff ``mcp_firecrawl`` is
     # enabled. Skip-if-missing covers the disabled case.
@@ -1207,7 +1232,7 @@ sub-categories:
 2. **Build context**: Dockerfiles + their local-COPY sources, consumed
    by buildkit during ``docker compose up --build``. The current
    inventory is ``Dockerfile.core``, ``Dockerfile.admin`` +
-   ``admin/entrypoint.sh``, ``Dockerfile.coredns``, and the conditional
+   ``admin/fwd.go``, ``Dockerfile.coredns``, and the conditional
    ``Dockerfile.mcp-firecrawl``.
 
 If a future Dockerfile gains a new local-COPY source (anything not
@@ -1218,8 +1243,7 @@ with the template change.
 
 CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cache/core", (".claude",)),
-    ("cache/admin", ("tmux_resurrect",)),
-    ("log", ("core", "admin")),
+    ("log", ("core",)),
 )
 """Per-parent grouping of cache/log leaves consumed by helper-mkdir+chown phase.
 
@@ -1595,38 +1619,95 @@ def _phase_compose_up(
     action.execute(ctx)
 
 
-def _phase_handover(
-    project_name: str,
-    host_user: str,
-    warmup_prompt: str = "",
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
-    cwd_workspace: str | None = None,
-) -> None:
-    """Phase 7: PTY handover — docker exec -it via machinectl.
+def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]:
+    """Build the canonical PTY-handover argv for ``sandbox attach`` / ``sandbox start``.
 
-    ``cwd_workspace`` is the runtime cwd selector: when supplied, ``-w
-    /workspaces/<ws>`` sets the in-container cwd at exec time per cli-attach.
-    ``attach`` always passes a value (resolved per the N=1 default / N>1 list
-    rule). ``start`` intentionally passes ``None`` — cli-start does NOT mandate
-    a runtime cwd, so the admin shell inherits whatever the entrypoint sets.
-    The Dockerfile WORKDIR is intentionally ignored for runtime cwd.
+    The invocation: ``tlog-rec`` wraps a host-side ssh client whose
+    ``ProxyCommand`` uses :func:`pipe_cmd` to cross the privilege boundary
+    via the byte-pipe primitive, then dials ``/fwd`` inside admin's net
+    namespace, which forwards stdio↔TCP to core's sshd on ipc_net. The PTY lives at the host ssh layer; admin
+    is a dumb byte pipe (per `admin-reframe` design D1 — Shape 2). Workspace
+    cwd is set via the ssh remote-command suffix (per design D9), not via
+    ``docker exec -w``.
+
+    The ``ProxyCommand`` uses :func:`pipe_cmd` (polkit-authenticated via
+    ``manage-units``) regardless of the host's ``machinectl_authentication``
+    mode — ``pipe_cmd`` is auth-mode-independent (per design D2). The ssh
+    client itself runs as the operator (dev) with no boundary crossing.
+
+    The ``--file-path`` value is the operator-side ``tlog-rec`` session log
+    path; it lives at ``<sandbox_ai_home()>/sessions/<inst>/<UTC-ts>.log``
+    and is created on demand.
+
+    Args:
+        inst: Instance name (used for the admin container name and the
+            sessions log directory).
+        ws: Workspace name (used for the remote-command ``cd`` target).
+        host_config: Per-host config (used for ``docker_unprivileged_user``).
+
+    Returns:
+        The argv to pass to :func:`subprocess.run` (no shell needed).
     """
-    executor = Executor()
-    exec_args = ["exec"]
-    if warmup_prompt:
-        exec_args.extend(["-e", f"SANDBOX_WARMUP_PROMPT={warmup_prompt}"])
-    if cwd_workspace is not None:
-        exec_args.extend(["-w", f"/workspaces/{cwd_workspace}"])
-    exec_args.extend(["-it", f"{project_name}-admin-1", "zsh"])
+    sbuser = host_config.host.docker_unprivileged_user
+    home = sandbox_ai_home()
+    inst_dir = home / "instances" / inst
+    secrets = inst_dir / "secrets"
 
-    executor.run(
-        [
-            *machinectl_cmd(host_user, auth),
-            "/usr/bin/docker",
-            *exec_args,
-        ],
-        interactive=True,
-    )
+    # Container name uses the compose project name (sanitized-username
+    # prefix), not the bare instance name. Mismatching this produces
+    # ``Error response from daemon: No such container: <inst>-admin-1``
+    # at attach time — verified empirically during admin-reframe smoke.
+    project_name = compose_project_name(inst)
+
+    # Core IPC IP — read-only ledger peek (no allocation; instance is
+    # already started by the time this argv is built). Per cli-attach
+    # spec: attach does not mutate IPAM state.
+    base_index, _existing = IPAMLedger().peek_next_slot(inst)
+    core_ipc_ip = derive_static_ips(base_index)["core_ipc_ip"]
+
+    # Operator-side session log path — host filesystem only, never a
+    # bind mount or instance secrets directory (per cli-attach spec).
+    # Keyed by project_name so concurrent instances under different
+    # operators don't collide on the session log directory.
+    session_log_dir = home / "sessions" / project_name
+    session_log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    session_log = session_log_dir / f"{timestamp}.log"
+
+    # ProxyCommand: pipe_cmd → docker exec -i <admin> /fwd <ip>:9999.
+    # Joined via shlex.join so the value can be passed as a single
+    # ``-o ProxyCommand=...`` token to ssh.
+    proxy_argv = [
+        *pipe_cmd(sbuser),
+        "/usr/bin/docker",
+        "exec",
+        "-i",
+        f"{project_name}-admin-1",
+        "/fwd",
+        f"{core_ipc_ip}:9999",
+    ]
+    proxy_command = shlex.join(proxy_argv)
+
+    return [
+        "tlog-rec",
+        "--writer=file",
+        f"--file-path={session_log}",
+        "--",
+        "ssh",
+        "-i",
+        str(secrets / "ipc_ssh_key"),
+        "-o",
+        f"UserKnownHostsFile={secrets / 'ipc_known_hosts'}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"ProxyCommand={proxy_command}",
+        "-p",
+        "9999",
+        "-t",
+        f"agent@{core_ipc_ip}",
+        f"cd /workspaces/{shlex.quote(ws)} && exec bash -l",
+    ]
 
 
 # ─── Compose down / ACL revoke ──────────────────────────────────────────────
@@ -1748,14 +1829,12 @@ def _dry_run_pipeline(inst: str) -> None:
     ledger = IPAMLedger()
     try:
         slot, is_existing = ledger.peek_next_slot(inst)
-        isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
+        isolated, core_proxy, dns, egress, ipc = derive_subnets(slot)
         status = "existing" if is_existing else "preview — subject to concurrent changes"
         console.print(f"\n  IPAM slot: {slot} ({status})")
         console.print(f"    Isolated:    {isolated}")
         console.print(f"    Core Proxy:  {core_proxy}")
         console.print(f"    DNS:         {dns}")
-        console.print(f"    Admin:       {admin}")
-        console.print(f"    Admin Proxy: {admin_proxy}")
         console.print(f"    Egress:      {egress}")
         console.print(f"    IPC:         {ipc}")
     except IPAMExhaustedError as e:
@@ -1849,9 +1928,26 @@ def _dry_run_pipeline(inst: str) -> None:
     compose_cmd = f"{machinectl_prefix} /bin/bash -c '{compose_action.describe()}'"
     console.print(f"    $ {compose_cmd}", style="dim")
 
-    # Handover
-    handover_cmd = f"{machinectl_prefix} /usr/bin/docker exec -it {project_name}-admin-1 zsh"
-    console.print(f"    $ {handover_cmd}", style="dim")
+    # Handover — admin-reframe D1: tlog-rec → ssh → ProxyCommand → /fwd into core.
+    # The full argv is constructed by `_build_attach_argv` at runtime; the
+    # dry-run preview shows the canonical shape rather than re-deriving it
+    # (the IPAM peek + sessions log mkdir are runtime-only side effects).
+    workspace_names = sorted(config.workspaces.keys())
+    ws_preview = workspace_names[0] if len(workspace_names) == 1 else "<ws>"
+    sbuser = host_user
+    proxy_cmd_preview = shlex.join(
+        [*pipe_cmd(sbuser), "/usr/bin/docker", "exec", "-i", f"{project_name}-admin-1", "/fwd", "<core_ipc_ip>:9999"]
+    )
+    handover_preview = (
+        f"tlog-rec --writer=file --file-path=<sessions>/{project_name}/<UTC>.log -- "
+        f"ssh -i <inst>/secrets/ipc_ssh_key "
+        f"-o UserKnownHostsFile=<inst>/secrets/ipc_known_hosts "
+        f"-o StrictHostKeyChecking=yes "
+        f"-o ProxyCommand={shlex.quote(proxy_cmd_preview)} "
+        f"-p 9999 -t agent@<core_ipc_ip> "
+        f"'cd /workspaces/{ws_preview} && exec bash -l'"
+    )
+    console.print(f"    $ {handover_preview}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
 
@@ -1894,12 +1990,22 @@ def _resolve_host_config() -> tuple[str, MachinectlAuth]:
 
 def _resolve_host_settings() -> HostSettings:
     """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
+    return _resolve_full_host_config().host
+
+
+def _resolve_full_host_config() -> HostConfig:
+    """Resolve the full ``HostConfig`` from per-host ``sandbox-ai.toml``.
+
+    Used by ``sandbox attach`` and ``sandbox start``'s handover path —
+    :func:`_build_attach_argv` consumes the full ``HostConfig`` (it reads
+    ``host.docker_unprivileged_user``); other call sites can keep using
+    :func:`_resolve_host_settings` / :func:`_resolve_host_config`.
+    """
     try:
-        project_config = HostConfig.from_toml()
+        return HostConfig.from_toml()
     except FileNotFoundError as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
-    return project_config.host
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
@@ -2401,8 +2507,26 @@ def start(
         console.print(f"Sandbox '{inst}' started. Attach with: sandbox attach {inst}")
         return
 
-    console.print("→ Handing over to admin shell")
-    _phase_handover(project_name, host_user, config.instance.warmup_prompt, auth)
+    # Default-handover lands in core (not admin) via the canonical
+    # tlog-rec → ssh → ProxyCommand → /fwd path (admin-reframe D1).
+    # When N=1 we default to the single workspace; when N>1 we print
+    # the attach hint and return without handing over (the operator
+    # picks a workspace explicitly via `sandbox attach <inst> <ws>`).
+    workspace_names = sorted(config.workspaces.keys())
+    if len(workspace_names) != 1:
+        console.print(
+            f"Sandbox '{inst}' started. Multiple workspaces — attach with: "
+            f"sandbox attach {inst} <ws> (one of: {', '.join(workspace_names)})."
+        )
+        return
+    ws = workspace_names[0]
+
+    # Re-resolve the full HostConfig for `_build_attach_argv` (the start
+    # command earlier resolved only HostSettings via `_resolve_host_settings`).
+    host_config = _resolve_full_host_config()
+    console.print("→ Handing over to core via ssh-through-admin")
+    completed = subprocess.run(_build_attach_argv(inst, ws, host_config), check=False)
+    raise typer.Exit(code=completed.returncode)
 
 
 @app.command()
@@ -2479,7 +2603,9 @@ def attach(
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
     project_name = compose_project_name(inst)
-    host_user, auth = _resolve_host_config()
+    host_config = _resolve_full_host_config()
+    host_user = host_config.host.docker_unprivileged_user
+    auth = host_config.host.machinectl_authentication
 
     # Workspace selection per cli-attach spec.
     workspace_names = sorted(config.workspaces.keys())
@@ -2505,8 +2631,10 @@ def attach(
         console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
-    # Direct handover — no hydration, no credentials, no locking
-    _phase_handover(project_name, host_user, auth=auth, cwd_workspace=ws)
+    # PTY handover via tlog-rec → ssh → ProxyCommand → /fwd (admin-reframe D1).
+    # No hydration, no credentials, no locking, no IPAM mutation.
+    completed = subprocess.run(_build_attach_argv(inst, ws, host_config), check=False)
+    raise typer.Exit(code=completed.returncode)
 
 
 def _resolve_backup_workspaces_spec(
@@ -2932,7 +3060,7 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
                 ips = derive_static_ips(slot)
                 ip_map = {
                     "core": ips.get("agent_isolated_ip", ""),
-                    "admin": ips.get("admin_admin_ip", ""),
+                    "admin": ips.get("admin_ipc_ip", ""),
                     "coredns": ips.get("coredns_dns_ip", ""),
                     "dnsdist": ips.get("dnsdist_isolated_ip", ""),
                     "db-postgres": ips.get("db_postgres_ip", ""),
@@ -2965,13 +3093,11 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     try:
         slot, is_existing = ledger.peek_next_slot(inst)
         if is_existing:
-            isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(slot)
+            isolated, core_proxy, dns, egress, ipc = derive_subnets(slot)
             console.print(f"\n[bold]IPAM[/bold] slot {slot}")
             console.print(f"  Isolated:    {isolated}")
             console.print(f"  Core Proxy:  {core_proxy}")
             console.print(f"  DNS:         {dns}")
-            console.print(f"  Admin:       {admin}")
-            console.print(f"  Admin Proxy: {admin_proxy}")
             console.print(f"  Egress:      {egress}")
             console.print(f"  IPC:         {ipc}")
     except IPAMExhaustedError:

@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+ARG GOLANG_BASE
+FROM ${GOLANG_BASE} AS build
+WORKDIR /src
+COPY fwd.go /src/fwd.go
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /fwd /src/fwd.go
+
+FROM scratch
+COPY --from=build /fwd /fwd
+USER 65534:65534
+ENTRYPOINT ["/fwd"]

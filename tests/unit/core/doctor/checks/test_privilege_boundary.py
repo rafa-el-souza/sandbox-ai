@@ -1,6 +1,6 @@
 """Tests for core.doctor.checks.privilege_boundary.
 
-Covers the 11 privilege-boundary checks: sudo, machinectl, user_exists,
+Covers the 12 privilege-boundary checks: sudo, machinectl, tlog, user_exists,
 systemd_machined, machinectl_reachable, docker_available, docker_rootless,
 runsc_registered, runsc_runtimeargs, host_uds, compose_project_name_collision.
 """
@@ -13,7 +13,7 @@ from typing import Any
 from unittest.mock import mock_open, patch
 
 
-def test_module_exposes_eleven_check_functions() -> None:
+def test_module_exposes_twelve_check_functions() -> None:
     from core.doctor.checks import privilege_boundary
 
     expected = {
@@ -27,6 +27,7 @@ def test_module_exposes_eleven_check_functions() -> None:
         "check_runsc_runtimeargs",
         "check_sudo",
         "check_systemd_machined",
+        "check_tlog",
         "check_user_exists",
     }
     assert expected.issubset(set(dir(privilege_boundary)))
@@ -75,6 +76,29 @@ class TestSudoAndMachinectlBinaries:
             result = check_machinectl("sandbox", "debian")
             assert result.status == "fail"
             assert result.remediation is not None
+
+
+class TestTlogBinary:
+    def test_check_tlog_present(self) -> None:
+        from core.doctor import check_tlog
+
+        with patch("shutil.which", return_value="/usr/bin/tlog-rec"):
+            result = check_tlog("sandbox", None)
+            assert result.status == "pass"
+            assert result.name == "tlog"
+            assert "/usr/bin/tlog-rec" in result.detail
+
+    def test_check_tlog_absent(self) -> None:
+        from core.doctor import check_tlog
+        from core.doctor.types import _BINARY_PACKAGES
+
+        with patch("shutil.which", return_value=None):
+            result = check_tlog("sandbox", "debian")
+            assert result.status == "fail"
+            assert result.name == "tlog"
+            assert result.detail == "tlog-rec not found on PATH"
+            assert result.remediation is not None
+            assert _BINARY_PACKAGES["tlog"] in result.remediation
 
 
 class TestUserAndSystemdChecks:

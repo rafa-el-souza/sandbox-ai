@@ -120,9 +120,47 @@ def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
     Returns:
         ``["sudo", "machinectl", "shell", "<user>@.host"]`` when auth is SUDO,
         ``["machinectl", "shell", "<user>@.host"]`` when auth is POLKIT.
+
+    Caveat — PTY allocation: ``machinectl shell`` opens a PTY between caller
+    and the spawned command. The PTY's ``onlcr`` line discipline rewrites
+    every ``\\n`` byte in either direction to ``\\r\\n``. **Captured stdout
+    therefore has CRLF line endings**, even when the underlying command
+    emits LF. Callers that capture output (``subprocess.run(...,
+    capture_output=True)``, shell ``$(... | head -1)``, etc.) MUST strip the
+    ``\\r`` (``tr -d '\\r'`` or text-mode decode) before using the value as
+    a filename, IP, hostname, or argv element. Passing a ``<value>\\r``
+    downstream silently fails. For paths that carry binary frames (SSH,
+    gRPC, raw TCP), use :func:`pipe_cmd` instead — it allocates no PTY and
+    preserves bytes verbatim.
     """
     prefix = ["sudo"] if auth == MachinectlAuth.SUDO else []
     return [*prefix, "machinectl", "shell", f"{user}@.host"]
+
+
+def pipe_cmd(user: str) -> list[str]:
+    """Build the byte-pipe primitive for crossing into ``user`` without a PTY.
+
+    Sibling to :func:`machinectl_cmd`. Where ``machinectl_cmd`` allocates a PTY
+    (the right shape for interactive handoffs and helper-container ``exec`` paths
+    that already speak to a real TTY), ``pipe_cmd`` produces a clean stdio pipe
+    suitable for programmatic byte transports — most notably the SSH
+    ``ProxyCommand`` path in ``cli-attach``.
+
+    Returns:
+        ``["systemd-run", "-q", "--pipe", f"--uid={user}"]``.
+
+    Auth-mode independence: unlike :func:`machinectl_cmd`, no ``auth`` argument
+    is accepted. ``systemd-run``'s ``manage-units`` polkit action is the only
+    authorization layer; the per-host ``machinectl_authentication`` setting
+    does not apply.
+
+    PAM-skip trade-off: ``systemd-run`` does NOT invoke PAM, so policies on
+    ``pam_limits.conf`` and similar do not apply to processes started this way.
+    Acceptable for our use case — programmatic SSH-byte transport with a
+    lifetime bounded by a single attach session — where the call site is
+    a fixed, audited orchestrator path rather than a user-typed command.
+    """
+    return ["systemd-run", "-q", "--pipe", f"--uid={user}"]
 
 
 # ─── Subuid / subgid resolvers ──────────────────────────────────────────────

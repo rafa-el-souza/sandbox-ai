@@ -32,6 +32,7 @@ from core.doctor.checks.privilege_boundary import (
     check_runsc_runtimeargs,
     check_sudo,
     check_systemd_machined,
+    check_tlog,
     check_user_exists,
 )
 from core.doctor.checks.repo_integrity import check_state_dir_writable, check_tooling_plane
@@ -88,6 +89,14 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 category="Privilege Boundary",
                 depends_on=[],
                 run=check_machinectl,
+                remediation="",
+            ),
+            Check(
+                id="tlog",
+                name="tlog binary",
+                category="Privilege Boundary",
+                depends_on=[],
+                run=check_tlog,
                 remediation="",
             ),
             Check(

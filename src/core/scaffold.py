@@ -46,7 +46,6 @@ INSTANCE_SUBDIRS = [
     "docker/admin",
     "docker/extras",
     "docker/coredns",
-    "config/admin",
     "config/core",
     "config/coredns",
     "config/dnsdist",
@@ -54,8 +53,6 @@ INSTANCE_SUBDIRS = [
     "log/proxy",
     "log/orchestrator",
     "cache/core",
-    "cache/admin",
-    "custom/config/admin",
     "custom/config/core",
     "secrets",
 ]
@@ -87,7 +84,6 @@ _SANDBOX_TOML_TEMPLATE = """\
 [instance]
 name = "{name}"
 host_uid = "{host_uid}"
-warmup_prompt = ""
 
 {workspaces_section}
 
@@ -100,14 +96,6 @@ base_image = "{core_base_image}"
 base_distro_family = "wolfi"
 git_user = "{git_user}"
 git_email = "{git_email}"
-
-[admin]
-shm_size = "2gb"
-pids_limit = 400
-mem_limit = "8gb"
-cpus = 4.0
-base_image = "{admin_base_image}"
-base_distro_family = "debian"
 
 [runtimes]
 python = true
@@ -206,7 +194,6 @@ def write_sandbox_toml(
         git_user=git_user,
         git_email=git_email,
         core_base_image=IMAGE_REGISTRY["wolfi_base"].pinned,
-        admin_base_image=IMAGE_REGISTRY["debian_trixie"].pinned,
         db_postgres_image=IMAGE_REGISTRY["postgres"].pinned,
     )
     toml_path = os.path.join(instance_dir, "sandbox.toml")

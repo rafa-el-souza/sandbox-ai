@@ -85,11 +85,11 @@ The `start` command SHALL NOT pass its `state.lock` file descriptor into IPAM or
 - **THEN** `IPAMLedger.allocate` acquires `<sandbox_ai_home()>/state/ipam.json.lock`, mutates the ledger, releases the IPAM lock, and returns; the start command continues to subsequent phases without raising `IPAMLockException` or `BlockingIOError`
 
 ### Requirement: IPAM Allocation Before Launch
-The system SHALL allocate seven consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
+The system SHALL allocate five consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
 
 #### Scenario: New instance gets lowest available slot
 - **WHEN** `sandbox start` scaffolds a new instance with no existing IPAM entry
-- **THEN** the lowest available `base_index` (0–5704) is assigned and written to `ipam.json` before any compose command runs
+- **THEN** the lowest available `base_index` (0–7986) is assigned and written to `ipam.json` before any compose command runs
 
 #### Scenario: Existing instance reuses previous slot
 - **WHEN** `sandbox start` is invoked for an instance already present in `ipam.json`
@@ -107,15 +107,17 @@ The system SHALL block launch until all services with defined healthchecks repor
 - **THEN** the CLI emits a service health summary, releases `state.lock`, and exits with a non-zero code
 
 ### Requirement: PTY Handover via machinectl
-The system SHALL hand over the terminal to the admin container via `machinectl shell` + `docker exec -it`, releasing `state.lock` before the exec call. The machinectl invocation SHALL use the configured authentication mode from host config.
+The system SHALL hand over the terminal to **core** (as `agent`) using the same canonical mechanism `cli-attach`'s `PTY Handover Without Re-Hydration` requirement defines: a host-side ssh client wrapped in `tlog-rec`, with a `ProxyCommand` that uses `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) to cross the privilege boundary and exec `/fwd` inside the admin container, forwarding stdio↔TCP to `core_ipc_ip:9999`. The exact command shape is owned by `cli-attach`; this requirement delegates to it. `state.lock` SHALL be released before the handover invocation.
 
-#### Scenario: Terminal handed to admin container (sudo mode)
+The `ProxyCommand` SHALL use `pipe_cmd` (polkit-authenticated) regardless of the `machinectl_authentication` mode configured in host config; the `sudo`/`polkit` setting governs other handover paths via `machinectl_cmd` and does NOT prefix the `ProxyCommand` in either mode.
+
+#### Scenario: Terminal handed to core (sudo mode)
 - **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"sudo"`
-- **THEN** `sudo machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed
+- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin" scenario); the `ProxyCommand` uses `systemd-run -q --pipe --uid=<docker_unprivileged_user> /usr/bin/docker exec -i <inst>-admin-1 /fwd <core_ipc_ip>:9999` with no `sudo` prefix
 
-#### Scenario: Terminal handed to admin container (polkit mode)
+#### Scenario: Terminal handed to core (polkit mode)
 - **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"polkit"`
-- **THEN** `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it <name>-admin-1 zsh` is executed
+- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin" scenario); the invocation is byte-identical to the sudo-mode scenario above because the `ProxyCommand` uses `pipe_cmd` (polkit) regardless of `machinectl_authentication`
 
 ### Requirement: Instance Pre-Flight Checks
 The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `machinectl_authentication` mode from host config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Per-instance file ownership matching for ro single-files (including the four IPC SSH secrets, all proxy ro files, dotfiles, and rendered service configs) SHALL occur during `_phase_helper_cp_chown_ro_files`, after ACL grants and the cache/log helper-recipe phase, via the disposable-helper-container primitive `helper_chown_files` (per the `helper-container` capability).
@@ -228,11 +230,7 @@ The system SHALL display progress for each provisioning phase using Rich formatt
 
 #### Scenario: Handover indication
 - **WHEN** all phases complete and handover begins
-- **THEN** a `→ Handing over to admin shell` line is printed before the PTY exec
-
-#### Scenario: Warmup prompt injected at exec time
-- **WHEN** `sandbox.toml` declares a non-empty `instance.warmup_prompt`
-- **THEN** the `docker exec` call includes `-e SANDBOX_WARMUP_PROMPT="<value>"` and the admin container's `.zshrc` reads this variable on shell init to auto-invoke claude via SSH
+- **THEN** a `→ Handing over to core` line is printed before the handover exec
 
 #### Scenario: IPC setup phase absent
 - **WHEN** `sandbox start` provisioning phases are inspected
@@ -413,7 +411,7 @@ covers callers who never had a TTY.
 
 - **WHEN** `sandbox start --help` is invoked
 - **THEN** the help output lists `--no-handover` with a description
-  noting that it skips the interactive admin-shell handover and
+  noting that it skips the interactive core handover and
   prints the attach hint
 
 ### Requirement: Handover Default Direction
@@ -421,7 +419,8 @@ covers callers who never had a TTY.
 The `sandbox start` command SHALL default to invoking
 `_phase_handover` when stdin is a TTY and `--no-handover` is not
 passed. This preserves the operator-friendly workflow where `sandbox
-start <inst>` drops the operator into the admin shell ready to work.
+start <inst>` drops the operator into an interactive shell on core
+ready to work.
 
 The default direction is recorded normatively so any future flip
 (e.g. opt-in `--handover` flag, or moving the shell-drop to a
@@ -433,7 +432,9 @@ silently shipping under a refactor.
 - **WHEN** an operator runs `sandbox start <inst>` from an
   interactive terminal with no flags
 - **THEN** after all phases succeed, `_phase_handover` is invoked
-  and the operator is dropped into the admin container's zsh
+  and the operator is dropped into core's interactive shell (as
+  `agent`) via the `cli-attach` canonical `tlog-rec → ssh →
+  ProxyCommand → /fwd` invocation
 
 #### Scenario: Spec change required to flip default
 
