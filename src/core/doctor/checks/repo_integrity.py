@@ -13,20 +13,17 @@ from core.host_config import sandbox_ai_home
 # (the alias used to live in ``core.doctor`` pre-refactor).
 _resource_files = files
 
-# 17 unconditional source files in the packaged templates module
+# 14 unconditional source files in the packaged templates module
 _UNCONDITIONAL_FILES: list[str] = [
     "docker/compose.yml",
     "docker/core/entrypoint.sh",
-    "docker/admin/entrypoint.sh",
+    "docker/admin/Dockerfile.admin",
+    "docker/admin/fwd.go",
     "docker/coredns/Dockerfile.coredns",
     "config/coredns/Corefile",
     "config/dnsdist/dnsdist.conf",
     "config/proxy/squid.conf",
     "config/proxy/ERR_SANDBOX_403",
-    "config/admin/.zshrc",
-    "config/admin/.tmux.conf",
-    "config/admin/gitmux.conf",
-    "config/admin/starship.toml",
     "config/core/.bashrc",
     "config/core/.npmrc",
     "config/core/.gitconfig",
@@ -36,7 +33,7 @@ _UNCONDITIONAL_FILES: list[str] = [
 
 
 def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
-    """Check that all 17 unconditional tooling plane files exist."""
+    """Check that all 14 unconditional tooling plane files exist."""
     templates_root = _resource_files("templates")
     missing: list[str] = []
     for rel_path in _UNCONDITIONAL_FILES:
@@ -47,7 +44,7 @@ def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
         return CheckResult(
             status="pass",
             name="tooling plane",
-            detail="All 17 unconditional files present",
+            detail="All 14 unconditional files present",
         )
     return CheckResult(
         status="fail",

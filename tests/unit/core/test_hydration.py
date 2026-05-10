@@ -2855,65 +2855,6 @@ class TestDockerfileUserContext:
         assert npm_idx is not None, "No npm install in branch-claude"
         assert user_switch_idx < npm_idx, "USER ${USERNAME} must appear before npm install"
 
-    def test_admin_user_root_before_entrypoint_copy(self) -> None:
-        """Admin Dockerfile: USER root before COPY entrypoint.sh."""
-        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
-        user_context = "unknown"
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("USER "):
-                user_context = stripped.split()[1]
-            if stripped.startswith("COPY") and "entrypoint.sh" in stripped:
-                assert user_context == "root", f"COPY entrypoint.sh under USER {user_context} (not root)"
-
-    def test_admin_user_unprivileged_before_entrypoint(self) -> None:
-        """Admin Dockerfile: USER ${USERNAME} between chmod and ENTRYPOINT."""
-        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
-        chmod_idx = next(
-            (i for i, line in enumerate(lines) if "chmod" in line and "entrypoint" in line),
-            None,
-        )
-        entrypoint_idx = next(
-            (i for i, line in enumerate(lines) if line.strip().startswith("ENTRYPOINT")),
-            None,
-        )
-        assert chmod_idx is not None, "No chmod entrypoint line"
-        assert entrypoint_idx is not None, "No ENTRYPOINT line"
-        # Find USER ${USERNAME} between chmod and ENTRYPOINT
-        user_between = any(
-            "${USERNAME}" in lines[i] and lines[i].strip().startswith("USER")
-            for i in range(chmod_idx + 1, entrypoint_idx)
-        )
-        assert user_between, "USER ${USERNAME} must appear between chmod and ENTRYPOINT"
-
-    def test_admin_entrypoint_owner_only_mode_and_consumer_owned(self) -> None:
-        """Admin Dockerfile: entrypoint.sh installed at mode 0500 with COPY --chown=human:human.
-
-        Cluster 1 regression for finding 8.L (orchestrator-volumes'
-        "Executable-Script File Recipes" requirement). The consumer is
-        the sole reader/exec; nobody else has any access. A regression
-        to ``a+x`` / ``a+rx`` / world-readable mode would re-widen the
-        access set and fail this assertion.
-        """
-        lines = _get_dockerfile_lines("docker/admin/Dockerfile.admin.debian")
-        copy_line = next(
-            (line for line in lines if line.strip().startswith("COPY") and "entrypoint.sh" in line),
-            None,
-        )
-        chmod_line = next(
-            (line for line in lines if "chmod" in line and "entrypoint.sh" in line),
-            None,
-        )
-        assert copy_line is not None, "Admin Dockerfile missing COPY entrypoint.sh"
-        assert chmod_line is not None, "Admin Dockerfile missing chmod entrypoint.sh"
-        assert "--chown=human:human" in copy_line, (
-            f"COPY entrypoint.sh must use --chown=human:human (got: {copy_line.strip()})"
-        )
-        assert "0500" in chmod_line, f"chmod entrypoint.sh must use 0500 (got: {chmod_line.strip()})"
-        # Negative assertions: legacy modes must NOT appear.
-        assert "a+x" not in chmod_line, f"chmod entrypoint.sh must NOT use a+x: {chmod_line.strip()}"
-        assert "a+rx" not in chmod_line, f"chmod entrypoint.sh must NOT use a+rx: {chmod_line.strip()}"
-
     def test_claude_local_bin_path(self) -> None:
         """Dockerfile.core.wolfi uses ${HOME_DIR}/.local/bin/claude (not .claude/local/claude)."""
         lines = _get_dockerfile_lines("docker/core/Dockerfile.core.wolfi")
@@ -3003,12 +2944,6 @@ class TestDockerfileUserLint:
         content = "\n".join(_get_dockerfile_lines("docker/core/Dockerfile.core.wolfi"))
         violations = _lint_dockerfile_user_context(content)
         assert violations == [], f"Violations in Dockerfile.core.wolfi: {violations}"
-
-    def test_admin_debian_zero_violations(self) -> None:
-        """Lint on current Dockerfile.admin.debian returns zero violations."""
-        content = "\n".join(_get_dockerfile_lines("docker/admin/Dockerfile.admin.debian"))
-        violations = _lint_dockerfile_user_context(content)
-        assert violations == [], f"Violations in Dockerfile.admin.debian: {violations}"
 
     def test_synthetic_violation_detected(self) -> None:
         """Synthetic Dockerfile with USER agent + mkdir /staging yields one violation."""
@@ -3162,22 +3097,22 @@ class TestHydrationPipelineRegistration:
         )
 
     def test_unconditional_files_includes_coredns_dockerfile(self) -> None:
-        """(d) _UNCONDITIONAL_FILES contains 'docker/coredns/Dockerfile.coredns' and has length 17."""
+        """(d) _UNCONDITIONAL_FILES contains 'docker/coredns/Dockerfile.coredns' and has length 14."""
         from core.doctor.checks.repo_integrity import _UNCONDITIONAL_FILES
 
         assert "docker/coredns/Dockerfile.coredns" in _UNCONDITIONAL_FILES
-        assert len(_UNCONDITIONAL_FILES) == 17
+        assert len(_UNCONDITIONAL_FILES) == 14
 
-    def test_check_tooling_plane_references_17(self) -> None:
-        """(e) check_tooling_plane detail string references '17' (not '16')."""
+    def test_check_tooling_plane_references_14(self) -> None:
+        """(e) check_tooling_plane detail string references '14' (not '17')."""
         from core.doctor import check_tooling_plane
 
         # Run against the actual repo — should pass (all files present)
         result = check_tooling_plane("testuser", None)
-        # If it passes, the detail must say "17"
+        # If it passes, the detail must say "14"
         if result.status == "pass":
-            assert "17" in result.detail, f"Expected '17' in detail: {result.detail}"
-            assert "16" not in result.detail, f"Detail still says '16': {result.detail}"
+            assert "14" in result.detail, f"Expected '14' in detail: {result.detail}"
+            assert "17" not in result.detail, f"Detail still says '17': {result.detail}"
 
 
 # ── Section: Integration Verification ─────────────────────────────────────────
@@ -3268,31 +3203,6 @@ class TestInfrastructureBugFixes:
         assert "/dev/tcp" in compose, "proxy healthcheck should use /dev/tcp"
         # coredns healthcheck uses /wget
         assert "/wget" in compose, "coredns healthcheck should use /wget"
-
-    def test_dockerfile_user_lint_zero_violations(self) -> None:
-        """(e) Dockerfile USER lint on both rendered Dockerfiles returns zero violations."""
-        core_path = (
-            Path(__file__).resolve().parent.parent.parent.parent
-            / "src"
-            / "templates"
-            / "docker"
-            / "core"
-            / "Dockerfile.core.wolfi"
-        )
-        admin_path = (
-            Path(__file__).resolve().parent.parent.parent.parent
-            / "src"
-            / "templates"
-            / "docker"
-            / "admin"
-            / "Dockerfile.admin.debian"
-        )
-
-        for path in (core_path, admin_path):
-            assert path.exists(), f"{path.name} not found"
-            content = path.read_text()
-            violations = _lint_dockerfile_user_context(content)
-            assert violations == [], f"{path.name} lint violations: {violations}"
 
     def test_image_registry_integrity(self) -> None:
         """(f) IMAGE_REGISTRY has 8 entries with valid sha256 digests and consistent properties."""
@@ -3701,91 +3611,6 @@ class TestAdminRuntimeRunc:
         admin_start = raw.index("\n  admin:")
         core_block = raw[core_start:admin_start]
         assert 'runtime: "{{ runtime }}"' in core_block, 'Core service must retain templated runtime: "{{ runtime }}"'
-
-
-class TestTmuxPluginPaths:
-    """8.T RED: tmux plugin paths match Dockerfile install location.
-
-    Implements: admin-shell-config/spec.md §tmux Plugin Path Resolution
-    """
-
-    def test_tmux_plugin_manager_path_set(self) -> None:
-        """.tmux.conf contains TMUX_PLUGIN_MANAGER_PATH set to /usr/local/tmux-plugins."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
-        ).read_text()
-        assert "set-environment -g TMUX_PLUGIN_MANAGER_PATH '/usr/local/tmux-plugins'" in content, (
-            ".tmux.conf must set TMUX_PLUGIN_MANAGER_PATH to /usr/local/tmux-plugins"
-        )
-
-    def test_catppuccin_run_path_correct(self) -> None:
-        """Catppuccin run path is /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
-        ).read_text()
-        assert "run /usr/local/tmux-plugins/catppuccin/tmux/catppuccin.tmux" in content, (
-            "Catppuccin run directive must reference /usr/local/tmux-plugins/"
-        )
-
-    def test_tpm_run_path_correct(self) -> None:
-        """TPM run path is /usr/local/tmux-plugins/tpm/tpm."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
-        ).read_text()
-        assert "run /usr/local/tmux-plugins/tpm/tpm" in content, (
-            "TPM run directive must reference /usr/local/tmux-plugins/"
-        )
-
-    def test_no_stale_home_config_plugin_paths(self) -> None:
-        """.tmux.conf does NOT contain any ~/.config/tmux/plugins/ paths."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".tmux.conf"
-        ).read_text()
-        assert "~/.config/tmux/plugins/" not in content, (
-            ".tmux.conf must NOT contain stale ~/.config/tmux/plugins/ paths"
-        )
-
-
-class TestLocaleTermExport:
-    """9.T RED: C.UTF-8 locale and TERM default for admin shell.
-
-    Implements: admin-shell-config/spec.md §C.UTF-8 Locale Configuration,
-                §TERM Environment Variable Default
-    """
-
-    def test_zshrc_lang_c_utf8(self) -> None:
-        """.zshrc contains LANG=C.UTF-8."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
-        ).read_text()
-        assert "LANG=C.UTF-8" in content, ".zshrc must set LANG=C.UTF-8"
-
-    def test_zshrc_lc_all_c_utf8(self) -> None:
-        """.zshrc contains LC_ALL=C.UTF-8."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
-        ).read_text()
-        assert "LC_ALL=C.UTF-8" in content, ".zshrc must set LC_ALL=C.UTF-8"
-
-    def test_zshrc_no_en_us_utf8(self) -> None:
-        """.zshrc does NOT contain en_US.UTF-8."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "admin" / ".zshrc"
-        ).read_text()
-        assert "en_US.UTF-8" not in content, ".zshrc must NOT contain en_US.UTF-8 — locale is not installed in image"
-
-    def test_entrypoint_term_export_before_tmux(self) -> None:
-        """Admin entrypoint.sh contains TERM export before tmux new-session."""
-        content = (
-            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "admin" / "entrypoint.sh"
-        ).read_text()
-        assert 'export TERM="${TERM:-xterm-256color}"' in content, (
-            "Admin entrypoint must export TERM with xterm-256color default"
-        )
-        # Verify ordering: TERM export before tmux
-        term_pos = content.index('export TERM="${TERM:-xterm-256color}"')
-        tmux_pos = content.index("tmux new-session")
-        assert term_pos < tmux_pos, "TERM export must appear before tmux new-session"
 
 
 class TestRootlessHardeningPosture:

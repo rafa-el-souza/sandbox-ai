@@ -17,7 +17,7 @@ def test_module_exposes_two_check_functions_and_unconditional_files() -> None:
         "check_tooling_plane",
     }
     assert isinstance(repo_integrity._UNCONDITIONAL_FILES, list)
-    assert len(repo_integrity._UNCONDITIONAL_FILES) == 17
+    assert len(repo_integrity._UNCONDITIONAL_FILES) == 14
     assert callable(repo_integrity._resource_files)
 
 
@@ -35,7 +35,7 @@ class TestCheckToolingPlane:
 
         result = check_tooling_plane("sandbox", None)
         assert result.status == "pass"
-        assert "17" in result.detail
+        assert "14" in result.detail
 
     def test_tooling_plane_missing_files(self, tmp_path: Path) -> None:
         from core.doctor import check_tooling_plane

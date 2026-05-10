@@ -127,12 +127,10 @@ _RESERVED_NAMES: frozenset[str] = frozenset(
         "all",
         "none",
         "system",
-        # Subnet names from the IPAM septuple
+        # Subnet names from the IPAM quintuple
         "isolated",
         "core_proxy",
         "dns",
-        "admin",
-        "admin_proxy",
         "egress",
         "ipc",
     }

@@ -27,6 +27,19 @@ def check_sudo(user: str, distro: str | None) -> CheckResult:
     )
 
 
+def check_tlog(user: str, distro: str | None) -> CheckResult:
+    """Check that tlog-rec is present on PATH (host-side dependency)."""
+    path = shutil.which("tlog-rec")
+    if path:
+        return CheckResult(status="pass", name="tlog", detail=f"Found at {path}")
+    return CheckResult(
+        status="fail",
+        name="tlog",
+        detail="tlog-rec not found on PATH",
+        remediation=get_install_cmd(distro, _BINARY_PACKAGES["tlog"]),
+    )
+
+
 def check_machinectl(user: str, distro: str | None) -> CheckResult:
     """Check that machinectl is present on PATH."""
     path = shutil.which("machinectl")
@@ -438,5 +451,6 @@ __all__ = [
     "check_runsc_runtimeargs",
     "check_sudo",
     "check_systemd_machined",
+    "check_tlog",
     "check_user_exists",
 ]
