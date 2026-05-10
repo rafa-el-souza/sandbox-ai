@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from unittest.mock import patch
 
 
 def test_module_exposes_eleven_check_functions() -> None:
@@ -844,7 +843,3 @@ class TestCheckWorkspaceHomeSingleFilesystem:
         assert result.status == "skip"
 
 
-def test_patch_module_for_lint() -> None:
-    """No-op test using `patch` to satisfy lint imports above when no other test uses it."""
-    with patch("os.getcwd", return_value="/"):
-        assert os.getcwd() == "/"
