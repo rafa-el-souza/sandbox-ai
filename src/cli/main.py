@@ -15,14 +15,15 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pydantic
 import typer
-
-if TYPE_CHECKING:
-    from pathlib import Path
-from core.actions import NamedAclGrantAction, NamedAclRevokeAction
+from core.actions import (
+    HelperMkdirChownAction,
+    NamedAclGrantAction,
+    NamedAclRevokeAction,
+)
 from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
@@ -1079,8 +1080,8 @@ and dry-run preview (_helper_mkdir_chown_plan).
 """
 
 
-def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int]]:
-    """Return ``[(parent_abs, leaves, owner_uid, owner_gid), ...]`` for cache/log.
+def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[HelperMkdirChownAction]:
+    """Return one :class:`HelperMkdirChownAction` per cache/log parent.
 
     ``owner_uid``/``owner_gid`` map in-container uid/gid 1000 (agent / human)
     to their host subuid/subgid via :func:`core.host_config.host_id_for_in_container`.
@@ -1088,7 +1089,12 @@ def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[st
     owner_uid = host_id_for_in_container(1000, host_user)
     owner_gid = host_gid_for_in_container(1000, host_user)
     return [
-        (os.path.join(instance_dir, parent), leaves, owner_uid, owner_gid)
+        HelperMkdirChownAction(
+            parent=Path(os.path.join(instance_dir, parent)),
+            leaves=leaves,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
         for parent, leaves in CACHE_LOG_LEAVES_BY_PARENT
     ]
 
@@ -1284,7 +1290,8 @@ def _phase_helper_mkdir_chown_cache_log(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
 
-    for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
+    for action in _helper_mkdir_chown_plan(instance_dir, host_user):
+        parent_abs = str(action.parent)
         try:
             subprocess.run(
                 ["setfacl", "-d", "-m", default_entry, parent_abs],
@@ -1295,7 +1302,7 @@ def _phase_helper_mkdir_chown_cache_log(
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             raise SandboxExecutionError(f"Default ACL setup failed for {parent_abs}: {stderr}") from exc
-        helper_mkdir_chown_dirs(host_user, parent_abs, leaves, owner_uid, owner_gid, auth)
+        helper_mkdir_chown_dirs(host_user, parent_abs, action.leaves, action.owner_uid, action.owner_gid, auth)
 
 
 def _phase_acl_grant(
@@ -1609,12 +1616,8 @@ def _dry_run_pipeline(inst: str) -> None:
 
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
     try:
-        for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
-            leaves_str = ", ".join(leaves)
-            console.print(
-                f"    helper-mkdir+chown {parent_abs}/{{{leaves_str}}} → {owner_uid}:{owner_gid}",
-                style="dim",
-            )
+        for mkdir_action in _helper_mkdir_chown_plan(instance_dir, host_user):
+            console.print(mkdir_action.describe(), style="dim")
         for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
             helper_files_str = ", ".join(files)
             console.print(

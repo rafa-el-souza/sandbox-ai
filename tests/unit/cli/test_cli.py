@@ -4321,7 +4321,8 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
         plan = _helper_mkdir_chown_plan("/inst", "claude-sandbox")
-        assert plan == [
+        as_tuples = [(str(a.parent), a.leaves, a.owner_uid, a.owner_gid) for a in plan]
+        assert as_tuples == [
             ("/inst/cache/core", (".claude",), 100999, 200999),
             ("/inst/cache/admin", ("tmux_resurrect",), 100999, 200999),
             ("/inst/log", ("core", "admin"), 100999, 200999),
