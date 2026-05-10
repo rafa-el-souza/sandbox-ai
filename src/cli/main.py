@@ -20,6 +20,8 @@ from pathlib import Path
 import pydantic
 import typer
 from core.actions import (
+    ActionContext,
+    ComposeUpAction,
     HelperCpChownAction,
     HelperMkdirChownAction,
     NamedAclGrantAction,
@@ -1375,24 +1377,26 @@ def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]
     return files
 
 
-def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> str:
-    """Return the inner ``bash -c`` command for ``docker compose up`` (no machinectl prefix).
+def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> ComposeUpAction:
+    """Return the :class:`ComposeUpAction` carrying the inner ``bash -c`` command.
 
     Sole producer of the ``TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain
     COMPOSE_PROJECT_NAME=<project> docker compose <files> --ansi never
-    --env-file <env> up -d --build --wait`` string. Consumed by
-    :func:`_phase_compose_up` (executed) and the dry-run preview (displayed)
+    --env-file <env> up -d --build --wait`` string. The Action's single
+    ``inner_command`` field is consumed by :func:`_phase_compose_up`
+    (via ``.execute(ctx)``) and the dry-run preview (via ``.describe()``)
     so the two paths cannot drift — same single-source-of-truth pattern as
     :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
     :func:`_helper_cp_chown_plan`.
     """
     compose_files = _build_compose_files(instance_dir, config)
     env_file = os.path.join(instance_dir, ".sandbox.env")
-    return (
+    inner = (
         f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
         f"COMPOSE_PROJECT_NAME={project_name} docker compose {' '.join(compose_files)} "
         f"--ansi never --env-file {env_file} up -d --build --wait"
     )
+    return ComposeUpAction(inner_command=inner)
 
 
 def _phase_compose_up(
@@ -1409,17 +1413,14 @@ def _phase_compose_up(
     - --env-file injection for .sandbox.env (D14)
     - sentinel=True for exit code recovery (D1)
     """
-    cmd = _compose_up_cmd_plan(instance_dir, project_name, config)
-    executor = Executor()
-    executor.run(
-        [
-            *machinectl_cmd(host_user, auth),
-            "/bin/bash",
-            "-c",
-            cmd,
-        ],
-        sentinel=True,
+    action = _compose_up_cmd_plan(instance_dir, project_name, config)
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
     )
+    action.execute(ctx)
 
 
 def _phase_handover(
@@ -1658,9 +1659,11 @@ def _dry_run_pipeline(inst: str) -> None:
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
-    # Compose up — derived from the same plan helper _phase_compose_up uses
+    # Compose up — derived from the same ComposeUpAction _phase_compose_up uses;
+    # both code paths read the .inner_command field (no parallel construction).
     machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
-    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{_compose_up_cmd_plan(instance_dir, project_name, config)}'"
+    compose_action = _compose_up_cmd_plan(instance_dir, project_name, config)
+    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{compose_action.describe()}'"
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
