@@ -145,17 +145,13 @@ Services with sshd auth paths through `/run` SHALL mount the `/run` tmpfs with `
 - **WHEN** the `compose.yml` template source is inspected for the proxy service
 - **THEN** the `/run` tmpfs entry includes `mode=0755`
 
-#### Scenario: Admin has no /run tmpfs
-- **WHEN** the `compose.yml` template source is inspected for the admin service
-- **THEN** the admin service's `tmpfs` block does NOT include a `/run` entry
-
 ### Requirement: Multi-Workspace Volumes Loop in Compose Template
 
-The `compose.yml` template SHALL render workspace bind mounts via a Jinja2 loop over the `workspaces` context key (a list of `{name, path}` dicts sorted by name). Each iteration emits one volume entry of the form `{{ ws.path }}:/workspaces/{{ ws.name }}:rw` on each agent service (core and admin). The legacy single `user_project_root` volume entry is removed.
+The `compose.yml` template SHALL render workspace bind mounts via a Jinja2 loop over the `workspaces` context key (a list of `{name, path}` dicts sorted by name). Each iteration emits one volume entry of the form `{{ ws.path }}:/workspaces/{{ ws.name }}:rw` on the core service only. The legacy single `user_project_root` volume entry is removed. Admin no longer receives workspace bind mounts (admin has zero `volumes:` post-reframe).
 
-#### Scenario: Loop renders one volume per workspace per service
+#### Scenario: Loop renders one volume per workspace on core only
 - **WHEN** `compose.yml` is rendered with the workspaces context list `[{name: "main", path: "/p1"}, {name: "scratch", path: "/p2"}]`
-- **THEN** core and admin services each contain exactly two volume entries: `/p1:/workspaces/main:rw` and `/p2:/workspaces/scratch:rw`
+- **THEN** the core service contains exactly two volume entries: `/p1:/workspaces/main:rw` and `/p2:/workspaces/scratch:rw`, and the admin service contains no `volumes:` key
 
 #### Scenario: Loop iterates in sort order for determinism
 - **WHEN** the same instance's compose.yml is rendered twice
@@ -165,39 +161,117 @@ The `compose.yml` template SHALL render workspace bind mounts via a Jinja2 loop 
 - **WHEN** the rendered compose.yml is inspected
 - **THEN** there is NO volume entry referencing `user_project_root` or targeting `/workspace` (singular) on any service
 
-### Requirement: Workspace Bridge Group Membership for core and admin
+### Requirement: Workspace Bridge Group Membership for core
 
-The rendered `compose.yml` SHALL include `group_add` (or compose-equivalent) entries on the `core` and `admin` services that add the in-container gid corresponding to the host workspace bridge group. The value is computed at hydration time via `in_container_gid_for_host_gid(workspace_bridge_gid(host), host.docker_unprivileged_user)`. The bridge gid is per-host (not per-workspace); a single `group_add` entry serves all bind-mounted workspaces because they share the same bridge group on the host.
+The rendered `compose.yml` SHALL include a `group_add` (or compose-equivalent) entry on the `core` service that adds the in-container gid corresponding to the host workspace bridge group. The value is computed at hydration time via `in_container_gid_for_host_gid(workspace_bridge_gid(host), host.docker_unprivileged_user)`. The bridge gid is per-host (not per-workspace); a single `group_add` entry serves all bind-mounted workspaces because they share the same bridge group on the host. Admin does NOT receive a `group_add` entry — admin has no workspace mounts post-reframe.
 
 #### Scenario: core service has group_add for bridge gid
 - **WHEN** `compose.yml` is rendered with a configured workspace bridge group
 - **THEN** the `core` service block contains `group_add: ["{{ in_container_workspace_bridge_gid }}"]` (or equivalent), with the value resolved to the in-container gid that maps to the host bridge group
 
-#### Scenario: admin service has group_add for bridge gid
+#### Scenario: admin service has no group_add
 - **WHEN** `compose.yml` is rendered
-- **THEN** the `admin` service block contains the same `group_add` entry
+- **THEN** the `admin` service block does NOT contain a `group_add:` key
 
 #### Scenario: One group_add entry serves all workspaces
 - **WHEN** the instance has multiple workspaces
-- **THEN** core and admin still have exactly one `group_add` entry each (NOT one per workspace); the bridge group is per-host, not per-workspace
+- **THEN** core has exactly one `group_add` entry (NOT one per workspace); the bridge group is per-host, not per-workspace
 
 #### Scenario: Numeric group_add only — no in-image group required
-- **WHEN** the agent images are inspected
-- **THEN** they do NOT need to define an internal `sb-ws` (or similarly-named) group at the bridge gid; Linux access checks operate on numeric gids — supplementary group membership conferred via `group_add` is sufficient regardless of whether a named group exists in `/etc/group` inside the image
+- **WHEN** the core image is inspected
+- **THEN** it does NOT need to define an internal `sb-ws` (or similarly-named) group at the bridge gid; Linux access checks operate on numeric gids — supplementary group membership conferred via `group_add` is sufficient regardless of whether a named group exists in `/etc/group` inside the image
 
 ### Requirement: Agent Shell Init Sets Restrictive Umask for Workspace Writes
 
-The agent shell init files (`templates/config/core/.bashrc`, `templates/config/admin/.zshrc`) SHALL set `umask 007` so that files created by the agent under any workspace land at mode `0660` group `<bridge-group>` (via setgid + supplementary group inheritance). The umask is set across all workspace mounts (not per-workspace); a single shell-init umask covers every `/workspaces/<ws>` bind mount.
+The agent shell init file (`templates/config/core/.bashrc`) SHALL set `umask 007` so that files created by the agent under any workspace land at mode `0660` group `<bridge-group>` (via setgid + supplementary group inheritance). The umask is set across all workspace mounts (not per-workspace); a single shell-init umask covers every `/workspaces/<ws>` bind mount. Admin has no shell init file post-reframe (admin runs only `/fwd`).
 
 #### Scenario: Core .bashrc sets umask 007
 - **WHEN** the rendered `templates/config/core/.bashrc` is inspected
 - **THEN** it contains `umask 007` early in the file, before any user override hook
 
-#### Scenario: Admin .zshrc sets umask 007
-- **WHEN** the rendered `templates/config/admin/.zshrc` is inspected
-- **THEN** it contains `umask 007` early in the file, before any user override hook
-
 #### Scenario: New files in workspaces land at mode 0660
 - **WHEN** the agent (in-container uid 1000, supplementary gid `<bridge-gid>`) creates a new file under any of `/workspaces/<ws>` (multiple workspaces)
 - **THEN** the resulting file has mode `0660` and group `<bridge-gid>`, allowing dev (sb-ws member on host) to read/write via group bits — same behavior across all workspaces
+
+### Requirement: Admin Service Compose Block Shape
+
+The admin service block in the rendered `compose.yml` SHALL contain only the keys required to (a) inherit the security baseline, (b) hold the `ipc_net` network position, (c) bound resource consumption, and (d) build the `/fwd`-only image. The admin service SHALL NOT contain any of the keys removed by the admin reframe (no tmpfs, no volumes, no DNS, no extra_hosts, no environment, no env_file, no depends_on, no group_add, no logging override).
+
+The admin service block SHALL include exactly the following keys:
+
+- `<<: *security-baseline` (inherits `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`, `ipc: private`, `init: true`, `read_only: true`)
+- `runtime: {{ runtime }}` (gVisor/runsc by default; the previous hard-coded `runtime: runc` lock is removed)
+- `pids_limit` (containment)
+- `mem_limit`, `memswap_limit`, `cpus` (containment)
+- `ulimits` with `core: 0` and `nofile: 65536`
+- `sysctls` containing `net.ipv4.ip_forward=0` and the IPv6-disable entries
+- `networks: { ipc_net: { ipv4_address: ... } }` — admin's only network
+- `build:` block with `dockerfile: Dockerfile.admin` and `context: <inst_dir>/docker/admin` (no other build args)
+
+The admin service block SHALL NOT include any of:
+
+- `tmpfs:` (any entry) — per the no-tmpfs design decision, admin's empty filesystem is strictly stronger than `tmpfs+noexec`
+- `volumes:` (any entry) — admin has no `/workspaces` mount, no config mount, no log mount, no secrets mount
+- `dns:` — admin makes no DNS queries
+- `extra_hosts:` — admin connects to a static IP on `ipc_net` only
+- `env_file:` or `environment:` — admin reads no env vars (the prior `ANTHROPIC_API_KEY` / `GITHUB_API_KEY` leak is removed by construction)
+- `depends_on:` — admin doesn't depend on dnsdist or proxy reachability
+- `group_add:` — admin doesn't mount workspaces and doesn't need the bridge group
+- `logging:` block override — PID-1 idle `/fwd` writes nothing; the default driver suffices
+
+#### Scenario: Admin merges the security baseline anchor
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block contains `<<: *security-baseline`
+
+#### Scenario: Admin runtime is templated, not locked to runc
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block's `runtime:` value is the rendered `{{ runtime }}` context value (defaulting to `runsc`) and is NOT hard-coded to `runc`
+
+#### Scenario: Admin keeps containment limits
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block contains `pids_limit`, `mem_limit`, `memswap_limit`, and `cpus` keys
+
+#### Scenario: Admin keeps ulimits and sysctls
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block contains `ulimits` with `core: 0` and `nofile: 65536`, and a `sysctls` block containing `net.ipv4.ip_forward=0`
+
+#### Scenario: Admin networks reduced to ipc_net only
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block's `networks:` map contains exactly the single key `ipc_net` with an `ipv4_address`, and no `admin_net` or `admin_proxy_net` entries
+
+#### Scenario: Admin uses a build block referencing Dockerfile.admin
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block contains a `build:` map with `dockerfile: Dockerfile.admin` and `context:` pointing at the per-instance `docker/admin` directory, and no other build args
+
+#### Scenario: Admin has no tmpfs entries
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain a `tmpfs:` key
+
+#### Scenario: Admin has no volumes
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain a `volumes:` key (no `/workspaces` mount, no config mount, no log mount, no secrets mount)
+
+#### Scenario: Admin has no dns key
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain a `dns:` key
+
+#### Scenario: Admin has no extra_hosts
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain an `extra_hosts:` key
+
+#### Scenario: Admin has no environment or env_file
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block contains neither `environment:` nor `env_file:`, and in particular contains no reference to `ANTHROPIC_API_KEY` or `GITHUB_API_KEY`
+
+#### Scenario: Admin has no depends_on
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain a `depends_on:` key
+
+#### Scenario: Admin has no group_add
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain a `group_add:` key
+
+#### Scenario: Admin has no logging override
+- **WHEN** the rendered `compose.yml` is inspected for the admin service
+- **THEN** the admin block does NOT contain a top-level `logging:` key (the default json-file driver inherited from compose handles the empty stream)
 

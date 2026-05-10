@@ -77,7 +77,7 @@ The system SHALL display the instance's IPAM allocation including slot index and
 
 #### Scenario: IPAM slot displayed
 - **WHEN** status is invoked for a running or stopped instance with an IPAM allocation
-- **THEN** the slot index and six derived subnets (isolated, core_proxy, dns, admin, admin_proxy, egress) are displayed
+- **THEN** the slot index and four derived subnets (isolated, core_proxy, dns, egress) plus `ipc_net` are displayed
 
 #### Scenario: No IPAM allocation
 - **WHEN** status is invoked for an instance with no IPAM ledger entry
@@ -99,18 +99,18 @@ The system SHALL display the correct static IPs from `derive_static_ips(base_ind
 
 #### Scenario: Correct IPs for slot 0
 - **WHEN** the instance has IPAM slot 0
-- **THEN** the table shows coredns at `10.100.2.53` (dns_net), dnsdist at `10.100.0.56` (isolated_net), proxy at `10.100.1.254` (core_proxy_net) / `10.100.4.254` (admin_proxy_net), core at `10.100.0.3` (isolated_net) / `10.100.1.3` (core_proxy_net), admin at `10.100.3.2` (admin_net) / `10.100.4.2` (admin_proxy_net), db-postgres at `10.100.0.54` (isolated_net) / `10.100.3.54` (admin_net)
+- **THEN** the table shows coredns at `10.100.2.53` (dns_net), dnsdist at `10.100.0.56` (isolated_net), proxy at `10.100.1.254` (core_proxy_net), core at `10.100.0.3` (isolated_net) / `10.100.1.3` (core_proxy_net), admin at `10.100.4.2` (ipc_net), db-postgres at `10.100.0.54` (isolated_net)
 
 ### Requirement: Status IP Map Structure
-The `ip_map` used by `sandbox status` SHALL include entries for all containers with their primary network IPs: `core`, `admin`, `coredns`, `dnsdist`, `proxy`, `db-postgres`, and `mcp-firecrawl`. Legacy key names (`dns-sidecar`, `proxy_ip`, `admin_isolated_ip`) SHALL NOT appear.
+The `ip_map` used by `sandbox status` SHALL include entries for all containers with their primary network IPs: `core`, `admin`, `coredns`, `dnsdist`, `proxy`, `db-postgres`, and `mcp-firecrawl`. Legacy key names (`dns-sidecar`, `proxy_ip`, `admin_isolated_ip`, `admin_admin_ip`, `admin_proxy_ip`, `coredns_admin_ip`, `dnsdist_admin_ip`, `proxy_admin_ip`, `db_postgres_admin_ip`) SHALL NOT appear.
 
 #### Scenario: ip_map contains all services
 - **WHEN** `sandbox status` constructs the IP display map for a running instance
-- **THEN** the map includes keys for `core`, `admin`, `coredns`, `dnsdist`, `proxy`, `db-postgres`, and `mcp-firecrawl` with IPs from `derive_static_ips(base_index)`
+- **THEN** the map includes keys for `core`, `admin`, `coredns`, `dnsdist`, `proxy`, `db-postgres`, and `mcp-firecrawl` with IPs from `derive_static_ips(base_index)`; admin's entry holds a single IP (its `admin_ipc_ip`); coredns holds its `dns_net` and `egress_net` IPs; dnsdist holds its `isolated_net` and `dns_net` IPs; proxy holds its `core_proxy_net` and `egress_net` IPs; db-postgres holds its `isolated_net` IP
 
 #### Scenario: ip_map uses new key names
 - **WHEN** `sandbox status` constructs the IP display map
-- **THEN** the map does NOT reference `dns_sidecar_ip`, `proxy_ip`, `admin_isolated_ip`, or `mcp_firecrawl_isolated_ip`
+- **THEN** the map does NOT reference `dns_sidecar_ip`, `proxy_ip`, `admin_isolated_ip`, `mcp_firecrawl_isolated_ip`, `admin_admin_ip`, `admin_proxy_ip`, `coredns_admin_ip`, `dnsdist_admin_ip`, `proxy_admin_ip`, or `db_postgres_admin_ip`
 
 
 ### Requirement: Per-User State Initialization Required

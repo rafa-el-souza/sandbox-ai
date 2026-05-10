@@ -5,7 +5,7 @@ This specification defines the dnsdist-based DNS exfiltration defense layer, inc
 ## Requirements
 
 ### Requirement: dnsdist Infrastructure Container
-The system SHALL deploy a `dnsdist` container (PowerDNS dnsdist 1.9.x) as a DNS filtering proxy on `isolated_net`, `dns_net`, and `admin_net`. The container SHALL forward surviving queries to coredns on `dns_net` and SHALL have no direct egress path to the internet.
+The system SHALL deploy a `dnsdist` container (PowerDNS dnsdist 1.9.x) as a DNS filtering proxy on `isolated_net` and `dns_net`. The container SHALL forward surviving queries to coredns on `dns_net` and SHALL have no direct egress path to the internet.
 
 #### Scenario: dnsdist forwards to coredns
 - **WHEN** a DNS query survives all filtering rules
@@ -13,7 +13,7 @@ The system SHALL deploy a `dnsdist` container (PowerDNS dnsdist 1.9.x) as a DNS 
 
 #### Scenario: dnsdist has no egress network membership
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the dnsdist service has network memberships on `isolated_net`, `dns_net`, and `admin_net` only — it is NOT on `egress_net`, `core_proxy_net`, or `admin_proxy_net`
+- **THEN** the dnsdist service has network memberships on `isolated_net` and `dns_net` only — it is NOT on `egress_net`, `core_proxy_net`, `admin_net`, or `admin_proxy_net`
 
 #### Scenario: dnsdist listens on all interfaces
 - **WHEN** the rendered `dnsdist.conf` is inspected
@@ -46,15 +46,11 @@ The system SHALL drop DNS queries whose QNAME has more than 7 labels, using the 
 - **THEN** the query is forwarded to coredns
 
 ### Requirement: Per-Container DNS Routing Through dnsdist
-The system SHALL configure each DNS-consuming container to resolve through dnsdist (not coredns directly). Core SHALL use `dnsdist_isolated_ip`, admin SHALL use `dnsdist_admin_ip`, and firecrawl SHALL use `dnsdist_dns_ip`.
+The system SHALL configure each DNS-consuming container to resolve through dnsdist (not coredns directly). Core SHALL use `dnsdist_isolated_ip` and firecrawl SHALL use `dnsdist_dns_ip`.
 
 #### Scenario: Core DNS points to dnsdist on isolated_net
 - **WHEN** the rendered `compose.yml` is inspected
 - **THEN** the core service's `dns` directive points to `{{ dnsdist_isolated_ip }}`
-
-#### Scenario: Admin DNS points to dnsdist on admin_net
-- **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the admin service's `dns` directive points to `{{ dnsdist_admin_ip }}`
 
 #### Scenario: Firecrawl DNS points to dnsdist on dns_net
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected

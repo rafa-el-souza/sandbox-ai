@@ -46,7 +46,7 @@ The system SHALL render all Jinja2 templates from the `templates` package into t
 
 #### Scenario: Config templates rendered
 - **WHEN** `sandbox start <inst>` proceeds to the hydration phase
-- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `<sandbox_ai_home()>/instances/<inst>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, `core/sshd_config`, `admin/.zshrc`, `admin/.tmux.conf`, and `admin/.gitconfig`.
+- **THEN** all entries in `_JINJA_RENDERED_CONFIG` are rendered into `<sandbox_ai_home()>/instances/<inst>/config/` with all Jinja2 variables resolved from the Pydantic model context. This includes `coredns/Corefile`, `dnsdist/dnsdist.conf`, `proxy/squid.conf`, `core/.gitconfig`, `core/.npmrc`, `core/.bashrc`, `core/CLAUDE.md`, and `core/sshd_config`.
 
 #### Scenario: Extras templates resolve Jinja2 variables
 - **WHEN** an enabled extras template (e.g., `db-postgres.yml`) is rendered
@@ -70,7 +70,7 @@ The system SHALL render extension override files only for components that are en
 
 ### Requirement: Extras Jinja2 Context Completeness
 
-The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `dnsdist_image`, `agent_proxy_ip`, `admin_proxy_ip`, AND the `workspaces` key (per the "Workspaces Context Key" requirement above).
+The system SHALL include all values required by extras templates and config templates in the Jinja2 context returned by `build_jinja_context()`. The context SHALL include both Squid-format domain lists (leading-dot) and CoreDNS-format domain lists (no leading dot) as distinct keys. The context SHALL include `proxy_whitelist_read_only_domains`, `db_postgres_image`, `proxy_image`, `dns_image`, `dnsdist_image`, `agent_proxy_ip`, AND the `workspaces` key (per the "Workspaces Context Key" requirement above).
 
 #### Scenario: Workspaces context key present
 - **WHEN** `build_jinja_context()` is called
@@ -78,7 +78,7 @@ The system SHALL include all values required by extras templates and config temp
 
 #### Scenario: Database context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `pg_user`, `pg_db`, `db_postgres_ip`, `db_postgres_admin_ip`, `db_postgres_image`, `core_pids_limit`, `runtime`, and `instance_dir`
+- **THEN** the returned context includes `pg_user`, `pg_db`, `db_postgres_ip`, `db_postgres_image`, `core_pids_limit`, `runtime`, and `instance_dir`
 
 #### Scenario: Firecrawl context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -98,7 +98,7 @@ The system SHALL include all values required by extras templates and config temp
 
 #### Scenario: Custom config path context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `custom_config_core` (value: `/home/agent/.sandbox/custom`), `custom_config_admin` (value: `/home/human/.sandbox/custom`), and `tmux_resurrect_dir` (value: `/home/human/.sandbox/tmux_resurrect`)
+- **THEN** the returned context includes `custom_config_core` (value: `/home/agent/.sandbox/custom`)
 
 #### Scenario: Component enablement context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -122,7 +122,7 @@ The system SHALL include all values required by extras templates and config temp
 
 #### Scenario: Per-container proxy IP context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `agent_proxy_ip` and `admin_proxy_ip` (from `derive_static_ips()`)
+- **THEN** the returned context includes `agent_proxy_ip` (from `derive_static_ips()`)
 
 #### Scenario: Read-only domains context key present
 - **WHEN** `build_jinja_context()` is called
@@ -163,23 +163,12 @@ The system SHALL include `core_mem_limit`, `core_memswap_limit`, and `core_cpus`
 - **WHEN** `build_jinja_context()` is called with `config.core.mem_limit = "16gb"`
 - **THEN** the returned context has `core_mem_limit = "16gb"` and `core_memswap_limit = "16gb"`
 
-### Requirement: Admin Resource Limit Context Keys
-The system SHALL include `admin_mem_limit`, `admin_memswap_limit`, and `admin_cpus` in the Jinja2 context returned by `build_jinja_context()`. `admin_memswap_limit` SHALL always equal `admin_mem_limit`.
-
-#### Scenario: Admin resource context keys present
-- **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `admin_mem_limit` (from `config.admin.mem_limit`), `admin_memswap_limit` (equal to `admin_mem_limit`), and `admin_cpus` (from `str(config.admin.cpus)`)
-
 ### Requirement: Compose Template Resource Limits
-The rendered `compose.yml` SHALL include `mem_limit`, `memswap_limit`, and `cpus` on the core and admin services, resolved from the Jinja2 context.
+The rendered `compose.yml` SHALL include `mem_limit`, `memswap_limit`, and `cpus` on the core service, resolved from the Jinja2 context.
 
 #### Scenario: Core service rendered with resource limits
 - **WHEN** `compose.yml` is rendered with default config
 - **THEN** the core service block contains `mem_limit: "8gb"`, `memswap_limit: "8gb"`, and `cpus: "4.0"`
-
-#### Scenario: Admin service rendered with resource limits
-- **WHEN** `compose.yml` is rendered with default config
-- **THEN** the admin service block contains `mem_limit: "8gb"`, `memswap_limit: "8gb"`, and `cpus: "4.0"`
 
 ### Requirement: Compose Template Static Hardening Properties
 The rendered compose templates (main `compose.yml` and feature-gated extras) SHALL include static hardening properties that are not configurable via `sandbox.toml`. All services with `cap_drop: ALL` SHALL re-grant only the minimum Linux capabilities required for their entrypoint to function. All tmpfs mounts SHALL include `noexec,nosuid,nodev` flags.
@@ -214,19 +203,11 @@ The rendered compose templates (main `compose.yml` and feature-gated extras) SHA
 
 ### Requirement: Config Template Path Templatization
 
-The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations and tmux resurrect state directories within rendered config files. No rendered config file SHALL contain literal references to custom config or tmux state under `/workspace` (legacy singular mount, removed in change 5) or `/workspaces/...` (new multi-workspace bind-mount paths). Custom config and tmux state belong in the agent's home directory, not in any workspace mount.
+The system SHALL use Jinja2 context variables — not hardcoded paths — for all custom config override locations within rendered config files. No rendered config file SHALL contain literal references to custom config under `/workspace` (legacy singular mount, removed in change 5) or `/workspaces/...` (new multi-workspace bind-mount paths). Custom config belongs in the agent's home directory, not in any workspace mount.
 
 #### Scenario: Core config files use templatized custom path
 - **WHEN** `templates/config/core/.gitconfig` and `templates/config/core/.bashrc` are rendered
 - **THEN** custom config references resolve to the value of `{{ custom_config_core }}` (typically `/home/agent/.sandbox/custom`); they do NOT contain `/workspace/.sandbox/custom/` (legacy) or `/workspaces/<ws>/.sandbox/custom/` (post-change-5 violation)
-
-#### Scenario: Admin config files use templatized custom path
-- **WHEN** `templates/config/admin/.zshrc` and `templates/config/admin/.tmux.conf` are rendered
-- **THEN** custom config references resolve to the value of `{{ custom_config_admin }}` (typically `/home/human/.sandbox/custom`); they do NOT contain `/workspace/.sandbox/custom/` or `/workspaces/<ws>/.sandbox/custom/`
-
-#### Scenario: Tmux resurrect dir uses templatized path
-- **WHEN** `templates/config/admin/.tmux.conf` is rendered
-- **THEN** the resurrect-dir setting resolves to the value of `{{ tmux_resurrect_dir }}` (typically `/home/human/.sandbox/tmux_resurrect`); it does NOT contain `/workspace/.tmux_resurrect` or `/workspaces/<ws>/.tmux_resurrect`
 
 #### Scenario: No hardcoded workspace sandbox paths in rendered output
 - **WHEN** all config templates are rendered
@@ -238,21 +219,6 @@ The `templates/config/core/.gitconfig` template SHALL use bare `{{ git_user }}` 
 #### Scenario: Gitconfig uses bare context variables
 - **WHEN** `templates/config/core/.gitconfig` template source is inspected
 - **THEN** it contains `{{ git_user }}` and `{{ git_email }}` without `| default(...)` filters
-
-### Requirement: Zshrc Load Order Contract
-The `templates/config/admin/.zshrc` template SHALL enforce a tail load order of: (1) `starship init`, (2) user override hook, (3) warmup prompt. A comment block SHALL document this contract.
-
-#### Scenario: Starship init before user override
-- **WHEN** the rendered `.zshrc` is inspected
-- **THEN** the `eval "$(starship init zsh)"` line appears before the user override `source` block
-
-#### Scenario: User override before warmup prompt
-- **WHEN** the rendered `.zshrc` is inspected
-- **THEN** the user override `source` block appears before the `SANDBOX_WARMUP_PROMPT` check
-
-#### Scenario: Load order contract comment present
-- **WHEN** the `templates/config/admin/.zshrc` template source is inspected
-- **THEN** it contains a comment block documenting the load order: shell setup → starship init → user override → warmup prompt
 
 ### Requirement: Read-Only Domains Context Key
 The system SHALL include `proxy_whitelist_read_only_domains` in the Jinja2 context returned by `build_jinja_context()`, sourced from `config.proxy_whitelist.read_only_domains`.
@@ -298,12 +264,12 @@ The system SHALL include `proxy_image`, `dns_image`, `dnsdist_image`, and `busyb
 - **WHEN** `build_jinja_context()` is called
 - **THEN** the returned context includes `proxy_image` (from `IMAGE_REGISTRY["squid"].pinned`), `dns_image` (from `IMAGE_REGISTRY["coredns"].pinned`), `dnsdist_image` (from `IMAGE_REGISTRY["dnsdist"].pinned`), and `busybox_image` (from `IMAGE_REGISTRY["busybox_musl"].pinned`)
 
-### Requirement: Seven-Subnet Context Keys
-The system SHALL include all seven subnet CIDR strings and all multi-network container IP addresses in the Jinja2 context returned by `build_jinja_context()`.
+### Requirement: Five-Subnet Context Keys
+The system SHALL include all five subnet CIDR strings and all multi-network container IP addresses in the Jinja2 context returned by `build_jinja_context()`.
 
-#### Scenario: All seven subnet context keys present
+#### Scenario: All five subnet context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `admin_subnet`, `admin_proxy_subnet`, `egress_subnet`, and `ipc_subnet`
+- **THEN** the returned context includes `isolated_subnet`, `core_proxy_subnet`, `dns_subnet`, `egress_subnet`, and `ipc_subnet`
 
 #### Scenario: IPC IP context keys present
 - **WHEN** `build_jinja_context()` is called
@@ -313,21 +279,21 @@ The system SHALL include all seven subnet CIDR strings and all multi-network con
 - **WHEN** `build_jinja_context()` is called
 - **THEN** the returned context includes `firecrawl_isolated_ip`
 
-#### Scenario: Proxy dual-network IP context keys present
+#### Scenario: Proxy core IP context key present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `proxy_core_ip` and `proxy_admin_ip`
+- **THEN** the returned context includes `proxy_core_ip`
 
 #### Scenario: dnsdist multi-network IP context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `dnsdist_isolated_ip`, `dnsdist_dns_ip`, and `dnsdist_admin_ip`
+- **THEN** the returned context includes `dnsdist_isolated_ip` and `dnsdist_dns_ip`
 
 #### Scenario: coredns multi-network IP context keys present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `coredns_dns_ip`, `coredns_admin_ip`, and `coredns_egress_ip`
+- **THEN** the returned context includes `coredns_dns_ip` and `coredns_egress_ip`
 
-#### Scenario: db-postgres dual-network IP context keys present
+#### Scenario: db-postgres IP context key present
 - **WHEN** `build_jinja_context()` is called
-- **THEN** the returned context includes `db_postgres_ip` and `db_postgres_admin_ip`
+- **THEN** the returned context includes `db_postgres_ip`
 
 ### Requirement: Programmatic .claude.json Generation
 

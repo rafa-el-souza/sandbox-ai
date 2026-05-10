@@ -44,19 +44,15 @@ The Squid proxy configuration SHALL deny HTTP requests targeting IP addresses vi
 - **THEN** each CIDR range has its own named ACL (e.g., `deny_rfc1918_10`, `deny_rfc1918_172`, `deny_rfc1918_192`, `deny_loopback`, `deny_link_local`, `deny_cgn`) to avoid splay tree ordering issues
 
 ### Requirement: Per-Container Proxy Source Binding
-The Squid proxy configuration SHALL bind proxy authentication to specific container IP addresses using `acl agent_src src {{ agent_proxy_ip }}` and `acl admin_src src {{ admin_proxy_ip }}`. The allow rule SHALL reference these per-IP ACLs instead of a subnet-wide ACL.
+The Squid proxy configuration SHALL bind proxy authentication to specific container IP addresses using `acl agent_src src {{ agent_proxy_ip }}`. The allow rule SHALL reference this per-IP ACL instead of a subnet-wide ACL.
 
 #### Scenario: Agent source ACL bound to specific IP
 - **WHEN** the rendered `squid.conf` is inspected
 - **THEN** it contains `acl agent_src src {{ agent_proxy_ip }}` (resolved from `derive_static_ips()`)
 
-#### Scenario: Admin source ACL bound to specific IP
-- **WHEN** the rendered `squid.conf` is inspected
-- **THEN** it contains `acl admin_src src {{ admin_proxy_ip }}` (resolved from `derive_static_ips()`)
-
 #### Scenario: Allow rules use per-IP ACLs
 - **WHEN** the rendered `squid.conf` is inspected
-- **THEN** it contains `http_access allow agent_src authenticated_users whitelist` and `http_access allow admin_src authenticated_users whitelist`
+- **THEN** it contains `http_access allow agent_src authenticated_users whitelist` and does NOT contain any `http_access allow admin_src ...` rule
 
 #### Scenario: No subnet-wide trusted_clients ACL
 - **WHEN** the rendered `squid.conf` is inspected
@@ -122,9 +118,9 @@ The Squid proxy configuration SHALL bind firecrawl proxy access to its specific 
 - **WHEN** firecrawl sends a POST request through the proxy to an allowlisted domain with valid credentials
 - **THEN** the proxy denies the request because POST is not in `safe_methods` — the request falls through to `http_access deny all`
 
-#### Scenario: Firecrawl allow rule after agent/admin allows
+#### Scenario: Firecrawl allow rule after agent allow
 - **WHEN** the rendered `squid.conf` is inspected
-- **THEN** the `firecrawl_src` allow rule appears after the `agent_src` and `admin_src` allow rules and before the `http_access deny all` catch-all
+- **THEN** the `firecrawl_src` allow rule appears after the `agent_src` allow rule and before the `http_access deny all` catch-all
 
 #### Scenario: Firecrawl subject to all deny layers
 - **WHEN** firecrawl sends an HTTP request through the proxy

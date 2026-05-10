@@ -22,9 +22,9 @@ The default-when-N=1 is computed at attach time (no "default workspace" field st
 - **WHEN** `sandbox attach foo nonexistent` is invoked and `nonexistent` is not in `[workspaces]`
 - **THEN** the CLI exits with a "workspace not found" error
 
-#### Scenario: docker exec sets cwd to /workspaces/<ws>
+#### Scenario: ssh remote command sets cwd to /workspaces/<ws>
 - **WHEN** attach proceeds to PTY handover with workspace `<ws>` resolved
-- **THEN** the `docker exec` command includes `-w /workspaces/<ws>` to set the in-container cwd
+- **THEN** the ssh invocation includes a remote command of the form `'cd /workspaces/<ws> && exec bash -l'`, replacing the prior `docker exec -w /workspaces/<ws>` flag (per design D9)
 
 ### Requirement: Per-Instance Backup Lock Check
 
@@ -35,31 +35,30 @@ The default-when-N=1 is computed at attach time (no "default workspace" field st
 - **THEN** attach exits with a "Backup in progress" error
 
 ### Requirement: Warm State Verification Before Attach
-The system SHALL verify that the sandbox's containers are running before attempting to drop the user into the admin container.
+The system SHALL verify that the sandbox's containers are running before attempting to hand the operator's terminal over to core via the ssh-through-admin path.
 
 #### Scenario: Running sandbox allows attach
 - **WHEN** `sandbox attach <inst>` is invoked and `docker compose ps -q` returns non-empty output
-- **THEN** the CLI proceeds to hand the terminal over to the admin container
+- **THEN** the CLI proceeds to hand the terminal over to core via the canonical `tlog-rec → ssh → ProxyCommand → /fwd` invocation
 
 #### Scenario: Stopped sandbox rejects attach
 - **WHEN** `sandbox attach <inst>` is invoked and no containers are running for the instance
 - **THEN** the CLI exits with: "Sandbox '<inst>' is not running. Use 'sandbox start <inst>' to launch."
 
 ### Requirement: PTY Handover Without Re-Hydration
-The system SHALL drop the user into the admin container via machinectl and `docker exec -it` without re-running hydration, credential generation, or IPAM allocation. The machinectl invocation SHALL use the configured authentication mode from host config. The `docker exec` invocation SHALL include `-w /workspaces/<ws>` to set the in-container cwd to the resolved workspace.
+The system SHALL hand the operator's terminal over to **core** (as `agent`) via a host-side ssh client wrapped in `tlog-rec`, using a `ProxyCommand` that crosses the privilege boundary into the unprivileged docker user via `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) and execs `/fwd` inside admin to forward stdio↔TCP to `core_ipc_ip:9999`. The handover SHALL NOT re-run hydration, credential generation, or IPAM allocation.
+
+The `ProxyCommand` SHALL use `pipe_cmd` (polkit-authenticated via the `manage-units` action) regardless of the `machinectl_authentication` mode configured in host config; the `sudo`/`polkit` setting in host config governs `machinectl_cmd` (used by other handover paths) and does NOT prefix the `ProxyCommand` with `sudo` in either mode.
+
+The in-container working directory SHALL be selected via the ssh remote command suffix `'cd /workspaces/<ws> && exec bash -l'` (per design D9), not via a `docker exec -w` flag.
 
 #### Scenario: Attach bypasses hydration
 - **WHEN** `sandbox attach <inst>` completes its warm state check successfully
 - **THEN** no Jinja2 templates are rendered, no `.htpasswd` is regenerated, and no IPAM ledger is read or modified
 
-#### Scenario: Terminal handed to admin container with workspace cwd (sudo mode)
-- **WHEN** containers are confirmed running, `state.lock` is released, and `machinectl_authentication` is `"sudo"`, with workspace `<ws>` resolved
-- **THEN** `sudo machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it -w /workspaces/<ws> <inst>-admin-1 zsh` is executed
-
-#### Scenario: Terminal handed to admin container with workspace cwd (polkit mode)
-- **WHEN** containers are confirmed running, `state.lock` is released, and `machinectl_authentication` is `"polkit"`, with workspace `<ws>` resolved
-- **THEN** `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker exec -it -w /workspaces/<ws> <inst>-admin-1 zsh` is executed without `sudo` prefix
-
+#### Scenario: Terminal handed to core via ssh-through-admin
+- **WHEN** containers are confirmed running, `state.lock` is released, and workspace `<ws>` is resolved (this scenario applies regardless of whether `machinectl_authentication` is `"sudo"` or `"polkit"` — the `ProxyCommand` uses `pipe_cmd` in both modes and is never prefixed with `sudo`)
+- **THEN** the system invokes `tlog-rec --writer=file --file-path=<host-side log path> -- ssh -i <inst_dir>/secrets/ipc_ssh_key -o UserKnownHostsFile=<inst_dir>/secrets/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand="systemd-run -q --pipe --uid=<docker_unprivileged_user> /usr/bin/docker exec -i <inst>-admin-1 /fwd <core_ipc_ip>:9999" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
 
 ### Requirement: Per-User State Initialization Required
 The `sandbox attach` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
@@ -71,3 +70,21 @@ The `sandbox attach` command SHALL refuse to operate when the per-user state tre
 #### Scenario: Resolved home in error message
 - **WHEN** the attach command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home`
+
+### Requirement: Host-Side `tlog-rec` Wrap
+
+The `sandbox attach` invocation SHALL wrap the ssh client in `tlog-rec` (a host-side Red Hat tlog dependency) so that operator sessions are recorded to a structured JSON file. The recording is best-effort and operator-side: no orchestrator state depends on tlog being installed; if absent, `sandbox doctor` reports the missing dependency.
+
+The tlog invocation form is `tlog-rec --writer=file --file-path=<path> -- ssh ...` where `<path>` lives under a host-side directory (e.g., `~/.sandbox-ai/sessions/<inst>/<UTC-timestamp>.log`).
+
+#### Scenario: tlog-rec wraps the ssh invocation
+- **WHEN** `sandbox attach <inst>` proceeds to PTY handover with workspace `<ws>` resolved
+- **THEN** the executed argv begins with `tlog-rec --writer=file --file-path=<path> --` followed by the `ssh ...` command described in the "Terminal handed to core via ssh-through-admin" scenario; the ssh client is never invoked outside of a `tlog-rec` wrap
+
+#### Scenario: Recording path lives under the host-side sessions directory
+- **WHEN** `sandbox attach <inst>` constructs the `tlog-rec` argv
+- **THEN** the `--file-path=<path>` value resolves to `~/.sandbox-ai/sessions/<inst>/<UTC-timestamp>.log` (or an equivalent host-side path under `<sandbox_ai_user_home()>/sessions/<inst>/`); the path is NOT inside any container, bind mount, or instance secrets directory
+
+#### Scenario: sandbox doctor checks for tlog presence
+- **WHEN** `sandbox doctor` runs on a host where `tlog-rec` is not installed
+- **THEN** the doctor reports the missing `tlog` dependency with a remediation hint (e.g., `apt install tlog`, `dnf install tlog`, AUR `tlog`); `sandbox attach` continues to function only when `tlog-rec` is on `PATH`

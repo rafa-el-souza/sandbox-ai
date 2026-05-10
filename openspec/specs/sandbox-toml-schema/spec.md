@@ -33,7 +33,7 @@ The `sandbox.toml` schema SHALL include a `[workspaces]` map-of-tables section. 
 - **THEN** Pydantic validation raises an error
 
 ### Requirement: Schema Generation on Scaffold
-The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[instance]` section SHALL NOT include `host_unprivileged_user` or `user_project_root`. The `[workspaces]` section SHALL include one entry per workspace specified at `sandbox init` time (defaulting to a single `[workspaces.main]` with `bootstrap_mode = "empty"` when no `--copy`/`--empty` flags are supplied). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[admin]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references.
+The system SHALL write a valid `sandbox.toml` with all required fields and their defaults to the instance directory when a new instance is scaffolded. The `[instance]` section SHALL NOT include `host_unprivileged_user` or `user_project_root`. The `[workspaces]` section SHALL include one entry per workspace specified at `sandbox init` time (defaulting to a single `[workspaces.main]` with `bootstrap_mode = "empty"` when no `--copy`/`--empty` flags are supplied). The `[components.db_postgres]` sub-table SHALL include `pg_user`, `pg_db`, and `image` fields with defaults. The `[core]` section SHALL include `mem_limit`, `cpus`, and `base_image` fields with defaults. The `[proxy.whitelist]` section SHALL include `read_only_domains` with default package registry domains. All image defaults SHALL use SHA256 digest references. The scaffolded `sandbox.toml` SHALL NOT contain an `[admin]` section.
 
 #### Scenario: Auto-derived instance name
 - **WHEN** scaffold writes a new `sandbox.toml`
@@ -67,9 +67,9 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 - **WHEN** scaffold writes a new `sandbox.toml`
 - **THEN** the `[core]` section includes `mem_limit = "8gb"`, `cpus = 4.0`, and `base_image` with a SHA256-pinned wolfi-base digest as defaults
 
-#### Scenario: Admin resource limit defaults
+#### Scenario: Admin section absent from scaffold output
 - **WHEN** scaffold writes a new `sandbox.toml`
-- **THEN** the `[admin]` section includes `mem_limit = "8gb"`, `cpus = 4.0`, and `base_image` with a SHA256-pinned debian-trixie digest as defaults
+- **THEN** the file does NOT contain an `[admin]` section (admin's image is `FROM scratch` + a static `/fwd` binary; there are no configurable runtime knobs)
 
 #### Scenario: Read-only domains defaults in scaffold
 - **WHEN** scaffold writes a new `sandbox.toml`
@@ -80,7 +80,7 @@ The system SHALL write a valid `sandbox.toml` with all required fields and their
 - **THEN** Pydantic applies defaults without validation errors — the fields are optional with defaults
 
 ### Requirement: Pydantic Schema Validation
-The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[instance]` section's Pydantic model class SHALL be named `SandboxInstanceSection` to disambiguate from the per-host `HostConfig` model. The `SandboxInstanceSection` model SHALL NOT contain `host_unprivileged_user` or `user_project_root` (the latter removed in change 5; replaced by `[workspaces]`). The `SandboxInstanceSection` model SHALL contain `workspaces: dict[str, WorkspaceConfig]` (non-empty dict). The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The `AdminConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float.
+The system SHALL parse `sandbox.toml` through a Pydantic model before any lifecycle operation and fail with a structured validation error if the file is invalid. The `[instance]` section's Pydantic model class SHALL be named `SandboxInstanceSection` to disambiguate from the per-host `HostConfig` model. The `SandboxInstanceSection` model SHALL NOT contain `host_unprivileged_user` or `user_project_root` (the latter removed in change 5; replaced by `[workspaces]`). The `SandboxInstanceSection` model SHALL contain `workspaces: dict[str, WorkspaceConfig]` (non-empty dict). The `DbPostgresConfig` model SHALL validate `pg_user` and `pg_db` as non-empty strings. The `CoreConfig` model SHALL validate `mem_limit` as a non-empty string and `cpus` as a positive float. The model SHALL NOT define an `AdminConfig` class and SHALL NOT recognize an `[admin]` top-level section.
 
 When `_load_config` (or any other CLI-side TOML loader for `sandbox.toml`) catches a `pydantic.ValidationError`, the CLI SHALL emit one user-facing message per error, formatted as a single line: `Invalid <toml-path>: <field-path>: <error-message>`, where `<toml-path>` is the absolute path to the offending `sandbox.toml`, `<field-path>` is the dotted location of the failing field (joining the entries of `error["loc"]` with `.`), and `<error-message>` is the Pydantic-supplied message. The CLI SHALL NOT display Pydantic's default `__str__` representation (which includes library internals, line numbers, and JSON URLs); the raw exception SHALL be suppressed (e.g., `raise typer.Exit(1) from None`). The wrap point SHALL be `_load_config` itself, so all callers benefit without per-command boilerplate.
 
@@ -114,17 +114,20 @@ The `try`/`except` clause SHALL match `pydantic.ValidationError` specifically an
 - **WHEN** `sandbox.toml` includes `[core]` with `mem_limit` or `cpus` fields
 - **THEN** the Pydantic model validates `mem_limit` as a string and `cpus` as a float, applying defaults (`"8gb"`, `4.0`) if absent
 
-#### Scenario: AdminConfig validates mem_limit and cpus
-- **WHEN** `sandbox.toml` includes `[admin]` with `mem_limit` or `cpus` fields
-- **THEN** the Pydantic model validates `mem_limit` as a string and `cpus` as a float, applying defaults (`"8gb"`, `4.0`) if absent
-
 #### Scenario: Workspaces map required
 - **WHEN** `sandbox.toml` lacks a `[workspaces]` section entirely OR contains an empty `[workspaces]` section
 - **THEN** Pydantic raises a validation error (instances must have at least one workspace)
 
 #### Scenario: Backward compatibility with existing sandbox.toml
-- **WHEN** an existing `sandbox.toml` omits `mem_limit` and `cpus` from `[core]` and `[admin]`
+- **WHEN** an existing `sandbox.toml` omits `mem_limit` and `cpus` from `[core]`
 - **THEN** Pydantic applies defaults without validation errors — the fields are optional with defaults
+
+### Requirement: Legacy `[admin]` Section Rejection
+Existing `sandbox.toml` files MAY contain a legacy `[admin]` table from before the admin-reframe change (when admin was a Debian-based interactive-shell container with configurable `mem_limit`, `cpus`, and `base_image`). Post-reframe, `[admin]` is not a recognized section: admin is `FROM scratch` + a single static `/fwd` binary with no configurable runtime knobs. When `_load_config` parses a `sandbox.toml` containing an `[admin]` table, the Pydantic `SandboxInstanceSection`/`InstanceConfig` validation SHALL reject the input with a clear error message instructing the operator to remove the section.
+
+#### Scenario: Legacy `[admin]` table is rejected on load
+- **WHEN** `_load_config` parses a `sandbox.toml` whose top-level contains an `[admin]` table (e.g., from a pre-upgrade instance)
+- **THEN** Pydantic raises a validation error identifying `admin` as an unknown section, and the CLI emits a single line of the form `Invalid <abs-path-to-sandbox.toml>: admin: Extra inputs are not permitted` (or the equivalent Pydantic-supplied message) and exits with code 1; the Pydantic traceback is not displayed
 
 ### Requirement: Read-Only Domains Configuration
 The `ProxyWhitelistConfig` Pydantic model SHALL include a `read_only_domains: list[str]` field with a default list of package registry domains. The `_SANDBOX_TOML_TEMPLATE` SHALL include `read_only_domains` in the `[proxy.whitelist]` section with sensible defaults.
