@@ -481,7 +481,7 @@ The doctor SHALL include a warn-only check `pre_existing_instance_layout` that d
 - **Leaf present and consumer-subuid-owned** — pass. The helper recipe ran successfully on a prior start; on-disk ownership matches the contract.
 - **Leaf present and dev-owned** — warn. Either a legacy instance from before the scaffold-vs-helper boundary was enforced (pre-Change-D scaffold pre-created the leaf as `dev:dev`), or a misconfiguration where the helper recipe failed silently on a prior start. The check SHALL recommend `rm -rf <home>/instances/<inst>/<leaf-path>` for each affected leaf; running the remediation lets the next `sandbox start` succeed because the helper recipe creates the leaf fresh as claude-sandbox-owned.
 
-The check uses `core.doctor._scan_instance_dirs` to iterate registered instances (per the "Doctor Instance Scan Uses Registry" requirement).
+The check uses `core.doctor.checks.workspace_bridge._scan_instance_dirs` to iterate registered instances (per the "Doctor Instance Scan Uses Registry" requirement). (This is the post-refactor module path; the function's behavior, signature, and return value are unchanged from its prior package-level location — only the import path moved.)
 
 The per-leaf ownership lookup used by the check SHALL be expressed as an injectable callable (`uid_for_path: Callable[[str], int]`) with a default that wraps `os.stat(path).st_uid`. Tests MAY override the resolver to make per-path ownership deterministic without monkeypatching `os.stat`. Production behavior MUST remain identical to direct `os.stat` use, including raising `OSError` for absent leaves so the absent-leaf branch is reached as before.
 
@@ -507,7 +507,9 @@ The per-leaf ownership lookup used by the check SHALL be expressed as an injecta
 
 ### Requirement: Doctor Instance Scan Uses Registry
 
-The doctor's per-instance scanning helper (`core.doctor._scan_instance_dirs`) SHALL iterate registered instances from `<sandbox_ai_home()>/state/instances.json` rather than walking `__file__` parents to discover a `sandboxes/` tree. This implementation change is install-mode-independent: doctor checks that depend on per-instance scanning (notably `secrets_hydrated_restrictively` and `pre_existing_instance_layout`) work correctly in both dev checkouts and wheel installs.
+The doctor's per-instance scanning helper (`core.doctor.checks.workspace_bridge._scan_instance_dirs`) SHALL iterate registered instances from `<sandbox_ai_home()>/state/instances.json` rather than walking `__file__` parents to discover a `sandboxes/` tree. This implementation change is install-mode-independent: doctor checks that depend on per-instance scanning (notably `secrets_hydrated_restrictively` and `pre_existing_instance_layout`) work correctly in both dev checkouts and wheel installs.
+
+(This is the post-refactor module path; the function's behavior, signature, and return value are unchanged from its prior package-level location — only the import path moved.)
 
 This requirement closes change-4's deferred behavior where these checks SKIPped in wheel installs because `__file__` resolved into `site-packages/`.
 
