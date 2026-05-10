@@ -91,6 +91,11 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
         tag="1.36.1-musl",
         digest="sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213",
     ),
+    "golang_alpine": ImagePin(
+        ref="golang",
+        tag="1.23-alpine",
+        digest="sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f",
+    ),
 }
 
 # ─── Pydantic Models ─────────────────────────────────────────────────────────

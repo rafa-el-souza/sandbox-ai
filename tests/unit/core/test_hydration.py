@@ -1442,9 +1442,9 @@ class TestImageDigestsDnsdist:
         assert pin.digest.startswith("sha256:")
         assert len(pin.digest.split("sha256:")[1]) == 64
 
-    def test_image_registry_has_7_entries(self) -> None:
-        """IMAGE_REGISTRY has exactly 7 entries."""
-        assert len(IMAGE_REGISTRY) == 7
+    def test_image_registry_has_8_entries(self) -> None:
+        """IMAGE_REGISTRY has exactly 8 entries."""
+        assert len(IMAGE_REGISTRY) == 8
         assert set(IMAGE_REGISTRY.keys()) == {
             "wolfi_base",
             "debian_trixie",
@@ -1453,6 +1453,7 @@ class TestImageDigestsDnsdist:
             "dnsdist",
             "postgres",
             "busybox_musl",
+            "golang_alpine",
         }
 
 
@@ -2571,10 +2572,10 @@ class TestW4IntegrationVerification:
 class TestImagePin:
     """Group 1.T: ImagePin dataclass and IMAGE_REGISTRY validation."""
 
-    def test_registry_is_dict_with_7_keys(self) -> None:
-        """IMAGE_REGISTRY is a dict with exactly 7 keys."""
+    def test_registry_is_dict_with_8_keys(self) -> None:
+        """IMAGE_REGISTRY is a dict with exactly 8 keys."""
         assert isinstance(IMAGE_REGISTRY, dict)
-        assert len(IMAGE_REGISTRY) == 7
+        assert len(IMAGE_REGISTRY) == 8
         assert set(IMAGE_REGISTRY.keys()) == {
             "wolfi_base",
             "debian_trixie",
@@ -2583,6 +2584,7 @@ class TestImagePin:
             "dnsdist",
             "postgres",
             "busybox_musl",
+            "golang_alpine",
         }
 
     def test_each_value_is_imagepin_with_str_fields(self) -> None:
@@ -3264,12 +3266,12 @@ class TestInfrastructureBugFixes:
             assert violations == [], f"{path.name} lint violations: {violations}"
 
     def test_image_registry_integrity(self) -> None:
-        """(f) IMAGE_REGISTRY has 7 entries with valid sha256 digests and consistent properties."""
+        """(f) IMAGE_REGISTRY has 8 entries with valid sha256 digests and consistent properties."""
         import re
 
         from core.hydration import IMAGE_REGISTRY, ImagePin
 
-        assert len(IMAGE_REGISTRY) == 7, f"Expected 7 entries, got {len(IMAGE_REGISTRY)}"
+        assert len(IMAGE_REGISTRY) == 8, f"Expected 8 entries, got {len(IMAGE_REGISTRY)}"
 
         sha256_re = re.compile(r"^sha256:[a-f0-9]{64}$")
         for key, pin in IMAGE_REGISTRY.items():
