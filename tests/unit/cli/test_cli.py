@@ -53,12 +53,6 @@ base_distro_family = "wolfi"
 git_user = ""
 git_email = ""
 
-[admin]
-shm_size = "2gb"
-pids_limit = 400
-base_image = "debian:trixie-slim"
-base_distro_family = "debian"
-
 [runtimes]
 python = true
 typescript = true
@@ -85,8 +79,6 @@ domains = [".github.com"]
 """
 
 RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-instance"')
-
-WARMUP_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'warmup_prompt = ""', b'warmup_prompt = "bootstrap the project"')
 
 
 # Capture the real seeder before any autouse patching can replace it. Tests that
@@ -247,7 +239,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up") as mock_compose,
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
             patch("cli.main._release_lock"),
             patch("cli.main._stdin_is_tty", return_value=True),
         ):
@@ -302,7 +298,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["start", inst])
@@ -334,7 +334,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
             patch("cli.main._release_lock"),
             patch("cli.main._stdin_is_tty", return_value=True),
         ):
@@ -364,7 +368,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
             patch("cli.main._release_lock"),
             patch("cli.main._stdin_is_tty", return_value=False),
         ):
@@ -394,7 +402,11 @@ class TestStartHappyPath:
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
             patch("cli.main._release_lock"),
             patch("cli.main._stdin_is_tty", return_value=True),
         ):
@@ -402,6 +414,57 @@ class TestStartHappyPath:
             assert result.exit_code == 0
             mock_handover.assert_not_called()
             assert "attach with" in result.output.lower()
+
+    def test_start_multi_workspace_skips_handover_with_hint(self, runner: CliRunner) -> None:
+        """When N>1 workspaces, start prints the attach hint with the workspace
+        list and skips the default handover (operator must pick a workspace
+        explicitly via `sandbox attach <inst> <ws>`).
+        """
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        # Replace the single-workspace TOML with one containing two workspaces.
+        ws_main = (
+            b'[workspaces.main]\nbootstrap_mode = "copy"\n'
+            b'source = "/home/dev/myproject"\npath = "/home/dev/myproject"'
+        )
+        ws_scratch = (
+            b'[workspaces.scratch]\nbootstrap_mode = "empty"\npath = "/home/dev/scratch"'
+        )
+        multi_ws_toml = VALID_TOML_CONTENT.replace(ws_main, ws_main + b"\n\n" + ws_scratch)
+        (instance_dir / "sandbox.toml").write_bytes(multi_ws_toml)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main._warm_check", return_value=False),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="proxypass123"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
+            patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 0
+            mock_handover.assert_not_called()
+            # Hint mentions multiple workspaces and lists them
+            assert "Multiple workspaces" in result.output
+            assert "main" in result.output
+            assert "scratch" in result.output
 
 
 class TestStartSecretCompletenessGate:
@@ -481,7 +544,11 @@ class TestStartComposeSpinner:
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
             patch("cli.main._release_lock"),
             patch.object(
                 __import__("cli.main", fromlist=["console"]).console,
@@ -762,13 +829,18 @@ class TestStartSshKeypairGeneration:
     def test_grant_post_hydrate_daemon_read_propagates_setfacl_failure(
         self, tmp_path: Path
     ) -> None:
-        """A failed setfacl surfaces as SandboxExecutionError (no silent skip)."""
+        """A failed setfacl surfaces as SandboxExecutionError (no silent skip).
+
+        Per admin-reframe (Fix B'), ``ipc_ssh_key`` is no longer a helper-cp
+        target, so use ``ipc_host_key`` (still in RO_FILE_RECIPES) to trigger
+        the setfacl pass.
+        """
         from cli.main import _grant_post_hydrate_daemon_read
         from core.exceptions import SandboxExecutionError
 
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir()
-        (secrets_dir / "ipc_ssh_key").write_text("k")
+        (secrets_dir / "ipc_host_key").write_text("k")
 
         def _fail(args: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
             raise subprocess.CalledProcessError(returncode=1, cmd=args, stderr="EPERM")
@@ -891,7 +963,11 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["start", inst])
@@ -922,7 +998,11 @@ class TestStartInstanceNameMatchesRegistry:
             patch("cli.main._phase_helper_mkdir_chown_cache_log"),
             patch("cli.main._phase_grant_post_hydrate_daemon_read"),
             patch("cli.main._phase_compose_up"),
-            patch("cli.main._phase_handover"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["start", inst])
@@ -1014,7 +1094,11 @@ class TestAttachWarm:
 
         with (
             patch("cli.main._warm_check", return_value=True),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
         ):
             result = runner.invoke(app, ["attach", inst])
             assert result.exit_code == 0
@@ -1326,6 +1410,120 @@ class TestPhaseCredentialsDirect:
             line = mock_write.call_args[0][1]
             assert line.startswith("proxyuser:$2b$")
 
+    def test_phase_credentials_reconciles_ipc_secret_ownership(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """admin-reframe Fix B' (3.G.11): on every start, ``_phase_credentials``
+        reconciles ``ipc_ssh_key`` and ``ipc_known_hosts`` to operator-owned
+        mode 0600. Bind-mount inode stability requires in-place mutation
+        (os.chown / os.chmod), never os.replace/mv/install.
+
+        Covers both reconciliation branches:
+            * uid mismatch -> os.chown
+            * mode mismatch -> os.chmod
+        """
+        from cli.main import _phase_credentials
+
+        (tmp_path / "config" / "proxy").mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        ssh_key = secrets_dir / "ipc_ssh_key"
+        kh = secrets_dir / "ipc_known_hosts"
+        ssh_key.write_text("k")
+        kh.write_text("h")
+        # Simulate legacy mode 0640 (would be wrong post-Fix-B').
+        os.chmod(ssh_key, 0o640)
+        os.chmod(kh, 0o640)
+
+        chown_calls: list[tuple[str, int, int]] = []
+        chmod_calls: list[tuple[str, int]] = []
+        real_chmod = os.chmod
+
+        # Pretend the on-disk uid is a non-operator uid so the chown branch
+        # fires. We can't actually chown to a foreign uid without privilege,
+        # so we monkeypatch os.stat to return a fake st_uid for these inodes.
+        operator_uid = os.geteuid()
+        legacy_uid = operator_uid + 12345  # any uid != operator_uid
+
+        real_stat = os.stat
+
+        def _fake_stat(path: str | os.PathLike[str], *args: object, **kwargs: object) -> os.stat_result:
+            st = real_stat(path)
+            if str(path) in {str(ssh_key), str(kh)}:
+                # Construct a stat_result with an overridden st_uid via tuple form
+                return os.stat_result(
+                    (st.st_mode, st.st_ino, st.st_dev, st.st_nlink, legacy_uid, st.st_gid,
+                     st.st_size, st.st_atime, st.st_mtime, st.st_ctime)
+                )
+            return st
+
+        def _record_chown(path: str, uid: int, gid: int) -> None:
+            # Don't actually chown (no privilege); record only.
+            chown_calls.append((str(path), uid, gid))
+
+        def _record_chmod(path: str, mode: int) -> None:
+            chmod_calls.append((str(path), mode))
+            real_chmod(path, mode)
+
+        monkeypatch.setattr("cli.main.os.stat", _fake_stat)
+        monkeypatch.setattr("cli.main.os.chown", _record_chown)
+        monkeypatch.setattr("cli.main.os.chmod", _record_chmod)
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+        ):
+            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3")
+
+        # uid mismatch reconciliation: both files chown'd to operator.
+        chown_targets = {p: (uid, gid) for p, uid, gid in chown_calls}
+        assert chown_targets[str(ssh_key)] == (operator_uid, os.getegid())
+        assert chown_targets[str(kh)] == (operator_uid, os.getegid())
+
+        # Mode-bit reconciliation: both files chmod'd to 0o600.
+        chmod_targets = {p: m for p, m in chmod_calls}
+        assert chmod_targets[str(ssh_key)] == 0o600
+        assert chmod_targets[str(kh)] == 0o600
+        assert (ssh_key.stat().st_mode & 0o7777) == 0o600
+        assert (kh.stat().st_mode & 0o7777) == 0o600
+
+    def test_phase_credentials_reconciliation_is_noop_when_correct(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When ipc secrets are already operator-owned mode 0600, the
+        reconciliation step issues no chown/chmod (idempotent)."""
+        from cli.main import _phase_credentials
+
+        (tmp_path / "config" / "proxy").mkdir(parents=True)
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        ssh_key = secrets_dir / "ipc_ssh_key"
+        kh = secrets_dir / "ipc_known_hosts"
+        ssh_key.write_text("k")
+        kh.write_text("h")
+        os.chmod(ssh_key, 0o600)
+        os.chmod(kh, 0o600)
+
+        chown_calls: list[object] = []
+        chmod_calls: list[object] = []
+        monkeypatch.setattr(
+            "cli.main.os.chown",
+            lambda *a, **kw: chown_calls.append((a, kw)),
+        )
+        monkeypatch.setattr(
+            "cli.main.os.chmod",
+            lambda *a, **kw: chmod_calls.append((a, kw)),
+        )
+
+        with (
+            patch("cli.main.write_htpasswd"),
+            patch("cli.main.generate_ssh_keypair"),
+        ):
+            _phase_credentials(str(tmp_path), core_ipc_ip="10.100.6.3")
+
+        assert chown_calls == [], "no chown when uid already matches operator"
+        assert chmod_calls == [], "no chmod when mode already 0600"
+
 
 class TestHelperCpChownRoFiles:
     """Section 8: helper-cp+chown phase replacing _phase_credential_ownership.
@@ -1360,8 +1558,15 @@ class TestHelperCpChownRoFiles:
             consumer_n = entry.owner_uid - 100000
             assert entry.owner_gid == 200000 + consumer_n
 
-    def test_plan_includes_legacy_ipc_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The four IPC SSH secrets continue to land at 0600 via the standard recipe."""
+    def test_plan_includes_server_side_ipc_secrets_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server-side IPC SSH secrets (authorized_keys, ipc_host_key) land at 0600.
+
+        admin-reframe Fix B' (design D3): the client-side files
+        ``ipc_ssh_key`` and ``ipc_known_hosts`` are dropped from
+        ``RO_FILE_RECIPES`` and remain dev-owned mode 0600 (read directly
+        by the host's ssh client during ``sandbox attach``). They must
+        NOT appear in the helper-cp plan.
+        """
         from cli.main import _helper_cp_chown_plan
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1000 if n == 1000 else 0)
@@ -1375,7 +1580,9 @@ class TestHelperCpChownRoFiles:
                 assert action.owner_gid == 2000
                 assert action.mode == 0o600
                 secrets_files.update(action.files)
-        assert {"ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"} <= secrets_files
+        assert {"ipc_host_key", "authorized_keys"} <= secrets_files
+        assert "ipc_ssh_key" not in secrets_files, "Fix B': ipc_ssh_key must not be in helper-cp plan"
+        assert "ipc_known_hosts" not in secrets_files, "Fix B': ipc_known_hosts must not be in helper-cp plan"
 
     def test_plan_uid_and_gid_both_in_subid_range(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Regression guard for D6: every (uid, gid) pair from `_helper_cp_chown_plan`
@@ -1426,8 +1633,12 @@ class TestHelperCpChownRoFiles:
         monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
         _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
         # One invocation per (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES)
-        # entry: 7 RO + 1 EXEC + 1 RW = 9 groups (cluster 5 added the RW recipe).
-        assert len(invocations) == 9
+        # entry. Per admin-reframe (Fix B'), the RO table now has 5 entries
+        # (coredns, dnsdist, proxy, core, secrets) — the legacy
+        # ipc_ssh_key/ipc_known_hosts secret entries no longer participate in
+        # the helper-cp recipe; they remain dev-owned mode 0600 and the host
+        # ssh client reads them in place. So 5 RO + 1 EXEC + 1 RW = 7 groups.
+        assert len(invocations) == 7
 
     def test_phase_propagates_helper_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files
@@ -1560,26 +1771,87 @@ class TestPhaseComposeUpDirect:
             assert "up -d --build --wait" in cmd_args[-1]
 
 
-class TestPhaseHandoverDirect:
-    """Direct test for _phase_handover."""
+class TestBuildAttachArgv:
+    """Structural tests for `_build_attach_argv` (admin-reframe D1 / cli-attach spec).
 
-    def test_handover_without_warmup(self) -> None:
-        from cli.main import _phase_handover
+    The fixture-diff test (admin-reframe task 3.H.13) lands separately; these
+    structural tests cover the canonical-shape requirement only.
+    """
 
-        with patch("cli.main.Executor") as MockExec:
-            _phase_handover("myproj", "sandbox")
-            cmd = MockExec.return_value.run.call_args[0][0]
-            assert "/usr/bin/docker" in cmd
-            assert "-it" in cmd
-            assert "SANDBOX_WARMUP_PROMPT" not in " ".join(cmd)
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> list[str]:
+        from cli.main import _build_attach_argv
+        from core.host_config import HostConfig, HostSettings
 
-    def test_handover_with_warmup(self) -> None:
-        from cli.main import _phase_handover
+        # Stable IPAM ledger so peek_next_slot returns a deterministic
+        # base_index (the IP set is derived from base_index; structural
+        # assertions only need it to be present in the argv).
+        ledger_path = tmp_path / "ipam.json"
+        ledger_path.write_text('{"myproj": 0}\n')
+        monkeypatch.setattr("core.ipam._default_ledger_path", lambda: str(ledger_path))
 
-        with patch("cli.main.Executor") as MockExec:
-            _phase_handover("myproj", "sandbox", warmup_prompt="do things")
-            cmd = MockExec.return_value.run.call_args[0][0]
-            assert any("SANDBOX_WARMUP_PROMPT" in arg for arg in cmd)
+        # Redirect SANDBOX_AI_HOME so sessions log dir lands under tmp.
+        home = tmp_path / "home"
+        (home / "instances" / "myproj" / "secrets").mkdir(parents=True)
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(home))
+
+        cfg = HostConfig(host=HostSettings(docker_unprivileged_user="sandbox"))
+        return _build_attach_argv("myproj", "main", cfg)
+
+    def test_argv_starts_with_tlog_rec_writer_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        argv = self._invoke(monkeypatch, tmp_path)
+        assert argv[0] == "tlog-rec"
+        assert "--writer=file" in argv
+        assert any(a.startswith("--file-path=") for a in argv)
+        assert "--" in argv
+
+    def test_argv_invokes_ssh_with_ipc_credentials(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        argv = self._invoke(monkeypatch, tmp_path)
+        # ssh -i <secrets>/ipc_ssh_key
+        assert "ssh" in argv
+        i_idx = argv.index("-i")
+        assert argv[i_idx + 1].endswith("/secrets/ipc_ssh_key")
+        joined = " ".join(argv)
+        assert "UserKnownHostsFile=" in joined
+        assert "ipc_known_hosts" in joined
+        assert "StrictHostKeyChecking=yes" in joined
+
+    def test_argv_proxy_command_uses_pipe_cmd_not_sudo(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        argv = self._invoke(monkeypatch, tmp_path)
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        # pipe_cmd shape: systemd-run -q --pipe --uid=<sbuser>
+        assert "systemd-run" in proxy
+        assert "--pipe" in proxy
+        assert "--uid=sandbox" in proxy
+        # MUST NOT be prefixed with sudo (admin-reframe D2 — pipe_cmd is
+        # auth-mode-independent and uses polkit's manage-units action).
+        assert "sudo" not in proxy
+        # /fwd into the admin container.
+        assert "/fwd" in proxy
+        assert "myproj-admin-1" in proxy
+        assert ":9999" in proxy
+
+    def test_argv_target_port_user_and_remote_command(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        argv = self._invoke(monkeypatch, tmp_path)
+        assert "-p" in argv
+        p_idx = argv.index("-p")
+        assert argv[p_idx + 1] == "9999"
+        assert "-t" in argv
+        # agent@<core_ipc_ip>
+        assert any(a.startswith("agent@") for a in argv)
+        # Remote command is the final positional, per cli-attach D9.
+        assert argv[-1] == "cd /workspaces/main && exec bash -l"
 
 
 class TestComposeDownDirect:
@@ -4014,7 +4286,6 @@ class TestACLPlanAsymmetry:
             "config/dnsdist",
             "config/proxy",
             "config/core",
-            "config/admin",
         ):
             parent_abs = str(instance_dir / parent_rel)
             entries = [
@@ -4320,9 +4591,10 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
         plan = _helper_mkdir_chown_plan("/inst", "claude-sandbox")
         as_tuples = [(str(a.parent), a.leaves, a.owner_uid, a.owner_gid) for a in plan]
+        # admin-reframe 3.G.2: cache/admin/tmux_resurrect dropped; cache/core
+        # and log/{core,admin} remain.
         assert as_tuples == [
             ("/inst/cache/core", (".claude",), 100999, 200999),
-            ("/inst/cache/admin", ("tmux_resurrect",), 100999, 200999),
             ("/inst/log", ("core", "admin"), 100999, 200999),
         ]
 
@@ -4347,8 +4619,9 @@ class TestHelperMkdirChownPlan:
 
         _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", MachinectlAuth.SUDO, "dev")
 
-        # Three setfacl + three helper invocations, alternating
-        assert [e[0] for e in events] == ["setfacl", "helper", "setfacl", "helper", "setfacl", "helper"]
+        # admin-reframe 3.G.2: two parents (cache/core, log) — two setfacl
+        # + two helper invocations, alternating (cache/admin dropped).
+        assert [e[0] for e in events] == ["setfacl", "helper", "setfacl", "helper"]
         # First setfacl applies parent default ACL with u:dev:rwx
         cmd = events[0][1]
         assert cmd[:3] == ["setfacl", "-d", "-m"]
@@ -4375,7 +4648,8 @@ class TestHelperMkdirChownPlan:
 
         for _ in range(2):
             _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
-        assert calls == {"setfacl": 6, "helper": 6}
+        # admin-reframe 3.G.2: two parents x two invocations = 4 each.
+        assert calls == {"setfacl": 4, "helper": 4}
 
     def test_phase_setfacl_failure_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
@@ -4561,7 +4835,11 @@ class TestStartPipelineOrdering:
             patch("cli.main._phase_helper_cp_chown_ro_files", side_effect=track_ownership),
             patch("cli.main._phase_workspace_shared_group"),
             patch("cli.main._phase_compose_up", side_effect=track_compose),
-            patch("cli.main._phase_handover"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
             patch("cli.main._release_lock"),
         ):
             result = runner.invoke(app, ["start", inst])
@@ -5728,26 +6006,45 @@ class TestPostInitMissingHostConfig:
 # ── Group 6 coverage: handover cwd, backup-lock check, attach ws selection, status views ──
 
 
-class TestPhaseHandoverCwdWorkspace:
-    """`_phase_handover(cwd_workspace=...)` adds ``-w /workspaces/<ws>`` to docker exec."""
+class TestBuildAttachArgvCwd:
+    """`_build_attach_argv` selects cwd via ssh remote-command (admin-reframe D9).
 
-    def test_handover_with_cwd_workspace(self) -> None:
-        from cli.main import _phase_handover
+    Replaces the prior `_phase_handover(cwd_workspace=...)` ``-w /workspaces/<ws>``
+    docker-exec test — Shape 2 lands the operator in core via ssh, so the
+    cwd suffix is part of the ssh remote command, not a docker-exec flag.
+    """
 
-        with patch("cli.main.Executor") as MockExec:
-            _phase_handover("myproj", "sandbox", cwd_workspace="api")
-            cmd = MockExec.return_value.run.call_args[0][0]
-            joined = " ".join(cmd)
-            assert "-w" in cmd
-            assert "/workspaces/api" in joined
+    def _argv(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ws: str
+    ) -> list[str]:
+        from cli.main import _build_attach_argv
+        from core.host_config import HostConfig, HostSettings
 
-    def test_handover_without_cwd_workspace_omits_w(self) -> None:
-        from cli.main import _phase_handover
+        ledger_path = tmp_path / "ipam.json"
+        ledger_path.write_text('{"myproj": 0}\n')
+        monkeypatch.setattr("core.ipam._default_ledger_path", lambda: str(ledger_path))
+        home = tmp_path / "home"
+        (home / "instances" / "myproj" / "secrets").mkdir(parents=True)
+        monkeypatch.setenv("SANDBOX_AI_HOME", str(home))
+        cfg = HostConfig(host=HostSettings(docker_unprivileged_user="sandbox"))
+        return _build_attach_argv("myproj", ws, cfg)
 
-        with patch("cli.main.Executor") as MockExec:
-            _phase_handover("myproj", "sandbox")
-            cmd = MockExec.return_value.run.call_args[0][0]
-            assert "-w" not in cmd
+    def test_argv_remote_command_sets_cwd_to_workspaces_ws(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        argv = self._argv(monkeypatch, tmp_path, "api")
+        assert argv[-1] == "cd /workspaces/api && exec bash -l"
+
+    def test_argv_no_docker_exec_w_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The pre-D9 implementation used ``docker exec -w /workspaces/<ws>``.
+        # Post-D9 the cwd lives in the ssh remote-command suffix, not in
+        # the ProxyCommand's ``docker exec`` invocation.
+        argv = self._argv(monkeypatch, tmp_path, "api")
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        assert " -w " not in proxy
+        assert "/workspaces/api" not in proxy
 
 
 class TestLifecycleBackupLockRefusal:
@@ -5799,7 +6096,11 @@ class TestLifecycleBackupLockRefusal:
 
         with (
             patch("cli.main.is_backup_lock_held", return_value=True),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
         ):
             result = runner.invoke(app, ["attach", inst])
             assert result.exit_code == 1
@@ -5854,12 +6155,17 @@ class TestAttachWorkspaceSelection:
         with (
             patch("cli.main.is_backup_lock_held", return_value=False),
             patch("cli.main._warm_check", return_value=True),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]) as mock_build,
         ):
             result = runner.invoke(app, ["attach", inst])
             assert result.exit_code == 0
-            kwargs = mock_handover.call_args.kwargs
-            assert kwargs.get("cwd_workspace") == "main"
+            # _build_attach_argv(inst, ws, host_config) — ws is positional arg 1.
+            args, _kwargs = mock_build.call_args
+            assert args[1] == "main"
 
     def test_n_greater_than_one_omitted_lists_and_exits(self, runner: CliRunner) -> None:
         inst = "myproject"
@@ -5870,7 +6176,11 @@ class TestAttachWorkspaceSelection:
 
         with (
             patch("cli.main.is_backup_lock_held", return_value=False),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
         ):
             result = runner.invoke(app, ["attach", inst])
             assert result.exit_code == 1
@@ -5886,7 +6196,11 @@ class TestAttachWorkspaceSelection:
 
         with (
             patch("cli.main.is_backup_lock_held", return_value=False),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ) as mock_handover,
         ):
             result = runner.invoke(app, ["attach", inst, "nonexistent"])
             assert result.exit_code == 1
@@ -5903,11 +6217,16 @@ class TestAttachWorkspaceSelection:
         with (
             patch("cli.main.is_backup_lock_held", return_value=False),
             patch("cli.main._warm_check", return_value=True),
-            patch("cli.main._phase_handover") as mock_handover,
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]) as mock_build,
         ):
             result = runner.invoke(app, ["attach", inst, "scratch"])
             assert result.exit_code == 0
-            assert mock_handover.call_args.kwargs.get("cwd_workspace") == "scratch"
+            args, _kwargs = mock_build.call_args
+            assert args[1] == "scratch"
 
 
 class TestWorkspaceStateLabel:

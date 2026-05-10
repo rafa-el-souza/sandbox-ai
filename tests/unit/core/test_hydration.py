@@ -8,7 +8,6 @@ import pytest
 from core.hydration import (
     _JINJA_RENDERED_CONFIG,
     IMAGE_REGISTRY,
-    AdminConfig,
     CoreConfig,
     DbPostgresConfig,
     ImagePin,
@@ -38,12 +37,6 @@ base_image = "cgr.dev/chainguard/wolfi-base:latest"
 base_distro_family = "wolfi"
 git_user = ""
 git_email = ""
-
-[admin]
-shm_size = "2gb"
-pids_limit = 400
-base_image = "debian:trixie-slim"
-base_distro_family = "debian"
 
 [runtimes]
 python = true
@@ -85,7 +78,6 @@ class TestInstanceConfig:
         assert config.workspaces["main"].path == "/home/dev/testproject"
         assert config.workspaces["main"].source == "/home/dev/testproject"
         assert config.core.pids_limit == 400
-        assert config.admin.base_distro_family == "debian"
         assert config.runtimes.python is True
         assert config.runtimes.go is False
         assert config.components_db_postgres.enabled is True
@@ -188,9 +180,8 @@ class TestBuildJinjaContext:
         assert ctx["isolated_subnet"] == "10.100.0.0/24"
         assert ctx["core_proxy_subnet"] == "10.100.1.0/24"
         assert ctx["dns_subnet"] == "10.100.2.0/24"
-        assert ctx["admin_subnet"] == "10.100.3.0/24"
-        assert ctx["admin_proxy_subnet"] == "10.100.4.0/24"
-        assert ctx["egress_subnet"] == "10.100.5.0/24"
+        assert ctx["egress_subnet"] == "10.100.3.0/24"
+        assert ctx["ipc_subnet"] == "10.100.4.0/24"
         assert ctx["coredns_dns_ip"] == "10.100.2.53"
         assert ctx["proxy_core_ip"] == "10.100.1.254"
         assert ctx["proxy_password"] == "secretpass"
@@ -204,7 +195,7 @@ class TestBuildJinjaContext:
             }
         ]
         assert ctx["core_base_image"] == "cgr.dev/chainguard/wolfi-base:latest"
-        assert ctx["admin_base_image"] == "debian:trixie-slim"
+        assert "admin_base_image" not in ctx
         assert ctx["host_uid"] == "1000"
 
     def test_runtimes_in_context(self, tmp_path: Path) -> None:
@@ -319,28 +310,46 @@ class TestCoreConfigResourceLimits:
         assert config.core.cpus == 4.0
 
 
-class TestAdminConfigResourceLimits:
-    """Task 8.2, 8.4: AdminConfig mem_limit and cpus fields with defaults."""
+class TestLegacyAdminSectionRejection:
+    """admin-reframe 3.C.3: legacy [admin] section is rejected at parse time."""
 
-    def test_admin_config_defaults(self) -> None:
-        """AdminConfig accepts mem_limit and cpus with correct defaults."""
-        admin = AdminConfig()
-        assert admin.mem_limit == "8gb"
-        assert admin.cpus == 4.0
+    def test_admin_section_rejected_with_friendly_message(self) -> None:
+        """Parsing a sandbox.toml dict containing [admin] raises a ValueError
+        whose message identifies the legacy section by name."""
+        from pydantic import ValidationError as _PydValidationError
 
-    def test_admin_config_custom_values(self) -> None:
-        """AdminConfig accepts custom mem_limit and cpus."""
-        admin = AdminConfig(mem_limit="4gb", cpus=2.0)
-        assert admin.mem_limit == "4gb"
-        assert admin.cpus == 2.0
+        flat = {
+            "instance": {"name": "x", "host_uid": "1000", "warmup_prompt": ""},
+            "workspaces": {
+                "main": {"bootstrap_mode": "copy", "source": "/tmp/x", "path": "/tmp/x"},
+            },
+            "admin": {"mem_limit": "8gb"},
+        }
+        with pytest.raises((_PydValidationError, ValueError)) as excinfo:
+            InstanceConfig.model_validate(flat)
+        assert "Legacy [admin] section detected" in str(excinfo.value)
 
-    def test_admin_config_backward_compatibility(self, tmp_path: Path) -> None:
-        """Omitted mem_limit and cpus fields use defaults."""
+    def test_admin_section_rejected_via_from_toml(self, tmp_path: Path) -> None:
+        """A sandbox.toml file with an [admin] table is rejected by from_toml."""
+        from pydantic import ValidationError as _PydValidationError
+
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(
+            VALID_TOML
+            + "\n[admin]\nmem_limit = \"4gb\"\n"
+        )
+        with pytest.raises((_PydValidationError, ValueError)) as excinfo:
+            InstanceConfig.from_toml(str(toml_path))
+        assert "Legacy [admin] section detected" in str(excinfo.value)
+
+    def test_valid_toml_without_admin_parses_cleanly(self, tmp_path: Path) -> None:
+        """A sandbox.toml without an [admin] table parses into InstanceConfig
+        without raising."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
-        assert config.admin.mem_limit == "8gb"
-        assert config.admin.cpus == 4.0
+        assert config.instance.name == "testproject"
+        assert not hasattr(config, "admin")
 
 
 class TestBuildJinjaContextResourceLimits:
@@ -356,15 +365,26 @@ class TestBuildJinjaContextResourceLimits:
         assert ctx["core_memswap_limit"] == "8gb"
         assert ctx["core_cpus"] == "4.0"
 
-    def test_admin_resource_keys_present(self, tmp_path: Path) -> None:
-        """Context includes admin_mem_limit, admin_memswap_limit, admin_cpus."""
+    def test_admin_resource_keys_absent(self, tmp_path: Path) -> None:
+        """Per admin-reframe: admin resource-limit keys are no longer in context."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
-        assert ctx["admin_mem_limit"] == "8gb"
-        assert ctx["admin_memswap_limit"] == "8gb"
-        assert ctx["admin_cpus"] == "4.0"
+        for key in (
+            "admin_mem_limit",
+            "admin_memswap_limit",
+            "admin_cpus",
+            "admin_pids_limit",
+            "admin_shm_size",
+            "admin_base_image",
+            "admin_distro_family",
+            "admin_subnet",
+            "admin_proxy_subnet",
+            "custom_config_admin",
+            "tmux_resurrect_dir",
+        ):
+            assert key not in ctx, f"Unexpected admin context key: {key}"
 
     def test_core_memswap_equals_mem_limit(self, tmp_path: Path) -> None:
         """core_memswap_limit always equals core_mem_limit (zero swap)."""
@@ -379,25 +399,13 @@ class TestBuildJinjaContextResourceLimits:
         assert ctx["core_mem_limit"] == "16gb"
         assert ctx["core_memswap_limit"] == "16gb"
 
-    def test_admin_memswap_equals_mem_limit(self, tmp_path: Path) -> None:
-        """admin_memswap_limit always equals admin_mem_limit (zero swap)."""
-        custom_toml = VALID_TOML.replace(
-            '[admin]\nshm_size = "2gb"',
-            '[admin]\nmem_limit = "4gb"\nshm_size = "2gb"',
-        )
-        toml_path = tmp_path / "sandbox.toml"
-        toml_path.write_text(custom_toml)
-        config = InstanceConfig.from_toml(str(toml_path))
-        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
-        assert ctx["admin_mem_limit"] == "4gb"
-        assert ctx["admin_memswap_limit"] == "4gb"
-
 
 class TestScaffoldTemplateResourceLimits:
     """Task 8.9: Scaffold _SANDBOX_TOML_TEMPLATE includes resource limit defaults."""
 
     def test_scaffold_template_contains_resource_limits(self, tmp_path: Path) -> None:
-        """Scaffold output contains mem_limit and cpus in both [core] and [admin]."""
+        """Scaffold output contains mem_limit and cpus in [core]. Per admin-reframe,
+        [admin] section was removed (admin is a static binary with no runtime knobs)."""
         from core.scaffold import WorkspaceSpec, write_sandbox_toml
 
         instance = tmp_path / "instance"
@@ -414,10 +422,8 @@ class TestScaffoldTemplateResourceLimits:
         assert 'mem_limit = "8gb"' in core_section
         assert "cpus = 4.0" in core_section
 
-        # Verify [admin] section has mem_limit and cpus
-        admin_section = content.split("[admin]")[1].split("[")[0]
-        assert 'mem_limit = "8gb"' in admin_section
-        assert "cpus = 4.0" in admin_section
+        # Verify [admin] section absent (admin-reframe)
+        assert "[admin]" not in content
 
 
 class TestRenderTemplates:
@@ -437,11 +443,10 @@ class TestRenderTemplates:
         (core_dir / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
         (core_dir / "entrypoint.sh").write_text("#!/bin/bash\n")
 
-        # Admin Dockerfile template
+        # admin Dockerfile is static (FROM scratch + /fwd) — no Jinja, no entrypoint.sh.
         admin_dir = docker_dir / "admin"
         admin_dir.mkdir()
-        (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
-        (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+        (admin_dir / "Dockerfile.admin").write_text("FROM scratch\nENTRYPOINT [\"/fwd\"]\n")
 
         # CoreDNS Dockerfile (static copy, no Jinja)
         coredns_dir = docker_dir / "coredns"
@@ -474,11 +479,7 @@ class TestRenderTemplates:
         (proxy_dir / "squid.conf").write_text("acl src {{ isolated_subnet }}\n")
         (proxy_dir / "ERR_SANDBOX_403").write_text("DENIED\n")
 
-        # admin static configs
-        admin_cfg = config_dir / "admin"
-        admin_cfg.mkdir(parents=True)
-        for f in [".zshrc", ".tmux.conf", "gitmux.conf", "starship.toml", ".gitconfig"]:
-            (admin_cfg / f).write_text(f"# {f}\n")
+        # admin-reframe: no admin config templates — admin is static FROM-scratch /fwd binary.
 
         # core static configs
         core_cfg = config_dir / "core"
@@ -595,7 +596,7 @@ class TestRenderTemplates:
         )
 
     def test_renders_dockerfile_by_distro(self, tooling_and_instance: tuple[Path, Path]) -> None:
-        """Dockerfile selected by base_distro_family, rendered as Dockerfile.core."""
+        """Core Dockerfile selected by base_distro_family; admin Dockerfile is static-copied."""
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
@@ -604,8 +605,12 @@ class TestRenderTemplates:
         core_df = (instance / "docker" / "core" / "Dockerfile.core").read_text()
         assert "cgr.dev/chainguard/wolfi-base:latest" in core_df
 
+        # admin Dockerfile is statically copied (no Jinja); the FROM-scratch shape is preserved verbatim.
         admin_df = (instance / "docker" / "admin" / "Dockerfile.admin").read_text()
-        assert "debian:trixie-slim" in admin_df
+        assert "FROM scratch" in admin_df
+        assert '/fwd' in admin_df
+        # entrypoint.sh is no longer copied for admin.
+        assert not (instance / "docker" / "admin" / "entrypoint.sh").exists()
 
     def test_disabled_component_skips_extra(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Disabled components do not have their extras rendered."""
@@ -670,19 +675,20 @@ class TestRenderTemplates:
     def test_renders_and_copies_configs(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Config files are rendered (Jinja2) or statically copied to instance.
 
-        .zshrc, .tmux.conf, .bashrc, .npmrc, .gitconfig, and CLAUDE.md are now
-        rendered through the Jinja2 pipeline (not statically copied). Static files
-        (.claude.json, gitmux.conf, starship.toml) are still copied as-is.
-        Assertions verify file existence at the expected output paths.
+        .bashrc, .npmrc, .gitconfig, and CLAUDE.md are rendered through the
+        Jinja2 pipeline. Per admin-reframe, no config/admin/* files are emitted.
         """
         tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
 
-        assert (instance / "config" / "admin" / ".zshrc").exists()
         assert (instance / "config" / "core" / ".bashrc").exists()
         assert (instance / "config" / "core" / "CLAUDE.md").exists()
+        # No admin shell configs are emitted — admin is FROM-scratch /fwd.
+        assert not (instance / "config" / "admin" / ".zshrc").exists()
+        assert not (instance / "config" / "admin" / ".tmux.conf").exists()
+        assert not (instance / "config" / "admin" / ".gitconfig").exists()
 
     def test_no_unresolved_jinja_markers(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """T1: No rendered file under instance dir contains literal {{ markers.
@@ -808,11 +814,12 @@ class TestComposeGroupAdd:
     """compose.yml renders group_add on core and admin services."""
 
     def test_core_and_admin_have_group_add(self, tmp_path: Path) -> None:
+        """Per admin-reframe, admin no longer has group_add (FROM-scratch shape);
+        only core retains the workspace-bridge group_add."""
         rendered = _render_compose(tmp_path)
-        # Crude split into service-level chunks; sufficient since we only check membership.
         assert "group_add:" in rendered
-        # appearing twice — once on core, once on admin
-        assert rendered.count("group_add:") == 2
+        # appearing once — on core only (admin is FROM-scratch, no group_add)
+        assert rendered.count("group_add:") == 1
 
 
 class TestRenderTemplatesRestrictiveModes:
@@ -858,7 +865,6 @@ class TestRenderTemplatesRestrictiveModes:
             "config/dnsdist/dnsdist.conf",
             "config/proxy/squid.conf",
             "config/core/.bashrc",
-            "config/admin/.zshrc",
             "config/proxy/allowed_domains.txt",
             "config/proxy/read_only_domains.txt",
             "config/core/.claude.json",
@@ -873,7 +879,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
     """Build a minimal Jinja2 context for render tests."""
     from core.ipam import derive_static_ips, derive_subnets
 
-    isolated, core_proxy, dns, admin, admin_proxy, egress, ipc = derive_subnets(0)
+    isolated, core_proxy, dns, egress, ipc = derive_subnets(0)
     ips = derive_static_ips(0)
 
     return {
@@ -890,33 +896,25 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "isolated_subnet": isolated,
         "core_proxy_subnet": core_proxy,
         "dns_subnet": dns,
-        "admin_subnet": admin,
-        "admin_proxy_subnet": admin_proxy,
         "egress_subnet": egress,
         "ipc_subnet": ipc,
         **ips,
         "proxy_password": "testpass",
         "proxy_url_core": "http://proxyuser:testpass@proxy:3128",
         "core_base_image": "cgr.dev/chainguard/wolfi-base:latest",
-        "admin_base_image": "debian:trixie-slim",
         "core_distro_family": "wolfi",
-        "admin_distro_family": "debian",
         "host_uid": "1000",
         "core_pids_limit": 400,
-        "admin_pids_limit": 400,
         "core_shm_size": "2gb",
-        "admin_shm_size": "2gb",
         "core_mem_limit": "8gb",
         "core_memswap_limit": "8gb",
         "core_cpus": "4.0",
-        "admin_mem_limit": "8gb",
-        "admin_memswap_limit": "8gb",
-        "admin_cpus": "4.0",
         "runtime": "runsc",
         "dns_image": IMAGE_REGISTRY["coredns"].pinned,
         "proxy_image": IMAGE_REGISTRY["squid"].pinned,
         "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
         "busybox_image": IMAGE_REGISTRY["busybox_musl"].pinned,
+        "golang_alpine_image": IMAGE_REGISTRY["golang_alpine"].pinned,
         "db_postgres_image": IMAGE_REGISTRY["postgres"].pinned,
         "nvm_version": "0.39.7",
         "node_version": "20.12.2",
@@ -930,8 +928,6 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "git_user": "Agent",
         "git_email": "agent@sandbox.local",
         "custom_config_core": "/home/agent/.sandbox/custom",
-        "custom_config_admin": "/home/human/.sandbox/custom",
-        "tmux_resurrect_dir": "/home/human/.sandbox/tmux_resurrect",
         "db_postgres_enabled": True,
         "mcp_firecrawl_enabled": False,
         "custom_claude_rules": "",
@@ -1070,8 +1066,8 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     (core_dir / "entrypoint.sh").write_text("#!/bin/bash\n")
     admin_dir = docker_dir / "admin"
     admin_dir.mkdir()
-    (admin_dir / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
-    (admin_dir / "entrypoint.sh").write_text("#!/bin/sh\n")
+    # admin Dockerfile is now a static copy (FROM scratch + /fwd) — no Jinja, no entrypoint.sh.
+    (admin_dir / "Dockerfile.admin").write_text("FROM scratch\nENTRYPOINT [\"/fwd\"]\n")
     coredns_dir = docker_dir / "coredns"
     coredns_dir.mkdir()
     (coredns_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")
@@ -1079,7 +1075,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     extras_dir.mkdir()
     (extras_dir / "mcp-firecrawl.yml").write_text("# firecrawl\n")
     (extras_dir / "Dockerfile.mcp-firecrawl").write_text("FROM node\n")
-    (extras_dir / "db-postgres.yml").write_text("# postgres: {{ db_postgres_admin_ip }}\n")
+    (extras_dir / "db-postgres.yml").write_text("# postgres\n")
 
     config_dir = tooling / "config"
     dns_dir = config_dir / "coredns"
@@ -1094,17 +1090,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     proxy_dir.mkdir(parents=True)
     (proxy_dir / "squid.conf").write_text("# {{ proxy_core_ip }}\n")
     (proxy_dir / "ERR_SANDBOX_403").write_text("DENIED\n")
-    # Admin: rendered templates + static files
-    admin_cfg = config_dir / "admin"
-    admin_cfg.mkdir(parents=True)
-    # Rendered (.zshrc, .tmux.conf)
-    (admin_cfg / ".zshrc").write_text("# zshrc {{ custom_config_admin }}\n")
-    (admin_cfg / ".tmux.conf").write_text("# tmux {{ tmux_resurrect_dir }}\n")
-    # Static (gitmux.conf, starship.toml)
-    for f in ["gitmux.conf", "starship.toml"]:
-        (admin_cfg / f).write_text(f"# {f}\n")
-    # Rendered (admin/.gitconfig)
-    (admin_cfg / ".gitconfig").write_text("# gitconfig {{ custom_config_admin }}\n")
+    # admin-reframe: no admin config templates — admin is static FROM-scratch /fwd binary.
     # Core: rendered templates + static files
     core_cfg = config_dir / "core"
     core_cfg.mkdir(parents=True)
@@ -1127,7 +1113,6 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
         "AllowAgentForwarding no\n"
         "AllowTcpForwarding no\n"
         "PermitTunnel no\n"
-        "AcceptEnv SANDBOX_WARMUP_PROMPT\n"
         "MaxSessions 10\n"
         "ClientAliveInterval 300\n"
         "ClientAliveCountMax 2\n"
@@ -1425,7 +1410,7 @@ class TestValidTomlBackwardCompatibility:
         config = InstanceConfig.from_toml(str(toml_path))
         # User-supplied mutable tags are accepted — defaults would be digests
         assert config.core.base_image == "cgr.dev/chainguard/wolfi-base:latest"
-        assert config.admin.base_image == "debian:trixie-slim"
+        assert not hasattr(config, "admin")
 
 
 class TestImageDigestsDnsdist:
@@ -1458,10 +1443,10 @@ class TestImageDigestsDnsdist:
 
 
 class TestSixSubnetContextKeys:
-    """Wave 3: build_jinja_context returns 6 subnet + new IP keys."""
+    """admin-reframe: build_jinja_context returns 5 subnet keys (admin/admin_proxy dropped)."""
 
-    def test_six_subnet_keys_present(self, tmp_path: Path) -> None:
-        """Context contains all 6 subnet CIDR keys."""
+    def test_five_subnet_keys_present(self, tmp_path: Path) -> None:
+        """Context contains all 5 surviving subnet CIDR keys."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
@@ -1470,47 +1455,50 @@ class TestSixSubnetContextKeys:
             "isolated_subnet",
             "core_proxy_subnet",
             "dns_subnet",
-            "admin_subnet",
-            "admin_proxy_subnet",
             "egress_subnet",
+            "ipc_subnet",
         ]
         for key in subnet_keys:
             assert key in ctx, f"Missing context key: {key}"
+        for dropped in ("admin_subnet", "admin_proxy_subnet"):
+            assert dropped not in ctx, f"Unexpected dropped subnet key: {dropped}"
 
-    def test_proxy_dual_ip_keys(self, tmp_path: Path) -> None:
-        """Context includes proxy_core_ip and proxy_admin_ip."""
+    def test_proxy_core_ip_present_admin_dropped(self, tmp_path: Path) -> None:
+        """Context includes proxy_core_ip; proxy_admin_ip dropped per admin-reframe."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert "proxy_core_ip" in ctx
-        assert "proxy_admin_ip" in ctx
+        assert "proxy_admin_ip" not in ctx
 
     def test_dnsdist_ip_keys(self, tmp_path: Path) -> None:
-        """Context includes all 3 dnsdist IP keys."""
+        """Context includes surviving dnsdist IP keys; dnsdist_admin_ip dropped."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
-        for key in ["dnsdist_isolated_ip", "dnsdist_dns_ip", "dnsdist_admin_ip"]:
+        for key in ["dnsdist_isolated_ip", "dnsdist_dns_ip"]:
             assert key in ctx, f"Missing context key: {key}"
+        assert "dnsdist_admin_ip" not in ctx
 
     def test_coredns_ip_keys(self, tmp_path: Path) -> None:
-        """Context includes all 3 coredns IP keys."""
+        """Context includes surviving coredns IP keys; coredns_admin_ip dropped."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
-        for key in ["coredns_dns_ip", "coredns_admin_ip", "coredns_egress_ip"]:
+        for key in ["coredns_dns_ip", "coredns_egress_ip"]:
             assert key in ctx, f"Missing context key: {key}"
+        assert "coredns_admin_ip" not in ctx
 
-    def test_db_postgres_admin_ip_key(self, tmp_path: Path) -> None:
-        """Context includes db_postgres_admin_ip."""
+    def test_db_postgres_admin_ip_dropped(self, tmp_path: Path) -> None:
+        """Context no longer includes db_postgres_admin_ip per admin-reframe."""
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
-        assert "db_postgres_admin_ip" in ctx
+        assert "db_postgres_admin_ip" not in ctx
 
     def test_firecrawl_dns_ip_key(self, tmp_path: Path) -> None:
         """Context includes firecrawl_dns_ip."""
@@ -1557,6 +1545,41 @@ class TestConfigRenderingRegistry:
         """Registry does NOT contain dns-sidecar/Corefile."""
         sources = [src for src, _dst in _JINJA_RENDERED_CONFIG]
         assert "dns-sidecar/Corefile" not in sources
+
+    def test_admin_entries_dropped(self) -> None:
+        """Per admin-reframe: registry has no admin/.zshrc, admin/.tmux.conf, admin/.gitconfig."""
+        sources = [src for src, _dst in _JINJA_RENDERED_CONFIG]
+        for dropped in ("admin/.zshrc", "admin/.tmux.conf", "admin/.gitconfig"):
+            assert dropped not in sources, f"Unexpected admin entry: {dropped}"
+
+    def test_registry_has_eight_entries(self) -> None:
+        """Per admin-reframe: registry shrinks from 11 to 8 entries (three admin entries dropped)."""
+        assert len(_JINJA_RENDERED_CONFIG) == 8
+
+    def test_static_config_admin_constant_removed(self) -> None:
+        """_STATIC_CONFIG_ADMIN constant is deleted entirely."""
+        import core.hydration as hydration_mod
+
+        assert not hasattr(hydration_mod, "_STATIC_CONFIG_ADMIN"), (
+            "_STATIC_CONFIG_ADMIN must be deleted per admin-reframe (no static admin shell configs)"
+        )
+
+    def test_golang_alpine_image_in_context(self, tmp_path: Path) -> None:
+        """build_jinja_context exposes golang_alpine_image for the new Dockerfile.admin builder pin."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "golang_alpine_image" in ctx
+        assert ctx["golang_alpine_image"] == IMAGE_REGISTRY["golang_alpine"].pinned
+
+    def test_admin_ipc_ip_in_context(self, tmp_path: Path) -> None:
+        """build_jinja_context exposes admin_ipc_ip from the IPAM derivation."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert "admin_ipc_ip" in ctx
 
 
 class TestDnsdistTemplateContent:
@@ -1626,15 +1649,17 @@ class TestSquidFirecrawlAcl:
         assert "http_access allow firecrawl_src authenticated_users safe_methods whitelist" in content
 
     def test_firecrawl_after_agent_admin(self) -> None:
-        """Firecrawl allow rule appears after agent/admin allows and before deny all."""
+        """Firecrawl allow rule appears after agent allow and before deny all.
+        Per admin-reframe, the admin_src ACL was removed (admin is not a proxy consumer)."""
         content = (
             Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "proxy" / "squid.conf"
         ).read_text()
         agent_pos = content.index("http_access allow agent_src")
-        admin_pos = content.index("http_access allow admin_src")
         firecrawl_pos = content.index("http_access allow firecrawl_src")
         deny_pos = content.index("http_access deny all")
-        assert agent_pos < admin_pos < firecrawl_pos < deny_pos
+        assert agent_pos < firecrawl_pos < deny_pos
+        # Per admin-reframe, admin_src ACL is gone
+        assert "admin_src" not in content
 
 
 def _render_compose(tmp_path: Path) -> str:
@@ -1727,25 +1752,27 @@ class TestComposeNetworkDefinitions:
     """5.T: 6-network topology with correct properties."""
 
     def test_new_networks_defined(self, tmp_path: Path) -> None:
-        """compose.yml defines core_proxy_net, dns_net, admin_net,
-        admin_proxy_net."""
+        """compose.yml defines core_proxy_net, dns_net, ipc_net.
+        Per admin-reframe, admin_net and admin_proxy_net were removed."""
         rendered = _render_compose(tmp_path)
         for net in [
             "core_proxy_net:",
             "dns_net:",
-            "admin_net:",
-            "admin_proxy_net:",
+            "ipc_net:",
         ]:
             assert net in rendered, f"Missing network: {net}"
+        # Removed by admin-reframe
+        assert "admin_net:" not in rendered
+        assert "admin_proxy_net:" not in rendered
 
     def test_new_networks_internal(self, tmp_path: Path) -> None:
-        """All 4 new networks have internal: true."""
+        """Internal networks have internal: true.
+        Per admin-reframe, admin_net and admin_proxy_net were removed."""
         raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         for net_name in [
             "core_proxy_net:",
             "dns_net:",
-            "admin_net:",
-            "admin_proxy_net:",
+            "ipc_net:",
         ]:
             idx = raw.index(net_name)
             # Check within the next 200 chars
@@ -1793,13 +1820,14 @@ class TestComposeServiceNetworkMembership:
         self,
         tmp_path: Path,
     ) -> None:
-        """Admin is on admin_net, admin_proxy_net, and ipc_net."""
+        """Per admin-reframe, admin is FROM-scratch on ipc_net only.
+        admin_net and admin_proxy_net were removed entirely."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "admin_net:" in admin_block
-        assert "admin_proxy_net:" in admin_block
         assert "ipc_net:" in admin_block
+        assert "admin_net:" not in admin_block
+        assert "admin_proxy_net:" not in admin_block
         assert "isolated_net:" not in admin_block
         assert "core_proxy_net:" not in admin_block
 
@@ -1894,14 +1922,13 @@ class TestComposeDnsRouting:
         assert ips["dnsdist_isolated_ip"] in core_block
 
     def test_admin_dns_points_to_dnsdist(self, tmp_path: Path) -> None:
-        """Admin dns directive uses dnsdist_admin_ip."""
-        from core.ipam import derive_static_ips
-
-        ips = derive_static_ips(0)
+        """Per admin-reframe, admin is FROM-scratch with no dns: directive
+        (admin doesn't perform DNS resolution; it's a stdio<->TCP forwarder).
+        Verify admin block contains no dns: section."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert ips["dnsdist_admin_ip"] in admin_block
+        assert "\n    dns:" not in admin_block
 
 
 class TestComposeExtraHosts:
@@ -1919,14 +1946,12 @@ class TestComposeExtraHosts:
         assert f"proxy:{ips['proxy_core_ip']}" in core_block
 
     def test_admin_extra_hosts_proxy(self, tmp_path: Path) -> None:
-        """Admin extra_hosts has proxy with proxy_admin_ip."""
-        from core.ipam import derive_static_ips
-
-        ips = derive_static_ips(0)
+        """Per admin-reframe, admin is FROM-scratch with no extra_hosts
+        (admin doesn't reach the proxy; it forwards stdio<->TCP only)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert f"proxy:{ips['proxy_admin_ip']}" in admin_block
+        assert "extra_hosts:" not in admin_block
 
 
 class TestComposeIpForward:
@@ -1941,7 +1966,7 @@ class TestComposeIpForward:
         assert "net.ipv4.ip_forward=0" in core_block
 
     def test_admin_ip_forward(self, tmp_path: Path) -> None:
-        """Admin sysctls contain ip_forward=0."""
+        """Admin sysctls contain ip_forward=0 (preserved per admin-reframe spec)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
@@ -1967,18 +1992,13 @@ class TestComposeNoProxy:
         assert subnets[3] not in core_block  # admin_subnet
 
     def test_admin_no_proxy_scoped(self, tmp_path: Path) -> None:
-        """Admin NO_PROXY includes admin/admin_proxy,
-        excludes core subnets."""
-        from core.ipam import derive_subnets
-
-        subnets = derive_subnets(0)
+        """Per admin-reframe, admin is FROM-scratch with no NO_PROXY env var
+        (admin has no environment block; proxy is unreachable from admin)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        # admin_subnet is subnets[3], admin_proxy is subnets[4]
-        assert subnets[3] in admin_block  # admin_subnet
-        assert subnets[4] in admin_block  # admin_proxy_subnet
-        assert subnets[0] not in admin_block  # isolated_subnet
+        assert "NO_PROXY" not in admin_block
+        assert "environment:" not in admin_block
 
 
 class TestComposeDependsOn:
@@ -1994,21 +2014,22 @@ class TestComposeDependsOn:
         assert "service_healthy" in core_block
 
     def test_admin_depends_on_dnsdist(self, tmp_path: Path) -> None:
-        """Admin depends_on includes dnsdist."""
+        """Per admin-reframe, admin is FROM-scratch with no depends_on
+        (admin starts independently as a TCP forwarder)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "dnsdist:" in admin_block
-        assert "service_healthy" in admin_block
+        assert "depends_on:" not in admin_block
 
 
 class TestDbPostgresTemplate:
     """5.T: db-postgres.yml topology and hardening."""
 
     def test_db_postgres_admin_net(self, tmp_path: Path) -> None:
-        """db-postgres has admin_net membership."""
+        """Per admin-reframe, db-postgres no longer has admin_net membership
+        (admin_net was removed entirely)."""
         rendered = _render_extras(tmp_path, "db-postgres.yml")
-        assert "admin_net:" in rendered
+        assert "admin_net:" not in rendered
 
     def test_db_postgres_ip_forward(self, tmp_path: Path) -> None:
         """db-postgres sysctls contain ip_forward=0."""
@@ -2016,12 +2037,16 @@ class TestDbPostgresTemplate:
         assert "net.ipv4.ip_forward=0" in rendered
 
     def test_db_postgres_admin_ip(self, tmp_path: Path) -> None:
-        """db-postgres has db_postgres_admin_ip on admin_net."""
+        """Per admin-reframe, db_postgres no longer carries an admin-net IP
+        (admin_net removed; db_postgres_admin_ip dropped from derive_static_ips)."""
+        rendered = _render_extras(tmp_path, "db-postgres.yml")
+        # The variable reference (Jinja substituted out at render) and the
+        # network name should both be absent from the rendered output.
+        assert "admin_net:" not in rendered
+        # Confirm derive_static_ips no longer produces the admin IP key
         from core.ipam import derive_static_ips
 
-        ips = derive_static_ips(0)
-        rendered = _render_extras(tmp_path, "db-postgres.yml")
-        assert ips["db_postgres_admin_ip"] in rendered
+        assert "db_postgres_admin_ip" not in derive_static_ips(0)
 
 
 class TestMcpFirecrawlTemplate:
@@ -2071,7 +2096,7 @@ class TestHydrationIpcContext:
             instance_dir=str(tmp_path),
         )
         assert "ipc_subnet" in ctx
-        assert ctx["ipc_subnet"] == "10.100.6.0/24"
+        assert ctx["ipc_subnet"] == "10.100.4.0/24"
 
     def test_context_includes_ipc_ips(self, tmp_path: Path) -> None:
         """build_jinja_context contains core_ipc_ip and admin_ipc_ip."""
@@ -2209,14 +2234,15 @@ class TestSshdConfigTemplate:
         tpl = env.get_template("config/core/sshd_config")
         rendered = tpl.render(ctx)
 
-        assert "ListenAddress 10.100.6.3" in rendered
+        assert "ListenAddress 10.100.4.3" in rendered
         assert "Port 9999" in rendered
         assert "PasswordAuthentication no" in rendered
         assert "AllowUsers agent" in rendered
         assert "PermitRootLogin no" in rendered
         assert "HostKey /run/secrets/ipc_host_key" in rendered
         assert "AuthorizedKeysFile /run/secrets/authorized_keys" in rendered
-        assert "AcceptEnv SANDBOX_WARMUP_PROMPT" in rendered
+        assert "AcceptEnv SANDBOX_WARMUP_PROMPT" not in rendered
+        assert "AcceptEnv" not in rendered
         assert "0.0.0.0" not in rendered
 
 
@@ -2307,11 +2333,15 @@ class TestComposeIpcNetAndW4Hardening:
 
     # --- (k) admin ipc_ssh_key bind-mount ---
     def test_compose_admin_ipc_ssh_key_secret(self, tmp_path: Path) -> None:
-        """Admin service volumes contain ipc_ssh_key as bind-mount (not Docker secrets)."""
+        """Per admin-reframe (Fix B'), admin no longer holds the SSH client key —
+        the host runs ssh and the key lives host-side. Admin has no volumes block."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro" in admin_block
+        # The /run/secrets/ipc_ssh_key bind path must not appear in admin
+        assert "/run/secrets/ipc_ssh_key" not in admin_block
+        # Admin is FROM-scratch with no volumes block
+        assert "\n    volumes:" not in admin_block
 
     # --- (l) core tmpfs /run ---
     def test_compose_core_tmpfs_run(self, tmp_path: Path) -> None:
@@ -2332,29 +2362,32 @@ class TestComposeIpcNetAndW4Hardening:
         core_block = rendered[core_start:admin_start]
         assert "/home/agent/.config" in core_block
 
-    # --- (n) admin tmpfs ~/.cache ---
+    # --- (n) admin no tmpfs (FROM-scratch) ---
     def test_compose_admin_tmpfs_cache(self, tmp_path: Path) -> None:
-        """Admin tmpfs includes /home/human/.cache."""
+        """Per admin-reframe (D6), admin is FROM-scratch with read_only:true and
+        zero tmpfs mounts — the empty filesystem is strictly stronger."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "/home/human/.cache" in admin_block
+        assert "/home/human/.cache" not in admin_block
 
-    # --- (o) admin tmpfs ~/.config ---
+    # --- (o) admin no tmpfs (FROM-scratch) ---
     def test_compose_admin_tmpfs_config(self, tmp_path: Path) -> None:
-        """Admin tmpfs includes /home/human/.config."""
+        """Per admin-reframe (D6), admin has no tmpfs mounts."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "/home/human/.config" in admin_block
+        assert "/home/human/.config" not in admin_block
+        assert "tmpfs:" not in admin_block
 
-    # --- (p) admin tmpfs ~/.zsh_sessions ---
+    # --- (p) admin no zsh_sessions tmpfs (no shell) ---
     def test_compose_admin_tmpfs_zsh_sessions(self, tmp_path: Path) -> None:
-        """Admin tmpfs includes /home/human/.zsh_sessions."""
+        """Per admin-reframe, admin has no shell — no zsh, no /home/human."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "/home/human/.zsh_sessions" in admin_block
+        assert "/home/human/.zsh_sessions" not in admin_block
+        assert "/home/human" not in admin_block
 
     # --- (q) core no command override ---
     def test_compose_core_no_command_override(self, tmp_path: Path) -> None:
@@ -2371,24 +2404,22 @@ class TestComposeIpcNetAndW4Hardening:
         from core.ipam import derive_subnets
 
         subnets = derive_subnets(0)
-        ipc_subnet = subnets[6]
+        ipc_subnet = subnets[4]
         rendered = _render_compose(tmp_path)
         core_start = rendered.index("\n  core:")
         admin_start = rendered.index("\n  admin:")
         core_block = rendered[core_start:admin_start]
         assert ipc_subnet in core_block
 
-    # --- (s) admin NO_PROXY includes ipc_subnet ---
+    # --- (s) admin has no NO_PROXY (FROM-scratch) ---
     def test_compose_admin_no_proxy_includes_ipc(self, tmp_path: Path) -> None:
-        """Admin service NO_PROXY includes ipc_subnet."""
-        from core.ipam import derive_subnets
-
-        subnets = derive_subnets(0)
-        ipc_subnet = subnets[6]
+        """Per admin-reframe, admin is FROM-scratch with no environment block,
+        so no NO_PROXY env var. Admin only sees the ipc_subnet via its network IP."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert ipc_subnet in admin_block
+        assert "NO_PROXY" not in admin_block
+        assert "environment:" not in admin_block
 
     # --- (t) core authorized_keys bind mount ---
     def test_compose_core_authorized_keys_bind(self, tmp_path: Path) -> None:
@@ -2399,21 +2430,23 @@ class TestComposeIpcNetAndW4Hardening:
         core_block = rendered[core_start:admin_start]
         assert "authorized_keys:/run/secrets/authorized_keys:ro" in core_block
 
-    # --- (u) admin known_hosts bind mount ---
+    # --- (u) admin no known_hosts bind (Fix B': known_hosts lives host-side) ---
     def test_compose_admin_known_hosts_bind(self, tmp_path: Path) -> None:
-        """Admin volumes contain ipc_known_hosts:/run/secrets/ipc_known_hosts:ro."""
+        """Per admin-reframe (Fix B'), ipc_known_hosts no longer lives in admin —
+        the host runs ssh and the known_hosts file is host-side."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block
+        assert "ipc_known_hosts" not in admin_block
 
-    # --- (v) admin starship bind mount ---
+    # --- (v) admin no starship (no shell, FROM-scratch) ---
     def test_compose_admin_starship_bind(self, tmp_path: Path) -> None:
-        """Admin volumes contain starship.toml:/home/human/.config/starship.toml:ro."""
+        """Per admin-reframe, admin has no shell or shell prompt config
+        (FROM-scratch image with only /fwd binary)."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "starship.toml:/home/human/.config/starship.toml:ro" in admin_block
+        assert "starship.toml" not in admin_block
 
     # --- (w) infra services no read_only: false ---
     def test_compose_infra_no_read_only_false(self, tmp_path: Path) -> None:
@@ -2505,7 +2538,7 @@ class TestW4IntegrationVerification:
     """13.T: End-to-end integration verification for Wave 4 containment hardening."""
 
     def test_full_w4_template_validation(self, tmp_path: Path) -> None:
-        """Build a complete Jinja2 context with all 7-tuple fields, validate all templates."""
+        """Build a complete Jinja2 context with all 5-tuple fields, validate all templates."""
         from core.hydration import InstanceConfig, build_jinja_context, validate_templates
 
         toml_path = tmp_path / "sandbox.toml"
@@ -2516,7 +2549,7 @@ class TestW4IntegrationVerification:
         context = build_jinja_context(config, base_index=0, proxy_password="testpass", instance_dir=str(tmp_path))
         context["in_container_workspace_bridge_gid"] = 1000
 
-        # Verify 7-tuple fields exist in context
+        # Verify 5-tuple fields exist in context
         assert "ipc_subnet" in context
         assert "core_ipc_ip" in context
         assert "admin_ipc_ip" in context
@@ -2538,7 +2571,7 @@ class TestW4IntegrationVerification:
         # Simulate IPAM allocation at slot 0
         base_index = 0
         subnets = derive_subnets(base_index)
-        assert len(subnets) == 7  # 7-tuple
+        assert len(subnets) == 5  # quintuple
 
         ips = derive_static_ips(base_index)
         assert "core_ipc_ip" in ips
@@ -2673,10 +2706,6 @@ class TestDownstreamConsumerMigration:
         """CoreConfig().base_image == IMAGE_REGISTRY['wolfi_base'].pinned."""
         assert CoreConfig().base_image == IMAGE_REGISTRY["wolfi_base"].pinned
 
-    def test_admin_config_default_uses_registry(self) -> None:
-        """AdminConfig().base_image == IMAGE_REGISTRY['debian_trixie'].pinned."""
-        assert AdminConfig().base_image == IMAGE_REGISTRY["debian_trixie"].pinned
-
     def test_db_postgres_config_default_uses_registry(self) -> None:
         """DbPostgresConfig().image == IMAGE_REGISTRY['postgres'].pinned."""
         assert DbPostgresConfig().image == IMAGE_REGISTRY["postgres"].pinned
@@ -2689,10 +2718,10 @@ class TestDownstreamConsumerMigration:
         assert "IMAGE_DIGESTS[" not in source
 
     def test_pydantic_source_no_legacy(self) -> None:
-        """CoreConfig, AdminConfig, DbPostgresConfig source does not contain IMAGE_DIGESTS[."""
+        """CoreConfig, DbPostgresConfig source does not contain IMAGE_DIGESTS[."""
         import inspect
 
-        for cls in (CoreConfig, AdminConfig, DbPostgresConfig):
+        for cls in (CoreConfig, DbPostgresConfig):
             source = inspect.getsource(cls)
             assert "IMAGE_DIGESTS[" not in source, f"{cls.__name__} still uses IMAGE_DIGESTS"
 
@@ -3323,44 +3352,16 @@ class TestDnsdistCommandArray:
 
 
 class TestTmuxGvisorPollingConfig:
-    """Spec: tmux polling and activity monitoring tuned for gVisor (gvisor-resource-tuning delta)."""
+    """Per admin-reframe, admin is FROM-scratch with no shell — no tmux config rendered."""
 
     def test_tmux_gvisor_polling_config(self, tmp_path: Path) -> None:
-        """Rendered .tmux.conf has gVisor-compatible polling: interval 30, activity off."""
-        instance = tmp_path / "inst"
-        for d in [
-            "docker/core",
-            "docker/admin",
-            "docker/extras",
-            "docker/coredns",
-            "config/admin",
-            "config/core",
-            "config/coredns",
-            "config/dnsdist",
-            "config/proxy",
-            "log/admin",
-            "log/core",
-            "cache/core/.claude",
-            "cache/admin/tmux_resurrect",
-            "custom/config/admin",
-            "custom/config/core",
-        ]:
-            (instance / d).mkdir(parents=True, exist_ok=True)
+        """Per admin-reframe, .tmux.conf is no longer rendered (admin has no shell)."""
+        # Test obsolete post-admin-reframe — admin has no tmux/.tmux.conf.
+        # Just verify the template path is not in the render registry.
+        from core.hydration import _JINJA_RENDERED_CONFIG
 
-        ctx = _build_test_context(str(instance))
-        render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
-
-        tmux_text = (instance / "config" / "admin" / ".tmux.conf").read_text()
-
-        # Positive assertions: correct gVisor-compatible values present
-        assert "set -g status-interval 30" in tmux_text, "status-interval must be 30 for gVisor compatibility"
-        assert "setw -g monitor-activity off" in tmux_text, "monitor-activity must be off for gVisor compatibility"
-        assert "set -g visual-activity off" in tmux_text, "visual-activity must be off for gVisor compatibility"
-
-        # Negative assertions: bare-metal defaults must not be present
-        assert "status-interval 2" not in tmux_text, "bare-metal status-interval 2 must not remain in template"
-        assert "monitor-activity on" not in tmux_text, "monitor-activity on must not remain in template"
-        assert "visual-activity on" not in tmux_text, "visual-activity on must not remain in template"
+        rendered_paths = {dst for _, dst in _JINJA_RENDERED_CONFIG}
+        assert not any("tmux" in p.lower() for p in rendered_paths)
 
 
 class TestDbPostgresZeroCap:
@@ -3449,13 +3450,12 @@ class TestSecretsRemovalBindMounts:
         )
 
     def test_compose_admin_ipc_ssh_key_bind_mount(self, tmp_path: Path) -> None:
-        """Admin volumes include ipc_ssh_key:/run/secrets/ipc_ssh_key:ro bind-mount."""
+        """Per admin-reframe (Fix B'), admin no longer holds the SSH client key —
+        host runs ssh and the key lives host-side."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro" in admin_block, (
-            "Admin volumes must include ipc_ssh_key bind-mount"
-        )
+        assert "/run/secrets/ipc_ssh_key" not in admin_block
 
     def test_compose_core_authorized_keys_unchanged(self, tmp_path: Path) -> None:
         """Core authorized_keys bind-mount unchanged."""
@@ -3466,11 +3466,12 @@ class TestSecretsRemovalBindMounts:
         assert "authorized_keys:/run/secrets/authorized_keys:ro" in core_block
 
     def test_compose_admin_known_hosts_unchanged(self, tmp_path: Path) -> None:
-        """Admin ipc_known_hosts bind-mount unchanged."""
+        """Per admin-reframe (Fix B'), admin no longer holds ipc_known_hosts —
+        host runs ssh and known_hosts lives host-side."""
         rendered = _render_compose(tmp_path)
         admin_start = rendered.index("\n  admin:")
         admin_block = rendered[admin_start:]
-        assert "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro" in admin_block
+        assert "ipc_known_hosts" not in admin_block
 
 
 class TestCoreNonRootSshd:
@@ -3647,13 +3648,14 @@ class TestSquidDnsNameservers:
         assert "dns_nameservers" in rendered, "squid.conf must contain a dns_nameservers directive"
 
     def test_squid_dns_nameservers_uses_coredns_egress_ip(self, tmp_path: Path) -> None:
-        """Rendered squid.conf dns_nameservers resolves to the coredns egress IP."""
+        """Rendered squid.conf dns_nameservers resolves to the coredns egress IP.
+        Per admin-reframe (IPAM septuple→quintuple), egress is now subnet index 3,
+        so coredns_egress_ip for slot 0 = 10.100.3.53."""
         rendered = _render_squid_conf(tmp_path)
-        # coredns_egress_ip for slot 0 = 10.100.5.53
         lines = [line.strip() for line in rendered.splitlines() if line.strip().startswith("dns_nameservers")]
         assert len(lines) == 1, f"Expected exactly one dns_nameservers line, got: {lines}"
-        assert "10.100.5.53" in lines[0], (
-            f"dns_nameservers must resolve to coredns egress IP (10.100.5.53), got: {lines[0]}"
+        assert "10.100.3.53" in lines[0], (
+            f"dns_nameservers must resolve to coredns egress IP (10.100.3.53), got: {lines[0]}"
         )
 
     def test_squid_dns_nameservers_no_docker_dns(self, tmp_path: Path) -> None:
@@ -3669,23 +3671,28 @@ class TestAdminRuntimeRunc:
     """
 
     def test_admin_runtime_is_runc(self) -> None:
-        """Admin service in compose.yml template has runtime: "runc"."""
+        """Per admin-reframe, admin runs under gVisor (runtime: "{{ runtime }}").
+        The runc lock was removed because the FROM-scratch /fwd binary has none of
+        the syscall surface that broke under gVisor previously (zsh/tmux are gone)."""
         raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         admin_start = raw.index("\n  admin:")
         admin_block = raw[admin_start:]
-        # Find runtime: line in admin block
         runtime_lines = [line.strip() for line in admin_block.splitlines() if line.strip().startswith("runtime:")]
         assert len(runtime_lines) >= 1, "Admin service must have a runtime: directive"
-        assert runtime_lines[0] == 'runtime: "runc"', f"Admin runtime must be 'runc', got: {runtime_lines[0]}"
+        assert runtime_lines[0] == 'runtime: "{{ runtime }}"', (
+            f"Admin runtime must be templated (gVisor), got: {runtime_lines[0]}"
+        )
 
     def test_admin_runtime_not_templated(self) -> None:
-        """Admin service runtime is NOT the Jinja2 variable {{ runtime }}."""
+        """Per admin-reframe, admin runtime IS templated (joins gVisor cohort)."""
         raw = (Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml").read_text()
         admin_start = raw.index("\n  admin:")
         admin_block = raw[admin_start:]
         runtime_lines = [line.strip() for line in admin_block.splitlines() if line.strip().startswith("runtime:")]
         assert len(runtime_lines) >= 1
-        assert "{{ runtime }}" not in runtime_lines[0], "Admin runtime must NOT use {{ runtime }} template variable"
+        assert "{{ runtime }}" in runtime_lines[0], (
+            "Admin runtime MUST use {{ runtime }} template variable post-admin-reframe"
+        )
 
     def test_core_retains_templated_runtime(self) -> None:
         """Core service retains runtime: "{{ runtime }}" (gVisor)."""
@@ -3822,11 +3829,11 @@ class TestRootlessHardeningPosture:
         if "mode=0755" not in proxy_block:
             errors.append("Proxy /run tmpfs must include mode=0755")
 
-        # ── Admin: runtime = runc ─────────────────────────────────────────
+        # ── Admin: runtime = templated (gVisor) per admin-reframe ─────────
         admin_block = compose_rendered[compose_rendered.index("\n  admin:") :]
         admin_runtime_lines = [line.strip() for line in admin_block.splitlines() if line.strip().startswith("runtime:")]
-        if not admin_runtime_lines or admin_runtime_lines[0] != 'runtime: "runc"':
-            errors.append(f"Admin runtime must be 'runc', got: {admin_runtime_lines}")
+        if not admin_runtime_lines or "runsc" not in admin_runtime_lines[0]:
+            errors.append(f"Admin runtime must resolve to runsc (gVisor), got: {admin_runtime_lines}")
 
         # ── No secrets: blocks ────────────────────────────────────────────
         raw_template = (
@@ -3844,7 +3851,7 @@ class TestRootlessHardeningPosture:
         if "secrets:" in admin_block:
             errors.append("Admin service must NOT contain a secrets: entry")
 
-        # ── Bind-mounts present ───────────────────────────────────────────
+        # ── Bind-mounts present (Fix B': admin no longer holds SSH credentials) ─
         bind_mount_checks = {
             "core: ipc_host_key": (
                 core_block,
@@ -3853,14 +3860,6 @@ class TestRootlessHardeningPosture:
             "core: authorized_keys": (
                 core_block,
                 "authorized_keys:/run/secrets/authorized_keys:ro",
-            ),
-            "admin: ipc_ssh_key": (
-                admin_block,
-                "ipc_ssh_key:/run/secrets/ipc_ssh_key:ro",
-            ),
-            "admin: ipc_known_hosts": (
-                admin_block,
-                "ipc_known_hosts:/run/secrets/ipc_known_hosts:ro",
             ),
         }
         for label, (block, expected) in bind_mount_checks.items():

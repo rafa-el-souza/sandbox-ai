@@ -1,0 +1,18 @@
+tlog-rec
+--writer=file
+--file-path=/tmp/sandbox-test/sessions/test-inst/20260510T000000Z.log
+--
+ssh
+-i
+/tmp/sandbox-test/instances/test-inst/secrets/ipc_ssh_key
+-o
+UserKnownHostsFile=/tmp/sandbox-test/instances/test-inst/secrets/ipc_known_hosts
+-o
+StrictHostKeyChecking=yes
+-o
+ProxyCommand=systemd-run -q --pipe --uid=claude-sandbox /usr/bin/docker exec -i test-inst-admin-1 /fwd 10.100.4.3:9999
+-p
+9999
+-t
+agent@10.100.4.3
+cd /workspaces/main && exec bash -l

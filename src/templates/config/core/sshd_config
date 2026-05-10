@@ -21,9 +21,6 @@ AllowAgentForwarding no
 AllowTcpForwarding no
 PermitTunnel no
 
-# ── Environment ──────────────────────────────────────────────────────────────
-AcceptEnv SANDBOX_WARMUP_PROMPT
-
 # ── Session Limits ───────────────────────────────────────────────────────────
 MaxSessions 10
 ClientAliveInterval 300

@@ -22,8 +22,6 @@ services:
     networks:
       isolated_net:
         ipv4_address: {{ db_postgres_ip }}
-      admin_net:
-        ipv4_address: {{ db_postgres_admin_ip }}
     env_file:
       - "{{ instance_dir }}/.sandbox.env"
     environment:
