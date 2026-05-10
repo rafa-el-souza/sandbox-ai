@@ -39,6 +39,7 @@ from core.doctor.checks.repo_integrity import _UNCONDITIONAL_FILES as _UNCONDITI
 from core.doctor.checks.repo_integrity import _resource_files as _resource_files
 from core.doctor.checks.repo_integrity import check_state_dir_writable as check_state_dir_writable
 from core.doctor.checks.repo_integrity import check_tooling_plane as check_tooling_plane
+from core.doctor.checks.supply_chain import check_image_digests as check_image_digests
 from core.doctor.types import _BINARY_PACKAGES as _BINARY_PACKAGES
 from core.doctor.types import Check as Check
 from core.doctor.types import CheckResult as CheckResult
@@ -55,7 +56,6 @@ from core.host_config import (
     WorkspaceBridgeGroupMissingError,
     autodetect_workspace_bridge_gid_recommendation,
     host_id_for_in_container,
-    machinectl_cmd,
     sandbox_ai_home,
     workspace_bridge_gid,
 )
@@ -68,95 +68,6 @@ if TYPE_CHECKING:
 
 # ─── Section 6b: Supply Chain Checks ────────────────────────────────────────
 
-
-def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
-    """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
-
-    Iterates IMAGE_REGISTRY and runs ``docker manifest inspect <ref>@<digest>``
-    via machinectl for each entry. Returns PASS if all resolve, FAIL if any are
-    stale, or SKIP if the registry is unreachable (timeout/network error).
-
-    Additionally checks for tag drift (upstream tag re-pushed with a different
-    digest) and reports it as informational detail.
-    """
-    from core.hydration import IMAGE_REGISTRY
-
-    stale: list[str] = []
-    drift: list[str] = []
-
-    mc_prefix = machinectl_cmd(user, auth_mode)
-    for key, pin in IMAGE_REGISTRY.items():
-        # Phase 1: verify pinned digest is resolvable
-        try:
-            result = subprocess.run(
-                [
-                    *mc_prefix,
-                    "/bin/bash",
-                    "-c",
-                    f"docker manifest inspect {pin.pinned}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return CheckResult(
-                status="skip",
-                name="image digests",
-                detail="Registry unreachable (timeout during manifest inspection)",
-            )
-
-        if result.returncode != 0:
-            stale.append(key)
-            continue
-
-        # Phase 2: check tag drift (informational)
-        try:
-            tag_result = subprocess.run(
-                [
-                    *mc_prefix,
-                    "/bin/bash",
-                    "-c",
-                    f"docker manifest inspect {pin.tagged}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if tag_result.returncode == 0:
-                try:
-                    manifest = json.loads(tag_result.stdout.strip())
-                    tag_digest = manifest.get("digest", "")
-                    if tag_digest and tag_digest != pin.digest:
-                        drift.append(key)
-                except json.JSONDecodeError:
-                    pass
-        except subprocess.TimeoutExpired:
-            pass  # Tag drift check is best-effort
-
-    if stale:
-        return CheckResult(
-            status="fail",
-            name="image digests",
-            detail=f"Stale digests: {', '.join(stale)}",
-            remediation="Run scripts/rotate_digests.py to update pinned digests",
-        )
-
-    count = len(IMAGE_REGISTRY)
-    detail = f"All {count} pinned digests verified"
-    if drift:
-        detail += f" (tag drift detected: {', '.join(drift)})"
-
-    return CheckResult(
-        status="pass",
-        name="image digests",
-        detail=detail,
-    )
-
-
-# ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
 def check_per_user_tree_exists(user: str, distro: str | None) -> CheckResult:
     """Verify that ``<home>/``, ``<home>/config/``, ``<home>/state/`` exist."""
