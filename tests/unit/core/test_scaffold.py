@@ -519,6 +519,99 @@ class TestPromptSecretsNonTTY:
         assert str(env_path) in captured.out
         assert "stub values" in captured.out
 
+    def test_non_tty_preserves_pre_populated_slot(self, tmp_path: Path) -> None:
+        """A slot pre-edited with a real value is preserved; only empty slots are stubbed."""
+        from unittest.mock import MagicMock, patch
+
+        from core.scaffold import prompt_secrets
+
+        env_path = tmp_path / ".sandbox.env"
+        env_path.write_text(
+            'CORE_ANTHROPIC_API_KEY="real-key-here"\nCORE_GITHUB_TOKEN=""\n'
+        )
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        with patch("sys.stdin", mock_stdin):
+            prompt_secrets(
+                str(env_path),
+                [
+                    ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+                    ("CORE_GITHUB_TOKEN", "GitHub PAT"),
+                ],
+                MagicMock(),
+            )
+
+        content = env_path.read_text()
+        # Pre-populated real value survives unchanged
+        assert 'CORE_ANTHROPIC_API_KEY="real-key-here"' in content
+        # Empty slot is stubbed
+        assert 'CORE_GITHUB_TOKEN="YOUR_CORE_GITHUB_TOKEN_HERE"' in content
+
+    def test_non_tty_idempotent_on_second_invocation(self, tmp_path: Path) -> None:
+        """Two consecutive non-TTY runs leave the file in the same final state.
+
+        After the first run, slots hold YOUR_<NAME>_HERE placeholders (non-empty),
+        so the second run's no-op replace plus non-empty verification both succeed.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from core.scaffold import prompt_secrets
+
+        env_path = tmp_path / ".sandbox.env"
+        env_path.write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""\n')
+
+        required = [
+            ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+            ("CORE_GITHUB_TOKEN", "GitHub PAT"),
+        ]
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        with patch("sys.stdin", mock_stdin):
+            prompt_secrets(str(env_path), required, MagicMock())
+            after_first = env_path.read_text()
+            prompt_secrets(str(env_path), required, MagicMock())
+            after_second = env_path.read_text()
+
+        assert after_first == after_second
+        assert 'CORE_ANTHROPIC_API_KEY="YOUR_CORE_ANTHROPIC_API_KEY_HERE"' in after_second
+        assert 'CORE_GITHUB_TOKEN="YOUR_CORE_GITHUB_TOKEN_HERE"' in after_second
+        # No double-wrapping (e.g. YOUR_YOUR_..._HERE_HERE)
+        assert "YOUR_YOUR_" not in after_second
+
+    def test_non_tty_missing_slot_raises(self, tmp_path: Path) -> None:
+        """A required secret with no slot in the file raises SandboxExecutionError.
+
+        Pins down the loud-failure contract: the function must not silently claim
+        success when the canonical `<NAME>=""` slot is absent.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from core.exceptions import SandboxExecutionError
+        from core.scaffold import prompt_secrets
+
+        env_path = tmp_path / ".sandbox.env"
+        # Only one of the two required slots exists in the file
+        env_path.write_text('CORE_ANTHROPIC_API_KEY=""\n')
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        with patch("sys.stdin", mock_stdin), pytest.raises(SandboxExecutionError) as exc:
+            prompt_secrets(
+                str(env_path),
+                [
+                    ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+                    ("CORE_FOO_BAR", "Missing slot"),
+                ],
+                MagicMock(),
+            )
+
+        assert "CORE_FOO_BAR" in str(exc.value)
+        assert str(env_path) in str(exc.value)
+
 
 # ─── ensure_registry_seed ────────────────────────────────────────────────────
 
