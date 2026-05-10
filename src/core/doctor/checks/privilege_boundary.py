@@ -369,7 +369,7 @@ def check_compose_project_name_collision(
     """
     del distro
     from core.compose import compose_project_name
-    from core.doctor import _read_registry_raw
+    from core.doctor.checks.workspace_bridge import _read_registry_raw
 
     registered = list(_read_registry_raw().keys())
     if not registered:
