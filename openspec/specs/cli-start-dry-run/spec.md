@@ -58,8 +58,8 @@ The system SHALL render all Jinja2 templates to memory during dry-run, validatin
 The system SHALL verify that all files referenced by the hydration pipeline exist in the tooling plane, using the parsed config to determine which conditional files are required.
 
 #### Scenario: All files present including config-dependent variants
-- **WHEN** the config specifies `base_distro_family = "wolfi"` for core and `base_distro_family = "debian"` for admin
-- **THEN** dry-run verifies `templates/docker/core/Dockerfile.core.wolfi` and `templates/docker/admin/Dockerfile.admin.debian` exist, along with all unconditional files
+- **WHEN** the config specifies `base_distro_family = "wolfi"` for core
+- **THEN** dry-run verifies `templates/docker/core/Dockerfile.core.wolfi` and `templates/docker/admin/Dockerfile.admin` exist, along with all unconditional files
 
 #### Scenario: Conditional extras verified when enabled
 - **WHEN** the config has `components.db_postgres.enabled = true` and `components.mcp_firecrawl = true`
@@ -96,11 +96,11 @@ The `docker compose up` command displayed by the preview SHALL be obtained from 
 
 #### Scenario: Handover command displayed (sudo mode)
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"sudo"`
-- **THEN** the preview shows `sudo machinectl shell ... docker exec -it`
+- **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand="systemd-run -q --pipe --uid=<sbuser> /usr/bin/docker exec -i <project_name>-admin-1 /fwd <core_ipc_ip>:9999" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
 
 #### Scenario: Handover command displayed (polkit mode)
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"polkit"`
-- **THEN** the preview shows `machinectl shell ... docker exec -it` without `sudo` prefix
+- **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand="systemd-run -q --pipe --uid=<sbuser> /usr/bin/docker exec -i <project_name>-admin-1 /fwd <core_ipc_ip>:9999" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'` (the `systemd-run` ProxyCommand path is auth-mode independent)
 
 #### Scenario: Named-ACL grant commands displayed (per-workspace)
 - **WHEN** dry-run completes validation for an instance with workspaces `main` and `scratch`
@@ -130,6 +130,6 @@ The `IPAMLedger` class SHALL provide a `peek_next_slot(instance_id)` method that
 - **THEN** it returns `(existing_base_index, True)`
 
 #### Scenario: Peek on exhausted ledger
-- **WHEN** `peek_next_slot` is called for a new instance and all 5,705 slots are consumed
+- **WHEN** `peek_next_slot` is called for a new instance and all 7,987 slots are consumed
 - **THEN** it raises `IPAMExhaustedError`
 

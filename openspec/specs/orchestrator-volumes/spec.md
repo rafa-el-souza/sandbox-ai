@@ -575,10 +575,6 @@ The `cli.main` module SHALL define `EXEC_FILE_RECIPES` as a sibling-table consta
 - **WHEN** `cli.main.RO_FILE_RECIPES` is inspected
 - **THEN** no entry has parent `docker/core` and files containing `entrypoint.sh`; the entrypoint kind belongs to `EXEC_FILE_RECIPES` exclusively
 
-#### Scenario: Admin Dockerfile uses owner-only mode
-- **WHEN** `templates/docker/admin/Dockerfile.admin.debian` is inspected
-- **THEN** the entrypoint is installed with `COPY --chown=human:human entrypoint.sh /usr/local/bin/entrypoint.sh` followed by `chmod 0500 /usr/local/bin/entrypoint.sh` (owner-only r-x)
-
 ### Requirement: Workspace Shared-Group Phase Ordering
 
 The workspace shared-group recipe (`_phase_workspace_shared_group`, `_workspace_shared_group_plan`) SHALL run BEFORE the named-ACL grant phase (`_phase_acl_grant`) so `chmod 2770` lands on a non-extended-ACL inode and the `group::` entry propagates from the mode bits without requiring a separate `setfacl -m g::rwx` call. The plan and phase MUST NOT contain an explicit `setfacl -m g::rwx` step on the workspace root — its presence indicates the prior workaround (which set the entry explicitly because chmod ran after named-ACL grants had already extended the inode's ACL) has resurfaced and the phase ordering has regressed.

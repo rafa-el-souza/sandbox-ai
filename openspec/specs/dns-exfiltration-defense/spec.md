@@ -13,7 +13,7 @@ The system SHALL deploy a `dnsdist` container (PowerDNS dnsdist 1.9.x) as a DNS 
 
 #### Scenario: dnsdist has no egress network membership
 - **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the dnsdist service has network memberships on `isolated_net` and `dns_net` only — it is NOT on `egress_net`, `core_proxy_net`, `admin_net`, or `admin_proxy_net`
+- **THEN** the dnsdist service has network memberships on `isolated_net` and `dns_net` only — it is NOT on `egress_net` or `core_proxy_net`
 
 #### Scenario: dnsdist listens on all interfaces
 - **WHEN** the rendered `dnsdist.conf` is inspected
@@ -95,7 +95,7 @@ The dnsdist container SHALL inherit the security baseline and re-grant only `NET
 - **THEN** the dnsdist service's `logging` block contains `driver: "json-file"` with options `max-size: "50m"` and `max-file: "5"`
 
 ### Requirement: dnsdist Service Dependency
-The dnsdist container SHALL depend on coredns being healthy. Containers that consume DNS through dnsdist (core, admin, firecrawl) SHALL depend on dnsdist being healthy.
+The dnsdist container SHALL depend on coredns being healthy. Containers that consume DNS through dnsdist (core, firecrawl) SHALL depend on dnsdist being healthy.
 
 #### Scenario: dnsdist depends on coredns
 - **WHEN** the rendered `compose.yml` is inspected
@@ -104,10 +104,6 @@ The dnsdist container SHALL depend on coredns being healthy. Containers that con
 #### Scenario: Core depends on dnsdist
 - **WHEN** the rendered `compose.yml` is inspected
 - **THEN** the core service has `depends_on` including `dnsdist: condition: service_healthy`
-
-#### Scenario: Admin depends on dnsdist
-- **WHEN** the rendered `compose.yml` is inspected
-- **THEN** the admin service has `depends_on` including `dnsdist: condition: service_healthy`
 
 #### Scenario: Firecrawl depends on dnsdist
 - **WHEN** the rendered `mcp-firecrawl.yml` is inspected

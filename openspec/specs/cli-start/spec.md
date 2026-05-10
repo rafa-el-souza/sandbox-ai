@@ -85,11 +85,11 @@ The `start` command SHALL NOT pass its `state.lock` file descriptor into IPAM or
 - **THEN** `IPAMLedger.allocate` acquires `<sandbox_ai_home()>/state/ipam.json.lock`, mutates the ledger, releases the IPAM lock, and returns; the start command continues to subsequent phases without raising `IPAMLockException` or `BlockingIOError`
 
 ### Requirement: IPAM Allocation Before Launch
-The system SHALL allocate seven consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
+The system SHALL allocate five consecutive `/24` subnets from the IPAM ledger and derive all static IPs before invoking `docker compose up`.
 
 #### Scenario: New instance gets lowest available slot
 - **WHEN** `sandbox start` scaffolds a new instance with no existing IPAM entry
-- **THEN** the lowest available `base_index` (0–5704) is assigned and written to `ipam.json` before any compose command runs
+- **THEN** the lowest available `base_index` (0–7986) is assigned and written to `ipam.json` before any compose command runs
 
 #### Scenario: Existing instance reuses previous slot
 - **WHEN** `sandbox start` is invoked for an instance already present in `ipam.json`

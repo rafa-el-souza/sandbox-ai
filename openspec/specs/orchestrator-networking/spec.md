@@ -40,6 +40,10 @@ The system SHALL derive static IP addresses for component containers from the sa
 - **WHEN** `derive_static_ips(base_index)` is called
 - **THEN** the returned dict includes `agent_isolated_ip` as `<isolated_base>.3`, `agent_proxy_ip` as `<core_proxy_base>.3`, and `core_ipc_ip` as `<ipc_base>.3`
 
+#### Scenario: Admin IPC IP derived from base_index
+- **WHEN** `derive_static_ips(base_index)` is called
+- **THEN** the returned dict includes `admin_ipc_ip` as `<ipc_base>.2`
+
 #### Scenario: Proxy IPs derived from base_index
 - **WHEN** `derive_static_ips(base_index)` is called
 - **THEN** the returned dict includes `proxy_core_ip` as `<core_proxy_base>.254`
@@ -66,7 +70,7 @@ The system SHALL derive static IP addresses for component containers from the sa
 
 #### Scenario: Legacy IP keys removed
 - **WHEN** `derive_static_ips(base_index)` is called
-- **THEN** the returned dict does NOT contain `dns_sidecar_ip` (replaced by `coredns_dns_ip`), `admin_isolated_ip` (replaced by `admin_admin_ip`), `mcp_firecrawl_isolated_ip` (replaced by `firecrawl_isolated_ip`), `proxy_ip` (replaced by `proxy_core_ip`), `admin_admin_ip`, `admin_proxy_ip`, `coredns_admin_ip`, `dnsdist_admin_ip`, `proxy_admin_ip`, or `db_postgres_admin_ip` (all removed by the admin-reframe network shrink)
+- **THEN** the returned dict does NOT contain `dns_sidecar_ip` (replaced by `coredns_dns_ip`), `admin_isolated_ip`, `mcp_firecrawl_isolated_ip` (replaced by `firecrawl_isolated_ip`), `proxy_ip` (replaced by `proxy_core_ip`), `admin_admin_ip`, `admin_proxy_ip`, `coredns_admin_ip`, `dnsdist_admin_ip`, `proxy_admin_ip`, or `db_postgres_admin_ip` (all removed by the admin-reframe network shrink)
 
 ### Requirement: Zero-Shared-Network Invariant
 The system SHALL ensure that core (agent) and admin (human) containers share zero Docker networks for non-IPC traffic. The `ipc_net` subnet SHALL be the sole shared network, used exclusively for SSH-based IPC. All inter-container communication between core and admin SHALL occur exclusively via TCP on `ipc_net`.

@@ -237,7 +237,7 @@ The admin service block SHALL NOT include any of:
 
 #### Scenario: Admin networks reduced to ipc_net only
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
-- **THEN** the admin block's `networks:` map contains exactly the single key `ipc_net` with an `ipv4_address`, and no `admin_net` or `admin_proxy_net` entries
+- **THEN** the admin block's `networks:` map contains exactly the single key `ipc_net` with an `ipv4_address`
 
 #### Scenario: Admin uses a build block referencing Dockerfile.admin
 - **WHEN** the rendered `compose.yml` is inspected for the admin service
