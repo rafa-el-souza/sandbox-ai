@@ -1638,7 +1638,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "pass"
         assert "200500" in result.detail
@@ -1656,9 +1656,9 @@ class TestCheckWorkspaceBridgeGroupExists:
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
 
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _raise)
         monkeypatch.setattr(
-            "core.doctor.autodetect_workspace_bridge_gid_recommendation",
+            "core.doctor.checks.workspace_bridge.autodetect_workspace_bridge_gid_recommendation",
             lambda host_user, in_container_min=1000: 200999,
         )
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
@@ -1682,8 +1682,11 @@ class TestCheckWorkspaceBridgeGroupExists:
         def _raise_no_range(host_user: str, in_container_min: int = 1000) -> int:
             raise NoSubgidRangeError("no subgid")
 
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
-        monkeypatch.setattr("core.doctor.autodetect_workspace_bridge_gid_recommendation", _raise_no_range)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _raise)
+        monkeypatch.setattr(
+            "core.doctor.checks.workspace_bridge.autodetect_workspace_bridge_gid_recommendation",
+            _raise_no_range,
+        )
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "fail"
         assert "<pick-a-gid" in (result.remediation or "")
@@ -1702,8 +1705,11 @@ class TestCheckWorkspaceBridgeGroupExists:
         def _raise_no_free(host_user: str, in_container_min: int = 1000) -> int:
             raise NoFreeGidInSubgidRangeError("range exhausted")
 
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
-        monkeypatch.setattr("core.doctor.autodetect_workspace_bridge_gid_recommendation", _raise_no_free)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _raise)
+        monkeypatch.setattr(
+            "core.doctor.checks.workspace_bridge.autodetect_workspace_bridge_gid_recommendation",
+            _raise_no_free,
+        )
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "fail"
         assert "<pick-a-gid" in (result.remediation or "")
@@ -1719,7 +1725,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         def _raise(host: Any) -> int:
             raise SubgidOutOfRangeError("gid 99 not in any range")
 
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _raise)
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "fail"
         assert "Recreate the bridge group" in (result.remediation or "")
@@ -1738,8 +1744,8 @@ class TestCheckDevInWorkspaceBridgeGroup:
         config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
-        monkeypatch.setattr("core.doctor.os.getgroups", lambda: [200500, 1000])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getgroups", lambda: [200500, 1000])
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "pass"
 
@@ -1749,9 +1755,9 @@ class TestCheckDevInWorkspaceBridgeGroup:
         config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
-        monkeypatch.setattr("core.doctor.os.getgroups", lambda: [1000])
-        monkeypatch.setattr("core.doctor.os.getuid", lambda: 1000)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getgroups", lambda: [1000])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getuid", lambda: 1000)
 
         class _Pw:
             pw_name = "dev"
@@ -1778,9 +1784,9 @@ class TestCheckDevInWorkspaceBridgeGroup:
         config_dir = isolated_sandbox_ai_home / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", lambda h: 200500)
-        monkeypatch.setattr("core.doctor.os.getgroups", lambda: [1000])
-        monkeypatch.setattr("core.doctor.os.getuid", lambda: 1000)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getgroups", lambda: [1000])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getuid", lambda: 1000)
 
         class _Pw:
             pw_name = "dev"
@@ -1805,7 +1811,7 @@ class TestCheckDevInWorkspaceBridgeGroup:
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
 
-        monkeypatch.setattr("core.doctor.workspace_bridge_gid", _raise)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _raise)
         result = check_dev_in_workspace_bridge_group("u", None)
         assert result.status == "fail"
 
@@ -1814,7 +1820,7 @@ class TestCheckSubuidResolverWorks:
     def test_pass(self, monkeypatch: Any) -> None:
         from core.doctor import check_subuid_resolver_works
 
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 100999)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 100999)
         result = check_subuid_resolver_works("claude-sandbox", None)
         assert result.status == "pass"
         assert "100999" in result.detail
@@ -1826,7 +1832,7 @@ class TestCheckSubuidResolverWorks:
         def _raise(n: int, u: str) -> int:
             raise NoSubuidRangeError("no subuid")
 
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", _raise)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", _raise)
         result = check_subuid_resolver_works("claude-sandbox", None)
         assert result.status == "fail"
         assert "rootless" in (result.remediation or "")
@@ -1839,7 +1845,7 @@ class TestCheckHelperImagePulled:
         from core.doctor import check_helper_image_pulled
 
         monkeypatch.setattr(
-            "core.doctor.subprocess.run",
+            "core.doctor.checks.workspace_bridge.subprocess.run",
             lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""),
         )
         result = check_helper_image_pulled("u", None)
@@ -1851,7 +1857,7 @@ class TestCheckHelperImagePulled:
         from core.doctor import check_helper_image_pulled
 
         monkeypatch.setattr(
-            "core.doctor.subprocess.run",
+            "core.doctor.checks.workspace_bridge.subprocess.run",
             lambda *a, **k: subprocess.CompletedProcess([], 1, "", "not found"),
         )
         result = check_helper_image_pulled("u", None)
@@ -1863,7 +1869,7 @@ class TestCheckHelperImagePulled:
         def _raise(*a: Any, **k: Any) -> Any:
             raise FileNotFoundError("no docker")
 
-        monkeypatch.setattr("core.doctor.subprocess.run", _raise)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.subprocess.run", _raise)
         result = check_helper_image_pulled("u", None)
         assert result.status == "warn"
         assert "docker not reachable" in result.detail
@@ -1873,7 +1879,7 @@ class TestCheckSecretsHydratedRestrictively:
     def test_pass_when_no_instances(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_secrets_hydrated_restrictively
 
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
@@ -1889,7 +1895,7 @@ class TestCheckSecretsHydratedRestrictively:
         leak.write_text("k")
         os.chmod(leak, 0o644)
 
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "warn"
         assert "ipc_host_key" in result.detail
@@ -1911,8 +1917,8 @@ class TestCheckPreExistingInstanceLayout:
         inst = tmp_path / "inst"
         inst.mkdir(parents=True)
         # No leaves created — the post-Change-D scaffold-vs-helper boundary state.
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
         assert result.detail == "no stale cache/log leaf ownership detected"
@@ -1927,8 +1933,8 @@ class TestCheckPreExistingInstanceLayout:
         for leaf in ("cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"):
             (inst / leaf).mkdir(parents=True)
         target_uid = os.stat(inst / "cache/core/.claude").st_uid
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: target_uid)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: target_uid)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
 
@@ -1947,8 +1953,8 @@ class TestCheckPreExistingInstanceLayout:
             (inst / leaf).mkdir(parents=True)
 
         # Mock to a uid that does not match any test-dir owner.
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
         assert "4 cache/log leaf(s)" in result.detail
@@ -1988,8 +1994,11 @@ class TestCheckPreExistingInstanceLayout:
                 return consumer_subuid
             return legacy_uid
 
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: consumer_subuid)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(
+            "core.doctor.checks.workspace_bridge.host_id_for_in_container",
+            lambda n, u: consumer_subuid,
+        )
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None, uid_for_path=resolver)
         assert result.status == "warn"
         # Only the legacy leaf is flagged; the consumer-owned one passes silently.
@@ -2009,8 +2018,11 @@ class TestCheckPreExistingInstanceLayout:
         (inst_a / "log/core").mkdir(parents=True)
         (inst_b / "log/admin").mkdir(parents=True)
 
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: 999999)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst_a), str(inst_b)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
+        monkeypatch.setattr(
+            "core.doctor.checks.workspace_bridge._scan_instance_dirs",
+            lambda: [str(inst_a), str(inst_b)],
+        )
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
         assert "2 cache/log leaf(s)" in result.detail
@@ -2029,8 +2041,8 @@ class TestCheckPreExistingInstanceLayout:
         (inst / "log/core").mkdir(parents=True)
         target_uid = (inst / "log/core").stat().st_uid
 
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", lambda n, u: target_uid)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: target_uid)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
 
@@ -2041,7 +2053,7 @@ class TestCheckPreExistingInstanceLayout:
         def _raise(n: int, u: str) -> int:
             raise NoSubuidRangeError("none")
 
-        monkeypatch.setattr("core.doctor.host_id_for_in_container", _raise)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", _raise)
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "skip"
 
@@ -2118,7 +2130,7 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
         # Instance dir exists but has no secrets/ subdir.
         inst = tmp_path / "inst"
         inst.mkdir()
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
@@ -2142,8 +2154,8 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
                 raise PermissionError("denied")
             return real_stat(path, **kw)
 
-        monkeypatch.setattr("core.doctor.os.stat", _raise_on_x)
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.stat", _raise_on_x)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         # File was skipped, no leaks reported.
         assert result.status == "pass"
@@ -2200,7 +2212,7 @@ class TestCheckBackupsDiskPressure:
                 )
             return st
 
-        monkeypatch.setattr("core.doctor.os.lstat", fat_stat)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.lstat", fat_stat)
         result = check_backups_disk_pressure("u", None)
         assert result.status == "warn"
 
@@ -2218,7 +2230,7 @@ class TestCheckBackupsDiskPressure:
                 raise OSError("denied")
             return real_lstat(path)
 
-        monkeypatch.setattr("core.doctor.os.lstat", boom)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.lstat", boom)
         result = check_backups_disk_pressure("u", None)
         # 1 entry, 0 bytes — under threshold.
         assert result.status == "pass"
@@ -2286,7 +2298,7 @@ class TestCheckBackupsPartialDirsPresent:
                 raise OSError("denied")
             return real_lstat(path)
 
-        monkeypatch.setattr("core.doctor.os.lstat", boom)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.lstat", boom)
         result = check_backups_partial_dirs_present("u", None)
         assert result.status == "pass"
 
@@ -2295,7 +2307,7 @@ class TestCheckDevUmaskWorkspaceFriendly:
     def test_skip_when_no_workspaces(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_umask_workspace_friendly
 
-        monkeypatch.setattr("core.doctor._scan_instance_workspace_paths", lambda: [])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_workspace_paths", lambda: [])
         result = check_dev_umask_workspace_friendly("u", None)
         assert result.status == "skip"
 
@@ -2303,11 +2315,11 @@ class TestCheckDevUmaskWorkspaceFriendly:
         from core.doctor import check_dev_umask_workspace_friendly
 
         monkeypatch.setattr(
-            "core.doctor._scan_instance_workspace_paths",
+            "core.doctor.checks.workspace_bridge._scan_instance_workspace_paths",
             lambda: [("/i", "main", "/p")],
         )
         # 0o022 → group write masked.
-        monkeypatch.setattr("core.doctor.os.umask", lambda mask: 0o022 if mask == 0 else 0)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.umask", lambda mask: 0o022 if mask == 0 else 0)
         result = check_dev_umask_workspace_friendly("u", None)
         assert result.status == "warn"
         assert "0022" in result.detail
@@ -2316,10 +2328,10 @@ class TestCheckDevUmaskWorkspaceFriendly:
         from core.doctor import check_dev_umask_workspace_friendly
 
         monkeypatch.setattr(
-            "core.doctor._scan_instance_workspace_paths",
+            "core.doctor.checks.workspace_bridge._scan_instance_workspace_paths",
             lambda: [("/i", "main", "/p")],
         )
-        monkeypatch.setattr("core.doctor.os.umask", lambda mask: 0o002 if mask == 0 else 0)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.umask", lambda mask: 0o002 if mask == 0 else 0)
         result = check_dev_umask_workspace_friendly("u", None)
         assert result.status == "pass"
 
@@ -2345,7 +2357,7 @@ class TestCheckComposeProjectNameCollision:
         def boom(*a: Any, **k: Any) -> Any:
             raise subprocess.TimeoutExpired(["docker"], 15)
 
-        monkeypatch.setattr("core.doctor.subprocess.run", boom)
+        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", boom)
         result = check_compose_project_name_collision("u", None)
         assert result.status == "skip"
         assert "timed out" in result.detail
@@ -2358,7 +2370,7 @@ class TestCheckComposeProjectNameCollision:
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
         result_obj = subprocess.CompletedProcess(["docker"], 1, stdout="", stderr="boom")
-        monkeypatch.setattr("core.doctor.subprocess.run", lambda *a, **k: result_obj)
+        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", lambda *a, **k: result_obj)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
         assert "failed" in out.detail
@@ -2371,7 +2383,7 @@ class TestCheckComposeProjectNameCollision:
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
         result_obj = subprocess.CompletedProcess(["docker"], 0, stdout="not-json", stderr="")
-        monkeypatch.setattr("core.doctor.subprocess.run", lambda *a, **k: result_obj)
+        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", lambda *a, **k: result_obj)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
         assert "parse" in out.detail
@@ -2386,7 +2398,7 @@ class TestCheckComposeProjectNameCollision:
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
         result_obj = subprocess.CompletedProcess(["docker"], 0, stdout="[]", stderr="")
-        monkeypatch.setattr("core.doctor.subprocess.run", lambda *a, **k: result_obj)
+        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", lambda *a, **k: result_obj)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "pass"
 
@@ -2395,7 +2407,7 @@ class TestCheckWorkspacePathInWalkerBoundary:
     def test_pass_when_no_workspaces(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_path_in_walker_boundary
 
-        monkeypatch.setattr("core.doctor._scan_instance_workspace_paths", lambda: [])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_workspace_paths", lambda: [])
         result = check_workspace_path_in_walker_boundary("u", None)
         assert result.status == "pass"
 
@@ -2405,7 +2417,7 @@ class TestCheckWorkspacePathInWalkerBoundary:
         from core.doctor import check_workspace_path_in_walker_boundary
 
         monkeypatch.setattr(
-            "core.doctor._scan_instance_workspace_paths",
+            "core.doctor.checks.workspace_bridge._scan_instance_workspace_paths",
             lambda: [("/i", "main", "/etc")],
         )
         result = check_workspace_path_in_walker_boundary("u", None)
@@ -2418,14 +2430,14 @@ class TestCheckWorkspacePathInWalkerBoundary:
         from core.doctor import check_workspace_path_in_walker_boundary
 
         monkeypatch.setattr(
-            "core.doctor._scan_instance_workspace_paths",
+            "core.doctor.checks.workspace_bridge._scan_instance_workspace_paths",
             lambda: [("/i", "main", "/some/path")],
         )
 
         def boom(_: str) -> str:
             raise OSError("denied")
 
-        monkeypatch.setattr("core.doctor.os.path.realpath", boom)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.path.realpath", boom)
         result = check_workspace_path_in_walker_boundary("u", None)
         # Path skipped → no offenders → pass.
         assert result.status == "pass"
@@ -2464,7 +2476,7 @@ class TestCheckWorkspaceHomeSingleFilesystem:
                 )
             return st
 
-        monkeypatch.setattr("core.doctor.os.stat", differ)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.stat", differ)
         result = check_workspace_home_single_filesystem("u", None)
         assert result.status == "warn"
         assert "different filesystems" in result.detail
@@ -2477,7 +2489,7 @@ class TestCheckWorkspaceHomeSingleFilesystem:
         def boom(path: Any) -> Any:
             raise PermissionError("denied")
 
-        monkeypatch.setattr("core.doctor.os.stat", boom)
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.stat", boom)
         result = check_workspace_home_single_filesystem("u", None)
         assert result.status == "skip"
 
@@ -2507,7 +2519,7 @@ class TestCheckLegacyWorkspaceInUserProjectRoot:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text('[instance]\nname = "x"\n')
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.per_user_tree._scan_instance_dirs", lambda: [str(inst)])
         result = check_legacy_workspace_in_user_project_root("u", None)
         assert result.status == "pass"
 
@@ -2519,7 +2531,7 @@ class TestCheckLegacyWorkspaceInUserProjectRoot:
         (inst / "sandbox.toml").write_text(
             '[instance]\nname = "myinst"\nuser_project_root = "/old/path"\n'
         )
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.per_user_tree._scan_instance_dirs", lambda: [str(inst)])
         result = check_legacy_workspace_in_user_project_root("u", None)
         assert result.status == "warn"
         assert "myinst" in result.detail
@@ -2530,7 +2542,7 @@ class TestCheckLegacyWorkspaceInUserProjectRoot:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text("not = valid = toml = !!")
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.per_user_tree._scan_instance_dirs", lambda: [str(inst)])
         result = check_legacy_workspace_in_user_project_root("u", None)
         # Skipped silently → pass (no legacy detected because we couldn't read).
         assert result.status == "pass"
@@ -2560,7 +2572,7 @@ class TestScanInstanceWorkspacePaths:
     def test_skips_missing_sandbox_toml(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import _scan_instance_workspace_paths
 
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: ["/no/such/dir"])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: ["/no/such/dir"])
         assert _scan_instance_workspace_paths() == []
 
     def test_skips_unparseable_toml(self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any) -> None:
@@ -2569,7 +2581,7 @@ class TestScanInstanceWorkspacePaths:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text("garbage = =")
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         assert _scan_instance_workspace_paths() == []
 
     def test_skips_non_dict_workspaces_block(
@@ -2580,7 +2592,7 @@ class TestScanInstanceWorkspacePaths:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text("workspaces = []\n")
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         assert _scan_instance_workspace_paths() == []
 
     def test_yields_each_workspace(
@@ -2594,7 +2606,7 @@ class TestScanInstanceWorkspacePaths:
             '[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p1"\n'
             '[workspaces.scratch]\nbootstrap_mode = "empty"\npath = "/p2"\n'
         )
-        monkeypatch.setattr("core.doctor._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
         result = sorted(_scan_instance_workspace_paths())
         assert result == [(str(inst), "main", "/p1"), (str(inst), "scratch", "/p2")]
 

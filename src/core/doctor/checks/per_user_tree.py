@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tomllib
 
+from core.doctor.checks.workspace_bridge import _read_registry_raw, _scan_instance_dirs
 from core.doctor.types import CheckResult
 from core.host_config import sandbox_ai_home
 
@@ -124,9 +125,6 @@ def check_legacy_workspace_in_user_project_root(host_user: str, distro: str | No
     """Warn if any registered instance's sandbox.toml carries the legacy
     ``[instance].user_project_root`` field."""
     del host_user, distro
-    # Lazy import to avoid circular dependency: workspace_bridge depends on this
-    # module's package siblings during the in-flight refactor.
-    from core.doctor import _scan_instance_dirs
 
     legacy: list[str] = []
     for inst_dir in _scan_instance_dirs():
@@ -161,9 +159,6 @@ def check_legacy_workspace_in_user_project_root(host_user: str, distro: str | No
 def check_legacy_registry_shape(host_user: str, distro: str | None) -> CheckResult:
     """Warn if ``instances.json`` is path-keyed (pre-change-5 shape)."""
     del host_user, distro
-    # Lazy import to avoid circular dependency during the in-flight refactor.
-    from core.doctor import _read_registry_raw
-
     data = _read_registry_raw()
     legacy_keys = [k for k in data if isinstance(k, str) and k.startswith("/")]
     if legacy_keys:
