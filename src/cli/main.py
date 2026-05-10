@@ -22,6 +22,7 @@ import typer
 
 if TYPE_CHECKING:
     from pathlib import Path
+from core.actions import NamedAclGrantAction, NamedAclRevokeAction
 from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
@@ -565,10 +566,10 @@ def _acl_grant_plan(
     host_user: str,
     workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
-) -> list[tuple[list[str], str]]:
+) -> list[NamedAclGrantAction]:
     """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
 
-    Returns a list of (setfacl_args, description) tuples:
+    Returns a list of :class:`NamedAclGrantAction` objects:
     - Ancestors: ``--x`` (traverse only)
     - Instance root: ``r-x``
     - docker/: ``rX`` recursive
@@ -582,43 +583,29 @@ def _acl_grant_plan(
     Cache/log Option-B grants are intentionally absent — replaced by the
     helper-mkdir+chown phase (acl-ownership-recipes Decision 1).
     """
-    plan: list[tuple[list[str], str]] = []
+    plan: list[NamedAclGrantAction] = []
+
+    def _g(argv: list[str], description: str) -> NamedAclGrantAction:
+        # Tuple-cast at append time per design Decision 1: command is
+        # immutable on the frozen Action so downstream code can't mutate
+        # the live argv held by a grant entry.
+        return NamedAclGrantAction(command=tuple(argv), description=description)
 
     # Ancestors — execute-only traverse
     for ancestor in _compute_ancestors(instance_dir):
-        plan.append(
-            (
-                ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
-                f"ancestor traverse: {ancestor}",
-            )
-        )
+        plan.append(_g(["setfacl", "-m", f"u:{host_user}:--x", ancestor], f"ancestor traverse: {ancestor}"))
 
     # Instance root — read + execute
-    plan.append(
-        (
-            ["setfacl", "-m", f"u:{host_user}:r-x", instance_dir],
-            f"instance root: {instance_dir}",
-        )
-    )
+    plan.append(_g(["setfacl", "-m", f"u:{host_user}:r-x", instance_dir], f"instance root: {instance_dir}"))
 
     # docker/ — recursive read + conditional execute
     docker_dir = os.path.join(instance_dir, "docker/")
-    plan.append(
-        (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rX", docker_dir],
-            f"docker config: {docker_dir}",
-        )
-    )
+    plan.append(_g(["setfacl", "-R", "-m", f"u:{host_user}:rX", docker_dir], f"docker config: {docker_dir}"))
 
     # docker/core/ — helper-cp target needs rwx on the parent so the recipe
     # can unlink+recreate entrypoint.sh (added to RO_FILE_RECIPES).
     docker_core_dir = os.path.join(instance_dir, "docker/core")
-    plan.append(
-        (
-            ["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir],
-            f"helper-cp parent: {docker_core_dir}",
-        )
-    )
+    plan.append(_g(["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir], f"helper-cp parent: {docker_core_dir}"))
 
     # config/ — recursive READ + conditional execute (NOT write). The temp
     # commit ``6c3bcb4`` widened this to ``rwX`` so the helper-cp recipe's
@@ -635,12 +622,7 @@ def _acl_grant_plan(
     # (mirrors secrets/ where dir-level ``rwx`` was retained but recursive
     # widening was rejected).
     config_dir = os.path.join(instance_dir, "config/")
-    plan.append(
-        (
-            ["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir],
-            f"config files: {config_dir}",
-        )
-    )
+    plan.append(_g(["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir], f"config files: {config_dir}"))
 
     # config/<subdir> — dir-level ``rwx`` on each helper-cp parent dir to
     # satisfy BUG-B for config/ (parallel to the ``docker/core`` and
@@ -653,20 +635,12 @@ def _acl_grant_plan(
     for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core", "config/admin"):
         helper_cp_parent = os.path.join(instance_dir, rel)
         plan.append(
-            (
-                ["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent],
-                f"helper-cp parent: {helper_cp_parent}",
-            )
+            _g(["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent], f"helper-cp parent: {helper_cp_parent}")
         )
 
     # .sandbox.env — read only
     env_file = os.path.join(instance_dir, ".sandbox.env")
-    plan.append(
-        (
-            ["setfacl", "-m", f"u:{host_user}:r", env_file],
-            f"env file: {env_file}",
-        )
-    )
+    plan.append(_g(["setfacl", "-m", f"u:{host_user}:r", env_file], f"env file: {env_file}"))
 
     # secrets/ — dir-level ``rwx`` provisioning grant. The dir-level write
     # bit is load-bearing for BUG-B (the daemon's helper-cp ``mv /tmp/$f
@@ -688,20 +662,14 @@ def _acl_grant_plan(
     # NOT appear in the plan.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
-        (
+        _g(
             ["setfacl", "-m", f"u:{host_user}:rwx", secrets_dir],
             f"secrets dir provisioning write: {secrets_dir}",
         )
     )
     plan.append(
-        (
-            [
-                "setfacl",
-                "-d",
-                "-m",
-                f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r",
-                secrets_dir,
-            ],
+        _g(
+            ["setfacl", "-d", "-m", f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r", secrets_dir],
             f"secrets default ACL: {secrets_dir}",
         )
     )
@@ -719,7 +687,7 @@ def _acl_grant_plan(
     ):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
-            (
+            _g(
                 ["setfacl", "-d", "-m", f"u:{host_user}:r", parent_dir],
                 f"helper-cp parent default ACL: {parent_dir}",
             )
@@ -730,20 +698,11 @@ def _acl_grant_plan(
     for rel in ("cache/core", "cache/admin", "log"):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
-            (
-                ["setfacl", "-m", f"u:{host_user}:rwx", parent_dir],
-                f"helper-recipe parent: {parent_dir}",
-            )
+            _g(["setfacl", "-m", f"u:{host_user}:rwx", parent_dir], f"helper-recipe parent: {parent_dir}")
         )
         plan.append(
-            (
-                [
-                    "setfacl",
-                    "-d",
-                    "-m",
-                    f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx",
-                    parent_dir,
-                ],
+            _g(
+                ["setfacl", "-d", "-m", f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx", parent_dir],
                 f"helper-recipe parent default ACL: {parent_dir}",
             )
         )
@@ -761,25 +720,19 @@ def _acl_grant_plan(
                     continue
                 seen_ancestors.add(ancestor)
                 plan.append(
-                    (
+                    _g(
                         ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
                         f"workspace ancestor traverse: {ancestor}",
                     )
                 )
             plan.append(
-                (
-                    ["setfacl", "-m", f"u:{host_user}:rwx", ws_path],
-                    f"workspace named-ACL: {ws_path}",
-                )
+                _g(["setfacl", "-m", f"u:{host_user}:rwx", ws_path], f"workspace named-ACL: {ws_path}")
             )
             default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
             if dev_user:
                 default_entry += f",u:{dev_user}:rwx"
             plan.append(
-                (
-                    ["setfacl", "-d", "-m", default_entry, ws_path],
-                    f"workspace default ACL: {ws_path}",
-                )
+                _g(["setfacl", "-d", "-m", default_entry, ws_path], f"workspace default ACL: {ws_path}")
             )
 
     return plan
@@ -811,7 +764,7 @@ def _acl_revoke_plan(
     instance_dir: str,
     host_user: str,
     workspace_paths: list[str] | None = None,
-) -> list[tuple[list[str], str]]:
+) -> list[NamedAclRevokeAction]:
     """Build the ACL revoke plan — strict subset of revertible operations.
 
     The revoke plan is NOT a 1:1 inverse of the grant plan. It excludes every
@@ -843,35 +796,23 @@ def _acl_revoke_plan(
     - secrets/ dir-level traverse named-ACL
     - Per-workspace effective + default-ACL named entries
     """
-    plan: list[tuple[list[str], str]] = []
+    plan: list[NamedAclRevokeAction] = []
+
+    def _r(argv: list[str], description: str) -> NamedAclRevokeAction:
+        return NamedAclRevokeAction(command=tuple(argv), description=description)
 
     # Instance root
-    plan.append(
-        (
-            ["setfacl", "-x", f"u:{host_user}", instance_dir],
-            f"instance root: {instance_dir}",
-        )
-    )
+    plan.append(_r(["setfacl", "-x", f"u:{host_user}", instance_dir], f"instance root: {instance_dir}"))
 
     # docker/ — dir-level only (NOT recursive: consumer-owned files inside
     # would EPERM under setfacl from dev; the recursive walk was the source
     # of the cluster-3 stop-time setfacl warnings).
     docker_dir = os.path.join(instance_dir, "docker/")
-    plan.append(
-        (
-            ["setfacl", "-x", f"u:{host_user}", docker_dir],
-            f"docker config: {docker_dir}",
-        )
-    )
+    plan.append(_r(["setfacl", "-x", f"u:{host_user}", docker_dir], f"docker config: {docker_dir}"))
 
     # config/ — dir-level only (NOT recursive: same rationale as docker/).
     config_dir = os.path.join(instance_dir, "config/")
-    plan.append(
-        (
-            ["setfacl", "-x", f"u:{host_user}", config_dir],
-            f"config files: {config_dir}",
-        )
-    )
+    plan.append(_r(["setfacl", "-x", f"u:{host_user}", config_dir], f"config files: {config_dir}"))
 
     # secrets/ dir-level traverse + symmetric default-ACL revocation
     # (per cluster 2's "Secrets Inherit Daemon-Readable Default ACL"
@@ -879,17 +820,9 @@ def _acl_revoke_plan(
     # stop). The named per-user entries are dev-applied and dev-revocable
     # — no consumer-owned files are at the dir level here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
+    plan.append(_r(["setfacl", "-x", f"u:{host_user}", secrets_dir], f"secrets dir traverse: {secrets_dir}"))
     plan.append(
-        (
-            ["setfacl", "-x", f"u:{host_user}", secrets_dir],
-            f"secrets dir traverse: {secrets_dir}",
-        )
-    )
-    plan.append(
-        (
-            ["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir],
-            f"secrets default ACL: {secrets_dir}",
-        )
+        _r(["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir], f"secrets default ACL: {secrets_dir}")
     )
 
     # Workspace named-ACL — both effective and default-entry revocation.
@@ -897,14 +830,9 @@ def _acl_revoke_plan(
     # default) is left intact (Decision 4). Per-workspace fan-out.
     if workspace_paths:
         for ws_path in workspace_paths:
+            plan.append(_r(["setfacl", "-x", f"u:{host_user}", ws_path], f"workspace named-ACL: {ws_path}"))
             plan.append(
-                (
-                    ["setfacl", "-x", f"u:{host_user}", ws_path],
-                    f"workspace named-ACL: {ws_path}",
-                )
-            )
-            plan.append(
-                (
+                _r(
                     ["setfacl", "-d", "-x", f"u:{host_user}", ws_path],
                     f"workspace default named entry: {ws_path}",
                 )
@@ -1382,12 +1310,12 @@ def _phase_acl_grant(
     sentinel injection would corrupt the setfacl command, per I-1).
     CalledProcessError is wrapped in SandboxExecutionError (D6).
     """
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
+    for action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         try:
-            subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
+            subprocess.run(list(action.command), check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
             diag = _diagnose_traverse_failure(instance_dir, host_user)
-            error_msg = f"ACL grant failed for {description}"
+            error_msg = f"ACL grant failed for {action.description}"
             if e.stderr:
                 error_msg += f": {e.stderr.strip()}"
             if diag:
@@ -1529,14 +1457,14 @@ def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] |
     as warning strings, not raised. Returns list of warning messages.
     """
     warnings: list[str] = []
-    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
+    for action in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
         try:
-            result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
+            result = subprocess.run(list(action.command), check=False, capture_output=True, text=True)
             if result.returncode != 0:
                 detail = result.stderr.strip() if result.stderr else f"exit {result.returncode}"
-                warnings.append(f"ACL revoke warning for {description}: {detail}")
+                warnings.append(f"ACL revoke warning for {action.description}: {detail}")
         except OSError as e:
-            warnings.append(f"ACL revoke warning for {description}: {e}")
+            warnings.append(f"ACL revoke warning for {action.description}: {e}")
     return warnings
 
 
@@ -1656,8 +1584,8 @@ def _dry_run_pipeline(inst: str) -> None:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
-        console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
+    for grant_action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
+        console.print(grant_action.describe(), style="dim")
 
     # Post-hydrate setfacl-as-owner pass — covers the write_restricted
     # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
