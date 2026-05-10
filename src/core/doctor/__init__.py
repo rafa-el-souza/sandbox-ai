@@ -14,9 +14,7 @@ import functools
 import json
 import os
 import subprocess
-import tempfile
 from collections import defaultdict, deque
-from importlib.resources import files as _resource_files
 from typing import TYPE_CHECKING
 
 from core.doctor.checks.filesystem import _ACL_PROBE_FAILURES as _ACL_PROBE_FAILURES
@@ -37,6 +35,10 @@ from core.doctor.checks.privilege_boundary import check_runsc_runtimeargs as che
 from core.doctor.checks.privilege_boundary import check_sudo as check_sudo
 from core.doctor.checks.privilege_boundary import check_systemd_machined as check_systemd_machined
 from core.doctor.checks.privilege_boundary import check_user_exists as check_user_exists
+from core.doctor.checks.repo_integrity import _UNCONDITIONAL_FILES as _UNCONDITIONAL_FILES
+from core.doctor.checks.repo_integrity import _resource_files as _resource_files
+from core.doctor.checks.repo_integrity import check_state_dir_writable as check_state_dir_writable
+from core.doctor.checks.repo_integrity import check_tooling_plane as check_tooling_plane
 from core.doctor.types import _BINARY_PACKAGES as _BINARY_PACKAGES
 from core.doctor.types import Check as Check
 from core.doctor.types import CheckResult as CheckResult
@@ -156,50 +158,6 @@ def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth
 
 # ─── Section 7: Filesystem Checks ───────────────────────────────────────────
 
-# 17 unconditional source files in the packaged templates module
-_UNCONDITIONAL_FILES: list[str] = [
-    "docker/compose.yml",
-    "docker/core/entrypoint.sh",
-    "docker/admin/entrypoint.sh",
-    "docker/coredns/Dockerfile.coredns",
-    "config/coredns/Corefile",
-    "config/dnsdist/dnsdist.conf",
-    "config/proxy/squid.conf",
-    "config/proxy/ERR_SANDBOX_403",
-    "config/admin/.zshrc",
-    "config/admin/.tmux.conf",
-    "config/admin/gitmux.conf",
-    "config/admin/starship.toml",
-    "config/core/.bashrc",
-    "config/core/.npmrc",
-    "config/core/.gitconfig",
-    "config/core/sshd_config",
-    "config/core/CLAUDE.md",
-]
-
-
-def check_tooling_plane(user: str, distro: str | None) -> CheckResult:
-    """Check that all 17 unconditional tooling plane files exist."""
-    templates_root = _resource_files("templates")
-    missing: list[str] = []
-    for rel_path in _UNCONDITIONAL_FILES:
-        if not templates_root.joinpath(rel_path).is_file():
-            missing.append(rel_path)
-
-    if not missing:
-        return CheckResult(
-            status="pass",
-            name="tooling plane",
-            detail="All 17 unconditional files present",
-        )
-    return CheckResult(
-        status="fail",
-        name="tooling plane",
-        detail=f"Missing files: {', '.join(missing)}",
-        remediation="Restore missing files from the repository or re-clone",
-    )
-
-
 def check_per_user_tree_exists(user: str, distro: str | None) -> CheckResult:
     """Verify that ``<home>/``, ``<home>/config/``, ``<home>/state/`` exist."""
     del user, distro
@@ -289,27 +247,6 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
             f"{home / 'state'}. Migrate manually or delete the legacy files."
         ),
     )
-
-
-def check_state_dir_writable(user: str, distro: str | None) -> CheckResult:
-    """Check that the per-user ``<home>/state/`` directory is writable."""
-    del user, distro
-    state_dir = sandbox_ai_home() / "state"
-    try:
-        with tempfile.NamedTemporaryFile(dir=str(state_dir), delete=True):
-            pass
-        return CheckResult(
-            status="pass",
-            name="state dir writable",
-            detail=f"{state_dir} is writable",
-        )
-    except OSError:
-        return CheckResult(
-            status="fail",
-            name="state dir writable",
-            detail=f"{state_dir} is not writable",
-            remediation=f"Fix permissions: chmod 0700 {state_dir}",
-        )
 
 
 # ─── Section 8: Check Runner ────────────────────────────────────────────────

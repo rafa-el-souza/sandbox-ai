@@ -251,7 +251,7 @@ class TestFilesystemChecks:
 
         # Build a templates root missing compose.yml (and other entries)
         (tmp_path / "docker").mkdir()
-        with patch("core.doctor._resource_files", return_value=tmp_path):
+        with patch("core.doctor.checks.repo_integrity._resource_files", return_value=tmp_path):
             result = check_tooling_plane("sandbox", None)
             assert result.status == "fail"
             assert "compose.yml" in result.detail

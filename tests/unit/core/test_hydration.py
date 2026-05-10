@@ -3132,7 +3132,7 @@ class TestHydrationPipelineRegistration:
 
     def test_unconditional_files_includes_coredns_dockerfile(self) -> None:
         """(d) _UNCONDITIONAL_FILES contains 'docker/coredns/Dockerfile.coredns' and has length 17."""
-        from core.doctor import _UNCONDITIONAL_FILES
+        from core.doctor.checks.repo_integrity import _UNCONDITIONAL_FILES
 
         assert "docker/coredns/Dockerfile.coredns" in _UNCONDITIONAL_FILES
         assert len(_UNCONDITIONAL_FILES) == 17
