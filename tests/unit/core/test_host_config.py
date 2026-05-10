@@ -1,5 +1,6 @@
 """Tests for core/host_config.py — HostConfig model and machinectl_cmd builder."""
 
+import inspect
 import os
 import stat
 from pathlib import Path
@@ -23,6 +24,7 @@ from core.host_config import (
     machinectl_cmd,
     parse_subgid_for_user,
     parse_subuid_for_user,
+    pipe_cmd,
     sandbox_ai_home,
     workspace_bridge_gid,
 )
@@ -225,6 +227,26 @@ class TestMachinectlCmd:
         b = machinectl_cmd("sandbox", MachinectlAuth.SUDO)
         assert a == b
         assert a is not b
+
+
+# ─── pipe_cmd() byte-pipe primitive ──────────────────────────────────────────
+
+
+class TestPipeCmd:
+    """pipe_cmd() byte-pipe primitive — sibling to machinectl_cmd."""
+
+    def test_returns_systemd_run_pipe_invocation(self) -> None:
+        """Canonical shape: ['systemd-run', '-q', '--pipe', '--uid=<user>']."""
+        assert pipe_cmd("claude-sandbox") == ["systemd-run", "-q", "--pipe", "--uid=claude-sandbox"]
+
+    def test_signature_is_auth_mode_independent(self) -> None:
+        """pipe_cmd takes only ``user`` — no ``auth`` parameter.
+
+        Contrasts with ``machinectl_cmd`` which takes ``(user, auth)``: the
+        byte-pipe primitive has no second authorization layer to select.
+        """
+        assert set(inspect.signature(pipe_cmd).parameters) == {"user"}
+        assert set(inspect.signature(machinectl_cmd).parameters) == {"user", "auth"}
 
 
 # ─── Subuid / subgid resolvers ──────────────────────────────────────────────

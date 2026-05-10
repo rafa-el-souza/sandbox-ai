@@ -125,6 +125,32 @@ def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
     return [*prefix, "machinectl", "shell", f"{user}@.host"]
 
 
+def pipe_cmd(user: str) -> list[str]:
+    """Build the byte-pipe primitive for crossing into ``user`` without a PTY.
+
+    Sibling to :func:`machinectl_cmd`. Where ``machinectl_cmd`` allocates a PTY
+    (the right shape for interactive handoffs and helper-container ``exec`` paths
+    that already speak to a real TTY), ``pipe_cmd`` produces a clean stdio pipe
+    suitable for programmatic byte transports — most notably the SSH
+    ``ProxyCommand`` path in ``cli-attach``.
+
+    Returns:
+        ``["systemd-run", "-q", "--pipe", f"--uid={user}"]``.
+
+    Auth-mode independence: unlike :func:`machinectl_cmd`, no ``auth`` argument
+    is accepted. ``systemd-run``'s ``manage-units`` polkit action is the only
+    authorization layer; the per-host ``machinectl_authentication`` setting
+    does not apply.
+
+    PAM-skip trade-off: ``systemd-run`` does NOT invoke PAM, so policies on
+    ``pam_limits.conf`` and similar do not apply to processes started this way.
+    Acceptable for our use case — programmatic SSH-byte transport with a
+    lifetime bounded by a single attach session — where the call site is
+    a fixed, audited orchestrator path rather than a user-typed command.
+    """
+    return ["systemd-run", "-q", "--pipe", f"--uid={user}"]
+
+
 # ─── Subuid / subgid resolvers ──────────────────────────────────────────────
 
 

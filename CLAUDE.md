@@ -29,7 +29,14 @@ The CLI entrypoint is `sandbox = "cli.main:app"` (typer). Run as `uv run sandbox
 
 ### Privilege boundary (load-bearing)
 
-Everything Docker-related crosses from the dev user into an unprivileged `sandbox` systemd user via `machinectl shell <user>@.host`. The prefix is built by `core.host_config.machinectl_cmd(user, auth)` and is either `["sudo", "machinectl", ...]` (SUDO mode) or `["machinectl", ...]` (POLKIT mode). **Never hardcode `sudo machinectl`** — always go through `machinectl_cmd()` so the auth mode from `sandbox-ai.toml` is respected. Recent commits (`f7ac8da`, `1648323`) refactored the codebase to enforce this; preserve it.
+Everything Docker-related crosses from the dev user into an unprivileged `sandbox` systemd user via `machinectl shell <user>@.host`. The prefix is built by `core.host_config.machinectl_cmd(user, auth)` and is either `["sudo", "machinectl", ...]` (SUDO mode) or `["machinectl", ...]` (POLKIT mode). **Never hardcode `sudo machinectl` or `systemd-run`** — always go through `machinectl_cmd()` / `pipe_cmd()` so the auth mode from `sandbox-ai.toml` is respected and the two primitives stay swappable. Recent commits (`f7ac8da`, `1648323`) refactored the codebase to enforce this; preserve it.
+
+Two boundary primitives, picked by call-site shape:
+
+- `machinectl_cmd(user, auth)` — PTY-allocating crossing. Used wherever the consumer expects a real TTY (today's interactive handoffs, helper-container `exec` paths whose stdin/stdout are TTYs).
+- `pipe_cmd(user)` — byte-pipe crossing. Returns `["systemd-run", "-q", "--pipe", f"--uid={user}"]`. Used for programmatic byte transports — most notably the SSH `ProxyCommand` path in `cli-attach`. Auth-mode independent: `systemd-run`'s `manage-units` polkit action is the only authorization layer; the per-host `machinectl_authentication` setting does not apply.
+
+PAM-skip trade-off (`pipe_cmd` only): `systemd-run` does NOT invoke PAM, so policies on `pam_limits.conf` and similar do not apply to processes started via `pipe_cmd`. Acceptable for our use case — programmatic byte-pipe transport over a session-bounded lifetime — where the call site is a fixed audited orchestrator path, not a user-typed command. `machinectl_cmd` retains the full PAM stack and remains the right choice for any path that should respect those policies.
 
 ### Two configuration scopes
 
