@@ -210,7 +210,7 @@ def write_sandbox_toml(
         db_postgres_image=IMAGE_REGISTRY["postgres"].pinned,
     )
     toml_path = os.path.join(instance_dir, "sandbox.toml")
-    with open(toml_path, "w") as f:
+    with open(toml_path, "w", encoding="utf-8") as f:
         f.write(content)
 
 
@@ -236,7 +236,7 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
             ``sandbox status`` for the schema-level diagnosis.
     """
     toml_path = os.path.join(instance_dir, "sandbox.toml")
-    with open(toml_path) as f:
+    with open(toml_path, encoding="utf-8") as f:
         text = f.read()
     try:
         doc = tomlkit.parse(text)
@@ -272,7 +272,7 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
             sub["path"] = spec.path
             ws_table[spec.name] = sub
 
-    with open(toml_path, "w") as f:
+    with open(toml_path, "w", encoding="utf-8") as f:
         f.write(tomlkit.dumps(doc))
 
 
@@ -382,14 +382,14 @@ def prompt_secrets(
         # subsequent `sandbox start` pre-flight ("Missing required secrets") doesn't block
         # automation flows for sandboxes that don't actually use those services at runtime.
         # Pre-existing non-empty values (operator-edited) are preserved.
-        with open(env_path) as f:
+        with open(env_path, encoding="utf-8") as f:
             content = f.read()
         for secret_name, _description in required_secrets:
             content = content.replace(
                 f'{secret_name}=""',
                 f'{secret_name}="YOUR_{secret_name}_HERE"',
             )
-        with open(env_path, "w") as f:
+        with open(env_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         # Verify each required secret now has a non-empty value. Any name still missing
@@ -406,8 +406,7 @@ def prompt_secrets(
             raise SandboxExecutionError(
                 f"Cannot stub required secrets in {env_path}: "
                 f"slot(s) {sorted(unresolved)} are absent or not in the canonical "
-                f'`<NAME>=\"\"` form. Edit the file to add empty slots, or set real values, '
-                f"then re-run 'sandbox init'."
+                f'`<NAME>=\"\"` form. Edit the file to add empty slots, or set real values.'
             )
 
         print(
@@ -417,7 +416,7 @@ def prompt_secrets(
         return
 
     # Read current content
-    with open(env_path) as f:
+    with open(env_path, encoding="utf-8") as f:
         content = f.read()
 
     # Prompt for each secret and replace empty values
@@ -429,7 +428,7 @@ def prompt_secrets(
         )
 
     # Write back
-    with open(env_path, "w") as f:
+    with open(env_path, "w", encoding="utf-8") as f:
         f.write(content)
 
 
@@ -439,5 +438,5 @@ def prompt_secrets(
 def write_initialized_sentinel(instance_dir: str) -> None:
     """Write the .initialized sentinel file. Idempotent."""
     sentinel_path = os.path.join(instance_dir, ".initialized")
-    with open(sentinel_path, "w") as f:
+    with open(sentinel_path, "w", encoding="utf-8") as f:
         f.write("")
