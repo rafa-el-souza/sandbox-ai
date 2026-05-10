@@ -589,27 +589,72 @@ def _acl_grant_plan(
     """
     plan: list[NamedAclGrantAction] = []
 
-    def _g(argv: list[str], description: str) -> NamedAclGrantAction:
+    def _g(
+        argv: list[str],
+        description: str,
+        *,
+        target: str,
+        entry: str,
+        default: bool = False,
+        recursive: bool = False,
+    ) -> NamedAclGrantAction:
         # Tuple-cast at append time per design Decision 1: command is
         # immutable on the frozen Action so downstream code can't mutate
-        # the live argv held by a grant entry.
-        return NamedAclGrantAction(command=tuple(argv), description=description)
+        # the live argv held by a grant entry. Structured fields
+        # (target/entry/default/recursive) enable Refactor C dispatch.
+        return NamedAclGrantAction(
+            command=tuple(argv),
+            description=description,
+            target=Path(target),
+            entry=entry,
+            default=default,
+            recursive=recursive,
+        )
 
     # Ancestors — execute-only traverse
     for ancestor in _compute_ancestors(instance_dir):
-        plan.append(_g(["setfacl", "-m", f"u:{host_user}:--x", ancestor], f"ancestor traverse: {ancestor}"))
+        plan.append(
+            _g(
+                ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
+                f"ancestor traverse: {ancestor}",
+                target=ancestor,
+                entry=f"u:{host_user}:--x",
+            )
+        )
 
     # Instance root — read + execute
-    plan.append(_g(["setfacl", "-m", f"u:{host_user}:r-x", instance_dir], f"instance root: {instance_dir}"))
+    plan.append(
+        _g(
+            ["setfacl", "-m", f"u:{host_user}:r-x", instance_dir],
+            f"instance root: {instance_dir}",
+            target=instance_dir,
+            entry=f"u:{host_user}:r-x",
+        )
+    )
 
     # docker/ — recursive read + conditional execute
     docker_dir = os.path.join(instance_dir, "docker/")
-    plan.append(_g(["setfacl", "-R", "-m", f"u:{host_user}:rX", docker_dir], f"docker config: {docker_dir}"))
+    plan.append(
+        _g(
+            ["setfacl", "-R", "-m", f"u:{host_user}:rX", docker_dir],
+            f"docker config: {docker_dir}",
+            target=docker_dir,
+            entry=f"u:{host_user}:rX",
+            recursive=True,
+        )
+    )
 
     # docker/core/ — helper-cp target needs rwx on the parent so the recipe
     # can unlink+recreate entrypoint.sh (added to RO_FILE_RECIPES).
     docker_core_dir = os.path.join(instance_dir, "docker/core")
-    plan.append(_g(["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir], f"helper-cp parent: {docker_core_dir}"))
+    plan.append(
+        _g(
+            ["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir],
+            f"helper-cp parent: {docker_core_dir}",
+            target=docker_core_dir,
+            entry=f"u:{host_user}:rwx",
+        )
+    )
 
     # config/ — recursive READ + conditional execute (NOT write). The temp
     # commit ``6c3bcb4`` widened this to ``rwX`` so the helper-cp recipe's
@@ -626,7 +671,15 @@ def _acl_grant_plan(
     # (mirrors secrets/ where dir-level ``rwx`` was retained but recursive
     # widening was rejected).
     config_dir = os.path.join(instance_dir, "config/")
-    plan.append(_g(["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir], f"config files: {config_dir}"))
+    plan.append(
+        _g(
+            ["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir],
+            f"config files: {config_dir}",
+            target=config_dir,
+            entry=f"u:{host_user}:rX",
+            recursive=True,
+        )
+    )
 
     # config/<subdir> — dir-level ``rwx`` on each helper-cp parent dir to
     # satisfy BUG-B for config/ (parallel to the ``docker/core`` and
@@ -639,12 +692,24 @@ def _acl_grant_plan(
     for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core", "config/admin"):
         helper_cp_parent = os.path.join(instance_dir, rel)
         plan.append(
-            _g(["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent], f"helper-cp parent: {helper_cp_parent}")
+            _g(
+                ["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent],
+                f"helper-cp parent: {helper_cp_parent}",
+                target=helper_cp_parent,
+                entry=f"u:{host_user}:rwx",
+            )
         )
 
     # .sandbox.env — read only
     env_file = os.path.join(instance_dir, ".sandbox.env")
-    plan.append(_g(["setfacl", "-m", f"u:{host_user}:r", env_file], f"env file: {env_file}"))
+    plan.append(
+        _g(
+            ["setfacl", "-m", f"u:{host_user}:r", env_file],
+            f"env file: {env_file}",
+            target=env_file,
+            entry=f"u:{host_user}:r",
+        )
+    )
 
     # secrets/ — dir-level ``rwx`` provisioning grant. The dir-level write
     # bit is load-bearing for BUG-B (the daemon's helper-cp ``mv /tmp/$f
@@ -669,12 +734,17 @@ def _acl_grant_plan(
         _g(
             ["setfacl", "-m", f"u:{host_user}:rwx", secrets_dir],
             f"secrets dir provisioning write: {secrets_dir}",
+            target=secrets_dir,
+            entry=f"u:{host_user}:rwx",
         )
     )
     plan.append(
         _g(
             ["setfacl", "-d", "-m", f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r", secrets_dir],
             f"secrets default ACL: {secrets_dir}",
+            target=secrets_dir,
+            entry=f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r",
+            default=True,
         )
     )
 
@@ -694,6 +764,9 @@ def _acl_grant_plan(
             _g(
                 ["setfacl", "-d", "-m", f"u:{host_user}:r", parent_dir],
                 f"helper-cp parent default ACL: {parent_dir}",
+                target=parent_dir,
+                entry=f"u:{host_user}:r",
+                default=True,
             )
         )
 
@@ -702,12 +775,20 @@ def _acl_grant_plan(
     for rel in ("cache/core", "cache/admin", "log"):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
-            _g(["setfacl", "-m", f"u:{host_user}:rwx", parent_dir], f"helper-recipe parent: {parent_dir}")
+            _g(
+                ["setfacl", "-m", f"u:{host_user}:rwx", parent_dir],
+                f"helper-recipe parent: {parent_dir}",
+                target=parent_dir,
+                entry=f"u:{host_user}:rwx",
+            )
         )
         plan.append(
             _g(
                 ["setfacl", "-d", "-m", f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx", parent_dir],
                 f"helper-recipe parent default ACL: {parent_dir}",
+                target=parent_dir,
+                entry=f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx",
+                default=True,
             )
         )
 
@@ -727,16 +808,29 @@ def _acl_grant_plan(
                     _g(
                         ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
                         f"workspace ancestor traverse: {ancestor}",
+                        target=ancestor,
+                        entry=f"u:{host_user}:--x",
                     )
                 )
             plan.append(
-                _g(["setfacl", "-m", f"u:{host_user}:rwx", ws_path], f"workspace named-ACL: {ws_path}")
+                _g(
+                    ["setfacl", "-m", f"u:{host_user}:rwx", ws_path],
+                    f"workspace named-ACL: {ws_path}",
+                    target=ws_path,
+                    entry=f"u:{host_user}:rwx",
+                )
             )
             default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
             if dev_user:
                 default_entry += f",u:{dev_user}:rwx"
             plan.append(
-                _g(["setfacl", "-d", "-m", default_entry, ws_path], f"workspace default ACL: {ws_path}")
+                _g(
+                    ["setfacl", "-d", "-m", default_entry, ws_path],
+                    f"workspace default ACL: {ws_path}",
+                    target=ws_path,
+                    entry=default_entry,
+                    default=True,
+                )
             )
 
     return plan
@@ -801,22 +895,54 @@ def _acl_revoke_plan(
     - Per-workspace effective + default-ACL named entries
     """
     plan: list[NamedAclRevokeAction] = []
+    user_entry = f"u:{host_user}"
 
-    def _r(argv: list[str], description: str) -> NamedAclRevokeAction:
-        return NamedAclRevokeAction(command=tuple(argv), description=description)
+    def _r(
+        argv: list[str],
+        description: str,
+        *,
+        target: str,
+        entry: str = user_entry,
+        default: bool = False,
+    ) -> NamedAclRevokeAction:
+        return NamedAclRevokeAction(
+            command=tuple(argv),
+            description=description,
+            target=Path(target),
+            entry=entry,
+            default=default,
+        )
 
     # Instance root
-    plan.append(_r(["setfacl", "-x", f"u:{host_user}", instance_dir], f"instance root: {instance_dir}"))
+    plan.append(
+        _r(
+            ["setfacl", "-x", f"u:{host_user}", instance_dir],
+            f"instance root: {instance_dir}",
+            target=instance_dir,
+        )
+    )
 
     # docker/ — dir-level only (NOT recursive: consumer-owned files inside
     # would EPERM under setfacl from dev; the recursive walk was the source
     # of the cluster-3 stop-time setfacl warnings).
     docker_dir = os.path.join(instance_dir, "docker/")
-    plan.append(_r(["setfacl", "-x", f"u:{host_user}", docker_dir], f"docker config: {docker_dir}"))
+    plan.append(
+        _r(
+            ["setfacl", "-x", f"u:{host_user}", docker_dir],
+            f"docker config: {docker_dir}",
+            target=docker_dir,
+        )
+    )
 
     # config/ — dir-level only (NOT recursive: same rationale as docker/).
     config_dir = os.path.join(instance_dir, "config/")
-    plan.append(_r(["setfacl", "-x", f"u:{host_user}", config_dir], f"config files: {config_dir}"))
+    plan.append(
+        _r(
+            ["setfacl", "-x", f"u:{host_user}", config_dir],
+            f"config files: {config_dir}",
+            target=config_dir,
+        )
+    )
 
     # secrets/ dir-level traverse + symmetric default-ACL revocation
     # (per cluster 2's "Secrets Inherit Daemon-Readable Default ACL"
@@ -824,9 +950,20 @@ def _acl_revoke_plan(
     # stop). The named per-user entries are dev-applied and dev-revocable
     # — no consumer-owned files are at the dir level here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
-    plan.append(_r(["setfacl", "-x", f"u:{host_user}", secrets_dir], f"secrets dir traverse: {secrets_dir}"))
     plan.append(
-        _r(["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir], f"secrets default ACL: {secrets_dir}")
+        _r(
+            ["setfacl", "-x", f"u:{host_user}", secrets_dir],
+            f"secrets dir traverse: {secrets_dir}",
+            target=secrets_dir,
+        )
+    )
+    plan.append(
+        _r(
+            ["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir],
+            f"secrets default ACL: {secrets_dir}",
+            target=secrets_dir,
+            default=True,
+        )
     )
 
     # Workspace named-ACL — both effective and default-entry revocation.
@@ -834,11 +971,19 @@ def _acl_revoke_plan(
     # default) is left intact (Decision 4). Per-workspace fan-out.
     if workspace_paths:
         for ws_path in workspace_paths:
-            plan.append(_r(["setfacl", "-x", f"u:{host_user}", ws_path], f"workspace named-ACL: {ws_path}"))
+            plan.append(
+                _r(
+                    ["setfacl", "-x", f"u:{host_user}", ws_path],
+                    f"workspace named-ACL: {ws_path}",
+                    target=ws_path,
+                )
+            )
             plan.append(
                 _r(
                     ["setfacl", "-d", "-x", f"u:{host_user}", ws_path],
                     f"workspace default named entry: {ws_path}",
+                    target=ws_path,
+                    default=True,
                 )
             )
 

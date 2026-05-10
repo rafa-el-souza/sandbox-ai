@@ -27,15 +27,29 @@ from core.actions.base import Action
 from core.exceptions import SandboxExecutionError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from core.actions.context import ActionContext
 
 
 @dataclass(frozen=True)
 class NamedAclGrantAction(Action):
-    """Single ``setfacl -m`` (or ``-d -m``) entry from ``_acl_grant_plan``."""
+    """Single ``setfacl -m`` (or ``-d -m``) entry from ``_acl_grant_plan``.
+
+    Per design Decision 1's table the Action carries the structured
+    ``target``/``entry``/``default``/``recursive`` fields in addition to
+    the precomputed ``command`` argv. ``.describe()`` and ``.execute()``
+    consume ``description``/``command`` today; the structured fields are
+    stored to enable Refactor C dispatch (Strategy classes) without
+    re-parsing the argv.
+    """
 
     command: tuple[str, ...]
     description: str
+    target: Path
+    entry: str
+    default: bool
+    recursive: bool
 
     def describe(self) -> str:
         return f"    $ {' '.join(self.command)}  # {self.description}"
@@ -50,10 +64,20 @@ class NamedAclGrantAction(Action):
 
 @dataclass(frozen=True)
 class NamedAclRevokeAction(Action):
-    """Single ``setfacl -x`` (or ``-d -x``) entry from ``_acl_revoke_plan``."""
+    """Single ``setfacl -x`` (or ``-d -x``) entry from ``_acl_revoke_plan``.
+
+    Per design Decision 1's table the Action carries the structured
+    ``target``/``entry``/``default`` fields in addition to the precomputed
+    ``command`` argv. The asymmetry with grant — no ``recursive`` — matches
+    the design table: the revoke plan is a strict subset of revertible
+    operations and never emits ``setfacl -R -x``.
+    """
 
     command: tuple[str, ...]
     description: str
+    target: Path
+    entry: str
+    default: bool
 
     def describe(self) -> str:
         return f"    $ {' '.join(self.command)}  # {self.description}"
