@@ -951,3 +951,36 @@ If a future bind mount adds a new dev-created RW single-file mount, `RW_FILE_REC
 - **WHEN** the compose template is inspected for dev-created single-file bind mounts
 - **THEN** every file mounted `:ro` from a dev-created path appears in `RO_FILE_RECIPES` or `EXEC_FILE_RECIPES`; every file mounted `:rw` from a dev-created path appears in `RW_FILE_RECIPES`. (Workspace `:rw` mounts and cache/log `:rw` directory mounts are NOT in scope for any of the file-recipe tables — they are handled by the workspace shared-group recipe and the helper-mkdir-chown recipe respectively.)
 
+### Requirement: Plan Items Are Typed Action Objects
+
+Each `_*_plan` function (`_acl_grant_plan`, `_acl_revoke_plan`, `_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan`, `_compose_up_cmd_plan`) SHALL return a list of typed `Action` objects (subclasses of `core.actions.base.Action`) rather than raw tuples or strings. Each `Action` SHALL expose `describe(self) -> str` (the line rendered by the dry-run preview) and `execute(self, ctx: ActionContext) -> None` (the live execution path). The dry-run preview and the live phases SHALL consume the same `Action` instances — the dry-run path calls `.describe()`, the live path calls `.execute(ctx)`. No code path is permitted to bypass an `Action` by reconstructing the underlying argv from the plan's input data; the `Action` is the single carrier of both semantics.
+
+This requirement makes the Command pattern (anti-hack rule 7: "Plan and execute share data") structural rather than conventional. Every spec elsewhere in this capability that constrains the *content* of a plan (command strings, descriptions, target paths, owner uid/gid, mode) continues to apply unchanged — those constraints are now satisfied via the `Action`'s `.command` / `.description` / `.target` / typed fields rather than positional tuple indexing.
+
+This requirement is ADDED rather than MODIFIED on an existing requirement (such as "ACL Grant Plan as Single Source of Truth") because the existing single-source-of-truth requirements constrain the *content* of plans (which functions exist, what target paths and command strings they produce, what uid/gid/mode each entry carries) but are silent on the *encoding* of plan items — they would be satisfied by tuples, dataclasses, namedtuples, or dicts equally. This new requirement adds an orthogonal constraint on the encoding (must be a typed `Action` subclass with `.describe()` / `.execute()`); keeping it independently auditable preserves a clean separation of concerns and avoids conflating two independent dimensions of the contract.
+
+#### Scenario: ACL grant plan returns typed grant Actions
+
+- **GIVEN** an instance directory with a populated `[workspaces]` section
+- **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
+- **THEN** every item in the returned list is an instance of `core.actions.acl.NamedAclGrantAction`
+- **AND** each item exposes `.describe()` returning the same human-readable line the pre-refactor code would have printed for the equivalent tuple
+- **AND** each item exposes `.execute(ctx)` which, when called with a valid `ActionContext`, issues the corresponding `setfacl` invocation via `ctx.executor` using the auth mode from `ctx.auth`
+- **AND** no item in the returned list is a `tuple` or any other non-`Action` type
+
+#### Scenario: helper-cp plan returns typed helper-cp Actions
+
+- **GIVEN** an instance directory and a host user
+- **WHEN** `_helper_cp_chown_plan(instance_dir, host_user)` is called
+- **THEN** every item in the returned list is an instance of `core.actions.helper_cp.HelperCpChownAction`
+- **AND** each item carries `.parent`, `.files`, `.owner_uid`, `.owner_gid`, `.mode` as typed attributes (not positional indices)
+- **AND** the per-entry `(owner_uid, owner_gid, mode)` values match the corresponding entries in `RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES`, satisfying the `Helper-CP Recipe Iterates Both Tables` requirement via attribute access rather than tuple unpacking
+
+#### Scenario: dry-run and live execution share the same Action instance
+
+- **GIVEN** any plan returned by an `_*_plan()` function
+- **WHEN** the dry-run preview iterates the plan and calls `.describe()` on each item
+- **AND** the corresponding `_phase_*` function iterates the same plan (or a re-invocation that returns equivalent items) and calls `.execute(ctx)` on each item
+- **THEN** the inputs read by `.describe()` (target path, command argv, description string) are the same fields read by `.execute(ctx)` — there is no parallel reconstruction of the argv inside `.execute()`
+- **AND** the `cli-start` capability's "Live and dry-run derive compose up from a shared plan helper" requirement is satisfied structurally: the `ComposeUpAction.inner_command` field is the single carrier consumed by both code paths
+

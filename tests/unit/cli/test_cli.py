@@ -853,7 +853,7 @@ class TestStartSshKeypairGeneration:
         from cli.main import _acl_grant_plan
 
         plan = _acl_grant_plan(str(tmp_path), "sandbox")
-        secrets_entries = [desc for _, desc in plan if "secrets" in desc]
+        secrets_entries = [a.description for a in plan if "secrets" in a.description]
         assert len(secrets_entries) >= 1
 
 
@@ -1341,7 +1341,7 @@ class TestHelperCpChownRoFiles:
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
-        owners = {p[2]: (p[0], p[1], p[4]) for p in plan}
+        owners = {a.owner_uid: (str(a.parent), a.files, a.mode) for a in plan}
         # Each consumer uid is mapped via subuid resolver
         assert 100000 + 65532 in owners  # coredns
         assert 100000 + 953 in owners  # dnsdist
@@ -1350,17 +1350,15 @@ class TestHelperCpChownRoFiles:
         # Modes per design table
         modes_by_uid: dict[int, set[int]] = {}
         for entry in plan:
-            modes_by_uid.setdefault(entry[2], set()).add(entry[4])
+            modes_by_uid.setdefault(entry.owner_uid, set()).add(entry.mode)
         assert 0o640 in modes_by_uid[100000 + 13]  # proxy ro
         assert 0o640 in modes_by_uid[100000 + 65532]  # coredns ro
         # Secrets at 0600 for the 1000-consumer
         assert 0o600 in modes_by_uid[100000 + 1000]
         # gid pairs with the consumer's host subgid (D6: literal-0 was removed).
         for entry in plan:
-            owner_uid = entry[2]
-            owner_gid = entry[3]
-            consumer_n = owner_uid - 100000
-            assert owner_gid == 200000 + consumer_n
+            consumer_n = entry.owner_uid - 100000
+            assert entry.owner_gid == 200000 + consumer_n
 
     def test_plan_includes_legacy_ipc_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The four IPC SSH secrets continue to land at 0600 via the standard recipe."""
@@ -1370,13 +1368,13 @@ class TestHelperCpChownRoFiles:
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2000 if n == 1000 else 0)
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         secrets_files: set[str] = set()
-        for parent, files, owner_uid, owner_gid, mode in plan:
-            if parent.endswith("/secrets"):
-                assert owner_uid == 1000
+        for action in plan:
+            if str(action.parent).endswith("/secrets"):
+                assert action.owner_uid == 1000
                 # gid is the consumer's host subgid (D6), not literal 0.
-                assert owner_gid == 2000
-                assert mode == 0o600
-                secrets_files.update(files)
+                assert action.owner_gid == 2000
+                assert action.mode == 0o600
+                secrets_files.update(action.files)
         assert {"ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"} <= secrets_files
 
     def test_plan_uid_and_gid_both_in_subid_range(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1398,10 +1396,10 @@ class TestHelperCpChownRoFiles:
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         assert plan, "plan should be non-empty"
         for entry in plan:
-            owner_uid, owner_gid = entry[2], entry[3]
-            # Both must resolve back to in-container values without raising.
-            in_uid = in_container_uid_for_host_uid(owner_uid, "claude-sandbox")
-            in_gid = in_container_gid_for_host_gid(owner_gid, "claude-sandbox")
+            # Typed-field reads per design Decision 1's carve-out for
+            # numeric/permission-bit assertions.
+            in_uid = in_container_uid_for_host_uid(entry.owner_uid, "claude-sandbox")
+            in_gid = in_container_gid_for_host_gid(entry.owner_gid, "claude-sandbox")
             assert in_uid >= 1
             assert in_gid >= 1
 
@@ -1425,7 +1423,7 @@ class TestHelperCpChownRoFiles:
         ) -> None:
             invocations.append((parent, *files))
 
-        monkeypatch.setattr("cli.main.helper_chown_files", _fake)
+        monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
         _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
         # One invocation per (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES)
         # entry: 7 RO + 1 EXEC + 1 RW = 9 groups (cluster 5 added the RW recipe).
@@ -1442,7 +1440,7 @@ class TestHelperCpChownRoFiles:
         def _raise(*a: object, **kw: object) -> None:
             raise SandboxExecutionError("helper failed")
 
-        monkeypatch.setattr("cli.main.helper_chown_files", _raise)
+        monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _raise)
         with pytest.raises(SandboxExecutionError, match="helper failed"):
             _phase_helper_cp_chown_ro_files("/inst", "u", MachinectlAuth.SUDO)
 
@@ -3464,7 +3462,7 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        descriptions = [desc for _, desc in plan]
+        descriptions = [a.description for a in plan]
         assert any("ancestor traverse" in d for d in descriptions)
 
     def test_revoke_plan_excludes_ancestors(self, tmp_path: Path) -> None:
@@ -3475,7 +3473,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
 
         plan = _acl_revoke_plan(str(instance_dir), "sandbox")
-        descriptions = [desc for _, desc in plan]
+        descriptions = [a.description for a in plan]
         assert not any("ancestor" in d for d in descriptions)
 
     def test_grant_plan_includes_env_file_revoke_excludes(self, tmp_path: Path) -> None:
@@ -3496,8 +3494,8 @@ class TestACLPlanAsymmetry:
         grant = _acl_grant_plan(str(instance_dir), "sandbox")
         revoke = _acl_revoke_plan(str(instance_dir), "sandbox")
 
-        grant_descs = [d for _, d in grant]
-        revoke_descs = [d for _, d in revoke]
+        grant_descs = [a.description for a in grant]
+        revoke_descs = [a.description for a in revoke]
         assert any("env file" in d for d in grant_descs)
         assert not any("env file" in d for d in revoke_descs)
 
@@ -3512,11 +3510,11 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        descriptions = [d for _, d in plan]
+        descriptions = [a.description for a in plan]
         assert any("instance root" in d for d in descriptions)
         # Verify r-x permission on instance root
-        root_entries = [(args, d) for args, d in plan if "instance root" in d]
-        assert any("r-x" in " ".join(args) for args, _ in root_entries)
+        root_entries = [a for a in plan if "instance root" in a.description]
+        assert any("r-x" in " ".join(a.command) for a in root_entries)
 
     def test_grant_plan_excludes_cache_log_option_b(self, tmp_path: Path) -> None:
         """Post-acl-ownership-recipes: cache/log Option-B grants are absent from grant plan."""
@@ -3529,10 +3527,10 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        for args, desc in plan:
+        for action in plan:
             for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
-                assert cache_log not in desc
-                assert not any(cache_log in arg for arg in args)
+                assert cache_log not in action.description
+                assert not any(cache_log in arg for arg in action.command)
 
     def test_grant_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
         """Workspace named-ACL is granted when user_project_root is supplied."""
@@ -3544,15 +3542,15 @@ class TestACLPlanAsymmetry:
         ws.mkdir()
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws)], dev_user="dev")
-        descriptions = [d for _, d in plan]
+        descriptions = [a.description for a in plan]
         assert any("workspace named-ACL" in d for d in descriptions)
         assert any("workspace default ACL" in d for d in descriptions)
         # Effective entry contains rwx
-        ws_eff = next((a, d) for a, d in plan if "workspace named-ACL" in d)
-        assert "u:sandbox:rwx" in " ".join(ws_eff[0])
+        ws_eff = next(a for a in plan if "workspace named-ACL" in a.description)
+        assert "u:sandbox:rwx" in " ".join(ws_eff.command)
         # Default entry includes both host_user and dev_user
-        ws_def = next((a, d) for a, d in plan if "workspace default ACL" in d)
-        joined = " ".join(ws_def[0])
+        ws_def = next(a for a in plan if "workspace default ACL" in a.description)
+        joined = " ".join(ws_def.command)
         assert "u:sandbox:rwx" in joined
         assert "u:dev:rwx" in joined
 
@@ -3564,10 +3562,10 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
 
         plan = _acl_revoke_plan(str(instance_dir), "sandbox")
-        for args, desc in plan:
+        for action in plan:
             for cache_log in ["cache/core/.claude", "cache/admin/tmux_resurrect", "log/core", "log/admin"]:
-                assert cache_log not in desc
-                assert not any(cache_log in arg for arg in args)
+                assert cache_log not in action.description
+                assert not any(cache_log in arg for arg in action.command)
 
     def test_revoke_plan_includes_workspace_named_acl(self, tmp_path: Path) -> None:
         """Workspace named-ACL effective and default-entry revocations."""
@@ -3578,13 +3576,13 @@ class TestACLPlanAsymmetry:
         ws = tmp_path / "myws"
 
         plan = _acl_revoke_plan(str(instance_dir), "sandbox", [str(ws)])
-        descriptions = [d for _, d in plan]
+        descriptions = [a.description for a in plan]
         assert any("workspace named-ACL" in d for d in descriptions)
         assert any("workspace default named entry" in d for d in descriptions)
         # The default revocation uses -d -x
-        ws_def = next((a, d) for a, d in plan if "workspace default named entry" in d)
-        assert "-d" in ws_def[0]
-        assert "-x" in ws_def[0]
+        ws_def = next(a for a in plan if "workspace default named entry" in a.description)
+        assert "-d" in ws_def.command
+        assert "-x" in ws_def.command
 
     def test_revoke_plan_omits_workspace_when_user_project_root_none(self, tmp_path: Path) -> None:
         """No workspace entries when user_project_root is None (back-compat call shape)."""
@@ -3594,7 +3592,7 @@ class TestACLPlanAsymmetry:
         instance_dir.mkdir(parents=True)
 
         plan = _acl_revoke_plan(str(instance_dir), "sandbox")
-        descriptions = [d for _, d in plan]
+        descriptions = [a.description for a in plan]
         # Match description-prefix tokens, not substrings — tmp_path may contain "workspace".
         assert not any(d.startswith("workspace ") for d in descriptions)
 
@@ -3608,7 +3606,7 @@ class TestACLPlanAsymmetry:
         # Workspace under a nonexistent path → os.stat on the parent raises OSError.
         plan = _acl_grant_plan(str(instance_dir), "sandbox", ["/nonexistent-root/myproj"], dev_user="dev")
         # Should not have crashed; the workspace named-ACL is still queued.
-        assert any("workspace named-ACL" in d for _, d in plan)
+        assert any("workspace named-ACL" in a.description for a in plan)
 
     def test_grant_plan_includes_secrets_provisioning_write(self, tmp_path: Path) -> None:
         """Grant plan emits a dir-level rwx provisioning grant on secrets/.
@@ -3627,7 +3625,7 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        descriptions = [d for _, d in plan]
+        descriptions = [a.description for a in plan]
         assert any("secrets dir provisioning write" in d for d in descriptions)
 
     def test_grant_plan_dedups_shared_ancestor_across_workspaces(self, tmp_path: Path) -> None:
@@ -3644,7 +3642,7 @@ class TestACLPlanAsymmetry:
         ws_b.mkdir()
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws_a), str(ws_b)], dev_user="dev")
-        ancestor_targets = [args[-1] for args, desc in plan if desc.startswith("workspace ancestor traverse: ")]
+        ancestor_targets = [a.command[-1] for a in plan if a.description.startswith("workspace ancestor traverse: ")]
         # Shared parent appears at most once even though both workspaces walk through it.
         assert ancestor_targets.count(str(ws_root)) == 1
 
@@ -3671,18 +3669,18 @@ class TestACLPlanAsymmetry:
         for parent_rel in ("cache/core", "cache/admin", "log"):
             parent_abs = str(instance_dir / parent_rel)
             effective = [
-                args
-                for args, desc in plan
-                if desc == f"helper-recipe parent: {parent_abs}"
+                a.command
+                for a in plan
+                if a.description == f"helper-recipe parent: {parent_abs}"
             ]
             assert effective, f"missing helper-recipe-parent effective grant for {parent_rel}"
             assert any(arg == "u:sandbox:rwx" for arg in effective[0]), (
                 f"helper-recipe parent {parent_rel} missing u:<daemon>:rwx"
             )
             default_entries = [
-                args
-                for args, desc in plan
-                if desc == f"helper-recipe parent default ACL: {parent_abs}"
+                a.command
+                for a in plan
+                if a.description == f"helper-recipe parent default ACL: {parent_abs}"
             ]
             assert default_entries, (
                 f"missing helper-recipe-parent default ACL grant for {parent_rel}"
@@ -3706,7 +3704,7 @@ class TestACLPlanAsymmetry:
         from cli.main import _workspace_shared_group_plan
 
         plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
-        ops = [op for op, _ in plan]
+        ops = [a.op for a in plan]
         assert not any("setfacl -m g::rwx" in op for op in ops), (
             "workspace shared-group plan must NOT emit explicit g::rwx setfacl post-reorder"
         )
@@ -3745,11 +3743,9 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        secrets_entries = [
-            (args, desc) for args, desc in plan if "secrets dir provisioning write" in desc
-        ]
+        secrets_entries = [a for a in plan if "secrets dir provisioning write" in a.description]
         assert secrets_entries, "secrets dir provisioning-write entry missing"
-        args, _desc = secrets_entries[0]
+        args = secrets_entries[0].command
         joined = " ".join(args)
         assert "-R" not in args, f"secrets/ grant must NOT be recursive: {joined}"
         assert "rwX" not in joined, f"secrets/ grant must NOT carry rwX: {joined}"
@@ -3761,22 +3757,20 @@ class TestACLPlanAsymmetry:
         # No recursive grant on secrets/ anywhere in the plan. Match
         # description prefixes that begin "secrets " (avoid false-matching
         # paths that contain "secrets" as a substring).
-        for cmd, desc in plan:
-            if desc.startswith("secrets "):
-                assert "-R" not in cmd, (
+        for action in plan:
+            if action.description.startswith("secrets "):
+                assert "-R" not in action.command, (
                     f"secrets/ entry must not be recursive (cluster-1 retires temp 0b35a53): "
-                    f"{cmd!r} {desc!r}"
+                    f"{action.command!r} {action.description!r}"
                 )
 
         # Default ACL granting daemon r on inherited entries — belt-and-
         # suspenders for any future write path that does NOT chmod-after-
         # create (per the requirement description).
-        default_entries = [
-            (args, desc) for args, desc in plan if "secrets default ACL" in desc
-        ]
+        default_entries = [a for a in plan if "secrets default ACL" in a.description]
         assert default_entries, "secrets default ACL entry missing"
-        d_args, _ = default_entries[0]
-        assert d_args[:3] == ["setfacl", "-d", "-m"], d_args
+        d_args = default_entries[0].command
+        assert d_args[:3] == ("setfacl", "-d", "-m"), d_args
         assert any("u:sandbox:r" in tok for tok in d_args), d_args
 
     def test_exec_file_recipes_table_emits_mode_0500(self) -> None:
@@ -3861,9 +3855,9 @@ class TestACLPlanAsymmetry:
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         # Find the RW entry for config/core/.claude.json in the plan.
         rw_entries = [
-            (parent_abs, files, mode)
-            for parent_abs, files, _uid, _gid, mode in plan
-            if parent_abs.endswith("/config/core") and ".claude.json" in files
+            (str(action.parent), action.files, action.mode)
+            for action in plan
+            if str(action.parent).endswith("/config/core") and ".claude.json" in action.files
         ]
         assert rw_entries, f"RW recipe for .claude.json missing from plan; got {plan}"
         # At least one entry must carry mode 0660 (the RW recipe).
@@ -3976,11 +3970,9 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        config_entries = [
-            (args, desc) for args, desc in plan if desc.startswith("config files: ")
-        ]
+        config_entries = [a for a in plan if a.description.startswith("config files: ")]
         assert config_entries, "config/ recursive grant entry missing"
-        args, _desc = config_entries[0]
+        args = config_entries[0].command
         joined = " ".join(args)
         assert "-R" in args, f"config/ grant must be recursive: {joined}"
         assert "rwX" not in joined, (
@@ -4026,9 +4018,9 @@ class TestACLPlanAsymmetry:
         ):
             parent_abs = str(instance_dir / parent_rel)
             entries = [
-                args
-                for args, desc in plan
-                if desc == f"helper-cp parent: {parent_abs}"
+                a.command
+                for a in plan
+                if a.description == f"helper-cp parent: {parent_abs}"
             ]
             assert entries, (
                 f"missing helper-cp parent dir-level rwx grant for {parent_rel}"
@@ -4223,7 +4215,7 @@ class TestWorkspaceSharedGroup:
         from cli.main import _workspace_shared_group_plan
 
         plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
-        ops = [op for op, _ in plan]
+        ops = [a.op for a in plan]
         assert any("chgrp 200500" in op for op in ops)
         assert any("chmod 2770" in op for op in ops)
         assert any("setfacl -m u:claude-sandbox:rwx" in op for op in ops)
@@ -4327,7 +4319,8 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
         plan = _helper_mkdir_chown_plan("/inst", "claude-sandbox")
-        assert plan == [
+        as_tuples = [(str(a.parent), a.leaves, a.owner_uid, a.owner_gid) for a in plan]
+        assert as_tuples == [
             ("/inst/cache/core", (".claude",), 100999, 200999),
             ("/inst/cache/admin", ("tmux_resurrect",), 100999, 200999),
             ("/inst/log", ("core", "admin"), 100999, 200999),
@@ -4350,7 +4343,7 @@ class TestHelperMkdirChownPlan:
             events.append(("helper", []))
 
         monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
-        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+        monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake_helper)
 
         _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", MachinectlAuth.SUDO, "dev")
 
@@ -4378,7 +4371,7 @@ class TestHelperMkdirChownPlan:
             calls["helper"] += 1
 
         monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
-        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+        monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake_helper)
 
         for _ in range(2):
             _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
@@ -4396,7 +4389,7 @@ class TestHelperMkdirChownPlan:
             raise subprocess.CalledProcessError(1, cmd, stderr="permission denied")
 
         monkeypatch.setattr("cli.main.subprocess.run", _raise)
-        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", lambda *a, **k: None)
+        monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", lambda *a, **k: None)
 
         with pytest.raises(SandboxExecutionError, match="permission denied"):
             _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
@@ -4987,11 +4980,25 @@ class TestStopUnlinkConsumerFiles:
         (instance_dir / "config" / "proxy" / "squid.conf").write_text("y")
         # `missing.txt` deliberately not created — covers FileNotFoundError branch.
 
+        from core.actions import HelperCpChownAction
+
         with patch(
             "cli.main._helper_cp_chown_plan",
             return_value=[
-                (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
-                (str(instance_dir / "config" / "proxy"), ("squid.conf", "missing.txt"), 0, 0, 0o640),
+                HelperCpChownAction(
+                    parent=instance_dir / "config" / "coredns",
+                    files=("Corefile",),
+                    owner_uid=0,
+                    owner_gid=0,
+                    mode=0o640,
+                ),
+                HelperCpChownAction(
+                    parent=instance_dir / "config" / "proxy",
+                    files=("squid.conf", "missing.txt"),
+                    owner_uid=0,
+                    owner_gid=0,
+                    mode=0o640,
+                ),
             ],
         ):
             warnings = _phase_stop_unlink_consumer_files(str(instance_dir), "claude-sandbox")
@@ -5026,11 +5033,19 @@ class TestStopUnlinkConsumerFiles:
 
         instance_dir = tmp_path / "inst"
         instance_dir.mkdir()
+        from core.actions import HelperCpChownAction
+
         with (
             patch(
                 "cli.main._helper_cp_chown_plan",
                 return_value=[
-                    (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
+                    HelperCpChownAction(
+                        parent=instance_dir / "config" / "coredns",
+                        files=("Corefile",),
+                        owner_uid=0,
+                        owner_gid=0,
+                        mode=0o640,
+                    ),
                 ],
             ),
             patch("cli.main.os.unlink", side_effect=PermissionError("locked down")),
@@ -5062,12 +5077,12 @@ class TestCluster3TeardownSymmetry:
         helper_cp_parents = {
             os.path.join(str(instance_dir), parent).rstrip("/") for parent, _, _, _ in RO_FILE_RECIPES
         }
-        for args, desc in plan:
-            if "-R" not in args:
+        for action in plan:
+            if "-R" not in action.command:
                 continue
-            target = args[-1].rstrip("/")
+            target = action.command[-1].rstrip("/")
             assert target not in helper_cp_parents, (
-                f"revoke plan contains recursive entry on helper-cp parent {target}: {desc}"
+                f"revoke plan contains recursive entry on helper-cp parent {target}: {action.description}"
             )
 
     def test_revoke_plan_excludes_recursive_walks(self, tmp_path: Path) -> None:
@@ -5082,8 +5097,10 @@ class TestCluster3TeardownSymmetry:
         from cli.main import _acl_revoke_plan
 
         plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
-        for args, desc in plan:
-            assert "-R" not in args, f"revoke plan contains recursive walk: {desc} → {args}"
+        for action in plan:
+            assert "-R" not in action.command, (
+                f"revoke plan contains recursive walk: {action.description} → {action.command}"
+            )
 
     def test_revoke_plan_excludes_ancestor_traverse(self, tmp_path: Path) -> None:
         """Ancestor traverse ACLs are `granted-once, persistent` and MUST NOT
@@ -5093,8 +5110,8 @@ class TestCluster3TeardownSymmetry:
         from cli.main import _acl_revoke_plan
 
         plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
-        for _args, desc in plan:
-            assert "ancestor" not in desc
+        for action in plan:
+            assert "ancestor" not in action.description
 
     def test_revoke_plan_excludes_workspace_shared_group_persistent(self, tmp_path: Path) -> None:
         """Workspace shared-group state (chgrp/chmod 2770/setgid + g::rwx
@@ -5105,15 +5122,17 @@ class TestCluster3TeardownSymmetry:
 
         ws = tmp_path / "ws"
         plan = _acl_revoke_plan("/inst", "sandbox", [str(ws)])
-        joined_descs = " ".join(d for _, d in plan)
+        joined_descs = " ".join(a.description for a in plan)
         assert "chgrp" not in joined_descs
         assert "setgid" not in joined_descs
-        for args, desc in plan:
-            if "-d" in args and "workspace" in desc:
-                assert "-x" in args
-                idx = args.index("-x")
-                target = args[idx + 1]
-                assert target.startswith("u:"), f"workspace default revoke not named-entry-only: {args}"
+        for action in plan:
+            if "-d" in action.command and "workspace" in action.description:
+                assert "-x" in action.command
+                idx = action.command.index("-x")
+                target = action.command[idx + 1]
+                assert target.startswith("u:"), (
+                    f"workspace default revoke not named-entry-only: {action.command}"
+                )
 
     def test_revoke_plan_excludes_env_file_persistent(self, tmp_path: Path) -> None:
         """The .sandbox.env named-ACL is `granted-once, persistent` (cluster 3
@@ -5123,9 +5142,13 @@ class TestCluster3TeardownSymmetry:
         from cli.main import _acl_revoke_plan
 
         plan = _acl_revoke_plan("/inst", "sandbox")
-        for args, desc in plan:
-            assert ".sandbox.env" not in desc, f"revoke plan touches .sandbox.env: {desc}"
-            assert not any(".sandbox.env" in a for a in args), f"revoke plan args touch .sandbox.env: {args}"
+        for action in plan:
+            assert ".sandbox.env" not in action.description, (
+                f"revoke plan touches .sandbox.env: {action.description}"
+            )
+            assert not any(".sandbox.env" in a for a in action.command), (
+                f"revoke plan args touch .sandbox.env: {action.command}"
+            )
 
     def test_phase_stop_teardown_orders_compose_then_unlink_then_revoke(self, tmp_path: Path) -> None:
         """ADDED requirement: Teardown Sequence.
@@ -5234,10 +5257,11 @@ class TestCluster3TeardownSymmetry:
         ws.mkdir()
         grant = _acl_grant_plan(str(instance_dir), "sandbox", [str(ws)], dev_user="dev")
         revoke = _acl_revoke_plan(str(instance_dir), "sandbox", [str(ws)])
-        grant_targets = {args[-1] for args, _ in grant}
-        for args, desc in revoke:
-            assert args[-1] in grant_targets, (
-                f"revoke target {args[-1]!r} ({desc}) is not in grant plan — asymmetry direction violated"
+        grant_targets = {a.command[-1] for a in grant}
+        for action in revoke:
+            assert action.command[-1] in grant_targets, (
+                f"revoke target {action.command[-1]!r} ({action.description}) "
+                f"is not in grant plan — asymmetry direction violated"
             )
 
 

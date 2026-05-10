@@ -309,10 +309,10 @@ def test_workspace_named_acl_round_trip(tmp_path: Path) -> None:
     # Match by description prefix, not substring — the tmp_path itself may
     # contain the word "workspace" via pytest's test-name dirs.
     plan = _acl_revoke_plan(str(tmp_path / "fake_instance"), user, [str(workspace)])
-    workspace_revokes = [args for args, desc in plan if desc.startswith("workspace ")]
+    workspace_revokes = [a.command for a in plan if a.description.startswith("workspace ")]
     assert workspace_revokes, "_acl_revoke_plan must emit workspace revocation entries"
-    for args in workspace_revokes:
-        subprocess.run(args, check=True)
+    for argv in workspace_revokes:
+        subprocess.run(list(argv), check=True)
 
     post = subprocess.run(
         ["getfacl", "--no-effective", str(workspace)],

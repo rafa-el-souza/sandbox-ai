@@ -29,19 +29,19 @@ def _config_with_postgres() -> InstanceConfig:
 
 class TestComposeUpCmdPlan:
     def test_contains_base_compose_file_flag(self) -> None:
-        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres())
+        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres()).inner_command
         assert "-f /inst/docker/compose.yml" in cmd
 
     def test_contains_extras_compose_file_flag(self) -> None:
-        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres())
+        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres()).inner_command
         assert "-f /inst/docker/extras/db-postgres.yml" in cmd
 
     def test_contains_env_file_flag(self) -> None:
-        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres())
+        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres()).inner_command
         assert "--env-file /inst/.sandbox.env" in cmd
 
     def test_ends_with_up_suffix(self) -> None:
-        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres())
+        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres()).inner_command
         assert cmd.endswith("up -d --build --wait")
 
     def test_does_not_contain_comma_joined_filenames(self) -> None:
@@ -51,12 +51,20 @@ class TestComposeUpCmdPlan:
         rendered command would contain `", "` between filenames in place
         of `-f` flags. Assert it never appears.
         """
-        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres())
+        cmd = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres()).inner_command
         assert ", " not in cmd
 
     def test_includes_compose_project_name(self) -> None:
-        cmd = _compose_up_cmd_plan("/inst", "alpha", _config_with_postgres())
+        cmd = _compose_up_cmd_plan("/inst", "alpha", _config_with_postgres()).inner_command
         assert "COMPOSE_PROJECT_NAME=alpha" in cmd
+
+    def test_returns_compose_up_action(self) -> None:
+        from core.actions import ComposeUpAction
+
+        action = _compose_up_cmd_plan("/inst", "myproj", _config_with_postgres())
+        assert isinstance(action, ComposeUpAction)
+        # describe() returns the same string the .execute() path will run
+        assert action.describe() == action.inner_command
 
 
 class TestPhaseComposeUpParity:
@@ -71,7 +79,7 @@ class TestPhaseComposeUpParity:
         instance_dir = "/inst"
         project_name = "myproj"
 
-        expected = _compose_up_cmd_plan(instance_dir, project_name, config)
+        expected = _compose_up_cmd_plan(instance_dir, project_name, config).inner_command
 
         with patch("cli.main.Executor") as MockExec:
             _phase_compose_up(instance_dir, project_name, "sandbox", config)

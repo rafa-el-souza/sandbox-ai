@@ -15,13 +15,19 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pydantic
 import typer
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from core.actions import (
+    ActionContext,
+    ComposeUpAction,
+    HelperCpChownAction,
+    HelperMkdirChownAction,
+    NamedAclGrantAction,
+    NamedAclRevokeAction,
+    WorkspaceSharedGroupAction,
+)
 from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
@@ -34,7 +40,6 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
 from core.host_config import (
     HostConfig,
     HostSettings,
@@ -565,10 +570,10 @@ def _acl_grant_plan(
     host_user: str,
     workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
-) -> list[tuple[list[str], str]]:
+) -> list[NamedAclGrantAction]:
     """Build the ACL grant plan — single source of truth for Phase 5 and dry-run (D4).
 
-    Returns a list of (setfacl_args, description) tuples:
+    Returns a list of :class:`NamedAclGrantAction` objects:
     - Ancestors: ``--x`` (traverse only)
     - Instance root: ``r-x``
     - docker/: ``rX`` recursive
@@ -582,31 +587,60 @@ def _acl_grant_plan(
     Cache/log Option-B grants are intentionally absent — replaced by the
     helper-mkdir+chown phase (acl-ownership-recipes Decision 1).
     """
-    plan: list[tuple[list[str], str]] = []
+    plan: list[NamedAclGrantAction] = []
+
+    def _g(
+        argv: list[str],
+        description: str,
+        *,
+        target: str,
+        entry: str,
+        default: bool = False,
+        recursive: bool = False,
+    ) -> NamedAclGrantAction:
+        # Tuple-cast at append time per design Decision 1: command is
+        # immutable on the frozen Action so downstream code can't mutate
+        # the live argv held by a grant entry. Structured fields
+        # (target/entry/default/recursive) enable Refactor C dispatch.
+        return NamedAclGrantAction(
+            command=tuple(argv),
+            description=description,
+            target=Path(target),
+            entry=entry,
+            default=default,
+            recursive=recursive,
+        )
 
     # Ancestors — execute-only traverse
     for ancestor in _compute_ancestors(instance_dir):
         plan.append(
-            (
+            _g(
                 ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
                 f"ancestor traverse: {ancestor}",
+                target=ancestor,
+                entry=f"u:{host_user}:--x",
             )
         )
 
     # Instance root — read + execute
     plan.append(
-        (
+        _g(
             ["setfacl", "-m", f"u:{host_user}:r-x", instance_dir],
             f"instance root: {instance_dir}",
+            target=instance_dir,
+            entry=f"u:{host_user}:r-x",
         )
     )
 
     # docker/ — recursive read + conditional execute
     docker_dir = os.path.join(instance_dir, "docker/")
     plan.append(
-        (
+        _g(
             ["setfacl", "-R", "-m", f"u:{host_user}:rX", docker_dir],
             f"docker config: {docker_dir}",
+            target=docker_dir,
+            entry=f"u:{host_user}:rX",
+            recursive=True,
         )
     )
 
@@ -614,9 +648,11 @@ def _acl_grant_plan(
     # can unlink+recreate entrypoint.sh (added to RO_FILE_RECIPES).
     docker_core_dir = os.path.join(instance_dir, "docker/core")
     plan.append(
-        (
+        _g(
             ["setfacl", "-m", f"u:{host_user}:rwx", docker_core_dir],
             f"helper-cp parent: {docker_core_dir}",
+            target=docker_core_dir,
+            entry=f"u:{host_user}:rwx",
         )
     )
 
@@ -636,9 +672,12 @@ def _acl_grant_plan(
     # widening was rejected).
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
-        (
+        _g(
             ["setfacl", "-R", "-m", f"u:{host_user}:rX", config_dir],
             f"config files: {config_dir}",
+            target=config_dir,
+            entry=f"u:{host_user}:rX",
+            recursive=True,
         )
     )
 
@@ -653,18 +692,22 @@ def _acl_grant_plan(
     for rel in ("config/coredns", "config/dnsdist", "config/proxy", "config/core", "config/admin"):
         helper_cp_parent = os.path.join(instance_dir, rel)
         plan.append(
-            (
+            _g(
                 ["setfacl", "-m", f"u:{host_user}:rwx", helper_cp_parent],
                 f"helper-cp parent: {helper_cp_parent}",
+                target=helper_cp_parent,
+                entry=f"u:{host_user}:rwx",
             )
         )
 
     # .sandbox.env — read only
     env_file = os.path.join(instance_dir, ".sandbox.env")
     plan.append(
-        (
+        _g(
             ["setfacl", "-m", f"u:{host_user}:r", env_file],
             f"env file: {env_file}",
+            target=env_file,
+            entry=f"u:{host_user}:r",
         )
     )
 
@@ -688,21 +731,20 @@ def _acl_grant_plan(
     # NOT appear in the plan.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
-        (
+        _g(
             ["setfacl", "-m", f"u:{host_user}:rwx", secrets_dir],
             f"secrets dir provisioning write: {secrets_dir}",
+            target=secrets_dir,
+            entry=f"u:{host_user}:rwx",
         )
     )
     plan.append(
-        (
-            [
-                "setfacl",
-                "-d",
-                "-m",
-                f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r",
-                secrets_dir,
-            ],
+        _g(
+            ["setfacl", "-d", "-m", f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r", secrets_dir],
             f"secrets default ACL: {secrets_dir}",
+            target=secrets_dir,
+            entry=f"u::rw-,g::---,o::---,m::r--,u:{host_user}:r",
+            default=True,
         )
     )
 
@@ -719,9 +761,12 @@ def _acl_grant_plan(
     ):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
-            (
+            _g(
                 ["setfacl", "-d", "-m", f"u:{host_user}:r", parent_dir],
                 f"helper-cp parent default ACL: {parent_dir}",
+                target=parent_dir,
+                entry=f"u:{host_user}:r",
+                default=True,
             )
         )
 
@@ -730,21 +775,20 @@ def _acl_grant_plan(
     for rel in ("cache/core", "cache/admin", "log"):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
-            (
+            _g(
                 ["setfacl", "-m", f"u:{host_user}:rwx", parent_dir],
                 f"helper-recipe parent: {parent_dir}",
+                target=parent_dir,
+                entry=f"u:{host_user}:rwx",
             )
         )
         plan.append(
-            (
-                [
-                    "setfacl",
-                    "-d",
-                    "-m",
-                    f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx",
-                    parent_dir,
-                ],
+            _g(
+                ["setfacl", "-d", "-m", f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx", parent_dir],
                 f"helper-recipe parent default ACL: {parent_dir}",
+                target=parent_dir,
+                entry=f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx",
+                default=True,
             )
         )
 
@@ -761,24 +805,31 @@ def _acl_grant_plan(
                     continue
                 seen_ancestors.add(ancestor)
                 plan.append(
-                    (
+                    _g(
                         ["setfacl", "-m", f"u:{host_user}:--x", ancestor],
                         f"workspace ancestor traverse: {ancestor}",
+                        target=ancestor,
+                        entry=f"u:{host_user}:--x",
                     )
                 )
             plan.append(
-                (
+                _g(
                     ["setfacl", "-m", f"u:{host_user}:rwx", ws_path],
                     f"workspace named-ACL: {ws_path}",
+                    target=ws_path,
+                    entry=f"u:{host_user}:rwx",
                 )
             )
             default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
             if dev_user:
                 default_entry += f",u:{dev_user}:rwx"
             plan.append(
-                (
+                _g(
                     ["setfacl", "-d", "-m", default_entry, ws_path],
                     f"workspace default ACL: {ws_path}",
+                    target=ws_path,
+                    entry=default_entry,
+                    default=True,
                 )
             )
 
@@ -811,7 +862,7 @@ def _acl_revoke_plan(
     instance_dir: str,
     host_user: str,
     workspace_paths: list[str] | None = None,
-) -> list[tuple[list[str], str]]:
+) -> list[NamedAclRevokeAction]:
     """Build the ACL revoke plan — strict subset of revertible operations.
 
     The revoke plan is NOT a 1:1 inverse of the grant plan. It excludes every
@@ -843,13 +894,31 @@ def _acl_revoke_plan(
     - secrets/ dir-level traverse named-ACL
     - Per-workspace effective + default-ACL named entries
     """
-    plan: list[tuple[list[str], str]] = []
+    plan: list[NamedAclRevokeAction] = []
+    user_entry = f"u:{host_user}"
+
+    def _r(
+        argv: list[str],
+        description: str,
+        *,
+        target: str,
+        entry: str = user_entry,
+        default: bool = False,
+    ) -> NamedAclRevokeAction:
+        return NamedAclRevokeAction(
+            command=tuple(argv),
+            description=description,
+            target=Path(target),
+            entry=entry,
+            default=default,
+        )
 
     # Instance root
     plan.append(
-        (
+        _r(
             ["setfacl", "-x", f"u:{host_user}", instance_dir],
             f"instance root: {instance_dir}",
+            target=instance_dir,
         )
     )
 
@@ -858,18 +927,20 @@ def _acl_revoke_plan(
     # of the cluster-3 stop-time setfacl warnings).
     docker_dir = os.path.join(instance_dir, "docker/")
     plan.append(
-        (
+        _r(
             ["setfacl", "-x", f"u:{host_user}", docker_dir],
             f"docker config: {docker_dir}",
+            target=docker_dir,
         )
     )
 
     # config/ — dir-level only (NOT recursive: same rationale as docker/).
     config_dir = os.path.join(instance_dir, "config/")
     plan.append(
-        (
+        _r(
             ["setfacl", "-x", f"u:{host_user}", config_dir],
             f"config files: {config_dir}",
+            target=config_dir,
         )
     )
 
@@ -880,15 +951,18 @@ def _acl_revoke_plan(
     # — no consumer-owned files are at the dir level here.
     secrets_dir = os.path.join(instance_dir, "secrets/")
     plan.append(
-        (
+        _r(
             ["setfacl", "-x", f"u:{host_user}", secrets_dir],
             f"secrets dir traverse: {secrets_dir}",
+            target=secrets_dir,
         )
     )
     plan.append(
-        (
+        _r(
             ["setfacl", "-d", "-x", f"u:{host_user}", secrets_dir],
             f"secrets default ACL: {secrets_dir}",
+            target=secrets_dir,
+            default=True,
         )
     )
 
@@ -898,15 +972,18 @@ def _acl_revoke_plan(
     if workspace_paths:
         for ws_path in workspace_paths:
             plan.append(
-                (
+                _r(
                     ["setfacl", "-x", f"u:{host_user}", ws_path],
                     f"workspace named-ACL: {ws_path}",
+                    target=ws_path,
                 )
             )
             plan.append(
-                (
+                _r(
                     ["setfacl", "-d", "-x", f"u:{host_user}", ws_path],
                     f"workspace default named entry: {ws_path}",
+                    target=ws_path,
+                    default=True,
                 )
             )
 
@@ -1151,8 +1228,8 @@ and dry-run preview (_helper_mkdir_chown_plan).
 """
 
 
-def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int]]:
-    """Return ``[(parent_abs, leaves, owner_uid, owner_gid), ...]`` for cache/log.
+def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[HelperMkdirChownAction]:
+    """Return one :class:`HelperMkdirChownAction` per cache/log parent.
 
     ``owner_uid``/``owner_gid`` map in-container uid/gid 1000 (agent / human)
     to their host subuid/subgid via :func:`core.host_config.host_id_for_in_container`.
@@ -1160,13 +1237,18 @@ def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[tuple[st
     owner_uid = host_id_for_in_container(1000, host_user)
     owner_gid = host_gid_for_in_container(1000, host_user)
     return [
-        (os.path.join(instance_dir, parent), leaves, owner_uid, owner_gid)
+        HelperMkdirChownAction(
+            parent=Path(os.path.join(instance_dir, parent)),
+            leaves=leaves,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
         for parent, leaves in CACHE_LOG_LEAVES_BY_PARENT
     ]
 
 
-def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int, int]]:
-    """Return ``[(parent_abs, files, owner_uid, owner_gid, mode), ...]`` for ro files.
+def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[HelperCpChownAction]:
+    """Return one :class:`HelperCpChownAction` per recipe entry across ro/exec/rw files.
 
     Owner uid and gid are both mapped via the host_config forward resolvers:
     owner gid matches the consumer's host subgid; in-container root reads via
@@ -1175,12 +1257,12 @@ def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, 
     the host-absolute helper API.
     """
     return [
-        (
-            os.path.join(instance_dir, parent),
-            files,
-            host_id_for_in_container(consumer_uid, host_user),
-            host_gid_for_in_container(consumer_uid, host_user),
-            mode,
+        HelperCpChownAction(
+            parent=Path(os.path.join(instance_dir, parent)),
+            files=files,
+            owner_uid=host_id_for_in_container(consumer_uid, host_user),
+            owner_gid=host_gid_for_in_container(consumer_uid, host_user),
+            mode=mode,
         )
         for parent, files, consumer_uid, mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES)
     ]
@@ -1233,19 +1315,53 @@ def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[
 
 def _workspace_shared_group_plan(
     workspace_path: str, bridge_gid: int, dev_user: str | None, host_user: str
-) -> list[tuple[str, str]]:
-    """Return the (operation_summary, target) list for the workspace shared-group recipe.
+) -> list[WorkspaceSharedGroupAction]:
+    """Return one :class:`WorkspaceSharedGroupAction` per chgrp/chmod/setfacl step.
 
-    Used by both execution and dry-run preview.
+    Per design Decision 1 the per-step ``op`` string is precomputed at
+    plan-construction time (interpolating ``bridge_gid`` / ``host_user`` /
+    ``dev_user``); ``ActionContext`` carries ``host_user`` but not
+    ``dev_user``, so recomputing in ``.describe()`` would force ``dev_user``
+    onto the Action — precomputing ``op`` is simpler and matches the
+    precomputed-``command`` choice on the ACL Actions.
+
+    Per-workspace fan-out lives in the caller; this function returns the
+    plan for **one** workspace.
     """
     default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
+    ws = Path(workspace_path)
+    ws_str = str(ws)
     return [
-        (f"chgrp {bridge_gid}", workspace_path),
-        ("chmod 2770", workspace_path),
-        (f"setfacl -m u:{host_user}:rwx", workspace_path),
-        (f"setfacl -d -m {default_entry}", workspace_path),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="chgrp",
+            op=f"chgrp {bridge_gid}",
+            command=(),
+        ),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="chmod_2770",
+            op="chmod 2770",
+            command=(),
+        ),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="setfacl_effective",
+            op=f"setfacl -m u:{host_user}:rwx",
+            command=("setfacl", "-m", f"u:{host_user}:rwx", ws_str),
+        ),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="setfacl_default",
+            op=f"setfacl -d -m {default_entry}",
+            command=("setfacl", "-d", "-m", default_entry, ws_str),
+        ),
     ]
 
 
@@ -1253,13 +1369,17 @@ def _phase_workspace_shared_group(
     workspace_path: str,
     host: HostSettings,
     dev_user: str | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5e: chgrp + chmod 2770 + setfacl on a single workspace tree.
 
     Drift-detects the workspace root: when not yet at setgid + bridge_gid,
     runs the recursive recipe (best-effort, per-file failures aggregated and
     reported, orchestrator never escalates to sudo per Decision 17). Then
-    applies idempotent root-level chgrp/chmod/setfacl on every start.
+    iterates ``_workspace_shared_group_plan`` and dispatches each step via
+    :meth:`WorkspaceSharedGroupAction.execute` — single carrier for the
+    dry-run preview and the live phase per the
+    "Plan Items Are Typed Action Objects" requirement.
 
     Raises:
         WorkspaceBridgeGroupMissingError: if the bridge group is missing.
@@ -1276,27 +1396,25 @@ def _phase_workspace_shared_group(
                 style="yellow",
             )
 
-    # Steady-state idempotent root setup
-    try:
-        os.chown(workspace_path, -1, bridge_gid, follow_symlinks=False)
-        os.chmod(workspace_path, 0o2770)
-    except OSError as exc:
-        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {workspace_path}: {exc}") from exc
-
-    default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
-    if dev_user:
-        default_entry += f",u:{dev_user}:rwx"
-    for args, label in (
-        (["setfacl", "-m", f"u:{host_user}:rwx", workspace_path], "effective"),
-        (["setfacl", "-d", "-m", default_entry, workspace_path], "default"),
-    ):
+    # Steady-state idempotent root setup — same Action plan that the dry-run preview
+    # consumes, executed here via .execute(ctx).
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(workspace_path),
+    )
+    for action in _workspace_shared_group_plan(workspace_path, bridge_gid, dev_user, host_user):
         try:
-            subprocess.run(args, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
-            raise SandboxExecutionError(
-                f"Workspace shared-group {label} ACL failed for {workspace_path}: {stderr}"
-            ) from exc
+            action.execute(ctx)
+        except SandboxExecutionError as exc:
+            # Preserve legacy error-message format for chgrp/chmod root steps —
+            # downstream callers and tests assert on "chgrp/chmod failed for ..." prose.
+            if action.step in ("chgrp", "chmod_2770"):
+                raise SandboxExecutionError(
+                    f"chgrp/chmod failed for {workspace_path}: {exc.__cause__ or exc}"
+                ) from exc
+            raise
 
 
 def _phase_helper_cp_chown_ro_files(
@@ -1309,9 +1427,20 @@ def _phase_helper_cp_chown_ro_files(
     Replaces today's ``_phase_credential_ownership`` — IPC SSH secrets are now
     handled by the standard recipe (``secrets/`` group with consumer uid 1000,
     mode 0600). One helper invocation per (parent, consumer_uid, mode) group.
+
+    Each ``HelperCpChownAction`` is executed via ``.execute(ctx)`` so the
+    dry-run preview and the live phase share the single carrier
+    (per the ``orchestrator-volumes`` "Plan Items Are Typed Action Objects"
+    requirement).
     """
-    for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
-        helper_chown_files(host_user, parent_abs, files, owner_uid, owner_gid, mode, auth)
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
+    for action in _helper_cp_chown_plan(instance_dir, host_user):
+        action.execute(ctx)
 
 
 def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list[str]:
@@ -1327,9 +1456,9 @@ def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list
     OSError encountered); the phase is fault-isolated, never raises.
     """
     warnings: list[str] = []
-    for parent_abs, files, _owner_uid, _owner_gid, _mode in _helper_cp_chown_plan(instance_dir, host_user):
-        for fname in files:
-            path = os.path.join(parent_abs, fname)
+    for action in _helper_cp_chown_plan(instance_dir, host_user):
+        for fname in action.files:
+            path = os.path.join(str(action.parent), fname)
             try:
                 os.unlink(path)
             except FileNotFoundError:
@@ -1356,7 +1485,14 @@ def _phase_helper_mkdir_chown_cache_log(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
 
-    for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
+    for action in _helper_mkdir_chown_plan(instance_dir, host_user):
+        parent_abs = str(action.parent)
         try:
             subprocess.run(
                 ["setfacl", "-d", "-m", default_entry, parent_abs],
@@ -1367,7 +1503,7 @@ def _phase_helper_mkdir_chown_cache_log(
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             raise SandboxExecutionError(f"Default ACL setup failed for {parent_abs}: {stderr}") from exc
-        helper_mkdir_chown_dirs(host_user, parent_abs, leaves, owner_uid, owner_gid, auth)
+        action.execute(ctx)
 
 
 def _phase_acl_grant(
@@ -1375,24 +1511,30 @@ def _phase_acl_grant(
     host_user: str,
     workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
 
-    Each setfacl call runs as direct subprocess.run (NOT via Executor.run —
+    Each setfacl call runs via :meth:`NamedAclGrantAction.execute` (which
+    invokes ``subprocess.run`` directly — NOT via Executor.run —
     sentinel injection would corrupt the setfacl command, per I-1).
-    CalledProcessError is wrapped in SandboxExecutionError (D6).
+    Action failures raise ``SandboxExecutionError``; we catch and enrich
+    with the traverse diagnostic before re-raising (D6).
     """
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
+    for action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         try:
-            subprocess.run(acl_cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
+            action.execute(ctx)
+        except SandboxExecutionError as exc:
             diag = _diagnose_traverse_failure(instance_dir, host_user)
-            error_msg = f"ACL grant failed for {description}"
-            if e.stderr:
-                error_msg += f": {e.stderr.strip()}"
             if diag:
-                error_msg += f"\n{diag}"
-            raise SandboxExecutionError(error_msg) from e
+                raise SandboxExecutionError(f"{exc}\n{diag}") from exc
+            raise
 
 
 def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]:
@@ -1407,24 +1549,26 @@ def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]
     return files
 
 
-def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> str:
-    """Return the inner ``bash -c`` command for ``docker compose up`` (no machinectl prefix).
+def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> ComposeUpAction:
+    """Return the :class:`ComposeUpAction` carrying the inner ``bash -c`` command.
 
     Sole producer of the ``TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain
     COMPOSE_PROJECT_NAME=<project> docker compose <files> --ansi never
-    --env-file <env> up -d --build --wait`` string. Consumed by
-    :func:`_phase_compose_up` (executed) and the dry-run preview (displayed)
+    --env-file <env> up -d --build --wait`` string. The Action's single
+    ``inner_command`` field is consumed by :func:`_phase_compose_up`
+    (via ``.execute(ctx)``) and the dry-run preview (via ``.describe()``)
     so the two paths cannot drift — same single-source-of-truth pattern as
     :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
     :func:`_helper_cp_chown_plan`.
     """
     compose_files = _build_compose_files(instance_dir, config)
     env_file = os.path.join(instance_dir, ".sandbox.env")
-    return (
+    inner = (
         f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
         f"COMPOSE_PROJECT_NAME={project_name} docker compose {' '.join(compose_files)} "
         f"--ansi never --env-file {env_file} up -d --build --wait"
     )
+    return ComposeUpAction(inner_command=inner)
 
 
 def _phase_compose_up(
@@ -1441,17 +1585,14 @@ def _phase_compose_up(
     - --env-file injection for .sandbox.env (D14)
     - sentinel=True for exit code recovery (D1)
     """
-    cmd = _compose_up_cmd_plan(instance_dir, project_name, config)
-    executor = Executor()
-    executor.run(
-        [
-            *machinectl_cmd(host_user, auth),
-            "/bin/bash",
-            "-c",
-            cmd,
-        ],
-        sentinel=True,
+    action = _compose_up_cmd_plan(instance_dir, project_name, config)
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
     )
+    action.execute(ctx)
 
 
 def _phase_handover(
@@ -1522,21 +1663,32 @@ def _compose_down(
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] | None = None) -> list[str]:
+def _revoke_acls(
+    instance_dir: str,
+    host_user: str,
+    workspace_paths: list[str] | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
-    Iterates _acl_revoke_plan(). Uses check=False; failures are collected
-    as warning strings, not raised. Returns list of warning messages.
+    Iterates ``_acl_revoke_plan()`` and dispatches each entry via
+    :meth:`NamedAclRevokeAction.execute`. The Action raises
+    ``SandboxExecutionError`` on non-zero exit or OSError; we capture
+    those messages into the warnings list (never re-raised — phase is
+    fault-isolated).
     """
     warnings: list[str] = []
-    for acl_cmd, description in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
+    for action in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
         try:
-            result = subprocess.run(acl_cmd, check=False, capture_output=True, text=True)
-            if result.returncode != 0:
-                detail = result.stderr.strip() if result.stderr else f"exit {result.returncode}"
-                warnings.append(f"ACL revoke warning for {description}: {detail}")
-        except OSError as e:
-            warnings.append(f"ACL revoke warning for {description}: {e}")
+            action.execute(ctx)
+        except SandboxExecutionError as exc:
+            warnings.append(str(exc))
     return warnings
 
 
@@ -1568,7 +1720,7 @@ def _phase_stop_teardown(
     warnings: list[str] = []
     _compose_down(instance_dir, project_name, host_user, config, volumes=volumes, auth=auth)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
-    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths))
+    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
     return warnings
 
 
@@ -1650,14 +1802,16 @@ def _dry_run_pipeline(inst: str) -> None:
     try:
         bridge_gid = workspace_bridge_gid(host_settings)
         for ws_path in workspace_paths:
-            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
-                console.print(f"    workspace: {op} {target}", style="dim")
+            for ws_action in _workspace_shared_group_plan(
+                ws_path, bridge_gid, os.environ.get("USER"), host_user
+            ):
+                console.print(ws_action.describe(), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
-    for acl_cmd, description in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
-        console.print(f"    $ {' '.join(acl_cmd)}  # {description}", style="dim")
+    for grant_action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
+        console.print(grant_action.describe(), style="dim")
 
     # Post-hydrate setfacl-as-owner pass — covers the write_restricted
     # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
@@ -1681,24 +1835,18 @@ def _dry_run_pipeline(inst: str) -> None:
 
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
     try:
-        for parent_abs, leaves, owner_uid, owner_gid in _helper_mkdir_chown_plan(instance_dir, host_user):
-            leaves_str = ", ".join(leaves)
-            console.print(
-                f"    helper-mkdir+chown {parent_abs}/{{{leaves_str}}} → {owner_uid}:{owner_gid}",
-                style="dim",
-            )
-        for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
-            helper_files_str = ", ".join(files)
-            console.print(
-                f"    helper-cp+chown {parent_abs}/{{{helper_files_str}}} → {owner_uid}:{owner_gid} {mode:o}",
-                style="dim",
-            )
+        for mkdir_action in _helper_mkdir_chown_plan(instance_dir, host_user):
+            console.print(mkdir_action.describe(), style="dim")
+        for cp_action in _helper_cp_chown_plan(instance_dir, host_user):
+            console.print(cp_action.describe(), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
-    # Compose up — derived from the same plan helper _phase_compose_up uses
+    # Compose up — derived from the same ComposeUpAction _phase_compose_up uses;
+    # both code paths read the .inner_command field (no parallel construction).
     machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
-    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{_compose_up_cmd_plan(instance_dir, project_name, config)}'"
+    compose_action = _compose_up_cmd_plan(instance_dir, project_name, config)
+    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{compose_action.describe()}'"
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover
@@ -2167,7 +2315,7 @@ def start(
         # requirement; closes the bug class fixed by temp commit 6f1831e).
         try:
             for ws_path in ws_paths:
-                _phase_workspace_shared_group(ws_path, host_settings, dev_user)
+                _phase_workspace_shared_group(ws_path, host_settings, dev_user, auth)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -2187,7 +2335,7 @@ def start(
         # Daemon-Readable Default ACL" requirement, closing finding 8.D
         # alternative #1).
         acl_granted = True  # set BEFORE grant — handles partial grants (D7)
-        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
+        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user, auth)
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 4: Credentials.
@@ -2238,7 +2386,7 @@ def start(
         # ACL on the workspace) are NOT reverted — they're persistent state
         # that survives intermediate stop/start cycles by design.
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
+            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths, auth)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
@@ -2554,7 +2702,7 @@ def destroy(
                 # (rmtree is irreversible by design). Run the post-compose
                 # phases separately so warnings still surface.
                 teardown_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
-                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths))
+                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths, auth))
             for w in teardown_warnings:
                 console.print(f"⚠ {w}", style="yellow")
 

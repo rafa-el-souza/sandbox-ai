@@ -2564,7 +2564,7 @@ class TestW4IntegrationVerification:
         from cli.main import _acl_grant_plan
 
         plan = _acl_grant_plan(str(tmp_path), "sandbox")
-        secrets_entries = [desc for _, desc in plan if "secrets" in desc]
+        secrets_entries = [a.description for a in plan if "secrets" in a.description]
         assert len(secrets_entries) >= 1
 
 
