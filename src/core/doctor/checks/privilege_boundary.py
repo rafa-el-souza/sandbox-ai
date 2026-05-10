@@ -421,7 +421,6 @@ def check_compose_project_name_collision(
             category="Privilege Boundary",
         )
     daemon_names = {p.get("Name") for p in projects if isinstance(p, dict)}
-    foreign = daemon_names - expected
     # Collisions: a daemon project whose name matches an *expected* project for
     # a registered instance is normal (that instance's own running compose).
     # A daemon project whose name collides with what we'd construct for a
@@ -431,7 +430,6 @@ def check_compose_project_name_collision(
     # in daemon_names, that's not a collision per se (it's the live project),
     # but if the operator runs `init` for a NEW name that already collides,
     # that's a separate concern handled at init pre-flight.
-    del foreign
     return CheckResult(
         status="pass",
         name="compose project name collision",

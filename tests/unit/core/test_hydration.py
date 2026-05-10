@@ -23,7 +23,6 @@ VALID_TOML = """\
 [instance]
 name = "testproject"
 host_uid = "1000"
-warmup_prompt = ""
 
 [workspaces.main]
 bootstrap_mode = "copy"
@@ -319,7 +318,7 @@ class TestLegacyAdminSectionRejection:
         from pydantic import ValidationError as _PydValidationError
 
         flat = {
-            "instance": {"name": "x", "host_uid": "1000", "warmup_prompt": ""},
+            "instance": {"name": "x", "host_uid": "1000"},
             "workspaces": {
                 "main": {"bootstrap_mode": "copy", "source": "/tmp/x", "path": "/tmp/x"},
             },
@@ -447,6 +446,7 @@ class TestRenderTemplates:
         admin_dir = docker_dir / "admin"
         admin_dir.mkdir()
         (admin_dir / "Dockerfile.admin").write_text("FROM scratch\nENTRYPOINT [\"/fwd\"]\n")
+        (admin_dir / "fwd.go").write_text("package main\nfunc main() {}\n")
 
         # CoreDNS Dockerfile (static copy, no Jinja)
         coredns_dir = docker_dir / "coredns"
@@ -924,7 +924,6 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "proxy_whitelist_read_only_domains": [".npmjs.com"],
         "pg_user": "sandbox",
         "pg_db": "sandbox_db",
-        "warmup_prompt": "",
         "git_user": "Agent",
         "git_email": "agent@sandbox.local",
         "custom_config_core": "/home/agent/.sandbox/custom",
@@ -1068,6 +1067,7 @@ def _build_minimal_tooling(tmp_path: Path) -> Path:
     admin_dir.mkdir()
     # admin Dockerfile is now a static copy (FROM scratch + /fwd) — no Jinja, no entrypoint.sh.
     (admin_dir / "Dockerfile.admin").write_text("FROM scratch\nENTRYPOINT [\"/fwd\"]\n")
+    (admin_dir / "fwd.go").write_text("package main\nfunc main() {}\n")
     coredns_dir = docker_dir / "coredns"
     coredns_dir.mkdir()
     (coredns_dir / "Dockerfile.coredns").write_text("ARG CORE_BASE\nFROM ${CORE_BASE}\n")

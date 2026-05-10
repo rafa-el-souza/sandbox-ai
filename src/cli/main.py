@@ -445,10 +445,7 @@ def _phase_credentials(
     operator_gid = os.getegid()
     for fname in ("ipc_ssh_key", "ipc_known_hosts"):
         path = os.path.join(instance_dir, "secrets", fname)
-        try:
-            st = os.stat(path)
-        except FileNotFoundError:
-            continue
+        st = os.stat(path)
         if st.st_uid != operator_uid:
             os.chown(path, operator_uid, operator_gid)
         if (st.st_mode & 0o7777) != 0o600:
@@ -798,7 +795,7 @@ def _acl_grant_plan(
 
     # Helper-recipe parents (cache/log) — grant <daemon>:rwx + matching default
     # so the helper-mkdir+chown phase can create leaves inside them.
-    for rel in ("cache/core", "cache/admin", "log"):
+    for rel in ("cache/core", "log"):
         parent_dir = os.path.join(instance_dir, rel)
         plan.append(
             _g(
@@ -1212,12 +1209,12 @@ DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ``Dockerfile.admin`` (no distro suffix) plus the static
     # ``Dockerfile.coredns`` / ``Dockerfile.mcp-firecrawl`` copies.
     ("docker/core", ("Dockerfile.core",)),
-    # admin/entrypoint.sh is COPY'd by Dockerfile.admin during the build;
-    # it is NOT in ``EXEC_FILE_RECIPES`` (the admin entrypoint is baked
-    # into the image, never bind-mounted at runtime). docker/core's
-    # entrypoint.sh IS in ``EXEC_FILE_RECIPES`` and is therefore covered
-    # by the helper-cp branch of the post-hydrate setfacl pass.
-    ("docker/admin", ("Dockerfile.admin", "entrypoint.sh")),
+    # admin/fwd.go is COPY'd by Dockerfile.admin during the build;
+    # the admin image is a static Go forwarder (no shell entrypoint and
+    # nothing bind-mounted at runtime). docker/core's entrypoint.sh IS in
+    # ``EXEC_FILE_RECIPES`` and is therefore covered by the helper-cp
+    # branch of the post-hydrate setfacl pass.
+    ("docker/admin", ("Dockerfile.admin", "fwd.go")),
     ("docker/coredns", ("Dockerfile.coredns",)),
     # Conditional extras Dockerfile — present iff ``mcp_firecrawl`` is
     # enabled. Skip-if-missing covers the disabled case.
@@ -1235,7 +1232,7 @@ sub-categories:
 2. **Build context**: Dockerfiles + their local-COPY sources, consumed
    by buildkit during ``docker compose up --build``. The current
    inventory is ``Dockerfile.core``, ``Dockerfile.admin`` +
-   ``admin/entrypoint.sh``, ``Dockerfile.coredns``, and the conditional
+   ``admin/fwd.go``, ``Dockerfile.coredns``, and the conditional
    ``Dockerfile.mcp-firecrawl``.
 
 If a future Dockerfile gains a new local-COPY source (anything not
@@ -1246,7 +1243,7 @@ with the template change.
 
 CACHE_LOG_LEAVES_BY_PARENT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cache/core", (".claude",)),
-    ("log", ("core", "admin")),
+    ("log", ("core",)),
 )
 """Per-parent grouping of cache/log leaves consumed by helper-mkdir+chown phase.
 
@@ -1701,7 +1698,7 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         "9999",
         "-t",
         f"agent@{core_ipc_ip}",
-        f"cd /workspaces/{ws} && exec bash -l",
+        f"cd /workspaces/{shlex.quote(ws)} && exec bash -l",
     ]
 
 
@@ -3055,7 +3052,7 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
                 ips = derive_static_ips(slot)
                 ip_map = {
                     "core": ips.get("agent_isolated_ip", ""),
-                    "admin": ips.get("admin_admin_ip", ""),
+                    "admin": ips.get("admin_ipc_ip", ""),
                     "coredns": ips.get("coredns_dns_ip", ""),
                     "dnsdist": ips.get("dnsdist_isolated_ip", ""),
                     "db-postgres": ips.get("db_postgres_ip", ""),

@@ -127,7 +127,6 @@ class SandboxInstanceSection(BaseModel):
 
     name: str
     host_uid: str
-    warmup_prompt: str = ""
 
 
 class CoreConfig(BaseModel):
@@ -317,7 +316,6 @@ def build_jinja_context(
         # Project
         "instance_name": config.instance.name,
         "host_uid": config.instance.host_uid,
-        "warmup_prompt": config.instance.warmup_prompt,
         # Git identity
         "git_user": config.core.git_user or "Agent",
         "git_email": config.core.git_email or "agent@sandbox.local",
@@ -431,6 +429,7 @@ def render_templates(
     # ── Static copies (no Jinja2 rendering) ───────────────────────────────
 
     _copy_file("docker/admin/Dockerfile.admin", instance_dir, "docker/admin/Dockerfile.admin")
+    _copy_file("docker/admin/fwd.go", instance_dir, "docker/admin/fwd.go")
     _copy_file("docker/core/entrypoint.sh", instance_dir, "docker/core/entrypoint.sh")
     _copy_file("docker/coredns/Dockerfile.coredns", instance_dir, "docker/coredns/Dockerfile.coredns")
 
@@ -613,6 +612,7 @@ def validate_templates(
         + [f"config/core/{f}" for f in _STATIC_CONFIG_CORE]
         + ["docker/core/entrypoint.sh"]
         + ["docker/admin/Dockerfile.admin"]
+        + ["docker/admin/fwd.go"]
         + ["docker/coredns/Dockerfile.coredns"]
     )
     if mcp_firecrawl:

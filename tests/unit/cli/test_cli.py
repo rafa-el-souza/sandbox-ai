@@ -38,7 +38,6 @@ VALID_TOML_CONTENT = b"""
 [instance]
 name = "myproject"
 host_uid = "1000"
-warmup_prompt = ""
 
 [workspaces.main]
 bootstrap_mode = "copy"
@@ -725,6 +724,13 @@ class TestStartSshKeypairGeneration:
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
 
+        # _phase_credentials reconciles ownership on ipc_ssh_key /
+        # ipc_known_hosts after generate_ssh_keypair returns; create stubs
+        # so the os.stat reconciliation finds them when the keypair
+        # generator is mocked out.
+        (secrets_dir / "ipc_ssh_key").write_text("")
+        (secrets_dir / "ipc_known_hosts").write_text("")
+
         with (
             patch("cli.main.write_htpasswd"),
             patch("cli.main.generate_ssh_keypair") as mock_ssh,
@@ -904,14 +910,14 @@ class TestStartSshKeypairGeneration:
         assert ("docker/coredns", "Dockerfile.coredns") in flat
         assert ("docker/extras", "Dockerfile.mcp-firecrawl") in flat
 
-        # Build context — local-COPY sources. admin/entrypoint.sh is
-        # COPY'd by Dockerfile.admin during the build (baked into the
-        # image, NOT bind-mounted at runtime; therefore NOT in
-        # EXEC_FILE_RECIPES). It is dev-created by hydrate's static
-        # _copy_file and needs explicit daemon-read on the host.
-        assert ("docker/admin", "entrypoint.sh") in flat, (
-            "admin/entrypoint.sh is COPY'd into the admin image during "
-            "build; without daemon read, buildkit's COPY step fails"
+        # Build context — local-COPY sources. admin/fwd.go is COPY'd by
+        # Dockerfile.admin during the build (the admin image is a static
+        # Go forwarder; nothing is bind-mounted at runtime). It is
+        # dev-created by hydrate's static _copy_file and needs explicit
+        # daemon-read on the host.
+        assert ("docker/admin", "fwd.go") in flat, (
+            "admin/fwd.go is COPY'd into the admin image during build; "
+            "without daemon read, buildkit's COPY step fails"
         )
 
     def test_phase_ipc_setup_not_in_start(self) -> None:
@@ -1399,6 +1405,9 @@ class TestPhaseCredentialsDirect:
         proxy_dir.mkdir(parents=True)
         secrets_dir = tmp_path / "secrets"
         secrets_dir.mkdir(parents=True)
+        # Stub keys for the os.stat reconciliation path.
+        (secrets_dir / "ipc_ssh_key").write_text("")
+        (secrets_dir / "ipc_known_hosts").write_text("")
 
         with (
             patch("cli.main.write_htpasswd") as mock_write,
@@ -3345,8 +3354,9 @@ def _create_tooling_plane(home: Path) -> None:
     (docker_dir / "compose.yml").write_text("# compose for {{ instance_name }}\nversion: '3'\n")
     (docker_dir / "core" / "entrypoint.sh").write_text("#!/bin/bash\n")
     (docker_dir / "core" / "Dockerfile.core.wolfi").write_text("FROM {{ core_base_image }}\n")
-    (docker_dir / "admin" / "entrypoint.sh").write_text("#!/bin/bash\n")
-    (docker_dir / "admin" / "Dockerfile.admin.debian").write_text("FROM {{ admin_base_image }}\n")
+    (docker_dir / "admin").mkdir(parents=True, exist_ok=True)
+    (docker_dir / "admin" / "Dockerfile.admin").write_text("FROM scratch\nENTRYPOINT [\"/fwd\"]\n")
+    (docker_dir / "admin" / "fwd.go").write_text("package main\nfunc main() {}\n")
     (docker_dir / "extras").mkdir(parents=True, exist_ok=True)
     (docker_dir / "extras" / "db-postgres.yml").write_text("# postgres\n")
     (docker_dir / "coredns").mkdir(parents=True, exist_ok=True)
@@ -3361,12 +3371,6 @@ def _create_tooling_plane(home: Path) -> None:
     )
     (config_dir / "proxy" / "squid.conf").write_text("# squid for {{ proxy_core_ip }}\n")
     (config_dir / "proxy" / "ERR_SANDBOX_403").write_text("403 Forbidden\n")
-    (config_dir / "admin").mkdir(parents=True, exist_ok=True)
-    (config_dir / "admin" / ".zshrc").write_text("# zshrc\n")
-    (config_dir / "admin" / ".tmux.conf").write_text("# tmux\n")
-    (config_dir / "admin" / "gitmux.conf").write_text("# gitmux\n")
-    (config_dir / "admin" / "starship.toml").write_text("# starship\n")
-    (config_dir / "admin" / ".gitconfig").write_text("# gitconfig\n")
     (config_dir / "core").mkdir(parents=True, exist_ok=True)
     (config_dir / "core" / ".bashrc").write_text("# bashrc\n")
     (config_dir / "core" / ".npmrc").write_text("# npmrc\n")
@@ -3568,6 +3572,12 @@ class TestStatusRunning:
             # Task 7.5a: container table must include IP addresses
             # For slot 0: core → agent_isolated_ip = 10.100.0.3
             assert "10.100.0.3" in result.output
+            # Admin row IP must come from admin_ipc_ip (post-reframe key).
+            # For slot 0: admin_ipc_ip = ipc_base.2 = 10.100.4.2
+            from core.ipam import derive_static_ips
+
+            expected_admin_ip = derive_static_ips(0)["admin_ipc_ip"]
+            assert expected_admin_ip in result.output
             assert "network" in out
 
 
@@ -3938,7 +3948,7 @@ class TestACLPlanAsymmetry:
         (instance_dir / ".sandbox.env").write_text("")
 
         plan = _acl_grant_plan(str(instance_dir), "sandbox")
-        for parent_rel in ("cache/core", "cache/admin", "log"):
+        for parent_rel in ("cache/core", "log"):
             parent_abs = str(instance_dir / parent_rel)
             effective = [
                 a.command
@@ -4591,11 +4601,12 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
         plan = _helper_mkdir_chown_plan("/inst", "claude-sandbox")
         as_tuples = [(str(a.parent), a.leaves, a.owner_uid, a.owner_gid) for a in plan]
-        # admin-reframe 3.G.2: cache/admin/tmux_resurrect dropped; cache/core
-        # and log/{core,admin} remain.
+        # admin-reframe: cache/admin/tmux_resurrect dropped, log/admin dropped
+        # (admin image has no shell / no logs); cache/core/.claude and log/core
+        # remain.
         assert as_tuples == [
             ("/inst/cache/core", (".claude",), 100999, 200999),
-            ("/inst/log", ("core", "admin"), 100999, 200999),
+            ("/inst/log", ("core",), 100999, 200999),
         ]
 
     def test_phase_sets_default_acl_then_invokes_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:

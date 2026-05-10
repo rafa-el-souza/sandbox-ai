@@ -10,7 +10,7 @@ Dry-run: sandbox start
     Egress:      10.100.3.0/24
     IPC:         10.100.4.0/24
 
-  Templates: 15 validated
+  Templates: 16 validated
 
   Missing/empty secrets:
     ⊘ CORE_ANTHROPIC_API_KEY
@@ -48,8 +48,6 @@ Dry-run: sandbox start
     $ setfacl -d -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/secrets  # helper-cp parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/secrets
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/core  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/cache/core
     $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/core  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/cache/core
-    $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin
-    $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/cache/admin
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/log  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/log
     $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/log  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/log
     $ setfacl -m u:sandbox:--x <PYTEST_ROOT>  # workspace ancestor traverse: <PYTEST_ROOT>
@@ -83,11 +81,11 @@ Dry-run: sandbox start
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/mcp-firecrawl.yml  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/core/Dockerfile.core  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/admin/Dockerfile.admin  # daemon-read direct
-    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/admin/entrypoint.sh  # daemon-read direct
+    $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/admin/fwd.go  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/coredns/Dockerfile.coredns  # daemon-read direct
     $ setfacl -m u:sandbox:r <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/Dockerfile.mcp-firecrawl  # daemon-read direct
     helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/cache/core/{.claude} → 101000:201000
-    helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/log/{core, admin} → 101000:201000
+    helper-mkdir+chown <TMP>/.sandbox-ai/instances/fixture-inst/log/{core} → 101000:201000
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/coredns/{Corefile} → 165532:265532 640
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/dnsdist/{dnsdist.conf} → 100953:200953 640
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/proxy/{squid.conf, allowed_domains.txt, read_only_domains.txt, ERR_SANDBOX_403, .htpasswd} → 100013:200013 640

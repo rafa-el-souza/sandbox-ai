@@ -84,7 +84,6 @@ _SANDBOX_TOML_TEMPLATE = """\
 [instance]
 name = "{name}"
 host_uid = "{host_uid}"
-warmup_prompt = ""
 
 {workspaces_section}
 
