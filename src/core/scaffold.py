@@ -377,7 +377,22 @@ def prompt_secrets(
     directing the operator to populate the env file manually.
     """
     if not sys.stdin.isatty():
-        print(f"Non-interactive mode: populate secrets in {env_path} before running 'sandbox start'.")
+        # Non-interactive: stub each required secret with a clearly-fake placeholder so the
+        # subsequent `sandbox start` pre-flight ("Missing required secrets") doesn't block
+        # automation flows for sandboxes that don't actually use those services at runtime.
+        with open(env_path) as f:
+            content = f.read()
+        for secret_name, _description in required_secrets:
+            content = content.replace(
+                f'{secret_name}=""',
+                f'{secret_name}="YOUR_{secret_name}_HERE"',
+            )
+        with open(env_path, "w") as f:
+            f.write(content)
+        print(
+            f"Non-interactive mode: stub values written for required secrets in {env_path}. "
+            f"Edit it to set real values before running 'sandbox start' if those services are needed."
+        )
         return
 
     # Read current content

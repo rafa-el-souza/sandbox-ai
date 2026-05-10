@@ -471,7 +471,38 @@ class TestPromptSecretsNonTTY:
             # the new implementation should skip and print guidance
             prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")], MagicMock())
 
-    def test_non_tty_prints_guidance(self, tmp_path: Path, capsys: object) -> None:
+    def test_non_tty_writes_placeholder_values(self, tmp_path: Path) -> None:
+        """Non-TTY mode rewrites empty CORE_* slots with YOUR_<KEY>_HERE placeholders.
+
+        This bypasses the `sandbox start` 'Missing required secrets' fail-fast for
+        automation flows that don't actually use those services at runtime, while
+        keeping the placeholder obviously not a real credential.
+        """
+        from unittest.mock import MagicMock, patch
+
+        env_path = tmp_path / ".sandbox.env"
+        env_path.write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""\n')
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        with patch("sys.stdin", mock_stdin):
+            prompt_secrets(
+                str(env_path),
+                [
+                    ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+                    ("CORE_GITHUB_TOKEN", "GitHub PAT"),
+                ],
+                MagicMock(),
+            )
+
+        content = env_path.read_text()
+        assert 'CORE_ANTHROPIC_API_KEY="YOUR_CORE_ANTHROPIC_API_KEY_HERE"' in content
+        assert 'CORE_GITHUB_TOKEN="YOUR_CORE_GITHUB_TOKEN_HERE"' in content
+        # The placeholder must not be an empty string anymore
+        assert 'CORE_ANTHROPIC_API_KEY=""' not in content
+
+    def test_non_tty_prints_guidance(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Non-TTY mode prints guidance message with env path."""
         from unittest.mock import MagicMock, patch
 
@@ -483,6 +514,10 @@ class TestPromptSecretsNonTTY:
 
         with patch("sys.stdin", mock_stdin):
             prompt_secrets(str(env_path), [("CORE_ANTHROPIC_API_KEY", "key")], MagicMock())
+
+        captured = capsys.readouterr()
+        assert str(env_path) in captured.out
+        assert "stub values" in captured.out
 
 
 # ─── ensure_registry_seed ────────────────────────────────────────────────────
