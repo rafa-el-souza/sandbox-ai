@@ -8,10 +8,7 @@ Sole-caller locality keeps the helpers in this module: every helper is consumed
 by check functions defined here, so co-locating them preserves cohesion. Two
 helpers (``_scan_instance_dirs``, ``_read_registry_raw``) are also consumed by
 ``checks/per_user_tree.py`` for the legacy-shape checks; per_user_tree imports
-them at function level via ``from core.doctor import _scan_instance_dirs`` to
-avoid an init-time circular import. The transient package-level re-export of
-those two private names lives in ``__init__.py`` and will be dropped in §11
-once per_user_tree imports them directly from this module.
+them directly from this module.
 """
 
 from __future__ import annotations

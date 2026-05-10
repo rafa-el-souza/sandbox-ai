@@ -10,8 +10,6 @@ Provides 16 diagnostic checks across 4 independent chains:
 
 from __future__ import annotations
 
-from core.doctor.checks.filesystem import _ACL_PROBE_FAILURES as _ACL_PROBE_FAILURES
-from core.doctor.checks.filesystem import _has_acl_exec as _has_acl_exec
 from core.doctor.checks.filesystem import check_acl_support as check_acl_support
 from core.doctor.checks.filesystem import check_ancestor_traverse as check_ancestor_traverse
 from core.doctor.checks.filesystem import check_setfacl as check_setfacl
@@ -38,16 +36,9 @@ from core.doctor.checks.privilege_boundary import check_runsc_runtimeargs as che
 from core.doctor.checks.privilege_boundary import check_sudo as check_sudo
 from core.doctor.checks.privilege_boundary import check_systemd_machined as check_systemd_machined
 from core.doctor.checks.privilege_boundary import check_user_exists as check_user_exists
-from core.doctor.checks.repo_integrity import _UNCONDITIONAL_FILES as _UNCONDITIONAL_FILES
-from core.doctor.checks.repo_integrity import _resource_files as _resource_files
 from core.doctor.checks.repo_integrity import check_state_dir_writable as check_state_dir_writable
 from core.doctor.checks.repo_integrity import check_tooling_plane as check_tooling_plane
 from core.doctor.checks.supply_chain import check_image_digests as check_image_digests
-from core.doctor.checks.workspace_bridge import _read_registry_raw as _read_registry_raw
-from core.doctor.checks.workspace_bridge import _scan_instance_dirs as _scan_instance_dirs
-from core.doctor.checks.workspace_bridge import (
-    _scan_instance_workspace_paths as _scan_instance_workspace_paths,
-)
 from core.doctor.checks.workspace_bridge import (
     check_backups_disk_pressure as check_backups_disk_pressure,
 )
@@ -86,7 +77,6 @@ from core.doctor.registry import run_check_subset as run_check_subset
 from core.doctor.registry import run_checks as run_checks
 from core.doctor.registry import topological_sort as topological_sort
 from core.doctor.render import render_results as render_results
-from core.doctor.types import _BINARY_PACKAGES as _BINARY_PACKAGES
 from core.doctor.types import Check as Check
 from core.doctor.types import CheckResult as CheckResult
 from core.doctor.types import detect_distro as detect_distro
