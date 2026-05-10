@@ -10,9 +10,6 @@ Provides 16 diagnostic checks across 4 independent chains:
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import TYPE_CHECKING
-
 from core.doctor.checks.filesystem import _ACL_PROBE_FAILURES as _ACL_PROBE_FAILURES
 from core.doctor.checks.filesystem import _has_acl_exec as _has_acl_exec
 from core.doctor.checks.filesystem import check_acl_support as check_acl_support
@@ -88,15 +85,12 @@ from core.doctor.registry import build_check_registry as build_check_registry
 from core.doctor.registry import run_check_subset as run_check_subset
 from core.doctor.registry import run_checks as run_checks
 from core.doctor.registry import topological_sort as topological_sort
+from core.doctor.render import render_results as render_results
 from core.doctor.types import _BINARY_PACKAGES as _BINARY_PACKAGES
 from core.doctor.types import Check as Check
 from core.doctor.types import CheckResult as CheckResult
 from core.doctor.types import detect_distro as detect_distro
 from core.doctor.types import get_install_cmd as get_install_cmd
-
-if TYPE_CHECKING:
-    from rich.console import Console
-
 
 # Public surface re-exported by this package. Topic modules own the
 # implementations; the package binds them to the public boundary.
@@ -145,71 +139,3 @@ __all__ = [
     "run_checks",
     "topological_sort",
 ]
-
-
-# ─── Section 9: Rich Output Renderer ────────────────────────────────────────
-
-
-def render_results(
-    results: list[CheckResult],
-    *,
-    console: Console | None = None,
-) -> None:
-    """Render check results using Rich with progressive disclosure."""
-    from rich.console import Console as RichConsole
-    from rich.text import Text
-
-    if console is None:
-        console = RichConsole()
-
-    # Group by category
-    grouped: dict[str, list[CheckResult]] = defaultdict(list)
-    for r in results:
-        cat = r.category or "General"
-        grouped[cat].append(r)
-
-    pass_count = sum(1 for r in results if r.status == "pass")
-    fail_count = sum(1 for r in results if r.status == "fail")
-    skip_count = sum(1 for r in results if r.status == "skip")
-    warn_count = sum(1 for r in results if r.status == "warn")
-
-    for category, checks in grouped.items():
-        console.print(f"\n[bold]{category}[/bold]")
-        for r in checks:
-            if r.status == "pass":
-                line = Text(f"  ✓ {r.name}", style="green")
-                if r.detail:
-                    line.append(f"  {r.detail}", style="dim")
-                console.print(line)
-            elif r.status == "fail":
-                console.print(Text(f"  ✗ {r.name}", style="red bold"))
-                console.print(f"    {r.detail}")
-                if r.remediation:
-                    console.print(f"    Fix: {r.remediation}", style="yellow")
-                if r.doc_ref:
-                    console.print(f"    Docs: {r.doc_ref}", style="dim")
-            elif r.status == "warn":
-                console.print(Text(f"  ⚠ {r.name}", style="yellow"))
-                console.print(f"    {r.detail}")
-                if r.remediation:
-                    console.print(f"    Fix: {r.remediation}", style="yellow")
-            elif r.status == "skip":
-                console.print(Text(f"  ⊘ {r.name} — {r.detail}", style="dim"))
-
-    # Summary line
-    console.print()
-    summary = f"{pass_count}/{len(results)} passed"
-    if warn_count:
-        summary += f" · {warn_count} warnings"
-    if fail_count:
-        summary += f" · {fail_count} failed"
-    if skip_count:
-        summary += f" · {skip_count} skipped"
-
-    if fail_count > 0:
-        style = "red bold"
-    elif warn_count > 0:
-        style = "yellow bold"
-    else:
-        style = "green bold"
-    console.print(summary, style=style)
