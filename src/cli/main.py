@@ -20,6 +20,7 @@ from pathlib import Path
 import pydantic
 import typer
 from core.actions import (
+    HelperCpChownAction,
     HelperMkdirChownAction,
     NamedAclGrantAction,
     NamedAclRevokeAction,
@@ -1099,8 +1100,8 @@ def _helper_mkdir_chown_plan(instance_dir: str, host_user: str) -> list[HelperMk
     ]
 
 
-def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, tuple[str, ...], int, int, int]]:
-    """Return ``[(parent_abs, files, owner_uid, owner_gid, mode), ...]`` for ro files.
+def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[HelperCpChownAction]:
+    """Return one :class:`HelperCpChownAction` per recipe entry across ro/exec/rw files.
 
     Owner uid and gid are both mapped via the host_config forward resolvers:
     owner gid matches the consumer's host subgid; in-container root reads via
@@ -1109,12 +1110,12 @@ def _helper_cp_chown_plan(instance_dir: str, host_user: str) -> list[tuple[str, 
     the host-absolute helper API.
     """
     return [
-        (
-            os.path.join(instance_dir, parent),
-            files,
-            host_id_for_in_container(consumer_uid, host_user),
-            host_gid_for_in_container(consumer_uid, host_user),
-            mode,
+        HelperCpChownAction(
+            parent=Path(os.path.join(instance_dir, parent)),
+            files=files,
+            owner_uid=host_id_for_in_container(consumer_uid, host_user),
+            owner_gid=host_gid_for_in_container(consumer_uid, host_user),
+            mode=mode,
         )
         for parent, files, consumer_uid, mode in (*RO_FILE_RECIPES, *EXEC_FILE_RECIPES, *RW_FILE_RECIPES)
     ]
@@ -1244,8 +1245,16 @@ def _phase_helper_cp_chown_ro_files(
     handled by the standard recipe (``secrets/`` group with consumer uid 1000,
     mode 0600). One helper invocation per (parent, consumer_uid, mode) group.
     """
-    for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
-        helper_chown_files(host_user, parent_abs, files, owner_uid, owner_gid, mode, auth)
+    for action in _helper_cp_chown_plan(instance_dir, host_user):
+        helper_chown_files(
+            host_user,
+            str(action.parent),
+            action.files,
+            action.owner_uid,
+            action.owner_gid,
+            action.mode,
+            auth,
+        )
 
 
 def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list[str]:
@@ -1261,9 +1270,9 @@ def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list
     OSError encountered); the phase is fault-isolated, never raises.
     """
     warnings: list[str] = []
-    for parent_abs, files, _owner_uid, _owner_gid, _mode in _helper_cp_chown_plan(instance_dir, host_user):
-        for fname in files:
-            path = os.path.join(parent_abs, fname)
+    for action in _helper_cp_chown_plan(instance_dir, host_user):
+        for fname in action.files:
+            path = os.path.join(str(action.parent), fname)
             try:
                 os.unlink(path)
             except FileNotFoundError:
@@ -1618,12 +1627,8 @@ def _dry_run_pipeline(inst: str) -> None:
     try:
         for mkdir_action in _helper_mkdir_chown_plan(instance_dir, host_user):
             console.print(mkdir_action.describe(), style="dim")
-        for parent_abs, files, owner_uid, owner_gid, mode in _helper_cp_chown_plan(instance_dir, host_user):
-            helper_files_str = ", ".join(files)
-            console.print(
-                f"    helper-cp+chown {parent_abs}/{{{helper_files_str}}} → {owner_uid}:{owner_gid} {mode:o}",
-                style="dim",
-            )
+        for cp_action in _helper_cp_chown_plan(instance_dir, host_user):
+            console.print(cp_action.describe(), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 

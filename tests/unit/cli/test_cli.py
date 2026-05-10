@@ -1341,7 +1341,7 @@ class TestHelperCpChownRoFiles:
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
-        owners = {p[2]: (p[0], p[1], p[4]) for p in plan}
+        owners = {a.owner_uid: (str(a.parent), a.files, a.mode) for a in plan}
         # Each consumer uid is mapped via subuid resolver
         assert 100000 + 65532 in owners  # coredns
         assert 100000 + 953 in owners  # dnsdist
@@ -1350,17 +1350,15 @@ class TestHelperCpChownRoFiles:
         # Modes per design table
         modes_by_uid: dict[int, set[int]] = {}
         for entry in plan:
-            modes_by_uid.setdefault(entry[2], set()).add(entry[4])
+            modes_by_uid.setdefault(entry.owner_uid, set()).add(entry.mode)
         assert 0o640 in modes_by_uid[100000 + 13]  # proxy ro
         assert 0o640 in modes_by_uid[100000 + 65532]  # coredns ro
         # Secrets at 0600 for the 1000-consumer
         assert 0o600 in modes_by_uid[100000 + 1000]
         # gid pairs with the consumer's host subgid (D6: literal-0 was removed).
         for entry in plan:
-            owner_uid = entry[2]
-            owner_gid = entry[3]
-            consumer_n = owner_uid - 100000
-            assert owner_gid == 200000 + consumer_n
+            consumer_n = entry.owner_uid - 100000
+            assert entry.owner_gid == 200000 + consumer_n
 
     def test_plan_includes_legacy_ipc_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The four IPC SSH secrets continue to land at 0600 via the standard recipe."""
@@ -1370,13 +1368,13 @@ class TestHelperCpChownRoFiles:
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2000 if n == 1000 else 0)
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         secrets_files: set[str] = set()
-        for parent, files, owner_uid, owner_gid, mode in plan:
-            if parent.endswith("/secrets"):
-                assert owner_uid == 1000
+        for action in plan:
+            if str(action.parent).endswith("/secrets"):
+                assert action.owner_uid == 1000
                 # gid is the consumer's host subgid (D6), not literal 0.
-                assert owner_gid == 2000
-                assert mode == 0o600
-                secrets_files.update(files)
+                assert action.owner_gid == 2000
+                assert action.mode == 0o600
+                secrets_files.update(action.files)
         assert {"ipc_host_key", "authorized_keys", "ipc_ssh_key", "ipc_known_hosts"} <= secrets_files
 
     def test_plan_uid_and_gid_both_in_subid_range(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1398,10 +1396,10 @@ class TestHelperCpChownRoFiles:
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         assert plan, "plan should be non-empty"
         for entry in plan:
-            owner_uid, owner_gid = entry[2], entry[3]
-            # Both must resolve back to in-container values without raising.
-            in_uid = in_container_uid_for_host_uid(owner_uid, "claude-sandbox")
-            in_gid = in_container_gid_for_host_gid(owner_gid, "claude-sandbox")
+            # Typed-field reads per design Decision 1's carve-out for
+            # numeric/permission-bit assertions.
+            in_uid = in_container_uid_for_host_uid(entry.owner_uid, "claude-sandbox")
+            in_gid = in_container_gid_for_host_gid(entry.owner_gid, "claude-sandbox")
             assert in_uid >= 1
             assert in_gid >= 1
 
@@ -3857,9 +3855,9 @@ class TestACLPlanAsymmetry:
         plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         # Find the RW entry for config/core/.claude.json in the plan.
         rw_entries = [
-            (parent_abs, files, mode)
-            for parent_abs, files, _uid, _gid, mode in plan
-            if parent_abs.endswith("/config/core") and ".claude.json" in files
+            (str(action.parent), action.files, action.mode)
+            for action in plan
+            if str(action.parent).endswith("/config/core") and ".claude.json" in action.files
         ]
         assert rw_entries, f"RW recipe for .claude.json missing from plan; got {plan}"
         # At least one entry must carry mode 0660 (the RW recipe).
@@ -4982,11 +4980,25 @@ class TestStopUnlinkConsumerFiles:
         (instance_dir / "config" / "proxy" / "squid.conf").write_text("y")
         # `missing.txt` deliberately not created — covers FileNotFoundError branch.
 
+        from core.actions import HelperCpChownAction
+
         with patch(
             "cli.main._helper_cp_chown_plan",
             return_value=[
-                (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
-                (str(instance_dir / "config" / "proxy"), ("squid.conf", "missing.txt"), 0, 0, 0o640),
+                HelperCpChownAction(
+                    parent=instance_dir / "config" / "coredns",
+                    files=("Corefile",),
+                    owner_uid=0,
+                    owner_gid=0,
+                    mode=0o640,
+                ),
+                HelperCpChownAction(
+                    parent=instance_dir / "config" / "proxy",
+                    files=("squid.conf", "missing.txt"),
+                    owner_uid=0,
+                    owner_gid=0,
+                    mode=0o640,
+                ),
             ],
         ):
             warnings = _phase_stop_unlink_consumer_files(str(instance_dir), "claude-sandbox")
@@ -5021,11 +5033,19 @@ class TestStopUnlinkConsumerFiles:
 
         instance_dir = tmp_path / "inst"
         instance_dir.mkdir()
+        from core.actions import HelperCpChownAction
+
         with (
             patch(
                 "cli.main._helper_cp_chown_plan",
                 return_value=[
-                    (str(instance_dir / "config" / "coredns"), ("Corefile",), 0, 0, 0o640),
+                    HelperCpChownAction(
+                        parent=instance_dir / "config" / "coredns",
+                        files=("Corefile",),
+                        owner_uid=0,
+                        owner_gid=0,
+                        mode=0o640,
+                    ),
                 ],
             ),
             patch("cli.main.os.unlink", side_effect=PermissionError("locked down")),
