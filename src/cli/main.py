@@ -1653,6 +1653,12 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     inst_dir = home / "instances" / inst
     secrets = inst_dir / "secrets"
 
+    # Container name uses the compose project name (sanitized-username
+    # prefix), not the bare instance name. Mismatching this produces
+    # ``Error response from daemon: No such container: <inst>-admin-1``
+    # at attach time — verified empirically during admin-reframe smoke.
+    project_name = compose_project_name(inst)
+
     # Core IPC IP — read-only ledger peek (no allocation; instance is
     # already started by the time this argv is built). Per cli-attach
     # spec: attach does not mutate IPAM state.
@@ -1661,7 +1667,9 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
 
     # Operator-side session log path — host filesystem only, never a
     # bind mount or instance secrets directory (per cli-attach spec).
-    session_log_dir = home / "sessions" / inst
+    # Keyed by project_name so concurrent instances under different
+    # operators don't collide on the session log directory.
+    session_log_dir = home / "sessions" / project_name
     session_log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     session_log = session_log_dir / f"{timestamp}.log"
@@ -1674,7 +1682,7 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         "/usr/bin/docker",
         "exec",
         "-i",
-        f"{inst}-admin-1",
+        f"{project_name}-admin-1",
         "/fwd",
         f"{core_ipc_ip}:9999",
     ]
