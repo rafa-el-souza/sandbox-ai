@@ -120,6 +120,18 @@ def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
     Returns:
         ``["sudo", "machinectl", "shell", "<user>@.host"]`` when auth is SUDO,
         ``["machinectl", "shell", "<user>@.host"]`` when auth is POLKIT.
+
+    Caveat — PTY allocation: ``machinectl shell`` opens a PTY between caller
+    and the spawned command. The PTY's ``onlcr`` line discipline rewrites
+    every ``\\n`` byte in either direction to ``\\r\\n``. **Captured stdout
+    therefore has CRLF line endings**, even when the underlying command
+    emits LF. Callers that capture output (``subprocess.run(...,
+    capture_output=True)``, shell ``$(... | head -1)``, etc.) MUST strip the
+    ``\\r`` (``tr -d '\\r'`` or text-mode decode) before using the value as
+    a filename, IP, hostname, or argv element. Passing a ``<value>\\r``
+    downstream silently fails. For paths that carry binary frames (SSH,
+    gRPC, raw TCP), use :func:`pipe_cmd` instead — it allocates no PTY and
+    preserves bytes verbatim.
     """
     prefix = ["sudo"] if auth == MachinectlAuth.SUDO else []
     return [*prefix, "machinectl", "shell", f"{user}@.host"]

@@ -38,6 +38,8 @@ Two boundary primitives, picked by call-site shape:
 
 PAM-skip trade-off (`pipe_cmd` only): `systemd-run` does NOT invoke PAM, so policies on `pam_limits.conf` and similar do not apply to processes started via `pipe_cmd`. Acceptable for our use case — programmatic byte-pipe transport over a session-bounded lifetime — where the call site is a fixed audited orchestrator path, not a user-typed command. `machinectl_cmd` retains the full PAM stack and remains the right choice for any path that should respect those policies.
 
+PTY consequence (`machinectl_cmd` only): the allocated PTY's `onlcr` line discipline rewrites every `\n` byte in either direction to `\r\n`. Captured stdout from `machinectl shell` therefore has CRLF line endings, even when the underlying command emits LF. Code that captures output (e.g., `docker inspect ... | head -1`) MUST strip the `\r` (`tr -d '\r'` or read in text mode) before using the value as a filename, IP, hostname, or argv element — passing a `<value>\r` to a downstream command silently fails. This is also the reason `pipe_cmd` exists: paths that carry binary frames (SSH, gRPC, raw TCP) MUST NOT cross the boundary via `machinectl_cmd` because `onlcr` would corrupt every `0x0a` byte in the stream.
+
 ### Two configuration scopes
 
 - **Per-host** (`<sandbox_ai_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`): parsed by `core.host_config.HostConfig`. Holds `[host].docker_unprivileged_user`, `[host].machinectl_authentication` (`sudo` | `polkit`), and `[host].workspace_bridge_group` (default `sb-ws`, the group used by the workspace shared-group recipe). Seeded by `sandbox init` (TTY prompt or non-TTY fail). `SANDBOX_AI_HOME` env var redirects this path for test isolation only.
