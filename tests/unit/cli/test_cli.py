@@ -1423,7 +1423,7 @@ class TestHelperCpChownRoFiles:
         ) -> None:
             invocations.append((parent, *files))
 
-        monkeypatch.setattr("cli.main.helper_chown_files", _fake)
+        monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
         _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
         # One invocation per (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES)
         # entry: 7 RO + 1 EXEC + 1 RW = 9 groups (cluster 5 added the RW recipe).
@@ -1440,7 +1440,7 @@ class TestHelperCpChownRoFiles:
         def _raise(*a: object, **kw: object) -> None:
             raise SandboxExecutionError("helper failed")
 
-        monkeypatch.setattr("cli.main.helper_chown_files", _raise)
+        monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _raise)
         with pytest.raises(SandboxExecutionError, match="helper failed"):
             _phase_helper_cp_chown_ro_files("/inst", "u", MachinectlAuth.SUDO)
 
@@ -4343,7 +4343,7 @@ class TestHelperMkdirChownPlan:
             events.append(("helper", []))
 
         monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
-        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+        monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake_helper)
 
         _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", MachinectlAuth.SUDO, "dev")
 
@@ -4371,7 +4371,7 @@ class TestHelperMkdirChownPlan:
             calls["helper"] += 1
 
         monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
-        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", _fake_helper)
+        monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake_helper)
 
         for _ in range(2):
             _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
@@ -4389,7 +4389,7 @@ class TestHelperMkdirChownPlan:
             raise subprocess.CalledProcessError(1, cmd, stderr="permission denied")
 
         monkeypatch.setattr("cli.main.subprocess.run", _raise)
-        monkeypatch.setattr("cli.main.helper_mkdir_chown_dirs", lambda *a, **k: None)
+        monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", lambda *a, **k: None)
 
         with pytest.raises(SandboxExecutionError, match="permission denied"):
             _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")

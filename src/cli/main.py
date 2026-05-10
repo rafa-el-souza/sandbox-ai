@@ -40,7 +40,6 @@ from core.doctor import (
 )
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
 from core.host_config import (
     HostConfig,
     HostSettings,
@@ -1214,13 +1213,17 @@ def _phase_workspace_shared_group(
     workspace_path: str,
     host: HostSettings,
     dev_user: str | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5e: chgrp + chmod 2770 + setfacl on a single workspace tree.
 
     Drift-detects the workspace root: when not yet at setgid + bridge_gid,
     runs the recursive recipe (best-effort, per-file failures aggregated and
     reported, orchestrator never escalates to sudo per Decision 17). Then
-    applies idempotent root-level chgrp/chmod/setfacl on every start.
+    iterates ``_workspace_shared_group_plan`` and dispatches each step via
+    :meth:`WorkspaceSharedGroupAction.execute` — single carrier for the
+    dry-run preview and the live phase per the
+    "Plan Items Are Typed Action Objects" requirement.
 
     Raises:
         WorkspaceBridgeGroupMissingError: if the bridge group is missing.
@@ -1237,27 +1240,25 @@ def _phase_workspace_shared_group(
                 style="yellow",
             )
 
-    # Steady-state idempotent root setup
-    try:
-        os.chown(workspace_path, -1, bridge_gid, follow_symlinks=False)
-        os.chmod(workspace_path, 0o2770)
-    except OSError as exc:
-        raise SandboxExecutionError(f"Workspace root chgrp/chmod failed for {workspace_path}: {exc}") from exc
-
-    default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
-    if dev_user:
-        default_entry += f",u:{dev_user}:rwx"
-    for args, label in (
-        (["setfacl", "-m", f"u:{host_user}:rwx", workspace_path], "effective"),
-        (["setfacl", "-d", "-m", default_entry, workspace_path], "default"),
-    ):
+    # Steady-state idempotent root setup — same Action plan that the dry-run preview
+    # consumes, executed here via .execute(ctx).
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(workspace_path),
+    )
+    for action in _workspace_shared_group_plan(workspace_path, bridge_gid, dev_user, host_user):
         try:
-            subprocess.run(args, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
-            raise SandboxExecutionError(
-                f"Workspace shared-group {label} ACL failed for {workspace_path}: {stderr}"
-            ) from exc
+            action.execute(ctx)
+        except SandboxExecutionError as exc:
+            # Preserve legacy error-message format for chgrp/chmod root steps —
+            # downstream callers and tests assert on "chgrp/chmod failed for ..." prose.
+            if action.step in ("chgrp", "chmod_2770"):
+                raise SandboxExecutionError(
+                    f"chgrp/chmod failed for {workspace_path}: {exc.__cause__ or exc}"
+                ) from exc
+            raise
 
 
 def _phase_helper_cp_chown_ro_files(
@@ -1270,17 +1271,20 @@ def _phase_helper_cp_chown_ro_files(
     Replaces today's ``_phase_credential_ownership`` — IPC SSH secrets are now
     handled by the standard recipe (``secrets/`` group with consumer uid 1000,
     mode 0600). One helper invocation per (parent, consumer_uid, mode) group.
+
+    Each ``HelperCpChownAction`` is executed via ``.execute(ctx)`` so the
+    dry-run preview and the live phase share the single carrier
+    (per the ``orchestrator-volumes`` "Plan Items Are Typed Action Objects"
+    requirement).
     """
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
     for action in _helper_cp_chown_plan(instance_dir, host_user):
-        helper_chown_files(
-            host_user,
-            str(action.parent),
-            action.files,
-            action.owner_uid,
-            action.owner_gid,
-            action.mode,
-            auth,
-        )
+        action.execute(ctx)
 
 
 def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list[str]:
@@ -1325,6 +1329,12 @@ def _phase_helper_mkdir_chown_cache_log(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
 
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
     for action in _helper_mkdir_chown_plan(instance_dir, host_user):
         parent_abs = str(action.parent)
         try:
@@ -1337,7 +1347,7 @@ def _phase_helper_mkdir_chown_cache_log(
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             raise SandboxExecutionError(f"Default ACL setup failed for {parent_abs}: {stderr}") from exc
-        helper_mkdir_chown_dirs(host_user, parent_abs, action.leaves, action.owner_uid, action.owner_gid, auth)
+        action.execute(ctx)
 
 
 def _phase_acl_grant(
@@ -1345,24 +1355,30 @@ def _phase_acl_grant(
     host_user: str,
     workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
 
-    Each setfacl call runs as direct subprocess.run (NOT via Executor.run —
+    Each setfacl call runs via :meth:`NamedAclGrantAction.execute` (which
+    invokes ``subprocess.run`` directly — NOT via Executor.run —
     sentinel injection would corrupt the setfacl command, per I-1).
-    CalledProcessError is wrapped in SandboxExecutionError (D6).
+    Action failures raise ``SandboxExecutionError``; we catch and enrich
+    with the traverse diagnostic before re-raising (D6).
     """
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
     for action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
         try:
-            subprocess.run(list(action.command), check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
+            action.execute(ctx)
+        except SandboxExecutionError as exc:
             diag = _diagnose_traverse_failure(instance_dir, host_user)
-            error_msg = f"ACL grant failed for {action.description}"
-            if e.stderr:
-                error_msg += f": {e.stderr.strip()}"
             if diag:
-                error_msg += f"\n{diag}"
-            raise SandboxExecutionError(error_msg) from e
+                raise SandboxExecutionError(f"{exc}\n{diag}") from exc
+            raise
 
 
 def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]:
@@ -1491,21 +1507,32 @@ def _compose_down(
     )
 
 
-def _revoke_acls(instance_dir: str, host_user: str, workspace_paths: list[str] | None = None) -> list[str]:
+def _revoke_acls(
+    instance_dir: str,
+    host_user: str,
+    workspace_paths: list[str] | None = None,
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
-    Iterates _acl_revoke_plan(). Uses check=False; failures are collected
-    as warning strings, not raised. Returns list of warning messages.
+    Iterates ``_acl_revoke_plan()`` and dispatches each entry via
+    :meth:`NamedAclRevokeAction.execute`. The Action raises
+    ``SandboxExecutionError`` on non-zero exit or OSError; we capture
+    those messages into the warnings list (never re-raised — phase is
+    fault-isolated).
     """
     warnings: list[str] = []
+    ctx = ActionContext(
+        host_user=host_user,
+        auth=auth,
+        executor=Executor(),
+        instance_dir=Path(instance_dir),
+    )
     for action in _acl_revoke_plan(instance_dir, host_user, workspace_paths):
         try:
-            result = subprocess.run(list(action.command), check=False, capture_output=True, text=True)
-            if result.returncode != 0:
-                detail = result.stderr.strip() if result.stderr else f"exit {result.returncode}"
-                warnings.append(f"ACL revoke warning for {action.description}: {detail}")
-        except OSError as e:
-            warnings.append(f"ACL revoke warning for {action.description}: {e}")
+            action.execute(ctx)
+        except SandboxExecutionError as exc:
+            warnings.append(str(exc))
     return warnings
 
 
@@ -1537,7 +1564,7 @@ def _phase_stop_teardown(
     warnings: list[str] = []
     _compose_down(instance_dir, project_name, host_user, config, volumes=volumes, auth=auth)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
-    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths))
+    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
     return warnings
 
 
@@ -2132,7 +2159,7 @@ def start(
         # requirement; closes the bug class fixed by temp commit 6f1831e).
         try:
             for ws_path in ws_paths:
-                _phase_workspace_shared_group(ws_path, host_settings, dev_user)
+                _phase_workspace_shared_group(ws_path, host_settings, dev_user, auth)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -2152,7 +2179,7 @@ def start(
         # Daemon-Readable Default ACL" requirement, closing finding 8.D
         # alternative #1).
         acl_granted = True  # set BEFORE grant — handles partial grants (D7)
-        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
+        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user, auth)
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 4: Credentials.
@@ -2203,7 +2230,7 @@ def start(
         # ACL on the workspace) are NOT reverted — they're persistent state
         # that survives intermediate stop/start cycles by design.
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
+            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths, auth)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         if lock_fd is not None:
@@ -2519,7 +2546,7 @@ def destroy(
                 # (rmtree is irreversible by design). Run the post-compose
                 # phases separately so warnings still surface.
                 teardown_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
-                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths))
+                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths, auth))
             for w in teardown_warnings:
                 console.print(f"⚠ {w}", style="yellow")
 
