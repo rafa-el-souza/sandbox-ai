@@ -497,7 +497,7 @@ class TestRunCheckSubset:
         def fake_setfacl(user: str, distro: str | None) -> CheckResult:
             return CheckResult(status="fail", name="setfacl", detail="not found", category="Filesystem")
 
-        with patch("core.doctor.check_setfacl", fake_setfacl):
+        with patch("core.doctor.registry.check_setfacl", fake_setfacl):
             results = run_check_subset(["Filesystem"], "sandbox", None)
             assert len(results) == 3
             statuses = {r.name: r.status for r in results}
@@ -555,7 +555,7 @@ class TestRunCheckSubset:
             ),
         ]
 
-        with patch("core.doctor.build_check_registry", return_value=fake_checks):
+        with patch("core.doctor.registry.build_check_registry", return_value=fake_checks):
             from core.doctor import run_check_subset
 
             with pytest.raises(ValueError, match="outside the subset"):
@@ -991,9 +991,9 @@ class TestCheckAncestorTraverse:
             return CheckResult(status="fail", name="ACL support", detail="no ACL", category="Filesystem")
 
         with (
-            patch("core.doctor.check_acl_support", fake_acl_support),
+            patch("core.doctor.registry.check_acl_support", fake_acl_support),
             patch(
-                "core.doctor.check_setfacl",
+                "core.doctor.registry.check_setfacl",
                 return_value=CheckResult(status="pass", name="setfacl binary", detail="ok", category="Filesystem"),
             ),
         ):
