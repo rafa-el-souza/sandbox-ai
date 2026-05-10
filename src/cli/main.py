@@ -24,6 +24,7 @@ from core.actions import (
     HelperMkdirChownAction,
     NamedAclGrantAction,
     NamedAclRevokeAction,
+    WorkspaceSharedGroupAction,
 )
 from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
@@ -1168,19 +1169,42 @@ def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[
 
 def _workspace_shared_group_plan(
     workspace_path: str, bridge_gid: int, dev_user: str | None, host_user: str
-) -> list[tuple[str, str]]:
-    """Return the (operation_summary, target) list for the workspace shared-group recipe.
+) -> list[WorkspaceSharedGroupAction]:
+    """Return one :class:`WorkspaceSharedGroupAction` per chgrp/chmod/setfacl step.
 
-    Used by both execution and dry-run preview.
+    Per design Decision 1 the per-step ``op`` string is precomputed at
+    plan-construction time (interpolating ``bridge_gid`` / ``host_user`` /
+    ``dev_user``); ``ActionContext`` carries ``host_user`` but not
+    ``dev_user``, so recomputing in ``.describe()`` would force ``dev_user``
+    onto the Action — precomputing ``op`` is simpler and matches the
+    precomputed-``command`` choice on the ACL Actions.
+
+    Per-workspace fan-out lives in the caller; this function returns the
+    plan for **one** workspace.
     """
     default_entry = f"u::rwx,g::rwx,o::---,m::rwx,u:{host_user}:rwx"
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
+    ws = Path(workspace_path)
     return [
-        (f"chgrp {bridge_gid}", workspace_path),
-        ("chmod 2770", workspace_path),
-        (f"setfacl -m u:{host_user}:rwx", workspace_path),
-        (f"setfacl -d -m {default_entry}", workspace_path),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws, bridge_gid=bridge_gid, step="chgrp", op=f"chgrp {bridge_gid}"
+        ),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws, bridge_gid=bridge_gid, step="chmod_2770", op="chmod 2770"
+        ),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="setfacl_effective",
+            op=f"setfacl -m u:{host_user}:rwx",
+        ),
+        WorkspaceSharedGroupAction(
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="setfacl_default",
+            op=f"setfacl -d -m {default_entry}",
+        ),
     ]
 
 
@@ -1594,8 +1618,10 @@ def _dry_run_pipeline(inst: str) -> None:
     try:
         bridge_gid = workspace_bridge_gid(host_settings)
         for ws_path in workspace_paths:
-            for op, target in _workspace_shared_group_plan(ws_path, bridge_gid, os.environ.get("USER"), host_user):
-                console.print(f"    workspace: {op} {target}", style="dim")
+            for ws_action in _workspace_shared_group_plan(
+                ws_path, bridge_gid, os.environ.get("USER"), host_user
+            ):
+                console.print(ws_action.describe(), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 

@@ -3704,7 +3704,7 @@ class TestACLPlanAsymmetry:
         from cli.main import _workspace_shared_group_plan
 
         plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
-        ops = [op for op, _ in plan]
+        ops = [a.op for a in plan]
         assert not any("setfacl -m g::rwx" in op for op in ops), (
             "workspace shared-group plan must NOT emit explicit g::rwx setfacl post-reorder"
         )
@@ -4215,7 +4215,7 @@ class TestWorkspaceSharedGroup:
         from cli.main import _workspace_shared_group_plan
 
         plan = _workspace_shared_group_plan("/ws", 200500, "dev", "claude-sandbox")
-        ops = [op for op, _ in plan]
+        ops = [a.op for a in plan]
         assert any("chgrp 200500" in op for op in ops)
         assert any("chmod 2770" in op for op in ops)
         assert any("setfacl -m u:claude-sandbox:rwx" in op for op in ops)
