@@ -1332,24 +1332,35 @@ def _workspace_shared_group_plan(
     if dev_user:
         default_entry += f",u:{dev_user}:rwx"
     ws = Path(workspace_path)
+    ws_str = str(ws)
     return [
         WorkspaceSharedGroupAction(
-            workspace_path=ws, bridge_gid=bridge_gid, step="chgrp", op=f"chgrp {bridge_gid}"
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="chgrp",
+            op=f"chgrp {bridge_gid}",
+            command=(),
         ),
         WorkspaceSharedGroupAction(
-            workspace_path=ws, bridge_gid=bridge_gid, step="chmod_2770", op="chmod 2770"
+            workspace_path=ws,
+            bridge_gid=bridge_gid,
+            step="chmod_2770",
+            op="chmod 2770",
+            command=(),
         ),
         WorkspaceSharedGroupAction(
             workspace_path=ws,
             bridge_gid=bridge_gid,
             step="setfacl_effective",
             op=f"setfacl -m u:{host_user}:rwx",
+            command=("setfacl", "-m", f"u:{host_user}:rwx", ws_str),
         ),
         WorkspaceSharedGroupAction(
             workspace_path=ws,
             bridge_gid=bridge_gid,
             step="setfacl_default",
             op=f"setfacl -d -m {default_entry}",
+            command=("setfacl", "-d", "-m", default_entry, ws_str),
         ),
     ]
 

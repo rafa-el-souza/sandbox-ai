@@ -36,12 +36,22 @@ WorkspaceSharedGroupStep = Literal["chgrp", "chmod_2770", "setfacl_effective", "
 
 @dataclass(frozen=True)
 class WorkspaceSharedGroupAction(Action):
-    """One step (chgrp / chmod / setfacl) of the workspace shared-group recipe."""
+    """One step (chgrp / chmod / setfacl) of the workspace shared-group recipe.
+
+    ``op`` carries the precomputed operation-summary string used by
+    ``.describe()`` (preserving the byte-for-byte dry-run output);
+    ``command`` carries the precomputed setfacl argv used by ``.execute()``
+    for the ``setfacl_*`` steps. Storing both fields removes the implicit
+    coupling between ``op``'s textual format and execute's argv derivation
+    (the previous ``op.split(" ")`` parsing) — chgrp/chmod steps populate
+    ``command`` with an empty tuple since they bypass subprocess entirely.
+    """
 
     workspace_path: Path
     bridge_gid: int
     step: WorkspaceSharedGroupStep
     op: str
+    command: tuple[str, ...]
 
     def describe(self) -> str:
         return f"    workspace: {self.op} {self.workspace_path}"
@@ -64,13 +74,10 @@ class WorkspaceSharedGroupAction(Action):
             except OSError as exc:
                 raise SandboxExecutionError(f"Workspace chmod failed for {ws}: {exc}") from exc
             return
-        # setfacl_effective / setfacl_default — derive argv from the precomputed op
-        # ``op`` is one of:
-        #   ``setfacl -m u:<host_user>:rwx``
-        #   ``setfacl -d -m <default_entry>``
-        argv = [*self.op.split(" "), ws]
+        # setfacl_effective / setfacl_default — use the precomputed argv directly
+        # (no parsing of ``op``, which is now a description-only field).
         try:
-            subprocess.run(argv, check=True, capture_output=True, text=True)
+            subprocess.run(list(self.command), check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else f"exit {exc.returncode}"
             label = "effective" if self.step == "setfacl_effective" else "default"
