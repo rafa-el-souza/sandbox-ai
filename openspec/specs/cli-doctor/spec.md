@@ -232,7 +232,7 @@ The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) th
 - **THEN** the check reports PASS
 
 #### Scenario: Ancestor lacks traverse permission
-- **WHEN** a user-owned ancestor directory (e.g., `/home/dev/`) has mode 0700 and no ACL entry granting `--x` to the sandbox user
+- **WHEN** a user-owned ancestor directory (e.g., `/home/user/`) has mode 0700 and no ACL entry granting `--x` to the sandbox user
 - **THEN** the check reports FAIL with the specific directory, its current mode, and a fix command: `setfacl -m u:<user>:--x <dir>`
 
 #### Scenario: Symlink detected in ancestor path

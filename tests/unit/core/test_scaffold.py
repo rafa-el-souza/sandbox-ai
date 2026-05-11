@@ -153,7 +153,7 @@ class TestCreateInstanceDirs:
 
 
 class TestWriteSandboxToml:
-    def _ws(self, path: str = "/home/dev/myproject") -> list[WorkspaceSpec]:
+    def _ws(self, path: str = "/home/user/myproject") -> list[WorkspaceSpec]:
         return [WorkspaceSpec(name="main", bootstrap_mode="copy", source=path, path=path)]
 
     def test_generates_valid_toml(self, tmp_path: Path) -> None:
@@ -174,8 +174,8 @@ class TestWriteSandboxToml:
         assert 'name = "myproject"' in content
         assert "[workspaces.main]" in content
         assert 'bootstrap_mode = "copy"' in content
-        assert 'source = "/home/dev/myproject"' in content
-        assert 'path = "/home/dev/myproject"' in content
+        assert 'source = "/home/user/myproject"' in content
+        assert 'path = "/home/user/myproject"' in content
         assert "host_unprivileged_user" not in content
         assert "host_uid" in content
 
@@ -304,7 +304,7 @@ class TestApplyDefaultAcls:
 
         apply_default_acls(
             instance_dir="/sandboxes/myproject-abc123",
-            workspace_paths=["/home/dev/myproject"],
+            workspace_paths=["/home/user/myproject"],
             dev_user="dev",
         )
 
@@ -318,7 +318,7 @@ class TestApplyDefaultAcls:
                 check=True,
             ),
             call(
-                ["setfacl", "-d", "-m", "u:dev:rwx", "/home/dev/myproject"],
+                ["setfacl", "-d", "-m", "u:dev:rwx", "/home/user/myproject"],
                 check=True,
             ),
         ]

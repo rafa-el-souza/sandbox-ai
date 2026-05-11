@@ -27,7 +27,7 @@ def _registry_file(home: Path) -> Path:
 
 class TestIsPathKeyed:
     def test_detects_path_keyed_legacy_shape(self) -> None:
-        assert is_path_keyed({"/home/dev/foo": "foo-aaa111"})
+        assert is_path_keyed({"/home/user/foo": "foo-aaa111"})
 
     def test_name_keyed_returns_false(self) -> None:
         assert not is_path_keyed({"foo": {"instance_dir": "/x", "created_at": "Z"}})
@@ -110,7 +110,7 @@ class TestPersistence:
     def test_legacy_path_keyed_registry_treated_empty(self, isolated_sandbox_ai_home: Path) -> None:
         path = _registry_file(isolated_sandbox_ai_home)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"/home/dev/foo": "foo-aaa111"}))
+        path.write_text(json.dumps({"/home/user/foo": "foo-aaa111"}))
         reg = InstanceRegistry()
         # Path-keyed entries are filtered; new lookups by name return None.
         assert reg.get("foo") is None

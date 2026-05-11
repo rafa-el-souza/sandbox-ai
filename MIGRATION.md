@@ -47,8 +47,8 @@ sandbox init <inst> --copy <ws-name>=/path/to/checkout
 
 # Or scaffold multiple workspaces in one call
 sandbox init backend-stack \
-  --copy api=/home/dev/repos/api \
-  --copy web=/home/dev/repos/web \
+  --copy api=/home/user/repos/api \
+  --copy web=/home/user/repos/web \
   --empty scratch
 ```
 

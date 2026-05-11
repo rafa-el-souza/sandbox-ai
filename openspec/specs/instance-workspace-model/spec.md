@@ -61,7 +61,7 @@ Instance names SHALL match the same regex/character/leading-character/reserved r
 The per-instance `sandbox.toml` SHALL contain a `[workspaces]` map-of-tables. Each entry SHALL have keys: `bootstrap_mode` (string, one of `"copy"` or `"empty"`), `source` (string, present when `bootstrap_mode == "copy"`, absent or null when `bootstrap_mode == "empty"`), and `path` (string, always present, the absolute path of the workspace tree on disk).
 
 #### Scenario: Valid workspaces section parses
-- **WHEN** `sandbox.toml` contains `[workspaces.main]` with `bootstrap_mode = "copy"`, `source = "/path/to/src"`, `path = "/home/dev/.sandbox-ai/workspaces/myinst/main"`
+- **WHEN** `sandbox.toml` contains `[workspaces.main]` with `bootstrap_mode = "copy"`, `source = "/path/to/src"`, `path = "/home/user/.sandbox-ai/workspaces/myinst/main"`
 - **THEN** the Pydantic model parses without error and exposes a `WorkspaceConfig` with those values
 
 #### Scenario: Empty bootstrap mode without source is valid

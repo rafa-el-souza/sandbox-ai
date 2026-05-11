@@ -12,12 +12,12 @@ if TYPE_CHECKING:
 def test_generate_project_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Test MD5 hashing of absolute paths.
-    E.g. md5("/home/dev/api") -> api-8f3a9e
+    E.g. md5("/home/user/api") -> api-8f3a9e
     """
-    monkeypatch.setattr(os.path, "abspath", lambda p: "/home/dev/api")
+    monkeypatch.setattr(os.path, "abspath", lambda p: "/home/user/api")
 
     instance_name = generate_project_hash("api")
 
-    # "api" + "-" + md5("/home/dev/api")[:6]
+    # "api" + "-" + md5("/home/user/api")[:6]
     assert instance_name.startswith("api-")
     assert len(instance_name.split("-")[1]) == 6

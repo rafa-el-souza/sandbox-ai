@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 SANDBOX_AI_HOME = "/fake/sandbox-ai"
-PROJECT_DIR = "/home/dev/myproject"
+PROJECT_DIR = "/home/user/myproject"
 INSTANCE_ID = "myproject-abc123"
 INSTANCE_DIR = f"{SANDBOX_AI_HOME}/sandboxes/{INSTANCE_ID}"
 STATE_DIR = f"{SANDBOX_AI_HOME}/.state"
@@ -41,8 +41,8 @@ host_uid = "1000"
 
 [workspaces.main]
 bootstrap_mode = "copy"
-source = "/home/dev/myproject"
-path = "/home/dev/myproject"
+source = "/home/user/myproject"
+path = "/home/user/myproject"
 
 [core]
 shm_size = "2gb"
@@ -424,10 +424,10 @@ class TestStartHappyPath:
         # Replace the single-workspace TOML with one containing two workspaces.
         ws_main = (
             b'[workspaces.main]\nbootstrap_mode = "copy"\n'
-            b'source = "/home/dev/myproject"\npath = "/home/dev/myproject"'
+            b'source = "/home/user/myproject"\npath = "/home/user/myproject"'
         )
         ws_scratch = (
-            b'[workspaces.scratch]\nbootstrap_mode = "empty"\npath = "/home/dev/scratch"'
+            b'[workspaces.scratch]\nbootstrap_mode = "empty"\npath = "/home/user/scratch"'
         )
         multi_ws_toml = VALID_TOML_CONTENT.replace(ws_main, ws_main + b"\n\n" + ws_scratch)
         (instance_dir / "sandbox.toml").write_bytes(multi_ws_toml)
@@ -1679,7 +1679,7 @@ class TestPhaseHydrateDirect:
                     "name": "test",
                     "host_uid": "1000",
                 },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/home/dev/test"}},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/home/user/test"}},
             }
         )
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
@@ -1922,7 +1922,7 @@ class TestRevokeACLsDirect:
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
-            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/user/proj"])
             assert mock_run.call_count == 7
             assert warnings == []
 
@@ -1940,7 +1940,7 @@ class TestRevokeACLsDirect:
             return subprocess.CompletedProcess([], 0, "", "")
 
         with patch("subprocess.run", side_effect=side_effect):
-            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/user/proj"])
 
         assert call_count == 7
         assert len(warnings) == 1
@@ -1951,7 +1951,7 @@ class TestRevokeACLsDirect:
         from cli.main import _revoke_acls
 
         with patch("subprocess.run", side_effect=OSError("setfacl not found")):
-            warnings = _revoke_acls("/inst", "sandbox", ["/home/dev/proj"])
+            warnings = _revoke_acls("/inst", "sandbox", ["/home/user/proj"])
 
         assert len(warnings) == 7
         assert all("setfacl not found" in w for w in warnings)
@@ -1964,7 +1964,7 @@ class TestInitScaffoldDirect:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/newproject"
+        project_dir = "/home/user/newproject"
 
         mock_config = InstanceConfig.model_validate(
             {
@@ -2119,7 +2119,7 @@ class TestInitFirecrawl:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/fc-project"
+        project_dir = "/home/user/fc-project"
 
         mock_config = InstanceConfig.model_validate(
             {
@@ -2334,7 +2334,7 @@ class TestInitHappyPath:
 
     def test_init_creates_instance(self, runner: CliRunner) -> None:
         """init scaffolds a new instance successfully."""
-        project_dir = "/home/dev/newproject"
+        project_dir = "/home/user/newproject"
 
         from cli.main import app
         from core.hydration import InstanceConfig
@@ -2419,7 +2419,7 @@ class TestInitPerUserTreeCreation:
         """init on a clean host creates the full per-user tree (config/state/instances/workspaces)."""
         from cli.main import app
 
-        project_dir = "/home/dev/p"
+        project_dir = "/home/user/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
@@ -2444,7 +2444,7 @@ class TestInitPerUserTreeCreation:
         from core.host_config import ensure_per_user_state
 
         ensure_per_user_state(isolated_sandbox_ai_home)
-        project_dir = "/home/dev/p"
+        project_dir = "/home/user/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
@@ -2468,7 +2468,7 @@ class TestInitPerUserTreeCreation:
             json.dumps({"existing": {"instance_dir": "/x/sandboxes/existing", "created_at": "2026-01-01T00:00:00Z"}})
         )
 
-        project_dir = "/home/dev/p"
+        project_dir = "/home/user/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
@@ -2493,7 +2493,7 @@ class TestInitPerUserTreeCreation:
 
         custom_home = tmp_path / "alt-home"
         monkeypatch.setenv("SANDBOX_AI_HOME", str(custom_home))
-        project_dir = "/home/dev/p"
+        project_dir = "/home/user/p"
         mock_config = self._make_mock_config(project_dir)
         with contextlib.ExitStack() as es:
             for p in self._common_patches(mock_sandbox_ai_home, project_dir, mock_config):
@@ -2601,7 +2601,7 @@ class TestInitNonTTY:
 
     def test_init_non_tty_completes(self, runner: CliRunner) -> None:
         """init completes in non-TTY mode (prompt_secrets skips)."""
-        project_dir = "/home/dev/newproject"
+        project_dir = "/home/user/newproject"
 
         from cli.main import app
         from core.hydration import InstanceConfig
@@ -2880,7 +2880,7 @@ class TestInitHostConfigResolution:
         from core.host_config import HostConfig
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/tomlproject"
+        project_dir = "/home/user/tomlproject"
 
         mock_project_config = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
@@ -2938,7 +2938,7 @@ class TestInitHostConfigResolution:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/seedproj"
+        project_dir = "/home/user/seedproj"
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {"name": "seedproj", "host_uid": "1000"},
@@ -2983,7 +2983,7 @@ class TestInitHostConfigResolution:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/empty"
+        project_dir = "/home/user/empty"
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {"name": "empty", "host_uid": "1000"},
@@ -3052,7 +3052,7 @@ class TestInitHostConfigResolution:
         cfg_path = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         cfg_path.write_text(existing_body)
 
-        project_dir = "/home/dev/preserve"
+        project_dir = "/home/user/preserve"
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {"name": "preserve", "host_uid": "1000"},
@@ -3093,7 +3093,7 @@ class TestInitAuthProbe:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/probeproject"
+        project_dir = "/home/user/probeproject"
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {"name": "probeproject", "host_uid": "1000"},
@@ -3151,7 +3151,7 @@ class TestInitAuthProbe:
         from cli.main import app
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/dev/polkit"
+        project_dir = "/home/user/polkit"
         mock_config = InstanceConfig.model_validate(
             {
                 "instance": {"name": "polkit", "host_uid": "1000"},
@@ -5385,7 +5385,7 @@ class TestCluster3TeardownSymmetry:
         """
         from cli.main import _acl_revoke_plan
 
-        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
+        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/user/proj"])
         for action in plan:
             assert "-R" not in action.command, (
                 f"revoke plan contains recursive walk: {action.description} → {action.command}"
@@ -5398,7 +5398,7 @@ class TestCluster3TeardownSymmetry:
         """
         from cli.main import _acl_revoke_plan
 
-        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/dev/proj"])
+        plan = _acl_revoke_plan("/inst", "sandbox", ["/home/user/proj"])
         for action in plan:
             assert "ancestor" not in action.description
 
@@ -6140,16 +6140,16 @@ class TestLifecycleBackupLockRefusal:
 _TWO_WORKSPACE_TOML = VALID_TOML_CONTENT.replace(
     b"""[workspaces.main]
 bootstrap_mode = "copy"
-source = "/home/dev/myproject"
-path = "/home/dev/myproject"
+source = "/home/user/myproject"
+path = "/home/user/myproject"
 """,
     b"""[workspaces.main]
 bootstrap_mode = "empty"
-path = "/home/dev/.sandbox-ai/workspaces/myproject/main"
+path = "/home/user/.sandbox-ai/workspaces/myproject/main"
 
 [workspaces.scratch]
 bootstrap_mode = "empty"
-path = "/home/dev/.sandbox-ai/workspaces/myproject/scratch"
+path = "/home/user/.sandbox-ai/workspaces/myproject/scratch"
 """,
 )
 

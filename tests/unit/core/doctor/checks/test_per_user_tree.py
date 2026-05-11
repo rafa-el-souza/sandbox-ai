@@ -181,6 +181,6 @@ class TestCheckLegacyRegistryShape:
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True)
-        (state / "instances.json").write_text(json.dumps({"/home/dev/foo": {"x": 1}}))
+        (state / "instances.json").write_text(json.dumps({"/home/user/foo": {"x": 1}}))
         result = check_legacy_registry_shape("u", None)
         assert result.status == "warn"

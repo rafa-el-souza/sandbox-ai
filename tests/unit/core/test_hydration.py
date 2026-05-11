@@ -26,8 +26,8 @@ host_uid = "1000"
 
 [workspaces.main]
 bootstrap_mode = "copy"
-source = "/home/dev/testproject"
-path = "/home/dev/testproject"
+source = "/home/user/testproject"
+path = "/home/user/testproject"
 
 [core]
 shm_size = "2gb"
@@ -74,8 +74,8 @@ class TestInstanceConfig:
         config = InstanceConfig.from_toml(str(toml_path))
         assert config.instance.name == "testproject"
         assert "main" in config.workspaces
-        assert config.workspaces["main"].path == "/home/dev/testproject"
-        assert config.workspaces["main"].source == "/home/dev/testproject"
+        assert config.workspaces["main"].path == "/home/user/testproject"
+        assert config.workspaces["main"].source == "/home/user/testproject"
         assert config.core.pids_limit == 400
         assert config.runtimes.python is True
         assert config.runtimes.go is False
@@ -121,8 +121,8 @@ class TestWorkspaceConfig:
         ws_block = (
             "[workspaces.main]\n"
             'bootstrap_mode = "copy"\n'
-            'source = "/home/dev/testproject"\n'
-            'path = "/home/dev/testproject"\n\n'
+            'source = "/home/user/testproject"\n'
+            'path = "/home/user/testproject"\n\n'
         )
         toml = VALID_TOML.replace(ws_block, "")
         toml_path = tmp_path / "sandbox.toml"
@@ -188,9 +188,9 @@ class TestBuildJinjaContext:
         assert ctx["workspaces"] == [
             {
                 "name": "main",
-                "path": "/home/dev/testproject",
+                "path": "/home/user/testproject",
                 "bootstrap_mode": "copy",
-                "source": "/home/dev/testproject",
+                "source": "/home/user/testproject",
             }
         ]
         assert ctx["core_base_image"] == "cgr.dev/chainguard/wolfi-base:latest"
@@ -412,7 +412,7 @@ class TestScaffoldTemplateResourceLimits:
         write_sandbox_toml(
             str(instance),
             "testproject",
-            [WorkspaceSpec(name="main", bootstrap_mode="copy", source="/home/dev/test", path="/home/dev/test")],
+            [WorkspaceSpec(name="main", bootstrap_mode="copy", source="/home/user/test", path="/home/user/test")],
         )
         content = (instance / "sandbox.toml").read_text()
 
@@ -888,9 +888,9 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "workspaces": [
             {
                 "name": "main",
-                "path": "/home/dev/testproject",
+                "path": "/home/user/testproject",
                 "bootstrap_mode": "copy",
-                "source": "/home/dev/testproject",
+                "source": "/home/user/testproject",
             }
         ],
         "isolated_subnet": isolated,
