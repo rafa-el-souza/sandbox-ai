@@ -13,8 +13,8 @@ sandbox-ai.toml
 .deprecated/
 temp/
 
-# Local-only deferred work log (per CLAUDE rule)
-openspec/deferred.md
+# Local-only exploration & backlog state (revisit when the repo goes public)
+openspec/explorations/
 
 # Tooling
 .antigravityignore
