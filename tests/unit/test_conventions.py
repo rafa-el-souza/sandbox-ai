@@ -46,15 +46,7 @@ _SUPPRESSION_CHECK_EXEMPT: frozenset[str] = frozenset(
 # Each entry is a tech-debt anchor: it documents what is allowed today and
 # is meant to be deleted once the underlying structural issue is fixed.
 # Add a corresponding entry in `openspec/deferred.md` when adding here.
-_GRANDFATHERED_SUPPRESSIONS: frozenset[tuple[str, int]] = frozenset(
-    {
-        # Late `import cli.main` deliberately captures `_seed_host_config_if_absent`
-        # before an autouse patch replaces it. Removing the late import requires
-        # redesigning the capture mechanism — non-trivial. Tracked in
-        # openspec/deferred.md.
-        ("tests/unit/cli/test_cli.py", 89),
-    }
-)
+_GRANDFATHERED_SUPPRESSIONS: frozenset[tuple[str, int]] = frozenset()
 
 
 def _python_files(root: Path) -> Iterator[Path]:

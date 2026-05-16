@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
+import cli.main as _cli_main_module
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -83,11 +84,9 @@ domains = [".github.com"]
 RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-instance"')
 
 
-# Capture the real seeder before any autouse patching can replace it. Tests that
-# want the real seeder to run apply ``wraps=_REAL_SEED_HOST_CONFIG`` so the
-# autouse no-op below is effectively bypassed.
-import cli.main as _cli_main_module  # noqa: E402
-
+# Real seeder captured at import time; the autouse fixture below patches
+# ``cli.main._seed_host_config_if_absent`` at test-setup, so tests opt back
+# in via ``wraps=_REAL_SEED_HOST_CONFIG``.
 _REAL_SEED_HOST_CONFIG = _cli_main_module._seed_host_config_if_absent
 
 
