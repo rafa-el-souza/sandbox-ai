@@ -337,7 +337,6 @@ def _container_status(
 
 def _warm_check(
     instance_dir: str,
-    project_name: str,
     host_user: str,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> bool:
@@ -1763,7 +1762,6 @@ def _revoke_acls(
 
 def _phase_stop_teardown(
     instance_dir: str,
-    project_name: str,
     host_user: str,
     config: InstanceConfig,
     workspace_paths: list[str] | None,
@@ -2344,7 +2342,6 @@ def start(
     host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
-    project_name = compose_project_name(inst)
 
     # Operator-edited TOML guard: ``instance.name`` should match the registry
     # key (the typer arg). Divergence is harmless for compose-project-name
@@ -2379,7 +2376,7 @@ def start(
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, project_name, host_user, auth):
+    if _warm_check(instance_dir, host_user, auth):
         console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
@@ -2538,11 +2535,10 @@ def stop(
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
 
     # Warm check
-    if not _warm_check(instance_dir, project_name, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth):
         console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
@@ -2570,7 +2566,7 @@ def stop(
     # `_phase_stop_teardown` (cluster 3 — Teardown Sequence requirement).
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     for w in _phase_stop_teardown(
-        instance_dir, project_name, host_user, config, ws_paths, volumes=clean, auth=auth
+        instance_dir, host_user, config, ws_paths, volumes=clean, auth=auth
     ):
         console.print(f"⚠ {w}", style="yellow")
 
@@ -2601,7 +2597,6 @@ def attach(
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_config = _resolve_full_host_config()
     host_user = host_config.host.docker_unprivileged_user
     auth = host_config.host.machinectl_authentication
@@ -2626,7 +2621,7 @@ def attach(
         raise typer.Exit(code=1)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, project_name, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth):
         console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
@@ -2717,7 +2712,6 @@ def destroy(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
     available = set(config.workspaces.keys())
 
@@ -2816,7 +2810,6 @@ def destroy(
             try:
                 teardown_warnings = _phase_stop_teardown(
                     instance_dir,
-                    project_name,
                     host_user,
                     config,
                     ws_paths,
@@ -3148,9 +3141,8 @@ def _require_instance_stopped(inst: str, instance_dir: str) -> None:
     Workspace mutations (add/remove/rename/restore) require the instance to
     be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
     """
-    project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
-    if _warm_check(instance_dir, project_name, host_user, auth):
+    if _warm_check(instance_dir, host_user, auth):
         console.print(
             f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
             style="red",

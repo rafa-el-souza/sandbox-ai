@@ -1307,7 +1307,7 @@ class TestWarmCheckDirect:
     def test_warm_check_no_compose_file(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
 
-        assert _warm_check(str(tmp_path), "name", "sandbox") is False
+        assert _warm_check(str(tmp_path), "sandbox") is False
 
     def test_warm_check_returns_true_when_containers_present(self, tmp_path: Path) -> None:
         from cli.main import ContainerInfo, _warm_check
@@ -1323,7 +1323,7 @@ class TestWarmCheckDirect:
             patch("cli.main._load_config"),
             patch("cli.main._container_status", return_value=containers),
         ):
-            assert _warm_check(str(tmp_path), "name", "sandbox") is True
+            assert _warm_check(str(tmp_path), "sandbox") is True
 
     def test_warm_check_returns_false_when_empty(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
@@ -1336,7 +1336,7 @@ class TestWarmCheckDirect:
             patch("cli.main._load_config"),
             patch("cli.main._container_status", return_value=[]),
         ):
-            assert _warm_check(str(tmp_path), "name", "sandbox") is False
+            assert _warm_check(str(tmp_path), "sandbox") is False
 
     def test_warm_check_returns_false_on_container_status_error(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
@@ -1350,7 +1350,7 @@ class TestWarmCheckDirect:
             patch("cli.main._load_config"),
             patch("cli.main._container_status", return_value=[]),
         ):
-            assert _warm_check(str(tmp_path), "name", "sandbox") is False
+            assert _warm_check(str(tmp_path), "sandbox") is False
 
 
 class TestLockingDirect:
@@ -5527,7 +5527,7 @@ class TestCluster3TeardownSymmetry:
             patch("cli.main._revoke_acls", side_effect=_track_revoke),
         ):
             _phase_stop_teardown(
-                "/inst", "proj", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
+                "/inst", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
             )
         assert calls == ["compose_down", "unlink", "revoke"]
 
