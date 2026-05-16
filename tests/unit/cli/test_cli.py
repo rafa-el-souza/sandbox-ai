@@ -3147,12 +3147,12 @@ class TestInitAuthProbe:
     def _ok(self) -> ProbeOutcome:
         from core.dispatch import ProbeOutcome
 
-        return ProbeOutcome(ok=True, timed_out=False, stdout="ok\n")
+        return ProbeOutcome(ok=True, timed_out=False, stdout="ok\n", message="")
 
-    def _fail(self, *, timed_out: bool = False) -> ProbeOutcome:
+    def _fail(self, *, timed_out: bool = False, message: str = "[FATAL] probe failed") -> ProbeOutcome:
         from core.dispatch import ProbeOutcome
 
-        return ProbeOutcome(ok=False, timed_out=timed_out, stdout="")
+        return ProbeOutcome(ok=False, timed_out=timed_out, stdout="", message=message)
 
     def test_probe_success_sudo(self, runner: CliRunner) -> None:
         """Probe succeeds with sudo mode — init proceeds; the probe's
@@ -3195,11 +3195,14 @@ class TestInitAuthProbe:
         """Probe failure (not-ok, not-timeout) exits with error + remediation."""
         from cli.main import app
 
-        with patch("cli.main.dispatch.probe", return_value=self._fail()):
+        with patch("cli.main.dispatch.probe", return_value=self._fail(message="boom: exit status 1")):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
+            # Restored diagnostic fidelity: the real failure context from
+            # ProbeOutcome.message is surfaced (not the prior generic string).
+            assert "boom: exit status 1" in result.output
 
     def test_probe_timeout_exits_with_error(self, runner: CliRunner) -> None:
         """Probe timeout (timed_out=True) exits with the exact original
@@ -3263,16 +3266,21 @@ class TestInitAuthProbe:
         assert "invalid" in result.output.lower()
 
     def test_probe_file_not_found_consolidated_into_failure_branch(self, runner: CliRunner) -> None:
-        """The prior FileNotFoundError ("command not found on PATH") case now
-        collapses into the not-ok/not-timeout branch (Q8 narrowing —
-        ProbeOutcome carries no ENOENT discriminator); the consolidated
-        diagnostic still names that cause and exits 1."""
+        """The prior FileNotFoundError ("command not found on PATH") case still
+        routes through the not-ok/not-timeout branch (Q8 narrowing —
+        ProbeOutcome carries no ENOENT discriminator). Diagnostic fidelity is
+        restored: ``Executor`` wraps the ``OSError`` into a distinct
+        ``SandboxExecutionError`` text that ``ProbeOutcome.message`` carries, so
+        the operator again sees the real ENOENT context; exit code is 1."""
         from cli.main import app
 
-        with patch("cli.main.dispatch.probe", return_value=self._fail()):
+        enoent_msg = "[FATAL] ENOENT-machinectl-missing"
+        with patch("cli.main.dispatch.probe", return_value=self._fail(message=enoent_msg)):
             result = runner.invoke(app, ["init", "polkit"])
             assert result.exit_code == 1
-            assert "command not found on path" in result.output.lower()
+            # The distinct ENOENT SandboxExecutionError text reaches the
+            # operator via ProbeOutcome.message (restored fidelity).
+            assert "ENOENT-machinectl-missing" in result.output
             assert "probe failed" in result.output.lower()
 
 
@@ -3525,7 +3533,7 @@ class TestContainerStatus:
     def _outcome(self, *, ok: bool, stdout: str = "") -> ProbeOutcome:
         from core.dispatch import ProbeOutcome
 
-        return ProbeOutcome(ok=ok, timed_out=False, stdout=stdout)
+        return ProbeOutcome(ok=ok, timed_out=False, stdout=stdout, message="" if ok else "[FATAL] probe failed")
 
     def test_parses_ndjson_output(self, tmp_path: Path) -> None:
         """Multiple NDJSON lines are parsed into ContainerInfo list."""
@@ -5200,7 +5208,7 @@ class TestContainerStatusEdgeCases:
 
         with patch(
             "cli.main.dispatch.probe",
-            return_value=ProbeOutcome(ok=True, timed_out=False, stdout=stdout),
+            return_value=ProbeOutcome(ok=True, timed_out=False, stdout=stdout, message=""),
         ):
             containers = _container_status(str(tmp_path), "t", "s", config)
             assert len(containers) == 1

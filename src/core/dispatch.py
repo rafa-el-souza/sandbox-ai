@@ -167,11 +167,17 @@ class ProbeOutcome:
         stdout: The op's captured stdout on success; ``""`` on any failure
             (the sterile ``Executor`` does not surface stdout through the
             raised exception).
+        message: ``""`` on success; otherwise the failure text — the
+            ``str(SandboxExecutionError)`` the sterile ``Executor`` raised
+            (carrying its informative exit-status / ``OSError`` context).
+            Probe-style callers interpolate this into their operator-facing
+            ``detail`` so the pre-refactor diagnostic fidelity is preserved.
     """
 
     ok: bool
     timed_out: bool
     stdout: str
+    message: str
 
 
 # ─── Shared argument-shape predicates ───────────────────────────────────────
@@ -815,9 +821,12 @@ def probe(
     ``raise ... from e``).
 
     Returns:
-        :class:`ProbeOutcome` — ``ok`` + the success stdout, or
-        ``ok=False`` with ``timed_out`` reflecting whether the underlying
-        failure was a subprocess timeout.
+        :class:`ProbeOutcome` — ``ok`` + the success stdout (``message`` is
+        ``""``), or ``ok=False`` with ``timed_out`` reflecting whether the
+        underlying failure was a subprocess timeout and ``message`` carrying
+        the ``SandboxExecutionError`` failure text (the sterile ``Executor``'s
+        informative exit-status / ``OSError`` context) for probe-style callers
+        to surface in their operator-facing ``detail``.
     """
     try:
         cp = invoke(op, args, host_config, timeout=timeout)
@@ -826,8 +835,9 @@ def probe(
             ok=False,
             timed_out=isinstance(exc.__cause__, subprocess.TimeoutExpired),
             stdout="",
+            message=str(exc),
         )
-    return ProbeOutcome(ok=True, timed_out=False, stdout=cp.stdout)
+    return ProbeOutcome(ok=True, timed_out=False, stdout=cp.stdout, message="")
 
 
 # ─── Offline reproducible compile recipe ────────────────────────────────────

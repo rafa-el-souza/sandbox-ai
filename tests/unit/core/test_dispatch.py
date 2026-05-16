@@ -1071,7 +1071,7 @@ class TestProbeOutcome:
     def test_is_frozen(self) -> None:
         import dataclasses
 
-        outcome = ProbeOutcome(ok=True, timed_out=False, stdout="x")
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout="x", message="")
         field_name = "ok"
         with pytest.raises(dataclasses.FrozenInstanceError):
             # Frozen dataclass — the runtime setattr path is rejected. The
@@ -1098,7 +1098,9 @@ class TestProbe:
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         out = probe("docker-version", [], self._fake_hc(), timeout=15)
-        assert out == ProbeOutcome(ok=True, timed_out=False, stdout="24.0.7\n")
+        assert out == ProbeOutcome(ok=True, timed_out=False, stdout="24.0.7\n", message="")
+        # Success path: ``message`` is empty (no failure context to surface).
+        assert out.message == ""
 
     def test_non_timeout_failure_returns_not_ok_not_timed_out(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1112,7 +1114,10 @@ class TestProbe:
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         out = probe("auth-probe", [], self._fake_hc())
-        assert out == ProbeOutcome(ok=False, timed_out=False, stdout="")
+        assert out == ProbeOutcome(ok=False, timed_out=False, stdout="", message="[FATAL] boom")
+        # Failure path: ``message`` carries the ``str(SandboxExecutionError)``
+        # so probe-style callers can restore informative diagnostics.
+        assert out.message == "[FATAL] boom"
 
     def test_timeout_failure_sets_timed_out(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1126,7 +1131,9 @@ class TestProbe:
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         out = probe("auth-probe", [], self._fake_hc(), timeout=10)
-        assert out == ProbeOutcome(ok=False, timed_out=True, stdout="")
+        assert out == ProbeOutcome(ok=False, timed_out=True, stdout="", message="[FATAL] timed out")
+        # Failure path (timeout): ``message`` still carries the error text.
+        assert out.message == "[FATAL] timed out"
 
     def test_validation_error_propagates_not_swallowed(self) -> None:
         # probe() only catches SandboxExecutionError; a pre-boundary

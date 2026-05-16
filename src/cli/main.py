@@ -2172,11 +2172,13 @@ def init(
     # branch (reachable → continue; unreachable/timeout → guidance + exit 1),
     # not crash. Per Q8 the probe-style entry point is ``core.dispatch.probe``,
     # which collapses the boundary-crossing outcome into a typed
-    # ``ProbeOutcome`` (``ok`` / ``timed_out``). The timeout branch preserves
-    # the exact original message; the non-timeout failure branch consolidates
-    # the prior non-zero (stderr) and ``FileNotFoundError`` ("command not found
-    # on PATH") cases — ``ProbeOutcome`` carries no stderr and does not
-    # discriminate ENOENT, the documented Q8 narrowing — into one diagnostic.
+    # ``ProbeOutcome`` (``ok`` / ``timed_out`` / ``message``). The timeout
+    # branch preserves the exact original message; the non-timeout failure
+    # branch surfaces ``ProbeOutcome.message`` — the prior non-zero (stderr)
+    # and ``FileNotFoundError`` ("command not found on PATH") cases reach it
+    # as distinct ``SandboxExecutionError`` texts (the sterile ``Executor``
+    # wraps both), so ``message`` naturally distinguishes them in the
+    # operator-facing detail.
     if not dry_run:
         probe_host_config = HostConfig(
             host=HostSettings(
@@ -2189,11 +2191,7 @@ def init(
             if probe_outcome.timed_out:
                 _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
             else:
-                _emit_auth_probe_failure(
-                    resolved_auth,
-                    resolved_user,
-                    "machinectl shell unreachable (non-zero exit or command not found on PATH)",
-                )
+                _emit_auth_probe_failure(resolved_auth, resolved_user, probe_outcome.message)
             raise typer.Exit(code=1)
 
     # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)

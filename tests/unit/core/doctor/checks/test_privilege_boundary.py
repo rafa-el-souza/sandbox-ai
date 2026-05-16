@@ -187,7 +187,9 @@ class TestMachinectlReachable:
         with patch("core.dispatch.invoke", side_effect=_exec_error()):
             result = check_machinectl_reachable("sandbox", None)
             assert result.status == "fail"
-            assert result.detail != ""
+            # Restored pre-refactor wording: the failure context (now sourced
+            # from ProbeOutcome.message) is interpolated into the detail.
+            assert result.detail == "Shell probe failed: [FATAL] Sandbox Execution Fault"
 
 
 class TestDockerChecks:
@@ -558,7 +560,9 @@ class TestCheckComposeProjectNameCollision:
         monkeypatch.setattr("core.dispatch.invoke", boom)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
-        assert "failed" in out.detail
+        # Restored pre-refactor wording with the failure context from
+        # ProbeOutcome.message interpolated.
+        assert out.detail == "docker compose ls failed: [FATAL] Sandbox Execution Fault"
 
     def test_skip_on_unparseable_output(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_compose_project_name_collision

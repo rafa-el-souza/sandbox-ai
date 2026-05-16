@@ -141,7 +141,7 @@ def check_machinectl_reachable(
         return CheckResult(
             status="fail",
             name="machinectl reachable",
-            detail="Shell probe failed",
+            detail=f"Shell probe failed: {outcome.message}",
             remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
         )
 
@@ -357,7 +357,7 @@ def check_compose_project_name_collision(
         return CheckResult(
             status="skip",
             name="compose project name collision",
-            detail="docker compose ls failed",
+            detail=f"docker compose ls failed: {outcome.message}",
             category="Privilege Boundary",
         )
     try:

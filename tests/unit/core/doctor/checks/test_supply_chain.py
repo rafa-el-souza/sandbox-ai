@@ -19,15 +19,15 @@ from core.dispatch import ProbeOutcome
 
 
 def _ok(stdout: str = "{}") -> ProbeOutcome:
-    return ProbeOutcome(ok=True, timed_out=False, stdout=stdout)
+    return ProbeOutcome(ok=True, timed_out=False, stdout=stdout, message="")
 
 
 def _fail() -> ProbeOutcome:
-    return ProbeOutcome(ok=False, timed_out=False, stdout="")
+    return ProbeOutcome(ok=False, timed_out=False, stdout="", message="[FATAL] manifest inspect failed")
 
 
 def _timeout() -> ProbeOutcome:
-    return ProbeOutcome(ok=False, timed_out=True, stdout="")
+    return ProbeOutcome(ok=False, timed_out=True, stdout="", message="[FATAL] manifest inspect timed out")
 
 
 def test_module_exposes_image_digests_check() -> None:
