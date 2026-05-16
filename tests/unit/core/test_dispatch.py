@@ -1226,8 +1226,16 @@ class TestCompileDispatcher:
         assert "--network none" in inner
         # Exactly ONE docker run (no second pull/run).
         assert inner.count("docker run") == 1
-        # Vendored deps, no network fetch.
-        assert "GOFLAGS=-mod=vendor" in inner
+        # Vendored deps, no network fetch: GOFLAGS=-mod=vendor MUST be
+        # delivered INTO the build container via `docker run --env`, not as a
+        # host-side shell prefix (which would only set it on the host docker
+        # client process and never reach the in-container build).
+        assert "--env GOFLAGS=-mod=vendor" in inner
+        # Single source of truth: it is NOT also set as a host-side prefix on
+        # the docker invocation.
+        assert "GOFLAGS=-mod=vendor docker run" not in inner
+        # The --env arg is positioned before the image as a `docker run` flag.
+        assert inner.index("--env GOFLAGS=-mod=vendor") < inner.index(_GOLANG_PINNED)
 
     def test_uses_digest_pinned_golang_image_not_tag(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

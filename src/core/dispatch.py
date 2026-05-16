@@ -921,9 +921,17 @@ def compile_dispatcher(
     """
     _stage_dispatch_source(build_dir)
     image = IMAGE_REGISTRY["golang_alpine"].pinned
+    # ``GOFLAGS=-mod=vendor`` MUST be delivered via ``docker run --env`` so it
+    # is set inside the ``golang:1.23-alpine`` build container: a host-side
+    # ``GOFLAGS=… docker run …`` prefix would only assign the variable on the
+    # host ``docker`` *client* process and never reach the in-container build,
+    # leaving the offline-reproducible vendor-mode contract unsatisfied.
+    # ``--env`` does not affect ``--network none``. This is the single source of
+    # truth for the setting (it is not also set host-side).
     docker_run = (
         "docker run --rm "
         "--network none "
+        "--env GOFLAGS=-mod=vendor "
         f"--mount type=bind,src={shlex.quote(build_dir)},dst={_BUILD_MOUNT_DST} "
         f"--workdir {_BUILD_MOUNT_DST} "
         f"{shlex.quote(image)} "
@@ -936,7 +944,7 @@ def compile_dispatcher(
         ),
         "/bin/bash",
         "-c",
-        f"GOFLAGS=-mod=vendor {docker_run}",
+        docker_run,
     ]
     # ``sentinel=True`` recovers the in-container exit code through the
     # machinectl PTY: a non-zero ``go test`` (fixture drift) or ``go build``
