@@ -1756,28 +1756,56 @@ class TestBuildComposeFiles:
 
 
 class TestPhaseComposeUpDirect:
-    """Direct test for _phase_compose_up."""
+    """Direct test for _phase_compose_up (routes through core.dispatch.invoke)."""
 
-    def test_compose_up_calls_executor(self) -> None:
+    def test_compose_up_crosses_boundary_via_dispatch(
+        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+        import subprocess
+        from typing import cast
+
         from cli.main import _phase_compose_up
-        from core.hydration import InstanceConfig
+        from core.host_config import MachinectlAuth
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
+        inst_dir = isolated_sandbox_ai_home / "instances" / "t"
+        (inst_dir / "docker").mkdir(parents=True, exist_ok=True)
+        (inst_dir / "docker" / "compose.yml").write_text("services: {}\n")
+        (inst_dir / ".sandbox.env").write_text("")
+        (inst_dir / "sandbox.toml").write_text(
+            '[instance]\nname = "t"\nhost_uid = "1000"\n\n'
+            '[workspaces.main]\nbootstrap_mode = "empty"\n'
+            f'path = "{isolated_sandbox_ai_home}/workspaces/t/main"\n'
+            "\n[components.db_postgres]\nenabled = false\n"
+        )
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "instances.json").write_text(
+            _json.dumps({"t": {"instance_dir": str(inst_dir), "created_at": "2026-01-01T00:00:00Z"}})
         )
 
-        with patch("cli.main.Executor") as MockExec:
-            _phase_compose_up("/inst", "myproj", "sandbox", config)
-            MockExec.return_value.run.assert_called_once()
-            cmd_args = MockExec.return_value.run.call_args[0][0]
-            assert "machinectl" in cmd_args
-            assert "up -d --build --wait" in cmd_args[-1]
+        from core.host_config import HostConfig
+
+        class _FakeHostSettings:
+            docker_unprivileged_user = "sandbox"
+            machinectl_authentication = MachinectlAuth.SUDO
+
+        class _FakeHostConfig:
+            host = _FakeHostSettings()
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        _phase_compose_up("t", str(inst_dir), cast("HostConfig", _FakeHostConfig()))
+        cmd = cast("list[str]", captured["cmd"])
+        assert "machinectl" in cmd
+        assert cmd[-1].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up t")
 
 
 class TestBuildAttachArgv:

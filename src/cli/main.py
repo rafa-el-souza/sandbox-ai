@@ -1573,48 +1573,45 @@ def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]
     return files
 
 
-def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> ComposeUpAction:
-    """Return the :class:`ComposeUpAction` carrying the inner ``bash -c`` command.
+def _compose_up_cmd_plan(inst: str) -> ComposeUpAction:
+    """Return the :class:`ComposeUpAction` carrying the typed instance intent.
 
-    Sole producer of the ``TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain
-    COMPOSE_PROJECT_NAME=<project> docker compose <files> --ansi never
-    --env-file <env> up -d --build --wait`` string. The Action's single
-    ``inner_command`` field is consumed by :func:`_phase_compose_up`
-    (via ``.execute(ctx)``) and the dry-run preview (via ``.describe()``)
-    so the two paths cannot drift — same single-source-of-truth pattern as
-    :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
+    Sole producer of the compose-up Action. Per Q6/D2 the Action carries ONLY
+    the typed instance name; the ``--project`` / ``--env-file`` /
+    ``--compose-file`` operands and the env-prefix/verb are resolved internally
+    by ``core.dispatch.build_invocation`` (the single command-construction
+    seam ``core.dispatch.invoke`` also consumes). The Action is consumed by
+    :func:`_phase_compose_up` (via ``.execute(ctx)``) and the dry-run preview
+    (via ``.render_command(host_config)``); both derive from the one
+    ``build_invocation`` seam so they cannot drift — same single-source-of-truth
+    pattern as :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
     :func:`_helper_cp_chown_plan`.
     """
-    compose_files = _build_compose_files(instance_dir, config)
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    inner = (
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {' '.join(compose_files)} "
-        f"--ansi never --env-file {env_file} up -d --build --wait"
-    )
-    return ComposeUpAction(inner_command=inner)
+    return ComposeUpAction(instance_name=inst)
 
 
 def _phase_compose_up(
+    inst: str,
     instance_dir: str,
-    project_name: str,
-    host_user: str,
-    config: InstanceConfig,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
+    host_config: HostConfig,
 ) -> None:
-    """Phase 6: docker compose up -d --build --wait via machinectl.
+    """Phase 6: docker compose up via the typed ``compose-up`` dispatcher op.
 
-    - Source suppression env prefix: TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain (D2 Layer 1)
-    - --ansi never flag (D2 Layer 1)
-    - --env-file injection for .sandbox.env (D14)
-    - sentinel=True for exit code recovery (D1)
+    Routes through :class:`~core.actions.ComposeUpAction`, whose ``.execute``
+    calls ``core.dispatch.invoke("compose-up", [inst], host_config)``. The
+    env prefix / ``--ansi never`` / ``--env-file`` / verb (and the Q6
+    ``--project`` / ``--compose-file`` expansion) are all internal to the
+    ``core.dispatch.build_invocation`` seam — not constructed here. ``invoke``
+    raises :class:`~core.exceptions.SandboxExecutionError` on a non-zero exit,
+    preserving the abort behavior the prior ``sentinel=True`` path had.
     """
-    action = _compose_up_cmd_plan(instance_dir, project_name, config)
+    action = _compose_up_cmd_plan(inst)
     ctx = ActionContext(
-        host_user=host_user,
-        auth=auth,
+        host_user=host_config.host.docker_unprivileged_user,
+        auth=host_config.host.machinectl_authentication,
         executor=Executor(),
         instance_dir=Path(instance_dir),
+        host_config=host_config,
     )
     action.execute(ctx)
 
@@ -1821,7 +1818,6 @@ def _dry_run_pipeline(inst: str) -> None:
     config = _load_config(instance_dir)
     host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
-    auth = host_settings.machinectl_authentication
 
     project_name = compose_project_name(inst)
 
@@ -1921,11 +1917,14 @@ def _dry_run_pipeline(inst: str) -> None:
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
-    # Compose up — derived from the same ComposeUpAction _phase_compose_up uses;
-    # both code paths read the .inner_command field (no parallel construction).
-    machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
-    compose_action = _compose_up_cmd_plan(instance_dir, project_name, config)
-    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{compose_action.describe()}'"
+    # Compose up — rendered from the SAME core.dispatch.build_invocation seam
+    # _phase_compose_up's ComposeUpAction.execute consumes via invoke(), so the
+    # preview is byte-identical to the live invocation (no parallel
+    # construction). The Q6 wire expansion resolves compose state via the
+    # registry, but ``_lookup_instance_or_exit`` above already guaranteed the
+    # instance is registered, so no soft-fail guard is needed here.
+    compose_action = _compose_up_cmd_plan(inst)
+    compose_cmd = compose_action.render_command(_resolve_full_host_config())
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover — admin-reframe D1: tlog-rec → ssh → ProxyCommand → /fwd into core.
@@ -2479,9 +2478,11 @@ def start(
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
 
-        # Phase 6: Compose up (D-5 — spinner for long-running phase)
+        # Phase 6: Compose up (D-5 — spinner for long-running phase).
+        # ComposeUpAction routes through core.dispatch.invoke, which needs the
+        # full HostConfig for operator-side compose-state resolution (Q6).
         with console.status("⟳ Compose — starting containers…"):
-            _phase_compose_up(instance_dir, project_name, host_user, config, auth)
+            _phase_compose_up(inst, instance_dir, _resolve_full_host_config())
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:

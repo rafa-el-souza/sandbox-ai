@@ -26,6 +26,7 @@ from core.dispatch import (
     OpSpec,
     ProbeOutcome,
     _expand_compose_wire,
+    build_invocation,
     build_target_argv,
     compile_dispatcher,
     invoke,
@@ -987,6 +988,80 @@ class TestInvoke:
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         assert invoke(Op.AUTH_PROBE, [], self._fake_hc()).returncode == 0
         assert invoke("auth-probe", [], self._fake_hc()).returncode == 0
+
+
+# ─── build_invocation(): the single command-construction seam ───────────────
+#
+# Rule 7 evidence: invoke() is exactly Executor().run(build_invocation(...)),
+# and the dry-run preview + ComposeUpAction render/execute from this same
+# function — no parallel argv/inner/compose-state construction anywhere.
+
+
+class TestBuildInvocation:
+    def _fake_hc(self) -> HostConfig:
+        from core.host_config import MachinectlAuth
+
+        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+
+    def test_builds_crossed_argv_without_executing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # build_invocation is PURE: it must not touch the Executor.
+        def boom(self: object, *a: object, **k: object) -> object:
+            raise AssertionError("build_invocation must not execute")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", boom)
+        argv = build_invocation("docker-info", ["runtimes"], self._fake_hc())
+        assert argv[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
+        assert argv[4:6] == ["/bin/bash", "-c"]
+        assert argv[6] == "/usr/local/libexec/sandbox-ai/dispatch docker-info runtimes"
+
+    def test_validates_before_building(self) -> None:
+        with pytest.raises(DispatchValidationError):
+            build_invocation("docker-info", ["bogus-preset"], self._fake_hc())
+
+    def test_unknown_op_raises(self) -> None:
+        with pytest.raises(ValueError):
+            build_invocation("not-a-real-op", [], self._fake_hc())
+
+    def test_compose_wire_expansion_is_internal(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
+        argv = build_invocation("compose-up", ["demo"], self._fake_hc())
+        assert argv[6] == (
+            f"/usr/local/libexec/sandbox-ai/dispatch compose-up demo "
+            f"--project {proj} "
+            f"--env-file {inst_dir / '.sandbox.env'} "
+            f"--compose-file {inst_dir / 'docker' / 'compose.yml'}"
+        )
+
+    def test_invoke_consumes_build_invocation_seam(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # invoke() == Executor().run(build_invocation(...), timeout=...): the
+        # argv handed to Executor is byte-identical to build_invocation's
+        # return, and timeout is forwarded verbatim.
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        hc = self._fake_hc()
+        invoke("docker-info", ["runtimes"], hc, timeout=15)
+        assert captured["cmd"] == build_invocation("docker-info", ["runtimes"], hc)
+        assert cast("dict[str, object]", captured["kwargs"]) == {"timeout": 15}
 
 
 # ─── probe(): typed non-raising wrapper (Q8) ────────────────────────────────

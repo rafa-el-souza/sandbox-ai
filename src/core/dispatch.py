@@ -696,6 +696,52 @@ def build_target_argv(op: Op | str, args: Sequence[str], host_config: HostConfig
     return OP_SPECS[resolved].build_target_argv(args, host_config)
 
 
+def build_invocation(
+    op: Op | str,
+    args: Sequence[str],
+    host_config: HostConfig,
+) -> list[str]:
+    """Build the boundary-crossing argv for ``op``/``args`` WITHOUT executing it.
+
+    This is the single command-construction seam (anti-hack rules 4 + 7): it
+    performs everything :func:`invoke` does *except* the
+    :class:`~core.executor.Executor` run — per-op validation, the Q6 compose
+    wire-expansion / deterministic passthrough, the ``dispatch <op> <wire>``
+    inner string, and the ``machinectl_cmd`` + ``bash -c`` crossing. :func:`invoke`
+    is exactly ``Executor().run(build_invocation(...), timeout=...)``; the
+    ``sandbox start --dry-run`` preview and :class:`core.actions.ComposeUpAction`
+    derive their displayed/executed command from this same function so no
+    parallel argv/inner construction exists anywhere.
+
+    Returns the argv list ``[*machinectl_cmd(user, auth), "/bin/bash", "-c",
+    "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` (design D2 — the outer
+    argv shape is preserved so operators' existing sudoers rule still matches).
+
+    Raises:
+        DispatchValidationError: the typed args are malformed for ``op`` (raised
+            before any boundary-crossing argv is built).
+        ValueError: ``op`` is not a known :class:`Op`.
+    """
+    resolved = Op(op)
+    op_value = resolved.value
+    validate_args(resolved, args)
+    wire_args = (
+        _expand_compose_wire(op_value, args)
+        if op_value in _COMPOSE_VERB
+        else list(args)
+    )
+    inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+    return [
+        *machinectl_cmd(
+            host_config.host.docker_unprivileged_user,
+            host_config.host.machinectl_authentication,
+        ),
+        "/bin/bash",
+        "-c",
+        inner,
+    ]
+
+
 def invoke(
     op: Op | str,
     args: list[str],
@@ -740,26 +786,13 @@ def invoke(
 
     The ``--check`` short-circuit is purely a Go concern (it never reaches
     Python); :func:`invoke` does not special-case it.
+
+    The command construction (validate -> Q6 wire-expand / passthrough ->
+    inner -> crossed argv) lives in :func:`build_invocation`; :func:`invoke`
+    is exactly that argv handed to the sterile :class:`~core.executor.Executor`
+    (anti-hack rules 4 + 7 — one seam, no parallel construction).
     """
-    resolved = Op(op)
-    op_value = resolved.value
-    validate_args(resolved, args)
-    wire_args = (
-        _expand_compose_wire(op_value, args)
-        if op_value in _COMPOSE_VERB
-        else list(args)
-    )
-    inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
-    cmd = [
-        *machinectl_cmd(
-            host_config.host.docker_unprivileged_user,
-            host_config.host.machinectl_authentication,
-        ),
-        "/bin/bash",
-        "-c",
-        inner,
-    ]
-    return Executor().run(cmd, timeout=timeout)
+    return Executor().run(build_invocation(op, args, host_config), timeout=timeout)
 
 
 def probe(

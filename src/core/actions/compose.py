@@ -1,48 +1,67 @@
-"""ComposeUpAction — wraps the inner ``bash -c`` string for ``docker compose up``.
+"""ComposeUpAction — the typed ``compose-up`` instance intent.
 
-Single field (``inner_command: str``) per design Decision 1: the four
-input parameters of ``_compose_up_cmd_plan`` (``instance_dir``,
-``project_name``, ``compose_files``, ``env_file``) are NOT carried on
-the Action — they are *inputs* to plan construction, not plan output.
-The ``machinectl`` argv prefix is built at ``.execute()`` time from
-``ActionContext.host_user`` + ``ActionContext.auth`` so the live and
-dry-run paths derive their command from the same single carrier (per
-``cli-start``'s "Live and dry-run derive compose up from a shared plan
-helper" requirement).
+The Action carries only the typed instance name (design Q6 / D2): the
+``--project`` / ``--env-file`` / ``--compose-file`` operands are NOT plan
+output — they are operator-side dev-context state that
+``core.dispatch.build_invocation`` resolves internally from the instance
+name (the single compose-state resolver ``_resolve_compose_state``). Both
+the live ``.execute()`` path and the dry-run ``.describe()`` path derive
+their command from ``core.dispatch.build_invocation("compose-up",
+[instance_name], host_config)`` so they cannot drift and there is no
+parallel command construction (anti-hack rules 4 + 7 — one seam).
+
+``host_config`` is read from :class:`~core.actions.context.ActionContext`
+(the optional field only the compose-up construction site supplies).
 """
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.actions.base import Action
-from core.host_config import machinectl_cmd
+from core.dispatch import Op, build_invocation, invoke
 
 if TYPE_CHECKING:
     from core.actions.context import ActionContext
+    from core.host_config import HostConfig
 
 
 @dataclass(frozen=True)
 class ComposeUpAction(Action):
-    """``docker compose up`` invocation — single source of truth for live + dry-run."""
+    """``compose-up`` invocation — single source of truth for live + dry-run.
 
-    inner_command: str
+    Carries the typed instance name; the boundary-crossing command (Q6 wire
+    form) is built by ``core.dispatch.build_invocation`` so the live and
+    dry-run paths cannot diverge.
+    """
+
+    instance_name: str
 
     def describe(self) -> str:
-        # The dry-run line includes the resolved machinectl prefix; that resolution
-        # is done by the caller (which has the ActionContext) so .describe() stays
-        # pure. The caller renders ``$ <prefix> /bin/bash -c '<inner>'`` from
-        # this string + the prefix it already computed.
-        return self.inner_command
+        # The full dry-run line needs the resolved HostConfig (operator-side
+        # compose-state resolution); that resolution is the caller's (it holds
+        # the config). .describe() stays a pure identity on the typed intent;
+        # the caller renders the command via .render_command(host_config),
+        # which goes through the SAME build_invocation seam invoke() uses.
+        return self.instance_name
+
+    def render_command(self, host_config: HostConfig) -> str:
+        """Render the would-be boundary-crossing command (NOT executed).
+
+        Derives from ``core.dispatch.build_invocation`` — the SAME seam
+        :func:`core.dispatch.invoke` (and thus :meth:`execute`) consumes — so
+        the dry-run line is byte-identical to the live invocation.
+        """
+        return shlex.join(build_invocation(Op.COMPOSE_UP, [self.instance_name], host_config))
 
     def execute(self, ctx: ActionContext) -> None:
-        ctx.executor.run(
-            [
-                *machinectl_cmd(ctx.host_user, ctx.auth),
-                "/bin/bash",
-                "-c",
-                self.inner_command,
-            ],
-            sentinel=True,
-        )
+        if ctx.host_config is None:
+            raise ValueError(
+                "ComposeUpAction requires ActionContext.host_config; the "
+                "compose-up construction site must supply the resolved HostConfig"
+            )
+        # invoke() raises SandboxExecutionError on a non-zero exit — the same
+        # raise-on-failure / abort behavior the previous sentinel=True path had.
+        invoke(Op.COMPOSE_UP, [self.instance_name], ctx.host_config)
