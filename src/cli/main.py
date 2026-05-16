@@ -51,6 +51,7 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
+    minimal_host_config,
     pipe_cmd,
     sandbox_ai_home,
     state_lock_path,
@@ -308,7 +309,7 @@ def _container_status(
     # ``--compose-file`` / ``--env-file`` operands are resolved internally by
     # ``invoke``'s single operator-side resolver (``_resolve_compose_state``),
     # so they are no longer constructed here.
-    host_config = HostConfig(host=HostSettings(docker_unprivileged_user=host_user, machinectl_authentication=auth))
+    host_config = minimal_host_config(host_user, auth)
     outcome = dispatch.probe("compose-ps", [config.instance.name], host_config)
     if not outcome.ok:
         return []
@@ -1722,7 +1723,7 @@ def _compose_down(
     ``--compose-file`` expansion are all internal to the single
     ``core.dispatch`` seam — not constructed here.
     """
-    host_config = HostConfig(host=HostSettings(docker_unprivileged_user=host_user, machinectl_authentication=auth))
+    host_config = minimal_host_config(host_user, auth)
     args = [config.instance.name, "--volumes"] if volumes else [config.instance.name]
     dispatch.invoke("compose-down", args, host_config)
 
@@ -2180,12 +2181,7 @@ def init(
     # wraps both), so ``message`` naturally distinguishes them in the
     # operator-facing detail.
     if not dry_run:
-        probe_host_config = HostConfig(
-            host=HostSettings(
-                docker_unprivileged_user=resolved_user,
-                machinectl_authentication=resolved_auth,
-            )
-        )
+        probe_host_config = minimal_host_config(resolved_user, resolved_auth)
         probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
         if not probe_outcome.ok:
             if probe_outcome.timed_out:

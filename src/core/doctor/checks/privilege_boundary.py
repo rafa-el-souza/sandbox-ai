@@ -12,20 +12,7 @@ import subprocess
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import HostConfig, HostSettings, MachinectlAuth
-
-
-def _host_config(user: str, auth_mode: MachinectlAuth) -> HostConfig:
-    """Adapt a doctor check's ``(user, auth_mode)`` to the ``HostConfig`` that
-    ``core.dispatch.invoke`` requires.
-
-    ``invoke`` reads only ``host.docker_unprivileged_user`` and
-    ``host.machinectl_authentication`` to build the boundary-crossing prefix;
-    this passes the exact two values the check already received through that
-    interface (no boundary re-derivation — the single crossing path stays
-    ``core.dispatch``).
-    """
-    return HostConfig(host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth_mode))
+from core.host_config import MachinectlAuth, minimal_host_config
 
 
 def check_sudo(user: str, distro: str | None) -> CheckResult:
@@ -119,7 +106,7 @@ def check_machinectl_reachable(
     Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang)
     in sudo mode, or polkit dialog/timeout in polkit mode.
     """
-    outcome = dispatch.probe("auth-probe", [], _host_config(user, auth_mode), timeout=10)
+    outcome = dispatch.probe("auth-probe", [], minimal_host_config(user, auth_mode), timeout=10)
     if outcome.timed_out:
         if auth_mode == MachinectlAuth.SUDO:
             timeout_remediation = (
@@ -156,7 +143,7 @@ def check_docker_available(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
-    outcome = dispatch.probe("docker-version", [], _host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("docker-version", [], minimal_host_config(user, auth_mode), timeout=15)
     if outcome.ok and outcome.stdout.strip():
         return CheckResult(
             status="pass",
@@ -176,7 +163,7 @@ def check_docker_rootless(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is running in rootless mode."""
-    outcome = dispatch.probe("docker-info", ["security-options"], _host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("docker-info", ["security-options"], minimal_host_config(user, auth_mode), timeout=15)
     if outcome.ok and "rootless" in outcome.stdout:
         return CheckResult(
             status="pass",
@@ -198,7 +185,7 @@ def check_runsc_registered(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
-    outcome = dispatch.probe("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
     if outcome.ok:
         try:
             runtimes = json.loads(outcome.stdout.strip())
@@ -228,7 +215,7 @@ def check_runsc_runtimeargs(
     Validates defense-in-depth configuration for the gVisor runtime.
     Returns warn (not fail) when args are missing — this is an advisory check.
     """
-    outcome = dispatch.probe("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
     if not outcome.ok:
         return CheckResult(
             status="warn",
@@ -280,7 +267,7 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
     The default (--host-uds=none) is the correct security posture.
     Returns PASS if --host-uds=all is absent, WARN if present.
     """
-    outcome = dispatch.probe("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
     if not outcome.ok:
         return CheckResult(
             status="warn",
@@ -345,7 +332,7 @@ def check_compose_project_name_collision(
         )
     expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
 
-    outcome = dispatch.probe("compose-ls", [], _host_config(host_user, auth_mode), timeout=15)
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, auth_mode), timeout=15)
     if outcome.timed_out:
         return CheckResult(
             status="skip",

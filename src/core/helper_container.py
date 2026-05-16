@@ -30,32 +30,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable
 from core.host_config import (
-    HostConfig,
-    HostSettings,
     MachinectlAuth,
     in_container_gid_for_host_gid,
     in_container_uid_for_host_uid,
+    minimal_host_config,
 )
 
 DEFAULT_HELPER_TIMEOUT_S = 30
-
-
-def _helper_host_config(host_user: str, machinectl_auth: MachinectlAuth) -> HostConfig:
-    """Build the minimal :class:`HostConfig` the helper ops need.
-
-    The helper ops (``helper-chown-files`` / ``helper-mkdir-chown-dirs``) consume
-    only ``host.docker_unprivileged_user`` + ``host.machinectl_authentication``
-    from the resolved config (they resolve no compose state). The public wrapper
-    signatures are pinned by the helper-container spec to take ``host_user`` +
-    ``machinectl_auth`` directly, so the carrier is reconstructed here for the
-    single-boundary :func:`core.dispatch.invoke` entry point.
-    """
-    return HostConfig(
-        host=HostSettings(
-            docker_unprivileged_user=host_user,
-            machinectl_authentication=machinectl_auth,
-        )
-    )
 
 
 def _hardened_docker_run(image: str, parent: str, inner_sh: str) -> str:
@@ -124,7 +105,7 @@ def helper_chown_files(
             str(in_container_gid),
             *file_list,
         ],
-        _helper_host_config(host_user, machinectl_auth),
+        minimal_host_config(host_user, machinectl_auth),
         timeout=timeout,
     )
 
@@ -163,6 +144,6 @@ def helper_mkdir_chown_dirs(
             str(in_container_gid),
             *leaf_list,
         ],
-        _helper_host_config(host_user, machinectl_auth),
+        minimal_host_config(host_user, machinectl_auth),
         timeout=timeout,
     )

@@ -6,7 +6,7 @@ import json
 
 from core import dispatch
 from core.doctor.types import CheckResult
-from core.host_config import HostConfig, HostSettings, MachinectlAuth
+from core.host_config import MachinectlAuth, minimal_host_config
 
 
 def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
@@ -24,9 +24,7 @@ def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth
     stale: list[str] = []
     drift: list[str] = []
 
-    host_config = HostConfig(
-        host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth_mode)
-    )
+    host_config = minimal_host_config(user, auth_mode)
     for key, pin in IMAGE_REGISTRY.items():
         pinned_outcome = dispatch.probe(
             "docker-manifest-inspect", [pin.pinned], host_config, timeout=2
