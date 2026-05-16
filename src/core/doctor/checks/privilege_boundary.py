@@ -12,7 +12,6 @@ import subprocess
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.exceptions import SandboxExecutionError
 from core.host_config import HostConfig, HostSettings, MachinectlAuth
 
 
@@ -120,30 +119,29 @@ def check_machinectl_reachable(
     Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang)
     in sudo mode, or polkit dialog/timeout in polkit mode.
     """
-    try:
-        dispatch.invoke("auth-probe", [], _host_config(user, auth_mode), timeout=10)
-    except SandboxExecutionError as exc:
-        if isinstance(exc.__cause__, subprocess.TimeoutExpired):
-            if auth_mode == MachinectlAuth.SUDO:
-                timeout_remediation = (
-                    "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
-                    f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
-                )
-            else:
-                timeout_remediation = (
-                    "Configure a passwordless polkit rule for org.freedesktop.machine1.shell "
-                    f"granting your user access to '{user}@.host', or switch to sudo mode."
-                )
-            return CheckResult(
-                status="fail",
-                name="machinectl reachable",
-                detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
-                remediation=timeout_remediation,
+    outcome = dispatch.probe("auth-probe", [], _host_config(user, auth_mode), timeout=10)
+    if outcome.timed_out:
+        if auth_mode == MachinectlAuth.SUDO:
+            timeout_remediation = (
+                "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
+                f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
+            )
+        else:
+            timeout_remediation = (
+                "Configure a passwordless polkit rule for org.freedesktop.machine1.shell "
+                f"granting your user access to '{user}@.host', or switch to sudo mode."
             )
         return CheckResult(
             status="fail",
             name="machinectl reachable",
-            detail=f"Shell probe failed: {exc}",
+            detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
+            remediation=timeout_remediation,
+        )
+    if not outcome.ok:
+        return CheckResult(
+            status="fail",
+            name="machinectl reachable",
+            detail="Shell probe failed",
             remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
         )
 
@@ -158,15 +156,12 @@ def check_docker_available(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
-    try:
-        result = dispatch.invoke("docker-version", [], _host_config(user, auth_mode), timeout=15)
-    except SandboxExecutionError:
-        result = None
-    if result is not None and result.stdout.strip():
+    outcome = dispatch.probe("docker-version", [], _host_config(user, auth_mode), timeout=15)
+    if outcome.ok and outcome.stdout.strip():
         return CheckResult(
             status="pass",
             name="Docker available",
-            detail=f"Docker {result.stdout.strip()}",
+            detail=f"Docker {outcome.stdout.strip()}",
         )
     return CheckResult(
         status="fail",
@@ -181,11 +176,8 @@ def check_docker_rootless(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is running in rootless mode."""
-    try:
-        result = dispatch.invoke("docker-info", ["security-options"], _host_config(user, auth_mode), timeout=15)
-    except SandboxExecutionError:
-        result = None
-    if result is not None and "rootless" in result.stdout:
+    outcome = dispatch.probe("docker-info", ["security-options"], _host_config(user, auth_mode), timeout=15)
+    if outcome.ok and "rootless" in outcome.stdout:
         return CheckResult(
             status="pass",
             name="Docker rootless",
@@ -206,13 +198,10 @@ def check_runsc_registered(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
-    try:
-        result = dispatch.invoke("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
-    except SandboxExecutionError:
-        result = None
-    if result is not None:
+    outcome = dispatch.probe("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    if outcome.ok:
         try:
-            runtimes = json.loads(result.stdout.strip())
+            runtimes = json.loads(outcome.stdout.strip())
             if "runsc" in runtimes:
                 return CheckResult(
                     status="pass",
@@ -239,9 +228,8 @@ def check_runsc_runtimeargs(
     Validates defense-in-depth configuration for the gVisor runtime.
     Returns warn (not fail) when args are missing — this is an advisory check.
     """
-    try:
-        result = dispatch.invoke("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
-    except SandboxExecutionError:
+    outcome = dispatch.probe("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    if not outcome.ok:
         return CheckResult(
             status="warn",
             name="runsc runtimeArgs",
@@ -250,7 +238,7 @@ def check_runsc_runtimeargs(
         )
 
     try:
-        runtimes = json.loads(result.stdout.strip())
+        runtimes = json.loads(outcome.stdout.strip())
     except json.JSONDecodeError:
         return CheckResult(
             status="warn",
@@ -292,9 +280,8 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
     The default (--host-uds=none) is the correct security posture.
     Returns PASS if --host-uds=all is absent, WARN if present.
     """
-    try:
-        result = dispatch.invoke("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
-    except SandboxExecutionError:
+    outcome = dispatch.probe("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    if not outcome.ok:
         return CheckResult(
             status="warn",
             name="--host-uds=none",
@@ -303,7 +290,7 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
         )
 
     try:
-        runtimes = json.loads(result.stdout.strip())
+        runtimes = json.loads(outcome.stdout.strip())
     except json.JSONDecodeError:
         return CheckResult(
             status="warn",
@@ -358,24 +345,23 @@ def check_compose_project_name_collision(
         )
     expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
 
-    try:
-        result = dispatch.invoke("compose-ls", [], _host_config(host_user, auth_mode), timeout=15)
-    except SandboxExecutionError as exc:
-        if isinstance(exc.__cause__, subprocess.TimeoutExpired):
-            return CheckResult(
-                status="skip",
-                name="compose project name collision",
-                detail="docker compose ls timed out",
-                category="Privilege Boundary",
-            )
+    outcome = dispatch.probe("compose-ls", [], _host_config(host_user, auth_mode), timeout=15)
+    if outcome.timed_out:
         return CheckResult(
             status="skip",
             name="compose project name collision",
-            detail=f"docker compose ls failed: {exc}",
+            detail="docker compose ls timed out",
+            category="Privilege Boundary",
+        )
+    if not outcome.ok:
+        return CheckResult(
+            status="skip",
+            name="compose project name collision",
+            detail="docker compose ls failed",
             category="Privilege Boundary",
         )
     try:
-        projects = json.loads(result.stdout or "[]")
+        projects = json.loads(outcome.stdout or "[]")
     except json.JSONDecodeError:
         return CheckResult(
             status="skip",

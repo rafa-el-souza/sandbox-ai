@@ -25,6 +25,17 @@ sanctioned execution path and it returns text-mode streams; an earlier draft's
 ``[bytes]`` annotation predated wiring the Executor and was reconciled here
 (noted for the orchestrator as a resolved signature ambiguity). Callers are
 wired in Milestones 5-7.
+
+Milestone 6b status (design "Resolved Design Questions" Q7 + Q8):
+``docker-manifest-inspect``'s validator is now pure ``IMAGE_REGISTRY``
+set-membership (``{pin.pinned}`` union ``{pin.tagged}``, computed once at module
+load) rather than a digest-only regex, so the supply-chain tag-drift call
+routes through the op. A sibling :func:`probe` returns a typed
+:class:`ProbeOutcome` for probe-style callers (doctor checks, the cli
+``auth-probe`` preflight); :func:`invoke`/``Executor`` keep their
+raise-on-failure contract verbatim and are the SINGLE place that crosses the
+boundary — :func:`probe` is the SINGLE place the ``SandboxExecutionError`` /
+``__cause__`` timeout discrimination lives.
 """
 
 from __future__ import annotations
@@ -33,6 +44,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -40,6 +52,7 @@ from importlib.resources import files as _resource_files
 from typing import TYPE_CHECKING
 
 from core.compose import compose_project_name
+from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.helper_container import _hardened_docker_run
 from core.host_config import machinectl_cmd
@@ -47,7 +60,6 @@ from core.hydration import IMAGE_REGISTRY, InstanceConfig
 from core.registry import InstanceRegistry
 
 if TYPE_CHECKING:
-    import subprocess
     from importlib.resources.abc import Traversable
 
     from core.host_config import HostConfig
@@ -135,6 +147,33 @@ class DispatchValidationError(ValueError):
     """
 
 
+@dataclass(frozen=True)
+class ProbeOutcome:
+    """Typed result of a non-raising :func:`probe` call (design Q8).
+
+    Probe-style callers (every doctor check; the cli ``auth-probe`` preflight)
+    must branch on success/failure/timeout and emit ``pass``/``fail``/``skip``
+    verdicts rather than crash on an *expected* failure. :func:`invoke` keeps
+    its raise-on-failure contract verbatim (helper/compose depend on it);
+    :func:`probe` wraps it and encapsulates — in this ONE place — the
+    ``SandboxExecutionError`` catch and the ``__cause__`` timeout
+    discrimination.
+
+    Attributes:
+        ok: ``True`` iff the op completed successfully (exit 0).
+        timed_out: ``True`` iff the failure was a subprocess timeout
+            (``exc.__cause__`` is a :class:`subprocess.TimeoutExpired`);
+            always ``False`` when ``ok``.
+        stdout: The op's captured stdout on success; ``""`` on any failure
+            (the sterile ``Executor`` does not surface stdout through the
+            raised exception).
+    """
+
+    ok: bool
+    timed_out: bool
+    stdout: str
+
+
 # ─── Shared argument-shape predicates ───────────────────────────────────────
 #
 # The instance-name rules mirror ``sandbox init``'s validator
@@ -167,7 +206,20 @@ _DOCKER_INFO_PRESETS: dict[str, str] = {
     "security-options": "{{.SecurityOptions}}",
     "runtimes": "{{json .Runtimes}}",
 }
-_IMAGE_REF_REGEX = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
+
+# Q7 — ``docker-manifest-inspect``'s legitimate argument domain is exactly the
+# set of refs that appear in ``IMAGE_REGISTRY``: every entry's digest ref
+# (``pin.pinned`` — ``<ref>@sha256:<hex>``, the stale-digest-detection call)
+# AND its tag ref (``pin.tagged`` — ``<ref>:<tag>``, the best-effort tag-drift
+# call). Validation is by *set membership*, not by docker-reference grammar:
+# the op exists solely to inspect registry refs, so that set IS its domain (a
+# new registry entry auto-extends it; zero grammar surface to get subtly
+# wrong). Computed ONCE at module load from the already-imported
+# ``IMAGE_REGISTRY`` (see design "Resolved Design Questions" Q7).
+_MANIFEST_INSPECT_REFS: frozenset[str] = frozenset(
+    {pin.pinned for pin in IMAGE_REGISTRY.values()}
+    | {pin.tagged for pin in IMAGE_REGISTRY.values()}
+)
 
 
 def _require_instance_name(value: str) -> None:
@@ -271,10 +323,12 @@ def _validate_docker_manifest_inspect(args: Sequence[str]) -> None:
         raise DispatchValidationError(
             f"docker-manifest-inspect takes exactly one <image-ref> argument; got {list(args)!r}"
         )
-    if not _IMAGE_REF_REGEX.match(args[0]):
+    if args[0] not in _MANIFEST_INSPECT_REFS:
         raise DispatchValidationError(
-            f"image ref {args[0]!r} must match <name>@sha256:<64-hex> "
-            "(a bare digest has no <name>@ prefix)"
+            f"image ref {args[0]!r} is not a member of IMAGE_REGISTRY "
+            "(accepted: each registry entry's pinned <ref>@sha256:<hex> or "
+            "tagged <ref>:<tag> form; a bare digest or arbitrary non-registry "
+            "ref is rejected)"
         )
 
 
@@ -706,6 +760,41 @@ def invoke(
         inner,
     ]
     return Executor().run(cmd, timeout=timeout)
+
+
+def probe(
+    op: Op | str,
+    args: list[str],
+    host_config: HostConfig,
+    *,
+    timeout: float | None = None,
+) -> ProbeOutcome:
+    """Run ``op``/``args`` like :func:`invoke`, but return a typed outcome.
+
+    Q8 entry point for *probe-style* callers (doctor checks; the cli
+    ``auth-probe`` preflight) that must branch on success/failure/timeout and
+    emit ``pass``/``fail``/``skip`` verdicts instead of crashing on an
+    *expected* failure. :func:`invoke` keeps its raise-on-failure contract
+    verbatim (helper/compose are unaffected — zero blast radius on that path);
+    this is the SINGLE place the ``SandboxExecutionError`` catch and the
+    ``exc.__cause__`` timeout discrimination live (the sterile ``Executor``
+    chains the originating :class:`subprocess.TimeoutExpired` via
+    ``raise ... from e``).
+
+    Returns:
+        :class:`ProbeOutcome` — ``ok`` + the success stdout, or
+        ``ok=False`` with ``timed_out`` reflecting whether the underlying
+        failure was a subprocess timeout.
+    """
+    try:
+        cp = invoke(op, args, host_config, timeout=timeout)
+    except SandboxExecutionError as exc:
+        return ProbeOutcome(
+            ok=False,
+            timed_out=isinstance(exc.__cause__, subprocess.TimeoutExpired),
+            stdout="",
+        )
+    return ProbeOutcome(ok=True, timed_out=False, stdout=cp.stdout)
 
 
 # ─── Offline reproducible compile recipe ────────────────────────────────────

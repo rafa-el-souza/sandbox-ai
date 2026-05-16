@@ -60,6 +60,17 @@
     ]
   },
   {
+    "op": "docker-manifest-inspect",
+    "args": [
+      "busybox:1.36.1-musl"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker manifest inspect busybox:1.36.1-musl"
+    ]
+  },
+  {
     "op": "helper-chown-files",
     "args": [
       "/srv/cache",

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
 
 from core import dispatch
 from core.doctor.types import CheckResult
-from core.exceptions import SandboxExecutionError
-from core.host_config import HostConfig, HostSettings, MachinectlAuth, machinectl_cmd
+from core.host_config import HostConfig, HostSettings, MachinectlAuth
 
 
 def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
@@ -29,43 +27,35 @@ def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth
     host_config = HostConfig(
         host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth_mode)
     )
-    mc_prefix = machinectl_cmd(user, auth_mode)
     for key, pin in IMAGE_REGISTRY.items():
-        try:
-            dispatch.invoke("docker-manifest-inspect", [pin.pinned], host_config, timeout=2)
-        except SandboxExecutionError as exc:
-            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
-                return CheckResult(
-                    status="skip",
-                    name="image digests",
-                    detail="Registry unreachable (timeout during manifest inspection)",
-                )
+        pinned_outcome = dispatch.probe(
+            "docker-manifest-inspect", [pin.pinned], host_config, timeout=2
+        )
+        if pinned_outcome.timed_out:
+            return CheckResult(
+                status="skip",
+                name="image digests",
+                detail="Registry unreachable (timeout during manifest inspection)",
+            )
+        if not pinned_outcome.ok:
             stale.append(key)
             continue
 
-        try:
-            tag_result = subprocess.run(
-                [
-                    *mc_prefix,
-                    "/bin/bash",
-                    "-c",
-                    f"docker manifest inspect {pin.tagged}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if tag_result.returncode == 0:
-                try:
-                    manifest = json.loads(tag_result.stdout.strip())
-                    tag_digest = manifest.get("digest", "")
-                    if tag_digest and tag_digest != pin.digest:
-                        drift.append(key)
-                except json.JSONDecodeError:
-                    pass
-        except subprocess.TimeoutExpired:
-            pass  # Tag drift check is best-effort
+        # Best-effort upstream tag-drift detection. Q7: ``pin.tagged`` is a
+        # registry member (``{pin.pinned}`` union ``{pin.tagged}``) so this routes
+        # through the typed op rather than a direct ``machinectl_cmd`` call —
+        # the file no longer imports ``machinectl_cmd`` (Group 8 meta-test).
+        tag_outcome = dispatch.probe(
+            "docker-manifest-inspect", [pin.tagged], host_config, timeout=2
+        )
+        if tag_outcome.ok:
+            try:
+                manifest = json.loads(tag_outcome.stdout.strip())
+                tag_digest = manifest.get("digest", "")
+                if tag_digest and tag_digest != pin.digest:
+                    drift.append(key)
+            except json.JSONDecodeError:
+                pass
 
     if stale:
         return CheckResult(

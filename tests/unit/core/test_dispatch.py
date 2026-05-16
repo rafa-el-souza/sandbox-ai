@@ -24,10 +24,12 @@ from core.dispatch import (
     DispatchValidationError,
     Op,
     OpSpec,
+    ProbeOutcome,
     _expand_compose_wire,
     build_target_argv,
     compile_dispatcher,
     invoke,
+    probe,
     validate_args,
 )
 from core.exceptions import SandboxExecutionError
@@ -262,28 +264,47 @@ class TestValidatorDockerInfo:
 
 
 class TestValidatorDockerManifestInspect:
-    def test_accepts_full_image_ref(self) -> None:
-        validate_args("docker-manifest-inspect", [_BUSYBOX_REF])
+    """Q7: validation is by ``IMAGE_REGISTRY`` set membership, not by grammar.
 
-    def test_accepts_pathish_image_ref(self) -> None:
+    The op's legitimate domain is exactly ``{pin.pinned}`` union ``{pin.tagged}`` over
+    ``IMAGE_REGISTRY`` (spec "Per-Op Argument Validation" + scenarios).
+    """
+
+    def test_accepts_registry_pinned_ref(self) -> None:
+        # Spec scenario: "Validator accepts a registry pinned-digest ref".
         validate_args(
-            "docker-manifest-inspect",
-            ["registry.example.io/lib/golang@sha256:" + "a" * 64],
+            "docker-manifest-inspect", [IMAGE_REGISTRY["busybox_musl"].pinned]
         )
 
+    def test_accepts_registry_tagged_ref(self) -> None:
+        # Spec scenario: "Validator accepts a registry tag ref (tag-drift probe
+        # path)" — the supply_chain.py tag-drift call now routes through the op.
+        validate_args(
+            "docker-manifest-inspect", [IMAGE_REGISTRY["busybox_musl"].tagged]
+        )
+
+    def test_accepts_every_registry_pinned_and_tagged(self) -> None:
+        for pin in IMAGE_REGISTRY.values():
+            validate_args("docker-manifest-inspect", [pin.pinned])
+            validate_args("docker-manifest-inspect", [pin.tagged])
+
     def test_rejects_bare_digest(self) -> None:
-        # Spec scenario: "Validator rejects bare-digest arg to
-        # docker-manifest-inspect"
-        with pytest.raises(DispatchValidationError, match=r"<name>@"):
+        # Spec scenario: "Validator rejects a ref not in IMAGE_REGISTRY (incl.
+        # bare digest)" — a bare ``sha256:<hex>`` is not a registry member.
+        with pytest.raises(DispatchValidationError, match="IMAGE_REGISTRY"):
             validate_args("docker-manifest-inspect", ["sha256:" + "a" * 64])
 
-    def test_rejects_short_digest(self) -> None:
-        with pytest.raises(DispatchValidationError):
-            validate_args("docker-manifest-inspect", ["busybox@sha256:" + "a" * 32])
+    def test_rejects_arbitrary_non_registry_digest_ref(self) -> None:
+        # Spec scenario: "Validator rejects a ref not in IMAGE_REGISTRY" — an
+        # arbitrary ``name@sha256:<hex>`` not present in the registry.
+        with pytest.raises(DispatchValidationError, match="IMAGE_REGISTRY"):
+            validate_args(
+                "docker-manifest-inspect", ["evil/image@sha256:" + "a" * 64]
+            )
 
-    def test_rejects_uppercase_hex(self) -> None:
-        with pytest.raises(DispatchValidationError):
-            validate_args("docker-manifest-inspect", ["busybox@sha256:" + "A" * 64])
+    def test_rejects_non_registry_tag_ref(self) -> None:
+        with pytest.raises(DispatchValidationError, match="IMAGE_REGISTRY"):
+            validate_args("docker-manifest-inspect", ["busybox:latest"])
 
     def test_rejects_zero_args(self) -> None:
         with pytest.raises(DispatchValidationError, match="exactly one"):
@@ -528,6 +549,15 @@ class TestTargetArgvFixture:
         assert build_target_argv(
             "docker-manifest-inspect", [_BUSYBOX_REF], host_config
         ) == ["/bin/bash", "-c", f"docker manifest inspect {_BUSYBOX_REF}"]
+
+    def test_docker_manifest_inspect_tagged_argv(self, host_config: HostConfig) -> None:
+        # Q7: the tag-drift probe path (``pin.tagged``) builds the same
+        # ``docker manifest inspect <ref>`` shape (matches the ``.tagged``
+        # fixture row added in 6b.2).
+        tagged = IMAGE_REGISTRY["busybox_musl"].tagged
+        assert build_target_argv(
+            "docker-manifest-inspect", [tagged], host_config
+        ) == ["/bin/bash", "-c", f"docker manifest inspect {tagged}"]
 
     def test_build_target_argv_accepts_op_enum(self, host_config: HostConfig) -> None:
         assert build_target_argv(Op.COMPOSE_LS, [], host_config) == [
@@ -957,6 +987,77 @@ class TestInvoke:
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         assert invoke(Op.AUTH_PROBE, [], self._fake_hc()).returncode == 0
         assert invoke("auth-probe", [], self._fake_hc()).returncode == 0
+
+
+# ─── probe(): typed non-raising wrapper (Q8) ────────────────────────────────
+
+
+class TestProbeOutcome:
+    def test_is_frozen(self) -> None:
+        import dataclasses
+
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout="x")
+        field_name = "ok"
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            # Frozen dataclass — the runtime setattr path is rejected. The
+            # attribute name is a variable so the assertion exercises the real
+            # frozen guard rather than a statically-rewritable attribute.
+            setattr(outcome, field_name, False)
+
+
+class TestProbe:
+    def _fake_hc(self) -> HostConfig:
+        from core.host_config import MachinectlAuth
+
+        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+
+    def test_success_returns_ok_with_stdout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, "24.0.7\n", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        out = probe("docker-version", [], self._fake_hc(), timeout=15)
+        assert out == ProbeOutcome(ok=True, timed_out=False, stdout="24.0.7\n")
+
+    def test_non_timeout_failure_returns_not_ok_not_timed_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> object:
+            err = SandboxExecutionError("[FATAL] boom")
+            err.__cause__ = subprocess.CalledProcessError(returncode=1, cmd="x")
+            raise err
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        out = probe("auth-probe", [], self._fake_hc())
+        assert out == ProbeOutcome(ok=False, timed_out=False, stdout="")
+
+    def test_timeout_failure_sets_timed_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> object:
+            err = SandboxExecutionError("[FATAL] timed out")
+            err.__cause__ = subprocess.TimeoutExpired(cmd="dispatch", timeout=10)
+            raise err
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        out = probe("auth-probe", [], self._fake_hc(), timeout=10)
+        assert out == ProbeOutcome(ok=False, timed_out=True, stdout="")
+
+    def test_validation_error_propagates_not_swallowed(self) -> None:
+        # probe() only catches SandboxExecutionError; a pre-boundary
+        # DispatchValidationError still raises (it is not an outcome).
+        with pytest.raises(DispatchValidationError):
+            probe("docker-info", ["bogus-preset"], self._fake_hc())
 
 
 # ─── compile_dispatcher(): offline reproducible compile recipe ──────────────
