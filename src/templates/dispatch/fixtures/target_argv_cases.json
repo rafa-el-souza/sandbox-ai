@@ -1,0 +1,93 @@
+[
+  {
+    "op": "auth-probe",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "echo ok"
+    ]
+  },
+  {
+    "op": "compose-ls",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker compose ls --format json --all"
+    ]
+  },
+  {
+    "op": "docker-version",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker version --format '{{.Server.Version}}'"
+    ]
+  },
+  {
+    "op": "docker-info",
+    "args": [
+      "security-options"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker info --format '{{.SecurityOptions}}'"
+    ]
+  },
+  {
+    "op": "docker-info",
+    "args": [
+      "runtimes"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker info --format '{{json .Runtimes}}'"
+    ]
+  },
+  {
+    "op": "docker-manifest-inspect",
+    "args": [
+      "busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker manifest inspect busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
+    ]
+  },
+  {
+    "op": "helper-chown-files",
+    "args": [
+      "/srv/cache",
+      "0644",
+      "1000",
+      "1000",
+      "a.log",
+      "b.log"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker run --rm --runtime=runc --network=none --read-only --tmpfs /tmp --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v /srv/cache:/p busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 sh -c 'set -e; for f in a.log b.log; do cp /p/\"$f\" /tmp/\"$f\" && unlink /p/\"$f\" && cp /tmp/\"$f\" /p/\"$f\" && chmod 0644 /p/\"$f\" && chown 1000:1000 /p/\"$f\"; done'"
+    ]
+  },
+  {
+    "op": "helper-mkdir-chown-dirs",
+    "args": [
+      "/srv/cache",
+      "1000",
+      "1000",
+      "logs",
+      "cache"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker run --rm --runtime=runc --network=none --read-only --tmpfs /tmp --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v /srv/cache:/p busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 sh -c 'set -e; for d in logs cache; do mkdir -p /p/\"$d\" && chown 1000:1000 /p/\"$d\"; done'"
+    ]
+  }
+]
