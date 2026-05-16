@@ -1920,7 +1920,7 @@ class TestComposeDownDirect:
         from core.host_config import MachinectlAuth
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
-            _compose_down("/inst", "myproj", "sandbox", self._config(), volumes=False)
+            _compose_down("sandbox", self._config(), volumes=False)
             (op, args, host_config), kwargs = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t"]
@@ -1933,9 +1933,7 @@ class TestComposeDownDirect:
         from core.host_config import MachinectlAuth
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
-            _compose_down(
-                "/inst", "myproj", "sandbox", self._config(), volumes=True, auth=MachinectlAuth.POLKIT
-            )
+            _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.POLKIT)
             (op, args, host_config), kwargs = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t", "--volumes"]
@@ -1951,7 +1949,7 @@ class TestComposeDownDirect:
             patch("cli.main.dispatch.invoke", side_effect=SandboxExecutionError("boom")),
             pytest.raises(SandboxExecutionError),
         ):
-            _compose_down("/inst", "myproj", "sandbox", self._config(), volumes=False)
+            _compose_down("sandbox", self._config(), volumes=False)
 
 
 class TestRevokeACLsDirect:
@@ -3549,7 +3547,7 @@ class TestContainerStatus:
         with patch(
             "cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout=ndjson)
         ) as mock_probe:
-            containers = _container_status(str(tmp_path), "t", "s", self._config())
+            containers = _container_status(str(tmp_path), "s", self._config())
 
         (op, args, _host_config), _kwargs = mock_probe.call_args
         assert op == "compose-ps"
@@ -3570,7 +3568,7 @@ class TestContainerStatus:
         compose.write_text("version: '3'")
 
         with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout="")):
-            containers = _container_status(str(tmp_path), "t", "s", self._config())
+            containers = _container_status(str(tmp_path), "s", self._config())
 
         assert containers == []
 
@@ -3584,7 +3582,7 @@ class TestContainerStatus:
         compose.write_text("version: '3'")
 
         with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=False)):
-            containers = _container_status(str(tmp_path), "t", "s", self._config())
+            containers = _container_status(str(tmp_path), "s", self._config())
 
         assert containers == []
 
@@ -5174,7 +5172,7 @@ class TestContainerStatusEdgeCases:
                 "components_db_postgres": {"enabled": False},
             }
         )
-        result = _container_status("/nonexistent/dir", "t", "s", config)
+        result = _container_status("/nonexistent/dir", "s", config)
         assert result == []
 
     def test_blank_and_malformed_ndjson_skipped(self, tmp_path: Path) -> None:
@@ -5209,7 +5207,7 @@ class TestContainerStatusEdgeCases:
             "cli.main.dispatch.probe",
             return_value=ProbeOutcome(ok=True, timed_out=False, stdout=stdout, message=""),
         ):
-            containers = _container_status(str(tmp_path), "t", "s", config)
+            containers = _container_status(str(tmp_path), "s", config)
             assert len(containers) == 1
             assert containers[0].name == "c1"
 
@@ -6020,7 +6018,6 @@ class TestPolkitEndToEnd:
 
         def fake_container_status(
             instance_dir: str,
-            name: str,
             host_user: str,
             config: object,
             auth: MachinectlAuth,

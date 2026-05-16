@@ -283,7 +283,6 @@ def _load_config(instance_dir: str) -> InstanceConfig:
 
 def _container_status(
     instance_dir: str,
-    project_name: str,
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
@@ -351,7 +350,7 @@ def _warm_check(
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, project_name, host_user, config, auth))
+    return bool(_container_status(instance_dir, host_user, config, auth))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -1702,8 +1701,6 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
 
 
 def _compose_down(
-    instance_dir: str,
-    project_name: str,
     host_user: str,
     config: InstanceConfig,
     *,
@@ -1783,7 +1780,7 @@ def _phase_stop_teardown(
     compose-down (stop propagates, destroy demotes to a warning).
     """
     warnings: list[str] = []
-    _compose_down(instance_dir, project_name, host_user, config, volumes=volumes, auth=auth)
+    _compose_down(host_user, config, volumes=volumes, auth=auth)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
     warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
     return warnings
@@ -2759,7 +2756,7 @@ def destroy(
 
         # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(instance_dir, project_name, host_user, config, volumes=False, auth=auth)
+            _compose_down(host_user, config, volumes=False, auth=auth)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
@@ -2990,13 +2987,12 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     """Render the per-instance detailed panel + workspaces + containers."""
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
 
     # Container status
-    containers = _container_status(instance_dir, project_name, host_user, config, auth)
+    containers = _container_status(instance_dir, host_user, config, auth)
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
