@@ -15,11 +15,16 @@ it trusts the validation performed here (design D4). Both sides construct the
 same target argv from a shared JSON fixture so they stay in lockstep
 (``src/templates/dispatch/fixtures/target_argv_cases.json``).
 
-Milestone 2 status: the :class:`Op` enum + :class:`OpSpec` wiring, the per-op
-validators, and the per-op target-argv builders are real. :func:`invoke` is
-still a scaffold stub (its body lands in a later milestone); its *signature*
-is load-bearing for Milestones 2-7 and is fixed deliberately. No caller is
-wired this milestone.
+Milestone 3 status: the :class:`Op` enum + :class:`OpSpec` wiring, the per-op
+validators, and the per-op target-argv builders are real, and :func:`invoke`
+has its real body (validate -> Q6 compose wire-expansion / verbatim
+deterministic args -> ``machinectl_cmd`` + ``bash -c`` crossing -> sterile
+:class:`core.executor.Executor` run). The return type is
+``subprocess.CompletedProcess[str]`` — the sterile ``Executor`` is the only
+sanctioned execution path and it returns text-mode streams; an earlier draft's
+``[bytes]`` annotation predated wiring the Executor and was reconciled here
+(noted for the orchestrator as a resolved signature ambiguity). Callers are
+wired in Milestones 5-7.
 """
 
 from __future__ import annotations
@@ -33,7 +38,9 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from core.compose import compose_project_name
+from core.executor import Executor
 from core.helper_container import _hardened_docker_run
+from core.host_config import machinectl_cmd
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
 from core.registry import InstanceRegistry
 
@@ -41,6 +48,8 @@ if TYPE_CHECKING:
     import subprocess
 
     from core.host_config import HostConfig
+
+_DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 
 class Op(StrEnum):
@@ -288,8 +297,16 @@ def _validate_helper_mkdir_chown_dirs(args: Sequence[str]) -> None:
 # is mirrored here.
 
 
-def _resolve_compose_state(inst: str) -> tuple[str, str, str]:
-    """Return ``(project_name, compose_files_str, env_file)`` for ``inst``.
+def _resolve_compose_state(inst: str) -> tuple[str, list[str], str]:
+    """Return ``(project_name, compose_file_paths, env_file)`` for ``inst``.
+
+    This is the single operator-side compose-state resolver (anti-hack rule 4 —
+    no parallel resolver exists). It returns the compose-file paths as a list
+    (not a pre-joined ``-f f1 -f f2`` string) so the Q6 wire-expansion producer
+    (:func:`_expand_compose_wire`) can emit one ``--compose-file`` flag per
+    path; the pure wire-keyed builder (:func:`_build_compose_wire_argv`) is the
+    only place ``-f`` joining happens, so the Python builder and the Go
+    assembly stay byte-identical via the shared fixture.
 
     Raises:
         DispatchValidationError: the instance is not registered.
@@ -299,14 +316,152 @@ def _resolve_compose_state(inst: str) -> tuple[str, str, str]:
         raise DispatchValidationError(f"no sandbox instance named {inst!r} is registered")
     instance_dir = entry.instance_dir
     config = InstanceConfig.from_toml(os.path.join(instance_dir, "sandbox.toml"))
-    files = ["-f", os.path.join(instance_dir, "docker", "compose.yml")]
+    files = [os.path.join(instance_dir, "docker", "compose.yml")]
     if config.components_db_postgres.enabled:
-        files.extend(["-f", os.path.join(instance_dir, "docker", "extras", "db-postgres.yml")])
+        files.append(os.path.join(instance_dir, "docker", "extras", "db-postgres.yml"))
     if config.components.mcp_firecrawl:
-        files.extend(["-f", os.path.join(instance_dir, "docker", "extras", "mcp-firecrawl.yml")])
+        files.append(os.path.join(instance_dir, "docker", "extras", "mcp-firecrawl.yml"))
     project_name = compose_project_name(inst)
     env_file = os.path.join(instance_dir, ".sandbox.env")
-    return project_name, " ".join(files), env_file
+    return project_name, files, env_file
+
+
+# ─── Q6 compose-op wire expansion + pure wire-keyed builder ─────────────────
+#
+# Q6 splits the compose path so compose target-argv is a *pure function of the
+# wire inputs* (and therefore lives in the one shared fixture alongside the
+# seven deterministic ops):
+#
+#   (a) ``_expand_compose_wire`` — the wire-expansion *producer*. It takes the
+#       typed args ``[<inst>]`` (+ ``["--volumes"]`` for a compose-down
+#       destroy), resolves dev-context state via the single resolver
+#       ``_resolve_compose_state``, and emits the named-flag wire form
+#       ``[<inst>, "--project", P, "--env-file", E, "--compose-file", f1, …]``
+#       (+ trailing ``"--volumes"``). Used only by :func:`invoke`.
+#   (b) ``_build_compose_wire_argv`` — the *pure* wire-keyed target-argv
+#       builder. It parses the named flags (no state resolution) and assembles
+#       the bash string with an op-hardcoded verb. This is what
+#       ``target_argv_cases.json`` pins for the compose ops and what the Go
+#       ``main_test.go`` must match byte-for-byte.
+
+# The compose verb is op-hardcoded HERE (and identically in Go) — it is NEVER
+# taken from the wire. ``--volumes`` only flips compose-down's verb to
+# ``down -v``; it can never select a different docker compose subcommand.
+_COMPOSE_VERB: dict[str, str] = {
+    "compose-up": "up -d --build --wait",
+    "compose-down": "down",
+    "compose-ps": "ps --format json",
+}
+
+
+def _expand_compose_wire(op: str, args: Sequence[str]) -> list[str]:
+    """Expand typed compose args to the Q6 named-flag wire form.
+
+    ``args`` is the validated typed form: ``[<inst>]`` for compose-up/compose-ps,
+    ``[<inst>]`` or ``[<inst>, "--volumes"]`` for compose-down. Returns
+    ``[<inst>, "--project", P, "--env-file", E, "--compose-file", f1, …]`` with a
+    trailing ``"--volumes"`` iff the compose-down destroy path requested it.
+    """
+    inst = args[0]
+    project_name, compose_files, env_file = _resolve_compose_state(inst)
+    wire = [inst, "--project", project_name, "--env-file", env_file]
+    for f in compose_files:
+        wire.extend(["--compose-file", f])
+    if op == Op.COMPOSE_DOWN.value and len(args) == 2:
+        wire.append("--volumes")
+    return wire
+
+
+def _parse_compose_wire(op: str, wire: Sequence[str]) -> tuple[str, str, list[str], bool]:
+    """Parse the post-expansion compose wire form (mirrors the Go parser).
+
+    Returns ``(project, env_file, compose_files, volumes)``. Raises
+    :class:`DispatchValidationError` for a missing/duplicated/illegal flag — the
+    same rejections the Go binary performs (kept in lockstep deliberately so the
+    fixture exercises one shared shape).
+    """
+    if not wire:
+        raise DispatchValidationError(f"{op}: missing <instance> in wire form")
+    rest = list(wire[1:])
+    project: str | None = None
+    env_file: str | None = None
+    compose_files: list[str] = []
+    volumes = False
+    i = 0
+    while i < len(rest):
+        flag = rest[i]
+        if flag == "--volumes":
+            if op != Op.COMPOSE_DOWN.value:
+                raise DispatchValidationError(f"{op}: --volumes is only valid for compose-down")
+            if volumes:
+                raise DispatchValidationError(f"{op}: --volumes given more than once")
+            volumes = True
+            i += 1
+            continue
+        if i + 1 >= len(rest):
+            raise DispatchValidationError(f"{op}: flag {flag!r} is missing its value")
+        value = rest[i + 1]
+        if flag == "--project":
+            if project is not None:
+                raise DispatchValidationError(f"{op}: --project given more than once")
+            project = value
+        elif flag == "--env-file":
+            if env_file is not None:
+                raise DispatchValidationError(f"{op}: --env-file given more than once")
+            env_file = value
+        elif flag == "--compose-file":
+            compose_files.append(value)
+        else:
+            raise DispatchValidationError(f"{op}: unrecognized flag {flag!r}")
+        i += 2
+    if project is None:
+        raise DispatchValidationError(f"{op}: --project is required exactly once")
+    if env_file is None:
+        raise DispatchValidationError(f"{op}: --env-file is required exactly once")
+    if not compose_files:
+        raise DispatchValidationError(f"{op}: at least one --compose-file is required")
+    return project, env_file, compose_files, volumes
+
+
+def _build_compose_wire_argv(op: str, wire: Sequence[str]) -> list[str]:
+    """Pure wire-keyed compose target-argv builder (byte-identical to Go).
+
+    Consumes the post-expansion wire form (``<inst> --project P --env-file E
+    --compose-file f1 …``) and assembles the ``bash -c`` string with the
+    op-hardcoded verb. No dev-context state is resolved here — that already
+    happened operator-side in :func:`_expand_compose_wire`.
+    """
+    project, env_file, compose_files, volumes = _parse_compose_wire(op, wire)
+    files_str = " ".join(f"-f {f}" for f in compose_files)
+    verb = _COMPOSE_VERB[op]
+    if op == Op.COMPOSE_DOWN.value and volumes:
+        verb = "down -v"
+    env_prefix = (
+        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={project}"
+    )
+    if op == Op.COMPOSE_PS.value:
+        inner = (
+            f"{env_prefix} docker compose {files_str} "
+            f"--env-file {env_file} --ansi never {verb}"
+        )
+    else:
+        inner = (
+            f"{env_prefix} docker compose {files_str} "
+            f"--ansi never --env-file {env_file} {verb}"
+        )
+    return _bash_c(inner)
+
+
+def _build_compose_up(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    return _build_compose_wire_argv(Op.COMPOSE_UP.value, args)
+
+
+def _build_compose_down(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    return _build_compose_wire_argv(Op.COMPOSE_DOWN.value, args)
+
+
+def _build_compose_ps(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    return _build_compose_wire_argv(Op.COMPOSE_PS.value, args)
 
 
 # ─── Per-op target-argv builders ────────────────────────────────────────────
@@ -335,35 +490,6 @@ def _build_docker_info(args: Sequence[str], host_config: HostConfig) -> list[str
 
 def _build_docker_manifest_inspect(args: Sequence[str], host_config: HostConfig) -> list[str]:
     return _bash_c(f"docker manifest inspect {args[0]}")
-
-
-def _build_compose_up(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    project_name, files_str, env_file = _resolve_compose_state(args[0])
-    return _bash_c(
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
-        f"--ansi never --env-file {env_file} up -d --build --wait"
-    )
-
-
-def _build_compose_down(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    project_name, files_str, env_file = _resolve_compose_state(args[0])
-    v_flag = " -v" if len(args) == 2 else ""
-    return _bash_c(
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
-        f"--ansi never --env-file {env_file} down{v_flag}"
-    )
-
-
-def _build_compose_ps(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    project_name, files_str, env_file = _resolve_compose_state(args[0])
-    return _bash_c(
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={project_name} "
-        f"docker compose {files_str} "
-        f"--env-file {env_file} "
-        f"--ansi never ps --format json"
-    )
 
 
 def _build_helper_chown_files(args: Sequence[str], host_config: HostConfig) -> list[str]:
@@ -501,7 +627,7 @@ def invoke(
     host_config: HostConfig,
     *,
     timeout: float | None = None,
-) -> subprocess.CompletedProcess[bytes]:
+) -> subprocess.CompletedProcess[str]:
     """Validate ``op``/``args`` and run the dispatcher across the privilege boundary.
 
     Contract (load-bearing — Milestones 2-7 depend on this signature):
@@ -519,16 +645,43 @@ def invoke(
     - ``timeout``: keyword-only; forwarded to the underlying subprocess. ``None``
       (the default) means no timeout.
 
-    Returns the completed :class:`subprocess.CompletedProcess` (bytes streams)
-    of the boundary-crossing invocation.
+    Returns the completed :class:`subprocess.CompletedProcess` of the
+    boundary-crossing invocation (produced by the sterile
+    :class:`core.executor.Executor`).
 
-    Scaffold status: this body raises :class:`NotImplementedError`. The real
-    implementation (validate -> build target argv -> wrap in the
-    ``machinectl_cmd`` + ``bash -c`` shape -> run) lands in a later milestone;
-    no caller is wired this milestone.
+    Flow (Q6):
+
+    1. Resolve + validate the *typed* args (the unchanged "Per-Op Argument
+       Validation" surface).
+    2. For the three compose ops, expand the typed args to the Q6 named-flag
+       wire form via :func:`_expand_compose_wire` (the single operator-side
+       resolver ``_resolve_compose_state``). The deterministic ops pass their
+       typed args through verbatim.
+    3. Cross the privilege boundary in the backward-compatible shape
+       ``[*machinectl_cmd(user, auth), "/bin/bash", "-c",
+       "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` (design D2 — the
+       outer argv shape is preserved so operators' existing sudoers rule still
+       matches).
+
+    The ``--check`` short-circuit is purely a Go concern (it never reaches
+    Python); :func:`invoke` does not special-case it.
     """
-    raise NotImplementedError(
-        "core.dispatch.invoke is a scaffold stub; the validate->build->run body "
-        f"lands in a later milestone (op={op!r}, args={args!r}, "
-        f"host_config={host_config!r}, timeout={timeout!r})"
+    resolved = Op(op)
+    op_value = resolved.value
+    validate_args(resolved, args)
+    wire_args = (
+        _expand_compose_wire(op_value, args)
+        if op_value in _COMPOSE_VERB
+        else list(args)
     )
+    inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+    cmd = [
+        *machinectl_cmd(
+            host_config.host.docker_unprivileged_user,
+            host_config.host.machinectl_authentication,
+        ),
+        "/bin/bash",
+        "-c",
+        inner,
+    ]
+    return Executor().run(cmd, timeout=timeout)

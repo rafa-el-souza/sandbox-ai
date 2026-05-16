@@ -89,5 +89,93 @@
       "-c",
       "docker run --rm --runtime=runc --network=none --read-only --tmpfs /tmp --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v /srv/cache:/p busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 sh -c 'set -e; for d in logs cache; do mkdir -p /p/\"$d\" && chown 1000:1000 /p/\"$d\"; done'"
     ]
+  },
+  {
+    "op": "compose-up",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env up -d --build --wait"
+    ]
+  },
+  {
+    "op": "compose-up",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/extras/db-postgres.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml -f /home/op/.sandbox-ai/instances/myinst/docker/extras/db-postgres.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env up -d --build --wait"
+    ]
+  },
+  {
+    "op": "compose-down",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env down"
+    ]
+  },
+  {
+    "op": "compose-down",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+      "--volumes"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env down -v"
+    ]
+  },
+  {
+    "op": "compose-ps",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env --ansi never ps --format json"
+    ]
   }
 ]

@@ -24,6 +24,7 @@ from core.dispatch import (
     DispatchValidationError,
     Op,
     OpSpec,
+    _expand_compose_wire,
     build_target_argv,
     invoke,
     validate_args,
@@ -136,19 +137,11 @@ class TestInvokeSignature:
         assert timeout.default is None
 
     def test_invoke_return_annotation_is_completed_process(self) -> None:
+        # M3 reconciled the M1-era ``[bytes]`` placeholder: the sterile
+        # ``core.executor.Executor`` (the only sanctioned execution path)
+        # returns text-mode streams, so the annotation is ``[str]``.
         sig = inspect.signature(invoke)
-        assert sig.return_annotation == "subprocess.CompletedProcess[bytes]"
-
-    def test_invoke_raises_not_implemented(self) -> None:
-        # Milestone 2 does NOT implement invoke()'s body; the M1 contract holds.
-        hc = cast("HostConfig", object())
-        with pytest.raises(NotImplementedError, match="scaffold stub"):
-            invoke(Op.AUTH_PROBE, [], hc, timeout=5.0)
-
-    def test_invoke_accepts_str_op_form(self) -> None:
-        hc = cast("HostConfig", object())
-        with pytest.raises(NotImplementedError):
-            invoke("compose-up", ["inst"], hc)
+        assert sig.return_annotation == "subprocess.CompletedProcess[str]"
 
 
 # ─── Per-Op Argument Validation ─────────────────────────────────────────────
@@ -417,19 +410,16 @@ class TestValidateArgsUnknownOp:
 
 
 class TestTargetArgvFixture:
-    def test_fixture_covers_all_deterministic_builder_ops(self) -> None:
-        # The fixture pins the args-pure ops (compose-* depend on runtime
-        # registry/dev-username state and are exercised dynamically below).
+    def test_fixture_covers_all_ten_ops(self) -> None:
+        # Q6 (3.3b): the fixture is keyed on each op's WIRE form. For the seven
+        # deterministic ops that is the typed args; for the three compose ops
+        # it is the post-expansion named-flag form. Keyed this way every op's
+        # target argv is a pure function of its wire inputs, so all ten ops
+        # live in the one shared fixture and the Python<->Go lockstep covers
+        # compose. (The operator-side <inst>-><operands> resolution stays
+        # dynamically tested below — it depends on a seeded instance.)
         ops_in_fixture = {cast("str", c["op"]) for c in _load_fixture()}
-        assert ops_in_fixture == {
-            "auth-probe",
-            "compose-ls",
-            "docker-version",
-            "docker-info",
-            "docker-manifest-inspect",
-            "helper-chown-files",
-            "helper-mkdir-chown-dirs",
-        }
+        assert ops_in_fixture == EXPECTED_OP_VALUES
 
     @pytest.mark.parametrize("case", _load_fixture(), ids=lambda c: f"{c['op']}-{c['args']}")
     def test_builder_matches_fixture(
@@ -577,18 +567,193 @@ def _seed_instance(home: Path, inst: str, *, pg: bool = False, fc: bool = False)
     )
 
 
-class TestComposeBuilders:
-    def test_compose_up_byte_faithful(
+# ─── Q6: pure wire-keyed compose builder (byte-identical to Go) ─────────────
+
+
+_WIRE = [
+    "myinst",
+    "--project",
+    "op-myinst",
+    "--env-file",
+    "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+    "--compose-file",
+    "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+]
+
+
+class TestComposeWireBuilder:
+    """The compose ``build_target_argv`` is now a PURE function of the
+    post-expansion wire form (Q6). It is fully covered by the shared-fixture
+    parametrized test above; these add the spec-scenario byte-faithfulness
+    assertions and the wire-flag parse-rejection paths the Go binary mirrors.
+    """
+
+    def test_compose_up_wire_byte_faithful(self, host_config: HostConfig) -> None:
+        assert build_target_argv("compose-up", _WIRE, host_config) == [
+            "/bin/bash",
+            "-c",
+            "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
+            "COMPOSE_PROJECT_NAME=op-myinst docker compose "
+            "-f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml "
+            "--ansi never --env-file "
+            "/home/op/.sandbox-ai/instances/myinst/.sandbox.env up -d --build --wait",
+        ]
+
+    def test_compose_down_no_volumes(self, host_config: HostConfig) -> None:
+        argv = build_target_argv("compose-down", _WIRE, host_config)
+        assert argv[2].endswith(" down")
+        assert " -v" not in argv[2]
+
+    def test_compose_down_with_volumes_verb_is_down_dash_v(
+        self, host_config: HostConfig
+    ) -> None:
+        # Spec scenario: "compose-down destroy carries --volumes in the wire
+        # form" -> op-hardcoded verb becomes ``down -v``.
+        argv = build_target_argv("compose-down", [*_WIRE, "--volumes"], host_config)
+        assert argv[2].endswith(" down -v")
+
+    def test_compose_ps_wire_byte_faithful(self, host_config: HostConfig) -> None:
+        argv = build_target_argv("compose-ps", _WIRE, host_config)
+        assert argv[2].endswith(
+            "--env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env "
+            "--ansi never ps --format json"
+        )
+
+    def test_multiple_compose_files_preserve_order(self, host_config: HostConfig) -> None:
+        wire = [
+            "myinst",
+            "--project",
+            "op-myinst",
+            "--env-file",
+            "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+            "--compose-file",
+            "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+            "--compose-file",
+            "/home/op/.sandbox-ai/instances/myinst/docker/extras/db-postgres.yml",
+        ]
+        argv = build_target_argv("compose-up", wire, host_config)
+        assert (
+            "-f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml "
+            "-f /home/op/.sandbox-ai/instances/myinst/docker/extras/db-postgres.yml"
+        ) in argv[2]
+
+    def test_volumes_rejected_for_compose_up(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="only valid for compose-down"):
+            build_target_argv("compose-up", [*_WIRE, "--volumes"], host_config)
+
+    def test_unrecognized_flag_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="unrecognized flag"):
+            build_target_argv(
+                "compose-up", [*_WIRE, "--runtime", "evil"], host_config
+            )
+
+    def test_duplicate_project_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="--project given more than once"):
+            build_target_argv(
+                "compose-up", [*_WIRE, "--project", "op-myinst"], host_config
+            )
+
+    def test_duplicate_env_file_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="--env-file given more than once"):
+            build_target_argv(
+                "compose-up", [*_WIRE, "--env-file", "/x"], host_config
+            )
+
+    def test_duplicate_volumes_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="more than once"):
+            build_target_argv(
+                "compose-down",
+                [*_WIRE, "--volumes", "--volumes"],
+                host_config,
+            )
+
+    def test_missing_project_rejected(self, host_config: HostConfig) -> None:
+        wire = [
+            "myinst",
+            "--env-file",
+            "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+            "--compose-file",
+            "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+        ]
+        with pytest.raises(DispatchValidationError, match="--project is required"):
+            build_target_argv("compose-up", wire, host_config)
+
+    def test_missing_env_file_rejected(self, host_config: HostConfig) -> None:
+        wire = [
+            "myinst",
+            "--project",
+            "op-myinst",
+            "--compose-file",
+            "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+        ]
+        with pytest.raises(DispatchValidationError, match="--env-file is required"):
+            build_target_argv("compose-up", wire, host_config)
+
+    def test_missing_compose_file_rejected(self, host_config: HostConfig) -> None:
+        wire = [
+            "myinst",
+            "--project",
+            "op-myinst",
+            "--env-file",
+            "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+        ]
+        with pytest.raises(DispatchValidationError, match="at least one --compose-file"):
+            build_target_argv("compose-up", wire, host_config)
+
+    def test_flag_missing_value_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="missing its value"):
+            build_target_argv(
+                "compose-up",
+                ["myinst", "--project", "op-myinst", "--compose-file"],
+                host_config,
+            )
+
+    def test_empty_wire_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="missing <instance>"):
+            build_target_argv("compose-up", [], host_config)
+
+
+# ─── Q6: operator-side wire-expansion producer (seeded instance) ────────────
+
+
+class TestComposeWireExpansion:
+    """``_expand_compose_wire`` is the single operator-side resolver path —
+    it reuses ``_resolve_compose_state`` (no parallel resolver). It depends on
+    a seeded registered instance and is therefore tested dynamically (not via
+    the static fixture), per spec "Target Argv Construction Per Op".
+    """
+
+    def test_expands_compose_up_to_named_flag_form(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
+        wire = _expand_compose_wire("compose-up", ["demo"])
+        assert wire == [
+            "demo",
+            "--project",
+            proj,
+            "--env-file",
+            str(inst_dir / ".sandbox.env"),
+            "--compose-file",
+            str(inst_dir / "docker" / "compose.yml"),
+        ]
+
+    def test_round_trip_expansion_then_build_is_byte_faithful(
         self, isolated_sandbox_ai_home: Path, host_config: HostConfig
     ) -> None:
         from core.compose import compose_project_name
 
         _seed_instance(isolated_sandbox_ai_home, "demo")
-        argv = build_target_argv("compose-up", ["demo"], host_config)
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
         compose_yml = inst_dir / "docker" / "compose.yml"
         env = inst_dir / ".sandbox.env"
+        wire = _expand_compose_wire("compose-up", ["demo"])
+        argv = build_target_argv("compose-up", wire, host_config)
         assert argv == [
             "/bin/bash",
             "-c",
@@ -597,57 +762,195 @@ class TestComposeBuilders:
             f"--ansi never --env-file {env} up -d --build --wait",
         ]
 
-    def test_compose_down_no_volumes(
-        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
+    def test_compose_down_destroy_appends_volumes(
+        self, isolated_sandbox_ai_home: Path
     ) -> None:
         _seed_instance(isolated_sandbox_ai_home, "demo")
-        argv = build_target_argv("compose-down", ["demo"], host_config)
-        assert argv[2].endswith(" down")
-        assert " -v" not in argv[2]
+        wire = _expand_compose_wire("compose-down", ["demo", "--volumes"])
+        assert wire[-1] == "--volumes"
 
-    def test_compose_down_with_volumes_appends_v_flag(
-        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
+    def test_compose_down_stop_omits_volumes(
+        self, isolated_sandbox_ai_home: Path
     ) -> None:
         _seed_instance(isolated_sandbox_ai_home, "demo")
-        argv = build_target_argv("compose-down", ["demo", "--volumes"], host_config)
-        assert argv[2].endswith(" down -v")
+        wire = _expand_compose_wire("compose-down", ["demo"])
+        assert "--volumes" not in wire
 
-    def test_compose_ps_byte_faithful(
-        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
+    def test_expansion_includes_postgres_extra(
+        self, isolated_sandbox_ai_home: Path
     ) -> None:
+        _seed_instance(isolated_sandbox_ai_home, "demo", pg=True)
+        wire = _expand_compose_wire("compose-up", ["demo"])
+        assert any("docker/extras/db-postgres.yml" in w for w in wire)
+
+    def test_expansion_includes_firecrawl_extra(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        _seed_instance(isolated_sandbox_ai_home, "demo", fc=True)
+        wire = _expand_compose_wire("compose-up", ["demo"])
+        assert any("docker/extras/mcp-firecrawl.yml" in w for w in wire)
+
+    def test_unregistered_instance_raises(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        with pytest.raises(DispatchValidationError, match="no sandbox instance"):
+            _expand_compose_wire("compose-up", ["nonexistent"])
+
+
+# ─── invoke(): validate -> expand -> machinectl_cmd + bash -c -> Executor ──
+
+
+class _FakeHostSettings:
+    docker_unprivileged_user = "sandbox"
+
+    def __init__(self, auth: object) -> None:
+        self.machinectl_authentication = auth
+
+
+class _FakeHostConfig:
+    def __init__(self, auth: object) -> None:
+        self.host = _FakeHostSettings(auth)
+
+
+class TestInvoke:
+    def _fake_hc(self) -> HostConfig:
+        from core.host_config import MachinectlAuth
+
+        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+
+    def test_deterministic_op_crosses_boundary_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, "out", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        result = invoke("docker-info", ["runtimes"], self._fake_hc(), timeout=15)
+        assert result.returncode == 0
+        cmd = cast("list[str]", captured["cmd"])
+        assert cmd[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
+        assert cmd[4:6] == ["/bin/bash", "-c"]
+        assert cmd[6] == (
+            "/usr/local/libexec/sandbox-ai/dispatch docker-info runtimes"
+        )
+        assert cast("dict[str, object]", captured["kwargs"])["timeout"] == 15
+
+    def test_nullary_op_has_no_trailing_space(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        invoke(Op.AUTH_PROBE, [], self._fake_hc())
+        cmd = cast("list[str]", captured["cmd"])
+        assert cmd[6] == "/usr/local/libexec/sandbox-ai/dispatch auth-probe"
+
+    def test_compose_op_expands_wire_form_internally(
+        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
         from core.compose import compose_project_name
 
         _seed_instance(isolated_sandbox_ai_home, "demo")
-        argv = build_target_argv("compose-ps", ["demo"], host_config)
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
-        compose_yml = inst_dir / "docker" / "compose.yml"
-        env = inst_dir / ".sandbox.env"
-        assert argv == [
-            "/bin/bash",
-            "-c",
-            f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={proj} "
-            f"docker compose -f {compose_yml} "
-            f"--env-file {env} "
-            f"--ansi never ps --format json",
-        ]
+        captured: dict[str, object] = {}
 
-    def test_compose_files_include_postgres_extra(
-        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
-    ) -> None:
-        _seed_instance(isolated_sandbox_ai_home, "demo", pg=True)
-        argv = build_target_argv("compose-up", ["demo"], host_config)
-        assert "docker/extras/db-postgres.yml" in argv[2]
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    def test_compose_files_include_firecrawl_extra(
-        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
-    ) -> None:
-        _seed_instance(isolated_sandbox_ai_home, "demo", fc=True)
-        argv = build_target_argv("compose-up", ["demo"], host_config)
-        assert "docker/extras/mcp-firecrawl.yml" in argv[2]
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        invoke("compose-up", ["demo"], self._fake_hc())
+        cmd = cast("list[str]", captured["cmd"])
+        # The Q6 expansion is INTERNAL to invoke(); the caller passed only
+        # ["demo"]. The crossed inner string carries the named-flag wire form.
+        assert cmd[6] == (
+            f"/usr/local/libexec/sandbox-ai/dispatch compose-up demo "
+            f"--project {proj} "
+            f"--env-file {inst_dir / '.sandbox.env'} "
+            f"--compose-file {inst_dir / 'docker' / 'compose.yml'}"
+        )
 
-    def test_compose_unregistered_instance_raises(
-        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
+    def test_compose_down_destroy_carries_volumes_in_wire(
+        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        with pytest.raises(DispatchValidationError, match="no sandbox instance"):
-            build_target_argv("compose-up", ["nonexistent"], host_config)
+        import subprocess
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        invoke("compose-down", ["demo", "--volumes"], self._fake_hc())
+        cmd = cast("list[str]", captured["cmd"])
+        assert cmd[6].endswith(" --volumes")
+
+    def test_polkit_auth_drops_sudo_prefix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        from core.host_config import MachinectlAuth
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
+        invoke("auth-probe", [], hc)
+        cmd = cast("list[str]", captured["cmd"])
+        assert cmd[:3] == ["machinectl", "shell", "sandbox@.host"]
+
+    def test_invoke_validates_before_crossing(self) -> None:
+        # A malformed typed arg is rejected by validate_args BEFORE the
+        # boundary is crossed (no Executor call).
+        with pytest.raises(DispatchValidationError):
+            invoke("docker-info", ["bogus-preset"], self._fake_hc())
+
+    def test_invoke_unknown_op_raises(self) -> None:
+        with pytest.raises(ValueError):
+            invoke("not-a-real-op", [], self._fake_hc())
+
+    def test_invoke_accepts_str_and_enum_op(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        assert invoke(Op.AUTH_PROBE, [], self._fake_hc()).returncode == 0
+        assert invoke("auth-probe", [], self._fake_hc()).returncode == 0
