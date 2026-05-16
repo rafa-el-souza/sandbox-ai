@@ -19,7 +19,7 @@ Three methods make up the contract:
   bundling per-invocation plumbing (host user, machinectl auth mode,
   executor, instance directory).
 
-The two methods share the underlying state stored on the dataclass, so
+These methods share the underlying state stored on the dataclass, so
 the dry-run preview and the live phase are guaranteed to operate on the
 same data — no parallel reconstruction is permitted.
 """
