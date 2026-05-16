@@ -361,10 +361,10 @@ func TestRunWiresSymlinkGuardBeforeExec(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit (guard must reject before exec), got %d", code)
 	}
-	if _, err := tmp.Seek(0, 0); err != nil {
+	buf, err := os.ReadFile(tmp.Name())
+	if err != nil {
 		t.Fatal(err)
 	}
-	buf, _ := os.ReadFile(tmp.Name())
 	s := string(buf)
 	if !strings.Contains(s, "is a symbolic link") ||
 		!strings.Contains(s, "instances/myinst/ envelope") {
