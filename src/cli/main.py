@@ -1596,6 +1596,13 @@ def _phase_compose_up(
     preserving the abort behavior the prior ``sentinel=True`` path had.
     """
     action = _compose_up_cmd_plan(inst)
+    # The full ActionContext is built deliberately: ActionContext is the uniform
+    # per-phase plumbing bundle every Action.execute receives, and its four
+    # non-host_config fields are required. ComposeUpAction.execute happens to
+    # consume only ctx.host_config, but the context contract is uniform across
+    # the Action hierarchy by design — not weakened to a per-Action shape (a
+    # narrower ctx would force type special-casing the phase loop, the very
+    # non-uniformity the render_command contract removed).
     ctx = ActionContext(
         host_user=host_config.host.docker_unprivileged_user,
         auth=host_config.host.machinectl_authentication,
