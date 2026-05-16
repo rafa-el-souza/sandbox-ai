@@ -14,11 +14,13 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -354,4 +356,123 @@ func TestShQuoteMatchesPythonShlex(t *testing.T) {
 			t.Errorf("shQuote(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// TestTranslateExecErrorErrnos covers the three spec-pinned errno
+// translations of the syscall.Exec failure path (main.go execTarget /
+// translateExecError). EIO is not reliably reproducible by a real exec
+// without a device fault, so the pure translateExecError seam is fed each
+// errno directly: EACCES -> 126 + IMA-appraise/fapolicyd hint, ENOENT -> 127
+// + reinstall hint, EIO -> 127 + dm-verity hint. The default branch (any
+// other error -> 1) is checked too.
+func TestTranslateExecErrorErrnos(t *testing.T) {
+	const target = "/usr/local/libexec/sandbox-ai/dispatch"
+	cases := []struct {
+		name     string
+		err      error
+		wantCode int
+		wantHint string
+	}{
+		{"EACCES", syscall.EACCES, 126, "IMA-appraise"},
+		{"EACCES-fapolicyd", syscall.EACCES, 126, "fapolicyd"},
+		{"ENOENT", syscall.ENOENT, 127, "Reinstall the package"},
+		{"EIO", syscall.EIO, 127, "dm-verity"},
+		{"default", syscall.EINVAL, 1, "dispatch: exec"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			code, hint := translateExecError(c.err, target)
+			if code != c.wantCode {
+				t.Fatalf("translateExecError(%v) code = %d, want %d", c.err, code, c.wantCode)
+			}
+			if !strings.Contains(hint, c.wantHint) {
+				t.Fatalf("translateExecError(%v) hint = %q, want substring %q", c.err, hint, c.wantHint)
+			}
+			if !strings.Contains(hint, target) {
+				t.Fatalf("translateExecError(%v) hint = %q, want it to name target %q", c.err, hint, target)
+			}
+		})
+	}
+}
+
+// TestExecTargetTranslatesRealErrnos drives the full execTarget path with
+// real syscall.Exec failures: ENOENT (bogus absolute argv[0]) and EACCES (a
+// 0644 non-executable temp file as argv[0]). syscall.Exec only returns on
+// failure, so execTarget returns rather than replacing the image.
+func TestExecTargetTranslatesRealErrnos(t *testing.T) {
+	t.Run("ENOENT bogus path", func(t *testing.T) {
+		tmp, err := os.CreateTemp(t.TempDir(), "stderr")
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := execTarget([]string{"/nonexistent/definitely/not/here/dispatch-bogus"}, tmp)
+		if code != 127 {
+			t.Fatalf("expected exit 127 for ENOENT, got %d", code)
+		}
+		if _, err := tmp.Seek(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		buf, _ := os.ReadFile(tmp.Name())
+		if !strings.Contains(string(buf), "Reinstall the package") {
+			t.Fatalf("stderr missing reinstall hint: %q", string(buf))
+		}
+	})
+	t.Run("EACCES non-executable file", func(t *testing.T) {
+		dir := t.TempDir()
+		notExec := filepath.Join(dir, "not-executable")
+		if err := os.WriteFile(notExec, []byte("plain text, mode 0644\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tmp, err := os.CreateTemp(dir, "stderr")
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := execTarget([]string{notExec}, tmp)
+		if code != 126 {
+			t.Fatalf("expected exit 126 for EACCES, got %d", code)
+		}
+		if _, err := tmp.Seek(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		buf, _ := os.ReadFile(tmp.Name())
+		if !strings.Contains(string(buf), "IMA-appraise") {
+			t.Fatalf("stderr missing IMA-appraise/fapolicyd hint: %q", string(buf))
+		}
+	})
+}
+
+// TestEncodeJournalFieldsNewlineBranch covers both arms of
+// encodeJournalFields (main.go): a newline-free value emits the plain
+// "KEY=value\n" form; a value containing a newline emits the
+// systemd-journal-native multiline form "KEY\n<le64 length><raw value>\n".
+func TestEncodeJournalFieldsNewlineBranch(t *testing.T) {
+	t.Run("plain form for newline-free value", func(t *testing.T) {
+		got := string(encodeJournalFields(map[string]string{"SANDBOX_AI_OP": "compose-up"}))
+		want := "SANDBOX_AI_OP=compose-up\n"
+		if got != want {
+			t.Fatalf("plain form = %q, want %q", got, want)
+		}
+	})
+	t.Run("multiline le64 framing for value with newline", func(t *testing.T) {
+		value := "line one\nline two"
+		got := encodeJournalFields(map[string]string{"MESSAGE": value})
+		key := "MESSAGE"
+		// Expected: "MESSAGE\n" + le64(len(value)) + value + "\n".
+		expected := make([]byte, 0, len(key)+1+8+len(value)+1)
+		expected = append(expected, key...)
+		expected = append(expected, '\n')
+		var l [8]byte
+		binary.LittleEndian.PutUint64(l[:], uint64(len(value)))
+		expected = append(expected, l[:]...)
+		expected = append(expected, value...)
+		expected = append(expected, '\n')
+		if !reflect.DeepEqual(got, expected) {
+			t.Fatalf("multiline framing mismatch\n got: %v\nwant: %v", got, expected)
+		}
+		// The plain "KEY=value" form must NOT appear for a newline value.
+		if strings.Contains(string(got), "MESSAGE=") {
+			t.Fatalf("multiline value must not use the KEY=value form: %q", string(got))
+		}
+	})
 }

@@ -489,12 +489,12 @@ func journalLog(op string, args, targetArgv []string, instance string, check boo
 	message := fmt.Sprintf("dispatch %s %s", op, strings.Join(args, " "))
 
 	fields := map[string]string{
-		"MESSAGE":                       message,
-		"PRIORITY":                      "6",
-		"SANDBOX_AI_OP":                 op,
-		"SANDBOX_AI_ARGS_SUMMARY":       argsSummary,
+		"MESSAGE":                        message,
+		"PRIORITY":                       "6",
+		"SANDBOX_AI_OP":                  op,
+		"SANDBOX_AI_ARGS_SUMMARY":        argsSummary,
 		"SANDBOX_AI_TARGET_ARGV_SUMMARY": targetSummary,
-		"SANDBOX_AI_INSTANCE":           instance,
+		"SANDBOX_AI_INSTANCE":            instance,
 	}
 	if check {
 		fields["SANDBOX_AI_CHECK"] = "1"
@@ -544,6 +544,34 @@ func encodeJournalFields(fields map[string]string) []byte {
 
 // ─── Process replacement + system-binary error translation ─────────────────
 
+// translateExecError maps a failed syscall.Exec error into the spec-pinned
+// (exit code, operator-meaningful hint) pair. It is a pure function extracted
+// as a test seam: EIO is not reliably reproducible by a real exec without a
+// device fault, so the EIO branch is exercised by feeding this helper
+// syscall.EIO directly. execTarget calls it on the (only-returns-on-failure)
+// path.
+func translateExecError(err error, target string) (int, string) {
+	switch {
+	case errors.Is(err, syscall.EACCES):
+		return 126, fmt.Sprintf(
+			"process replacement refused by kernel (EACCES); likely IMA-appraise "+
+				"or fapolicyd is enforcing on %s. Check system integrity tool "+
+				"state via 'sandbox doctor'.\n", target)
+	case errors.Is(err, syscall.EIO):
+		return 127, fmt.Sprintf(
+			"I/O error during process replacement (EIO); likely dm-verity reports "+
+				"block-level corruption on %s's partition. Check dmesg for verity "+
+				"events.\n", target)
+	case errors.Is(err, syscall.ENOENT):
+		return 127, fmt.Sprintf(
+			"target binary not found at %s; the package providing it may be "+
+				"uninstalled. Reinstall the package and re-run 'sudo sandbox "+
+				"setup'.\n", target)
+	default:
+		return 1, fmt.Sprintf("dispatch: exec %s failed: %v\n", target, err)
+	}
+}
+
 // execTarget replaces the process image with targetArgv via stdlib
 // syscall.Exec (Linux). On EACCES / EIO / ENOENT it returns the spec-pinned
 // exit code and writes the spec-asserted hint substrings to errOut. On any
@@ -552,27 +580,7 @@ func execTarget(targetArgv []string, errOut *os.File) int {
 	target := targetArgv[0]
 	err := syscall.Exec(target, targetArgv, os.Environ())
 	// syscall.Exec only returns on failure.
-	switch {
-	case errors.Is(err, syscall.EACCES):
-		fmt.Fprintf(errOut,
-			"process replacement refused by kernel (EACCES); likely IMA-appraise "+
-				"or fapolicyd is enforcing on %s. Check system integrity tool "+
-				"state via 'sandbox doctor'.\n", target)
-		return 126
-	case errors.Is(err, syscall.EIO):
-		fmt.Fprintf(errOut,
-			"I/O error during process replacement (EIO); likely dm-verity reports "+
-				"block-level corruption on %s's partition. Check dmesg for verity "+
-				"events.\n", target)
-		return 127
-	case errors.Is(err, syscall.ENOENT):
-		fmt.Fprintf(errOut,
-			"target binary not found at %s; the package providing it may be "+
-				"uninstalled. Reinstall the package and re-run 'sudo sandbox "+
-				"setup'.\n", target)
-		return 127
-	default:
-		fmt.Fprintf(errOut, "dispatch: exec %s failed: %v\n", target, err)
-		return 1
-	}
+	code, hint := translateExecError(err, target)
+	fmt.Fprint(errOut, hint)
+	return code
 }
