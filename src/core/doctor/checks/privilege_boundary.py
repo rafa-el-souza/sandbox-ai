@@ -10,8 +10,23 @@ import json
 import shutil
 import subprocess
 
+from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import MachinectlAuth, machinectl_cmd
+from core.exceptions import SandboxExecutionError
+from core.host_config import HostConfig, HostSettings, MachinectlAuth
+
+
+def _host_config(user: str, auth_mode: MachinectlAuth) -> HostConfig:
+    """Adapt a doctor check's ``(user, auth_mode)`` to the ``HostConfig`` that
+    ``core.dispatch.invoke`` requires.
+
+    ``invoke`` reads only ``host.docker_unprivileged_user`` and
+    ``host.machinectl_authentication`` to build the boundary-crossing prefix;
+    this passes the exact two values the check already received through that
+    interface (no boundary re-derivation — the single crossing path stays
+    ``core.dispatch``).
+    """
+    return HostConfig(host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth_mode))
 
 
 def check_sudo(user: str, distro: str | None) -> CheckResult:
@@ -105,44 +120,37 @@ def check_machinectl_reachable(
     Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang)
     in sudo mode, or polkit dialog/timeout in polkit mode.
     """
-    cmd = [*machinectl_cmd(user, auth_mode), "/bin/bash", "-c", "echo ok"]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        if auth_mode == MachinectlAuth.SUDO:
-            timeout_remediation = (
-                "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
-                f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
-            )
-        else:
-            timeout_remediation = (
-                "Configure a passwordless polkit rule for org.freedesktop.machine1.shell "
-                f"granting your user access to '{user}@.host', or switch to sudo mode."
+        dispatch.invoke("auth-probe", [], _host_config(user, auth_mode), timeout=10)
+    except SandboxExecutionError as exc:
+        if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+            if auth_mode == MachinectlAuth.SUDO:
+                timeout_remediation = (
+                    "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
+                    f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
+                )
+            else:
+                timeout_remediation = (
+                    "Configure a passwordless polkit rule for org.freedesktop.machine1.shell "
+                    f"granting your user access to '{user}@.host', or switch to sudo mode."
+                )
+            return CheckResult(
+                status="fail",
+                name="machinectl reachable",
+                detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
+                remediation=timeout_remediation,
             )
         return CheckResult(
             status="fail",
             name="machinectl reachable",
-            detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
-            remediation=timeout_remediation,
+            detail=f"Shell probe failed: {exc}",
+            remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
         )
 
-    if result.returncode == 0:
-        return CheckResult(
-            status="pass",
-            name="machinectl reachable",
-            detail=f"Shell probe succeeded for {user}@.host",
-        )
     return CheckResult(
-        status="fail",
+        status="pass",
         name="machinectl reachable",
-        detail=f"Shell probe failed (exit {result.returncode}): {result.stderr.strip()}",
-        remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
+        detail=f"Shell probe succeeded for {user}@.host",
     )
 
 
@@ -150,19 +158,11 @@ def check_docker_available(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker version --format '{{.Server.Version}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode == 0 and result.stdout.strip():
+    try:
+        result = dispatch.invoke("docker-version", [], _host_config(user, auth_mode), timeout=15)
+    except SandboxExecutionError:
+        result = None
+    if result is not None and result.stdout.strip():
         return CheckResult(
             status="pass",
             name="Docker available",
@@ -181,19 +181,11 @@ def check_docker_rootless(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is running in rootless mode."""
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{.SecurityOptions}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode == 0 and "rootless" in result.stdout:
+    try:
+        result = dispatch.invoke("docker-info", ["security-options"], _host_config(user, auth_mode), timeout=15)
+    except SandboxExecutionError:
+        result = None
+    if result is not None and "rootless" in result.stdout:
         return CheckResult(
             status="pass",
             name="Docker rootless",
@@ -214,19 +206,11 @@ def check_runsc_registered(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{json .Runtimes}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode == 0:
+    try:
+        result = dispatch.invoke("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    except SandboxExecutionError:
+        result = None
+    if result is not None:
         try:
             runtimes = json.loads(result.stdout.strip())
             if "runsc" in runtimes:
@@ -255,19 +239,9 @@ def check_runsc_runtimeargs(
     Validates defense-in-depth configuration for the gVisor runtime.
     Returns warn (not fail) when args are missing — this is an advisory check.
     """
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{json .Runtimes}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode != 0:
+    try:
+        result = dispatch.invoke("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    except SandboxExecutionError:
         return CheckResult(
             status="warn",
             name="runsc runtimeArgs",
@@ -318,19 +292,9 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
     The default (--host-uds=none) is the correct security posture.
     Returns PASS if --host-uds=all is absent, WARN if present.
     """
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{json .Runtimes}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode != 0:
+    try:
+        result = dispatch.invoke("docker-info", ["runtimes"], _host_config(user, auth_mode), timeout=15)
+    except SandboxExecutionError:
         return CheckResult(
             status="warn",
             name="--host-uds=none",
@@ -394,21 +358,20 @@ def check_compose_project_name_collision(
         )
     expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
 
-    cmd = [*machinectl_cmd(host_user, auth_mode), "/bin/bash", "-c", "docker compose ls --format json --all"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
-    except subprocess.TimeoutExpired:
+        result = dispatch.invoke("compose-ls", [], _host_config(host_user, auth_mode), timeout=15)
+    except SandboxExecutionError as exc:
+        if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+            return CheckResult(
+                status="skip",
+                name="compose project name collision",
+                detail="docker compose ls timed out",
+                category="Privilege Boundary",
+            )
         return CheckResult(
             status="skip",
             name="compose project name collision",
-            detail="docker compose ls timed out",
-            category="Privilege Boundary",
-        )
-    if result.returncode != 0:
-        return CheckResult(
-            status="skip",
-            name="compose project name collision",
-            detail=f"docker compose ls failed: {result.stderr.strip()}",
+            detail=f"docker compose ls failed: {exc}",
             category="Privilege Boundary",
         )
     try:

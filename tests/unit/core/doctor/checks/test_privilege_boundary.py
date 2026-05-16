@@ -12,6 +12,29 @@ import subprocess
 from typing import Any
 from unittest.mock import mock_open, patch
 
+from core.exceptions import SandboxExecutionError
+
+
+def _ok(stdout: str = "") -> subprocess.CompletedProcess[str]:
+    """A successful ``core.dispatch.invoke`` return (returncode 0 always — a
+    non-zero inner exit surfaces as ``SandboxExecutionError`` from the sterile
+    Executor, never as a returncode-bearing CompletedProcess)."""
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _exec_error(*, timeout: bool = False) -> SandboxExecutionError:
+    """Build the ``SandboxExecutionError`` ``core.dispatch.invoke`` raises.
+
+    The sterile Executor chains the originating ``subprocess.TimeoutExpired`` /
+    ``CalledProcessError`` via ``raise ... from e``; the refactored checks
+    discriminate timeout-vs-other on ``exc.__cause__``."""
+    err = SandboxExecutionError("[FATAL] Sandbox Execution Fault")
+    if timeout:
+        err.__cause__ = subprocess.TimeoutExpired(cmd="dispatch", timeout=15)
+    else:
+        err.__cause__ = subprocess.CalledProcessError(returncode=1, cmd="dispatch")
+    return err
+
 
 def test_module_exposes_twelve_check_functions() -> None:
     from core.doctor.checks import privilege_boundary
@@ -142,18 +165,18 @@ class TestMachinectlReachable:
     def test_reachable_success(self) -> None:
         from core.doctor import check_machinectl_reachable
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("ok\n")) as inv:
             result = check_machinectl_reachable("sandbox", None)
             assert result.status == "pass"
+            (op, args, _hc), kw = inv.call_args
+            assert op == "auth-probe"
+            assert list(args) == []
+            assert kw["timeout"] == 10
 
     def test_reachable_timeout(self) -> None:
         from core.doctor import check_machinectl_reachable
 
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="machinectl", timeout=10),
-        ):
+        with patch("core.dispatch.invoke", side_effect=_exec_error(timeout=True)):
             result = check_machinectl_reachable("sandbox", None)
             assert result.status == "fail"
             assert "timeout" in result.detail.lower() or "sudoers" in (result.remediation or "").lower()
@@ -161,8 +184,7 @@ class TestMachinectlReachable:
     def test_reachable_nonzero_exit(self) -> None:
         from core.doctor import check_machinectl_reachable
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="No machine 'sandbox' known")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", side_effect=_exec_error()):
             result = check_machinectl_reachable("sandbox", None)
             assert result.status == "fail"
             assert result.detail != ""
@@ -172,52 +194,77 @@ class TestDockerChecks:
     def test_docker_available_pass(self) -> None:
         from core.doctor import check_docker_available
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="24.0.7\n", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("24.0.7\n")) as inv:
             result = check_docker_available("sandbox", None)
             assert result.status == "pass"
             assert "24.0.7" in result.detail
+            (op, args, _hc), kw = inv.call_args
+            assert op == "docker-version"
+            assert list(args) == []
+            assert kw["timeout"] == 15
 
     def test_docker_available_fail(self) -> None:
         from core.doctor import check_docker_available
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="command not found")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", side_effect=_exec_error()):
+            result = check_docker_available("sandbox", None)
+            assert result.status == "fail"
+
+    def test_docker_available_empty_stdout_fail(self) -> None:
+        from core.doctor import check_docker_available
+
+        with patch("core.dispatch.invoke", return_value=_ok("")):
             result = check_docker_available("sandbox", None)
             assert result.status == "fail"
 
     def test_docker_rootless_pass(self) -> None:
         from core.doctor import check_docker_rootless
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="[rootless, cgroupns]", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("[rootless, cgroupns]")) as inv:
             result = check_docker_rootless("sandbox", None)
             assert result.status == "pass"
+            (op, args, _hc), kw = inv.call_args
+            assert op == "docker-info"
+            assert list(args) == ["security-options"]
+            assert kw["timeout"] == 15
 
     def test_docker_rootless_system_docker(self) -> None:
         from core.doctor import check_docker_rootless
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="[apparmor, seccomp]", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("[apparmor, seccomp]")):
             result = check_docker_rootless("sandbox", None)
             assert result.status == "fail"
             assert "rootless" in (result.remediation or "").lower()
 
+    def test_docker_rootless_invoke_error_fail(self) -> None:
+        from core.doctor import check_docker_rootless
+
+        with patch("core.dispatch.invoke", side_effect=_exec_error()):
+            result = check_docker_rootless("sandbox", None)
+            assert result.status == "fail"
+
     def test_runsc_registered_pass(self) -> None:
         from core.doctor import check_runsc_registered
 
-        docker_info = '{"runsc": {}, "runc": {}}'
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok('{"runsc": {}, "runc": {}}')) as inv:
             result = check_runsc_registered("sandbox", None)
             assert result.status == "pass"
+            (op, args, _hc), kw = inv.call_args
+            assert op == "docker-info"
+            assert list(args) == ["runtimes"]
+            assert kw["timeout"] == 15
 
     def test_runsc_not_registered(self) -> None:
         from core.doctor import check_runsc_registered
 
-        docker_info = '{"runc": {}}'
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok('{"runc": {}}')):
+            result = check_runsc_registered("sandbox", None)
+            assert result.status == "fail"
+
+    def test_runsc_registered_invoke_error_fail(self) -> None:
+        from core.doctor import check_runsc_registered
+
+        with patch("core.dispatch.invoke", side_effect=_exec_error()):
             result = check_runsc_registered("sandbox", None)
             assert result.status == "fail"
 
@@ -237,8 +284,7 @@ class TestRunscJsonDecodeError:
     def test_runsc_bad_json_output(self) -> None:
         from core.doctor import check_runsc_registered
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="NOT-VALID-JSON{{{", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("NOT-VALID-JSON{{{")):
             result = check_runsc_registered("sandbox", None)
             assert result.status == "fail"
 
@@ -255,12 +301,15 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)) as inv:
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "pass"
             assert "--oci-seccomp" in result.detail
             assert "--debug-log" in result.detail
+            (op, args, _hc), kw = inv.call_args
+            assert op == "docker-info"
+            assert list(args) == ["runtimes"]
+            assert kw["timeout"] == 15
 
     def test_missing_oci_seccomp_warn(self) -> None:
         from core.doctor import check_runsc_runtimeargs
@@ -273,8 +322,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
             assert "--oci-seccomp" in result.detail
@@ -290,8 +338,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
             assert "--debug-log" in result.detail
@@ -306,8 +353,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
             assert "--oci-seccomp" in result.detail
@@ -317,8 +363,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps({"runsc": {"path": "/usr/local/bin/runsc"}})
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.remediation is not None
             assert "~sandbox/.config/docker/daemon.json" in result.remediation
@@ -336,10 +381,13 @@ class TestCheckHostUds:
                 }
             }
         )
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)) as inv:
             result = check_host_uds("sandbox", None)
             assert result.status == "pass"
+            (op, args, _hc), kw = inv.call_args
+            assert op == "docker-info"
+            assert list(args) == ["runtimes"]
+            assert kw["timeout"] == 15
 
     def test_check_host_uds_all_detected_warns(self) -> None:
         from core.doctor import check_host_uds
@@ -352,8 +400,7 @@ class TestCheckHostUds:
                 }
             }
         )
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=docker_info, stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok(docker_info)):
             result = check_host_uds("sandbox", None)
             assert result.status == "warn"
             assert "daemon.json" in (result.remediation or "")
@@ -361,8 +408,7 @@ class TestCheckHostUds:
     def test_check_host_uds_docker_query_failure(self) -> None:
         from core.doctor import check_host_uds
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", side_effect=_exec_error()):
             result = check_host_uds("sandbox", None)
             assert result.status == "warn"
             assert "daemon.json" in (result.remediation or "")
@@ -370,8 +416,7 @@ class TestCheckHostUds:
     def test_check_host_uds_json_parse_failure(self) -> None:
         from core.doctor import check_host_uds
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="NOT-JSON{{{", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("NOT-JSON{{{")):
             result = check_host_uds("sandbox", None)
             assert result.status == "warn"
             assert "daemon.json" in (result.remediation or "")
@@ -381,8 +426,7 @@ class TestRunscRuntimeArgsEdgeCases:
     def test_nonzero_exit_returns_warn(self) -> None:
         from core.doctor import check_runsc_runtimeargs
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", side_effect=_exec_error()):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
             assert "Could not query" in result.detail
@@ -390,77 +434,89 @@ class TestRunscRuntimeArgsEdgeCases:
     def test_json_decode_error_returns_warn(self) -> None:
         from core.doctor import check_runsc_runtimeargs
 
-        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="{{INVALID}}", stderr="")
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("core.dispatch.invoke", return_value=_ok("{{INVALID}}")):
             result = check_runsc_runtimeargs("sandbox", None)
             assert result.status == "warn"
             assert "parse" in result.detail.lower()
 
 
-class TestPolkitMachinectlCommandShape:
-    """Polkit-mode machinectl/docker commands omit 'sudo' prefix."""
+class TestAuthModeThreadedToDispatch:
+    """The checks delegate boundary-prefix construction to ``core.dispatch.invoke``;
+    the doctor-level contract is that the auth mode + user are threaded into the
+    ``HostConfig`` ``invoke`` receives (the sudo/polkit prefix shape itself is
+    asserted in ``tests/unit/core/test_dispatch.py``, not here)."""
 
-    def test_polkit_machinectl_reachable_command_has_no_sudo(self) -> None:
+    def test_machinectl_reachable_threads_auth_mode_into_host_config(self) -> None:
         from core.doctor import check_machinectl_reachable
         from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
-        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            captured["cmd"] = cmd
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok\n", stderr="")
+        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["op"] = op
+            captured["host_config"] = host_config
+            captured["timeout"] = kwargs.get("timeout")
+            return _ok("ok\n")
 
-        with patch("subprocess.run", side_effect=capture):
+        with patch("core.dispatch.invoke", side_effect=capture):
             result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
         assert result.status == "pass"
-        assert captured["cmd"][0] == "machinectl"
-        assert "sudo" not in captured["cmd"]
+        assert captured["op"] == "auth-probe"
+        assert captured["timeout"] == 10
+        assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
+        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
 
-    def test_sudo_machinectl_reachable_command_has_sudo_prefix(self) -> None:
+    def test_machinectl_reachable_sudo_mode_host_config(self) -> None:
         from core.doctor import check_machinectl_reachable
         from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
-        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            captured["cmd"] = cmd
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok\n", stderr="")
+        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["host_config"] = host_config
+            return _ok("ok\n")
 
-        with patch("subprocess.run", side_effect=capture):
+        with patch("core.dispatch.invoke", side_effect=capture):
             check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
 
-        assert captured["cmd"][:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
+        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_polkit_timeout_remediation_mentions_polkit(self) -> None:
         from core.doctor import check_machinectl_reachable
         from core.host_config import MachinectlAuth
 
-        with patch(
-            "subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="machinectl", timeout=10),
-        ):
+        with patch("core.dispatch.invoke", side_effect=_exec_error(timeout=True)):
             result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
         assert result.status == "fail"
         assert "polkit" in (result.remediation or "").lower()
         assert "sudoers" not in (result.remediation or "").lower()
 
-    def test_polkit_docker_available_command_has_no_sudo(self) -> None:
+    def test_sudo_timeout_remediation_mentions_sudoers(self) -> None:
+        from core.doctor import check_machinectl_reachable
+        from core.host_config import MachinectlAuth
+
+        with patch("core.dispatch.invoke", side_effect=_exec_error(timeout=True)):
+            result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
+
+        assert result.status == "fail"
+        assert "sudoers" in (result.remediation or "").lower()
+
+    def test_docker_available_threads_auth_mode_into_host_config(self) -> None:
         from core.doctor import check_docker_available
         from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
-        def capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            captured["cmd"] = cmd
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="24.0.7\n", stderr="")
+        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["host_config"] = host_config
+            return _ok("24.0.7\n")
 
-        with patch("subprocess.run", side_effect=capture):
+        with patch("core.dispatch.invoke", side_effect=capture):
             check_docker_available("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
-        assert captured["cmd"][0] == "machinectl"
-        assert "sudo" not in captured["cmd"]
+        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
 
 
 class TestCheckComposeProjectNameCollision:
@@ -482,9 +538,9 @@ class TestCheckComposeProjectNameCollision:
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
         def boom(*a: Any, **k: Any) -> Any:
-            raise subprocess.TimeoutExpired(["docker"], 15)
+            raise _exec_error(timeout=True)
 
-        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", boom)
+        monkeypatch.setattr("core.dispatch.invoke", boom)
         result = check_compose_project_name_collision("u", None)
         assert result.status == "skip"
         assert "timed out" in result.detail
@@ -496,8 +552,10 @@ class TestCheckComposeProjectNameCollision:
         state.mkdir(parents=True)
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
-        result_obj = subprocess.CompletedProcess(["docker"], 1, stdout="", stderr="boom")
-        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", lambda *a, **k: result_obj)
+        def boom(*a: Any, **k: Any) -> Any:
+            raise _exec_error()
+
+        monkeypatch.setattr("core.dispatch.invoke", boom)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
         assert "failed" in out.detail
@@ -509,8 +567,7 @@ class TestCheckComposeProjectNameCollision:
         state.mkdir(parents=True)
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
-        result_obj = subprocess.CompletedProcess(["docker"], 0, stdout="not-json", stderr="")
-        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", lambda *a, **k: result_obj)
+        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok("not-json"))
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
         assert "parse" in out.detail
@@ -524,7 +581,15 @@ class TestCheckComposeProjectNameCollision:
         state.mkdir(parents=True)
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
-        result_obj = subprocess.CompletedProcess(["docker"], 0, stdout="[]", stderr="")
-        monkeypatch.setattr("core.doctor.checks.privilege_boundary.subprocess.run", lambda *a, **k: result_obj)
+        captured: dict[str, Any] = {}
+
+        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["op"] = op
+            captured["timeout"] = kwargs.get("timeout")
+            return _ok("[]")
+
+        monkeypatch.setattr("core.dispatch.invoke", capture)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "pass"
+        assert captured["op"] == "compose-ls"
+        assert captured["timeout"] == 15

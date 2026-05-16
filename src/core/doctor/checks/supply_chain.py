@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import subprocess
 
+from core import dispatch
 from core.doctor.types import CheckResult
-from core.host_config import MachinectlAuth, machinectl_cmd
+from core.exceptions import SandboxExecutionError
+from core.host_config import HostConfig, HostSettings, MachinectlAuth, machinectl_cmd
 
 
 def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
@@ -24,29 +26,20 @@ def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth
     stale: list[str] = []
     drift: list[str] = []
 
+    host_config = HostConfig(
+        host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth_mode)
+    )
     mc_prefix = machinectl_cmd(user, auth_mode)
     for key, pin in IMAGE_REGISTRY.items():
         try:
-            result = subprocess.run(
-                [
-                    *mc_prefix,
-                    "/bin/bash",
-                    "-c",
-                    f"docker manifest inspect {pin.pinned}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return CheckResult(
-                status="skip",
-                name="image digests",
-                detail="Registry unreachable (timeout during manifest inspection)",
-            )
-
-        if result.returncode != 0:
+            dispatch.invoke("docker-manifest-inspect", [pin.pinned], host_config, timeout=2)
+        except SandboxExecutionError as exc:
+            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+                return CheckResult(
+                    status="skip",
+                    name="image digests",
+                    detail="Registry unreachable (timeout during manifest inspection)",
+                )
             stale.append(key)
             continue
 
