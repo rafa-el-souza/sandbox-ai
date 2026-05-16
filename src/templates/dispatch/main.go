@@ -15,7 +15,13 @@
 //   - write one structured journald entry before the spawn;
 //   - construct the per-op target argv (deterministic ops: pure function of
 //     typed args; compose ops: Q6 named-flag wire form with an op-hardcoded
-//     verb plus a bounded structural + scoped-symlink confinement check);
+//     verb plus the PURE LEXICAL half of the bounded structural confinement —
+//     the construction path does zero filesystem I/O, so it is Python↔Go
+//     byte-parity-asserted by the shared fixture);
+//   - for compose ops, run the RUNTIME scoped-symlink confinement guard
+//     (enforceComposeSymlinkSafety: the per-component lstat pass) on the
+//     dispatch path, after the argv is built and before the spawn — relocated
+//     off the pure construction path, not weakened;
 //   - replace the process image via syscall.Exec, translating EACCES / EIO /
 //     ENOENT into operator-meaningful hints.
 //
@@ -122,6 +128,23 @@ func run(argv []string, errOut *os.File) int {
 	if err != nil {
 		fmt.Fprintln(errOut, err.Error())
 		return 1
+	}
+
+	// Runtime symlink confinement (D4 carve-out, second half). The pure
+	// target-argv construction above performs only the LEXICAL envelope checks
+	// (Python↔Go byte-parity contract — fixture-asserted, zero disk I/O). The
+	// filesystem `lstat` symlink pass is a RUNTIME guard on the dispatch path,
+	// not part of the constructed argv: it runs here, after the argv is built
+	// and before the process image is replaced, so a symlinked-in-tree operand
+	// is rejected with no `os.execv`. Behaviour for a real on-disk tree is
+	// identical to the previous (pre-split) implementation — the check moved
+	// layers, it was not weakened.
+	switch op {
+	case "compose-up", "compose-down", "compose-ps":
+		if err := enforceComposeSymlinkSafety(op, rest); err != nil {
+			fmt.Fprintln(errOut, err.Error())
+			return 1
+		}
 	}
 
 	journalLog(op, rest, targetArgv, instance, false)
@@ -267,150 +290,189 @@ func shQuote(s string) string {
 
 var projectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
-// buildComposeArgv parses the Q6 named-flag wire form, applies the bounded
-// structural + scoped-symlink confinement (spec "Compose Op Wire Expansion"),
-// and assembles the target argv with an op-hardcoded verb.
+// composeWire is the parsed Q6 named-flag wire form.
+type composeWire struct {
+	inst         string
+	project      string
+	envFile      string
+	composeFiles []string
+	volumes      bool
+}
+
+// parseComposeWire parses the Q6 named-flag wire form. It is PURE — wire-flag
+// lexing only, NO filesystem access — so it is shared between the pure
+// target-argv construction path (buildComposeArgv, fixture-parity asserted)
+// and the runtime symlink guard (enforceComposeSymlinkSafety) without dragging
+// disk I/O into the construction path.
 //
 // Wire form: <inst> --project <P> --env-file <E> --compose-file <f1> [...] [--volumes]
-func buildComposeArgv(op string, wire []string) ([]string, string, error) {
+func parseComposeWire(op string, wire []string) (composeWire, error) {
+	var cw composeWire
 	if len(wire) == 0 {
-		return nil, "", fmt.Errorf("%s: missing <instance> in wire form", op)
+		return cw, fmt.Errorf("%s: missing <instance> in wire form", op)
 	}
-	inst := wire[0]
+	cw.inst = wire[0]
 	rest := wire[1:]
 
-	var project, envFile string
-	var haveProject, haveEnv, volumes bool
-	composeFiles := []string{}
-
+	var haveProject, haveEnv bool
 	for i := 0; i < len(rest); {
 		flag := rest[i]
 		if flag == "--volumes" {
 			if op != "compose-down" {
-				return nil, "", fmt.Errorf("%s: --volumes is only valid for compose-down", op)
+				return cw, fmt.Errorf("%s: --volumes is only valid for compose-down", op)
 			}
-			if volumes {
-				return nil, "", fmt.Errorf("%s: --volumes given more than once", op)
+			if cw.volumes {
+				return cw, fmt.Errorf("%s: --volumes given more than once", op)
 			}
-			volumes = true
+			cw.volumes = true
 			i++
 			continue
 		}
 		if i+1 >= len(rest) {
-			return nil, "", fmt.Errorf("%s: flag %q is missing its value", op, flag)
+			return cw, fmt.Errorf("%s: flag %q is missing its value", op, flag)
 		}
 		value := rest[i+1]
 		switch flag {
 		case "--project":
 			if haveProject {
-				return nil, "", fmt.Errorf("%s: --project given more than once", op)
+				return cw, fmt.Errorf("%s: --project given more than once", op)
 			}
-			project, haveProject = value, true
+			cw.project, haveProject = value, true
 		case "--env-file":
 			if haveEnv {
-				return nil, "", fmt.Errorf("%s: --env-file given more than once", op)
+				return cw, fmt.Errorf("%s: --env-file given more than once", op)
 			}
-			envFile, haveEnv = value, true
+			cw.envFile, haveEnv = value, true
 		case "--compose-file":
-			composeFiles = append(composeFiles, value)
+			cw.composeFiles = append(cw.composeFiles, value)
 		default:
-			return nil, "", fmt.Errorf("%s: unrecognized flag %q", op, flag)
+			return cw, fmt.Errorf("%s: unrecognized flag %q", op, flag)
 		}
 		i += 2
 	}
 
 	if !haveProject {
-		return nil, "", fmt.Errorf("%s: --project is required exactly once", op)
+		return cw, fmt.Errorf("%s: --project is required exactly once", op)
 	}
 	if !haveEnv {
-		return nil, "", fmt.Errorf("%s: --env-file is required exactly once", op)
+		return cw, fmt.Errorf("%s: --env-file is required exactly once", op)
 	}
-	if len(composeFiles) == 0 {
-		return nil, "", fmt.Errorf("%s: at least one --compose-file is required", op)
+	if len(cw.composeFiles) == 0 {
+		return cw, fmt.Errorf("%s: at least one --compose-file is required", op)
 	}
 
 	// --project: charset + ends with -<inst> (spec "Compose Op Wire Expansion").
-	if !projectRe.MatchString(project) {
-		return nil, "", fmt.Errorf(
-			"%s: --project %q must match ^[a-z0-9][a-z0-9_-]*$", op, project)
+	// Pure lexical (regex + suffix) — part of target-argv construction.
+	if !projectRe.MatchString(cw.project) {
+		return cw, fmt.Errorf(
+			"%s: --project %q must match ^[a-z0-9][a-z0-9_-]*$", op, cw.project)
 	}
-	if !strings.HasSuffix(project, "-"+inst) {
-		return nil, "", fmt.Errorf(
-			"%s: --project %q must end with -%s", op, project, inst)
+	if !strings.HasSuffix(cw.project, "-"+cw.inst) {
+		return cw, fmt.Errorf(
+			"%s: --project %q must end with -%s", op, cw.project, cw.inst)
+	}
+	return cw, nil
+}
+
+// buildComposeArgv parses the Q6 named-flag wire form, applies the PURE
+// LEXICAL portion of the bounded structural confinement (spec "Compose Op
+// Wire Expansion"), and assembles the target argv with an op-hardcoded verb.
+//
+// This function is part of the Python↔Go byte-parity contract asserted by the
+// shared fixture (TestTargetArgvFixtureParity) and therefore performs ZERO
+// filesystem access. The runtime `lstat` symlink pass is NOT performed here —
+// it is a separate dispatch-path guard (enforceComposeSymlinkSafety, called
+// from run()).
+//
+// Wire form: <inst> --project <P> --env-file <E> --compose-file <f1> [...] [--volumes]
+func buildComposeArgv(op string, wire []string) ([]string, string, error) {
+	cw, err := parseComposeWire(op, wire)
+	if err != nil {
+		return nil, "", err
 	}
 
-	// Structural + scoped-symlink confinement on every path operand.
-	for _, p := range composeFiles {
-		if err := confinePathOperand(p, inst); err != nil {
+	// PURE LEXICAL confinement on every path operand (absolute, no
+	// empty/./.. component, no NUL/newline, inside the instances/<inst>
+	// envelope). NO filesystem access — this is part of the byte-parity
+	// target-argv contract. The runtime `lstat` symlink pass is performed
+	// separately by enforceComposeSymlinkSafety from run().
+	for _, p := range cw.composeFiles {
+		if err := confinePathOperand(p, cw.inst); err != nil {
 			return nil, "", err
 		}
 	}
-	if err := confinePathOperand(envFile, inst); err != nil {
+	if err := confinePathOperand(cw.envFile, cw.inst); err != nil {
 		return nil, "", err
 	}
 
 	// Assemble. The verb is op-hardcoded and NEVER read from the wire.
 	verb := composeVerb[op]
-	if op == "compose-down" && volumes {
+	if op == "compose-down" && cw.volumes {
 		verb = "down -v"
 	}
-	fParts := make([]string, 0, len(composeFiles))
-	for _, f := range composeFiles {
+	fParts := make([]string, 0, len(cw.composeFiles))
+	for _, f := range cw.composeFiles {
 		fParts = append(fParts, "-f "+f)
 	}
 	filesStr := strings.Join(fParts, " ")
 	envPrefix := fmt.Sprintf(
-		"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=%s", project)
+		"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=%s", cw.project)
 
 	var inner string
 	if op == "compose-ps" {
 		inner = fmt.Sprintf(
 			"%s docker compose %s --env-file %s --ansi never %s",
-			envPrefix, filesStr, envFile, verb)
+			envPrefix, filesStr, cw.envFile, verb)
 	} else {
 		inner = fmt.Sprintf(
 			"%s docker compose %s --ansi never --env-file %s %s",
-			envPrefix, filesStr, envFile, verb)
+			envPrefix, filesStr, cw.envFile, verb)
 	}
-	return bashC(inner), inst, nil
+	return bashC(inner), cw.inst, nil
 }
 
 // confinePathOperand applies the bounded D4 carve-out to a compose path
-// operand. NO filename allowlist, NO path resolution (namespace-stable):
+// operand. This is the PURE LEXICAL half — NO filename allowlist, NO path
+// resolution, NO filesystem access (namespace-stable):
 //
 //  1. absolute; no empty / "." / ".." component; no NUL / newline byte;
 //  2. contains the consecutive components `instances` then <inst> with at
-//     least one further component below <inst>;
-//  3. lstat() every component FROM the instances/<inst> boundary DOWNWARD to
-//     and including the operand file; reject any symlink; fail-closed on any
-//     lstat error with an actionable diagnostic. Components ABOVE the
-//     `instances` boundary (operator-home ancestors) are intentionally NOT
-//     symlink-checked — checking them would reintroduce the namespace-fragile
-//     false-reject behaviour that ruled out realpath (distro /home -> /var/home,
-//     systemd ProtectHome views).
+//     least one further component below <inst>.
 //
-// This is deliberately NOT TOCTOU-complete: it cannot close the race between
-// this check and docker compose's later open() of -f <path>. The only actor
-// able to win that race is one with write access to the operator-owned
-// …/instances/<inst>/ tree — i.e. the operator, who already holds passwordless
-// arbitrary command execution via the F-003-unclosable sudoers grant. The
-// residual grants that actor no power they lack; tracked in deferred.md.
+// These deterministic string checks are part of the target-argv construction
+// contract (Python↔Go byte-parity, fixture-asserted via
+// TestTargetArgvFixtureParity) and run with zero disk I/O. The filesystem
+// `lstat` symlink pass is a SEPARATE runtime guard
+// (enforceComposeSymlinkSafety) on the dispatch path — it is NOT performed
+// here; see that function for the symlink semantics and the
+// honestly-documented TOCTOU residual.
 func confinePathOperand(p, inst string) error {
+	_, err := composeEnvelopeBoundary(p, inst)
+	return err
+}
+
+// composeEnvelopeBoundary runs the pure lexical envelope checks and, on
+// success, returns the path components together with the index of the <inst>
+// component (the instances/<inst> boundary). It performs NO filesystem access
+// and is shared by confinePathOperand (pure construction) and
+// enforceComposeSymlinkSafety (runtime guard) so the boundary is located
+// identically in both layers.
+func composeEnvelopeBoundary(p, inst string) (boundary composeBoundary, err error) {
 	if strings.IndexByte(p, 0) >= 0 {
-		return fmt.Errorf("compose path operand %q contains a NUL byte", p)
+		return boundary, fmt.Errorf("compose path operand %q contains a NUL byte", p)
 	}
 	if strings.IndexByte(p, '\n') >= 0 {
-		return fmt.Errorf("compose path operand %q contains a newline byte", p)
+		return boundary, fmt.Errorf("compose path operand %q contains a newline byte", p)
 	}
 	if !strings.HasPrefix(p, "/") {
-		return fmt.Errorf("compose path operand %q must be absolute", p)
+		return boundary, fmt.Errorf("compose path operand %q must be absolute", p)
 	}
 
 	parts := strings.Split(p, "/") // leading "" from the root slash
 	comps := parts[1:]
 	for _, c := range comps {
 		if c == "" || c == "." || c == ".." {
-			return fmt.Errorf(
+			return boundary, fmt.Errorf(
 				"compose path operand %q has an empty/./.. component (outside the instances/%s envelope)",
 				p, inst)
 		}
@@ -418,29 +480,78 @@ func confinePathOperand(p, inst string) error {
 
 	// Locate the consecutive `instances` then <inst> components, with at least
 	// one component below <inst>.
-	boundary := -1
+	instIdx := -1
 	for idx := 0; idx+1 < len(comps); idx++ {
 		if comps[idx] == "instances" && comps[idx+1] == inst {
-			boundary = idx + 1 // index of the <inst> component
+			instIdx = idx + 1 // index of the <inst> component
 			break
 		}
 	}
-	if boundary < 0 || boundary+1 >= len(comps) {
-		return fmt.Errorf(
+	if instIdx < 0 || instIdx+1 >= len(comps) {
+		return boundary, fmt.Errorf(
 			"compose path operand %q is outside the instances/%s/ envelope", p, inst)
 	}
+	return composeBoundary{comps: comps, instIdx: instIdx}, nil
+}
 
-	// lstat each component from the instances/<inst> boundary downward,
-	// including the operand file. Build the absolute prefix up to <inst> first.
-	prefix := "/" + strings.Join(comps[:boundary+1], "/")
-	if err := rejectSymlink(prefix, p, inst); err != nil {
+// composeBoundary is the lexical-pass result handed to the runtime symlink
+// guard: the split path components and the index of the <inst> component.
+type composeBoundary struct {
+	comps   []string
+	instIdx int
+}
+
+// enforceComposeSymlinkSafety is the RUNTIME half of the D4 carve-out. For
+// every `--compose-file` and the `--env-file` it lstat()s each path component
+// FROM the instances/<inst> boundary DOWNWARD to and including the operand
+// file and rejects any symlink; it is fail-closed on any lstat error with an
+// actionable diagnostic. Components ABOVE the `instances` boundary
+// (operator-home ancestors) are intentionally NOT symlink-checked — checking
+// them would reintroduce the namespace-fragile false-reject behaviour that
+// ruled out realpath (distro /home -> /var/home, systemd ProtectHome views).
+//
+// This is RELOCATED, not removed: the runtime behaviour for a real on-disk
+// tree is identical to the previous (pre-split) implementation. It moved off
+// the pure target-argv construction path (so the Python↔Go byte-parity
+// fixture asserts construction with zero disk I/O) and onto the dispatch path
+// in run(), where it runs after the argv is built and before os.execv.
+//
+// It is deliberately NOT TOCTOU-complete: it cannot close the race between
+// this check and docker compose's later open() of -f <path>. The only actor
+// able to win that race is one with write access to the operator-owned
+// …/instances/<inst>/ tree — i.e. the operator, who already holds passwordless
+// arbitrary command execution via the F-003-unclosable sudoers grant. The
+// residual grants that actor no power they lack; tracked in deferred.md.
+//
+// It re-runs the pure lexical envelope check (cheap, no disk I/O) so it can be
+// called from run() with only (op, wire) and remain correct even if invoked
+// independently of buildComposeArgv.
+func enforceComposeSymlinkSafety(op string, wire []string) error {
+	cw, err := parseComposeWire(op, wire)
+	if err != nil {
 		return err
 	}
-	cur := prefix
-	for _, c := range comps[boundary+1:] {
-		cur = filepath.Join(cur, c)
-		if err := rejectSymlink(cur, p, inst); err != nil {
+	operands := make([]string, 0, len(cw.composeFiles)+1)
+	operands = append(operands, cw.composeFiles...)
+	operands = append(operands, cw.envFile)
+	for _, p := range operands {
+		b, err := composeEnvelopeBoundary(p, cw.inst)
+		if err != nil {
 			return err
+		}
+		// lstat each component from the instances/<inst> boundary downward,
+		// including the operand file. Build the absolute prefix up to <inst>
+		// first.
+		prefix := "/" + strings.Join(b.comps[:b.instIdx+1], "/")
+		if err := rejectSymlink(prefix, p, cw.inst); err != nil {
+			return err
+		}
+		cur := prefix
+		for _, c := range b.comps[b.instIdx+1:] {
+			cur = filepath.Join(cur, c)
+			if err := rejectSymlink(cur, p, cw.inst); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

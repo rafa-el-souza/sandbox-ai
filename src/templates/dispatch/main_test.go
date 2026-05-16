@@ -148,12 +148,13 @@ func TestComposeWireFlagParsing(t *testing.T) {
 	})
 }
 
-// confinement scenarios — these create real on-disk trees / symlinks so the
-// lstat pass is genuinely exercised.
+// PURE LEXICAL confinement scenarios — these assert the deterministic
+// string-only checks that STAY on the target-argv construction path
+// (confinePathOperand, zero filesystem access, fixture-parity-asserted).
 
 func TestConfinementRejectsOutsideEnvelope(t *testing.T) {
 	// Spec scenario "dispatcher rejects a compose-file outside the instance
-	// tree": /tmp/evil.yml is not under …/instances/myinst/.
+	// tree": /tmp/evil.yml is not under …/instances/myinst/. Pure lexical.
 	err := confinePathOperand("/tmp/evil.yml", "myinst")
 	if err == nil || !strings.Contains(err.Error(), "outside the instances/myinst/ envelope") {
 		t.Fatalf("expected envelope rejection, got %v", err)
@@ -162,6 +163,7 @@ func TestConfinementRejectsOutsideEnvelope(t *testing.T) {
 
 func TestConfinementRejectsDotDot(t *testing.T) {
 	// Spec scenario "dispatcher rejects a compose path operand containing ..".
+	// Pure lexical.
 	err := confinePathOperand("/home/op/.sandbox-ai/instances/myinst/../other/compose.yml", "myinst")
 	if err == nil || !strings.Contains(err.Error(), "empty/./.. component") {
 		t.Fatalf("expected .. rejection, got %v", err)
@@ -169,9 +171,22 @@ func TestConfinementRejectsDotDot(t *testing.T) {
 }
 
 func TestConfinementRejectsRelative(t *testing.T) {
+	// Pure lexical.
 	err := confinePathOperand("instances/myinst/docker/compose.yml", "myinst")
 	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
 		t.Fatalf("expected absolute-path rejection, got %v", err)
+	}
+}
+
+// composeSymlinkWire builds a minimal valid Q6 wire form whose --compose-file
+// and --env-file point at the supplied paths, for driving the relocated
+// runtime symlink guard (enforceComposeSymlinkSafety) and run().
+func composeSymlinkWire(inst, composeFile, envFile string) []string {
+	return []string{
+		inst,
+		"--project", "u-" + inst,
+		"--env-file", envFile,
+		"--compose-file", composeFile,
 	}
 }
 
@@ -190,13 +205,24 @@ func TestConfinementAcceptsInEnvelopeRealTree(t *testing.T) {
 	if err := os.WriteFile(envFile, []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Pure lexical accept.
 	if err := confinePathOperand(composeYml, "myinst"); err != nil {
 		t.Fatalf("expected in-envelope compose.yml to pass, got %v", err)
 	}
 	if err := confinePathOperand(envFile, "myinst"); err != nil {
 		t.Fatalf("expected in-envelope .sandbox.env to pass, got %v", err)
 	}
+	// Runtime symlink guard accept (all components are real dirs/files).
+	if err := enforceComposeSymlinkSafety(
+		"compose-up", composeSymlinkWire("myinst", composeYml, envFile)); err != nil {
+		t.Fatalf("expected runtime symlink guard to accept a real in-envelope tree, got %v", err)
+	}
 }
+
+// RUNTIME symlink-guard scenarios — these create real on-disk trees /
+// symlinks so the relocated lstat pass (enforceComposeSymlinkSafety) is
+// genuinely exercised. The guard moved off the pure construction path but its
+// runtime behaviour for a real on-disk tree is identical to pre-split.
 
 func TestConfinementRejectsSymlinkedComponentInTree(t *testing.T) {
 	// Spec scenario "dispatcher rejects a symlinked component inside the
@@ -217,8 +243,13 @@ func TestConfinementRejectsSymlinkedComponentInTree(t *testing.T) {
 	if err := os.Symlink(evil, dockerLink); err != nil {
 		t.Fatal(err)
 	}
+	envFile := filepath.Join(instMyinst, ".sandbox.env")
+	if err := os.WriteFile(envFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	operand := filepath.Join(dockerLink, "compose.yml")
-	err := confinePathOperand(operand, "myinst")
+	err := enforceComposeSymlinkSafety(
+		"compose-up", composeSymlinkWire("myinst", operand, envFile))
 	if err == nil || !strings.Contains(err.Error(), "is a symbolic link") {
 		t.Fatalf("expected symlinked-component rejection, got %v", err)
 	}
@@ -239,13 +270,19 @@ func TestConfinementAcceptsSymlinkAboveInstancesBoundary(t *testing.T) {
 	if err := os.WriteFile(composeYml, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	envReal := filepath.Join(realHome, "instances", "myinst", ".sandbox.env")
+	if err := os.WriteFile(envReal, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// /home -> /var/home style ancestor symlink, ABOVE the instances boundary.
 	homeLink := filepath.Join(root, "home")
 	if err := os.Symlink(filepath.Join(root, "var", "home"), homeLink); err != nil {
 		t.Fatal(err)
 	}
 	operand := filepath.Join(homeLink, "op", "instances", "myinst", "docker", "compose.yml")
-	if err := confinePathOperand(operand, "myinst"); err != nil {
+	envOperand := filepath.Join(homeLink, "op", "instances", "myinst", ".sandbox.env")
+	if err := enforceComposeSymlinkSafety(
+		"compose-up", composeSymlinkWire("myinst", operand, envOperand)); err != nil {
 		t.Fatalf("expected ancestor-above-instances symlink to be ignored, got %v", err)
 	}
 }
@@ -259,12 +296,85 @@ func TestConfinementFailClosedOnLstatError(t *testing.T) {
 	}
 	// docker/ never created -> lstat of …/myinst/docker fails (ENOENT).
 	operand := filepath.Join(root, "instances", "myinst", "docker", "compose.yml")
-	err := confinePathOperand(operand, "myinst")
+	envFile := filepath.Join(root, "instances", "myinst", ".sandbox.env")
+	if err := os.WriteFile(envFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := enforceComposeSymlinkSafety(
+		"compose-up", composeSymlinkWire("myinst", operand, envFile))
 	if err == nil || !strings.Contains(err.Error(), "cannot lstat component") {
 		t.Fatalf("expected fail-closed lstat error, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "sandbox doctor") {
 		t.Fatalf("lstat error should point at 'sandbox doctor', got %v", err)
+	}
+}
+
+// TestRunWiresSymlinkGuardBeforeExec is the regression test that closes the
+// exact bug class this fix targets: a relocated guard that exists but is not
+// actually on the enforced dispatch path. It drives run() (the real dispatch
+// entrypoint) for a compose-up whose --compose-file traverses a symlinked
+// in-instances component in a real on-disk tree, and asserts:
+//
+//   - run() returns non-zero (the guard rejected);
+//   - stderr names the symbolic-link rejection inside the instances/<inst>
+//     envelope (the relocated guard's message — proving it ran);
+//   - stderr is NOT the exec-failure hint (so run() did NOT fall through to
+//     execTarget; the guard fired BEFORE process replacement was attempted).
+//
+// If the guard were merely defined but not wired into run(), run() would
+// proceed to execTarget and the stderr would be an exec hint (or, in an
+// environment with a real /bin/bash, the process image would be replaced),
+// not the symlink rejection — so this asserts the wiring, not just the
+// guard's existence.
+func TestRunWiresSymlinkGuardBeforeExec(t *testing.T) {
+	root := t.TempDir()
+	instMyinst := filepath.Join(root, "instances", "myinst")
+	if err := os.MkdirAll(instMyinst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(root, "evil")
+	if err := os.MkdirAll(evil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evil, "compose.yml"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// …/instances/myinst/docker is a symlink resolving outside the tree.
+	dockerLink := filepath.Join(instMyinst, "docker")
+	if err := os.Symlink(evil, dockerLink); err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(instMyinst, ".sandbox.env")
+	if err := os.WriteFile(envFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	composeFile := filepath.Join(dockerLink, "compose.yml")
+
+	tmp, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := append([]string{"dispatch", "compose-up"},
+		composeSymlinkWire("myinst", composeFile, envFile)...)
+	code := run(argv, tmp)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit (guard must reject before exec), got %d", code)
+	}
+	if _, err := tmp.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	buf, _ := os.ReadFile(tmp.Name())
+	s := string(buf)
+	if !strings.Contains(s, "is a symbolic link") ||
+		!strings.Contains(s, "instances/myinst/ envelope") {
+		t.Fatalf("run() stderr must be the relocated symlink-guard rejection, got %q", s)
+	}
+	// Negative: the guard fired BEFORE execTarget, so no exec-failure hint.
+	for _, hint := range []string{"Reinstall the package", "process replacement", "dispatch: exec"} {
+		if strings.Contains(s, hint) {
+			t.Fatalf("run() reached execTarget — guard not wired before exec; stderr=%q", s)
+		}
 	}
 }
 
