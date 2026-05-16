@@ -13,7 +13,7 @@ import pytest
 from core.actions.base import Action
 from core.actions.context import ActionContext
 from core.executor import Executor
-from core.host_config import MachinectlAuth
+from core.host_config import MachinectlAuth, minimal_host_config
 
 
 def _instantiate(cls: type) -> object:
@@ -63,3 +63,23 @@ def test_complete_subclass_can_be_instantiated() -> None:
         instance_dir=Path("/inst"),
     )
     inst.execute(ctx)  # returns None per Action protocol
+
+
+def test_render_command_base_default_delegates_to_describe_ignoring_host_config() -> None:
+    """The base ``render_command`` default returns ``describe()`` and does
+    not vary with ``host_config`` — the uniform-contract guarantee the
+    dry-run loop relies on for non-overriding subclasses."""
+
+    class _Complete(Action):
+        def describe(self) -> str:
+            return "identity-line"
+
+        def execute(self, ctx: ActionContext) -> None:
+            return None
+
+    inst = _Complete()
+    hc_sudo = minimal_host_config("alice", MachinectlAuth.SUDO)
+    hc_polkit = minimal_host_config("bob", MachinectlAuth.POLKIT)
+    assert inst.render_command(hc_sudo) == "identity-line"
+    assert inst.render_command(hc_polkit) == "identity-line"
+    assert inst.render_command(hc_sudo) == inst.describe()

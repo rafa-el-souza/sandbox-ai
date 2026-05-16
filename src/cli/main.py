@@ -1856,6 +1856,13 @@ def _dry_run_pipeline(inst: str) -> None:
     dev_user = os.environ.get("USER")
     workspace_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
 
+    # Uniform Action contract: every plan item is rendered via
+    # ``.render_command(host_config)``. The base default delegates to
+    # ``.describe()`` (HostConfig-independent items ignore it); compose-up
+    # overrides it to emit the HostConfig-dependent wire form. Resolve the
+    # full HostConfig once here (compose-up is the only consumer that reads it).
+    preview_host_config = _resolve_full_host_config()
+
     # Workspace shared-group plan — runs BEFORE Phase-5 named-ACL grants per
     # the "Workspace Shared-Group Phase Ordering" requirement.
     try:
@@ -1864,13 +1871,13 @@ def _dry_run_pipeline(inst: str) -> None:
             for ws_action in _workspace_shared_group_plan(
                 ws_path, bridge_gid, os.environ.get("USER"), host_user
             ):
-                console.print(ws_action.describe(), style="dim")
+                console.print(ws_action.render_command(preview_host_config), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     for grant_action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
-        console.print(grant_action.describe(), style="dim")
+        console.print(grant_action.render_command(preview_host_config), style="dim")
 
     # Post-hydrate setfacl-as-owner pass — covers the write_restricted
     # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
@@ -1895,9 +1902,9 @@ def _dry_run_pipeline(inst: str) -> None:
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
     try:
         for mkdir_action in _helper_mkdir_chown_plan(instance_dir, host_user):
-            console.print(mkdir_action.describe(), style="dim")
+            console.print(mkdir_action.render_command(preview_host_config), style="dim")
         for cp_action in _helper_cp_chown_plan(instance_dir, host_user):
-            console.print(cp_action.describe(), style="dim")
+            console.print(cp_action.render_command(preview_host_config), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
@@ -1908,7 +1915,7 @@ def _dry_run_pipeline(inst: str) -> None:
     # registry, but ``_lookup_instance_or_exit`` above already guaranteed the
     # instance is registered, so no soft-fail guard is needed here.
     compose_action = _compose_up_cmd_plan(inst)
-    compose_cmd = compose_action.render_command(_resolve_full_host_config())
+    compose_cmd = compose_action.render_command(preview_host_config)
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover — admin-reframe D1: tlog-rec → ssh → ProxyCommand → /fwd into core.

@@ -87,6 +87,18 @@ def test_action_carries_typed_instance_name_only() -> None:
     assert not hasattr(action, "inner_command")
 
 
+def test_render_command_formally_overrides_base_default() -> None:
+    """``ComposeUpAction.render_command`` is a real override of the base
+    ``Action.render_command`` default (it does NOT inherit the
+    describe()-delegating default), and ``describe()`` stays the pure
+    identity returning the instance name."""
+    from core.actions.base import Action
+
+    assert ComposeUpAction.render_command is not Action.render_command
+    action = ComposeUpAction(instance_name="demo")
+    assert action.describe() == "demo"
+
+
 def test_render_command_emits_q6_wire_form(isolated_sandbox_ai_home: Path) -> None:
     _seed_instance(isolated_sandbox_ai_home, "demo")
     proj = compose_project_name("demo")
