@@ -752,7 +752,8 @@ def invoke(
 ) -> subprocess.CompletedProcess[str]:
     """Validate ``op``/``args`` and run the dispatcher across the privilege boundary.
 
-    Contract (load-bearing — Milestones 2-7 depend on this signature):
+    Contract (load-bearing — the orchestrator callers and the Go dispatcher
+    depend on this signature):
 
     - ``op``: an :class:`Op` enum member, or its ``str`` wire value (e.g.
       ``Op.COMPOSE_UP`` or ``"compose-up"``). Both forms are accepted; an
