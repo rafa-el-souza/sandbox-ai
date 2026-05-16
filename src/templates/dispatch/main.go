@@ -248,7 +248,7 @@ func hardenedDockerRun(image, parent, innerSh string) string {
 		fmt.Sprintf("sh -c %s", shQuote(innerSh))
 }
 
-// shQuote reproduces Python's shlex.quote byte-for-byte: empty -> ''; a string
+// shQuote reproduces Python's shlex.quote byte-for-byte: empty -> a quote pair; a string
 // of only the safe set [\w@%+=:,./-] -> unquoted; otherwise single-quote-wrap
 // with embedded ' rendered as '"'"'.
 var shSafeRe = regexp.MustCompile(`^[\w@%+=:,./-]+$`)
