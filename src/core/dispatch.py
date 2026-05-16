@@ -32,9 +32,11 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from importlib.resources import files as _resource_files
 from typing import TYPE_CHECKING
 
 from core.compose import compose_project_name
@@ -46,10 +48,29 @@ from core.registry import InstanceRegistry
 
 if TYPE_CHECKING:
     import subprocess
+    from importlib.resources.abc import Traversable
 
     from core.host_config import HostConfig
 
 _DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
+
+# The Go dispatcher source staged into the build dir and compiled offline.
+# ``vendor`` / ``fixtures`` are directories; the rest are files. The recipe
+# stages exactly these so the build context is hermetic (no stray host files).
+_DISPATCH_SOURCE_ENTRIES = ("main.go", "main_test.go", "go.mod", "go.sum", "vendor", "fixtures")
+
+# In-container build dir (the bind-mount target) and the built binary path
+# inside it. ``go test ./...`` runs the Python<->Go fixture-parity suite BEFORE
+# ``go build`` in the SAME ``docker run`` (spec C-e enforcement): a fixture
+# mismatch fails ``go test`` -> the ``&&`` short-circuits -> no binary is
+# produced, and the non-zero exit propagates out of :func:`compile_dispatcher`
+# as a hard failure (no binary is placed at ``output_path``).
+_BUILD_MOUNT_DST = "/build"
+_BUILD_OUTPUT_IN_CONTAINER = "/build/dispatch"
+_COMPILE_INNER = (
+    "go test ./... && "
+    "go build -trimpath -ldflags '-s -w' -o /build/dispatch ."
+)
 
 
 class Op(StrEnum):
@@ -685,3 +706,114 @@ def invoke(
         inner,
     ]
     return Executor().run(cmd, timeout=timeout)
+
+
+# ─── Offline reproducible compile recipe ────────────────────────────────────
+#
+# The dispatcher binary is compiled per-host at setup-install-time (sister
+# change ``sandbox-setup``'s L6.5 phase) inside the pinned ``golang:1.23-alpine``
+# image, offline (``--network none``), against vendored deps. There is no host
+# Go toolchain, so this docker container is the ONLY place ``main_test.go``'s
+# Python<->Go target-argv fixture-parity suite runs: the recipe runs
+# ``go test ./...`` BEFORE ``go build`` in the SAME invocation (spec
+# "Target Argv Construction Per Op" C-e + "Offline Reproducible Compile
+# Recipe"). A fixture drift fails ``go test`` -> the ``&&`` short-circuits ->
+# ``go build`` never runs -> no ``/build/dispatch`` is produced, the non-zero
+# container exit propagates as :class:`~core.exceptions.SandboxExecutionError`,
+# and no binary is ever placed at ``output_path``. Two *successful* compiles of
+# the same source against the same pinned image are byte-identical
+# (``-trimpath`` strips embedded paths; ``go test`` does not write the output).
+
+
+def _stage_dispatch_source(build_dir: str) -> None:
+    """Stage the Go dispatcher source tree into ``build_dir``.
+
+    Copies ``src/templates/dispatch/{main.go, main_test.go, go.mod, go.sum,
+    vendor/, fixtures/}`` from the shipped ``templates`` package (resolved via
+    :func:`importlib.resources.files`, so it works from both the source tree
+    and an installed wheel) into ``build_dir``. The staged tree is the entire
+    build context — nothing else is mounted into the container.
+    """
+    os.makedirs(build_dir, exist_ok=True)
+    dispatch_root = _resource_files("templates").joinpath("dispatch")
+    for entry in _DISPATCH_SOURCE_ENTRIES:
+        _stage_resource(dispatch_root.joinpath(entry), os.path.join(build_dir, entry))
+
+
+def _stage_resource(src: Traversable, dst: str) -> None:
+    """Recursively copy a traversable resource (file or directory) to ``dst``."""
+    if src.is_dir():
+        os.makedirs(dst, exist_ok=True)
+        for child in src.iterdir():
+            _stage_resource(child, os.path.join(dst, child.name))
+    else:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as fh:
+            fh.write(src.read_bytes())
+
+
+def compile_dispatcher(
+    build_dir: str,
+    output_path: str,
+    host_config: HostConfig,
+) -> None:
+    """Compile the Go dispatcher offline, reproducibly, across the boundary.
+
+    Stages the dispatcher source into ``build_dir``, then in ONE
+    ``docker run --rm --network none`` invocation (crossed via
+    :func:`~core.host_config.machinectl_cmd` using the same unprivileged
+    docker user / machinectl auth mode :func:`invoke` uses) runs, inside the
+    digest-pinned ``IMAGE_REGISTRY["golang_alpine"]`` image with
+    ``GOFLAGS=-mod=vendor``::
+
+        go test ./... && go build -trimpath -ldflags '-s -w' -o /build/dispatch .
+
+    ``go test ./...`` (the ``main_test.go`` Python<->Go fixture-parity suite)
+    runs BEFORE ``go build`` in the same container (spec C-e): a fixture drift
+    fails ``go test``, the ``&&`` short-circuits, ``go build`` never runs, and
+    no ``/build/dispatch`` is produced. The non-zero container exit is detected
+    by the sterile :class:`~core.executor.Executor` (``sentinel=True``) and
+    raised as :class:`~core.exceptions.SandboxExecutionError`; the built binary
+    is copied to ``output_path`` ONLY after the container exits 0, so a failed
+    ``go test`` (or build) guarantees no binary at ``output_path``.
+
+    Args:
+        build_dir: Host directory to stage the source into and bind-mount at
+            ``/build``. Created if absent.
+        output_path: Host path the freshly-built binary is copied to on
+            success. Untouched on any failure.
+        host_config: Resolved :class:`~core.host_config.HostConfig` supplying
+            the unprivileged docker user + machinectl auth mode for the
+            boundary crossing (same path as :func:`invoke`).
+
+    Raises:
+        SandboxExecutionError: ``go test`` failed (fixture drift / build
+            failure), the container could not start, or it timed out. No binary
+            is placed at ``output_path`` in any failure case.
+    """
+    _stage_dispatch_source(build_dir)
+    image = IMAGE_REGISTRY["golang_alpine"].pinned
+    docker_run = (
+        "docker run --rm "
+        "--network none "
+        f"--mount type=bind,src={shlex.quote(build_dir)},dst={_BUILD_MOUNT_DST} "
+        f"--workdir {_BUILD_MOUNT_DST} "
+        f"{shlex.quote(image)} "
+        f"/bin/sh -c {shlex.quote(_COMPILE_INNER)}"
+    )
+    cmd = [
+        *machinectl_cmd(
+            host_config.host.docker_unprivileged_user,
+            host_config.host.machinectl_authentication,
+        ),
+        "/bin/bash",
+        "-c",
+        f"GOFLAGS=-mod=vendor {docker_run}",
+    ]
+    # ``sentinel=True`` recovers the in-container exit code through the
+    # machinectl PTY: a non-zero ``go test`` (fixture drift) or ``go build``
+    # raises SandboxExecutionError here, so the copy below never runs and no
+    # binary is placed at ``output_path``.
+    Executor().run(cmd, sentinel=True)
+    built = os.path.join(build_dir, "dispatch")
+    shutil.copyfile(built, output_path)
