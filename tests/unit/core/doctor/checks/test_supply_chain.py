@@ -13,7 +13,6 @@ member of ``{pin.pinned}`` union ``{pin.tagged}``); the check branches on the ty
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 from core.dispatch import ProbeOutcome
 
@@ -53,19 +52,25 @@ def test_module_does_not_import_machinectl_cmd() -> None:
 
 
 class TestCheckImageDigests:
-    def test_all_digests_resolvable_pass(self) -> None:
+    def test_all_digests_resolvable_pass(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
 
-        with patch("core.dispatch.probe", return_value=_ok()) as prb:
-            result = check_image_digests("sandbox", None)
-            assert result.status == "pass"
-            assert "8" in result.detail
-            # docker-manifest-inspect op per IMAGE_REGISTRY pin (pinned + tagged).
-            (op, args, _hc), kw = prb.call_args
-            assert op == "docker-manifest-inspect"
-            assert kw["timeout"] == 2
+        captured: dict[str, Any] = {}
 
-    def test_stale_digest_detected_fail(self) -> None:
+        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> ProbeOutcome:
+            captured["op"] = op
+            captured["timeout"] = kwargs.get("timeout")
+            return _ok()
+
+        monkeypatch.setattr("core.dispatch.probe", capture)
+        result = check_image_digests("sandbox", None)
+        assert result.status == "pass"
+        assert "8" in result.detail
+        # docker-manifest-inspect op per IMAGE_REGISTRY pin (pinned + tagged).
+        assert captured["op"] == "docker-manifest-inspect"
+        assert captured["timeout"] == 2
+
+    def test_stale_digest_detected_fail(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
         from core.hydration import IMAGE_REGISTRY
 
@@ -76,20 +81,20 @@ class TestCheckImageDigests:
                 return _fail()
             return _ok()
 
-        with patch("core.dispatch.probe", side_effect=selective_probe):
-            result = check_image_digests("sandbox", None)
-            assert result.status == "fail"
-            assert keys[0] in result.detail
+        monkeypatch.setattr("core.dispatch.probe", selective_probe)
+        result = check_image_digests("sandbox", None)
+        assert result.status == "fail"
+        assert keys[0] in result.detail
 
-    def test_timeout_returns_skip(self) -> None:
+    def test_timeout_returns_skip(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
 
-        with patch("core.dispatch.probe", return_value=_timeout()):
-            result = check_image_digests("sandbox", None)
-            assert result.status == "skip"
-            assert "registry unreachable" in result.detail.lower()
+        monkeypatch.setattr("core.dispatch.probe", lambda *a, **k: _timeout())
+        result = check_image_digests("sandbox", None)
+        assert result.status == "skip"
+        assert "registry unreachable" in result.detail.lower()
 
-    def test_tag_drift_reports_warn(self) -> None:
+    def test_tag_drift_reports_warn(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
         from core.hydration import IMAGE_REGISTRY
 
@@ -113,13 +118,13 @@ class TestCheckImageDigests:
                     return _ok(f'{{"digest": "{pin.digest}"}}')
             return _ok()
 
-        with patch("core.dispatch.probe", side_effect=selective_probe):
-            result = check_image_digests("sandbox", None)
-            assert result.status == "pass"
-            assert "tag drift detected" in result.detail
-            assert keys[0] in result.detail
+        monkeypatch.setattr("core.dispatch.probe", selective_probe)
+        result = check_image_digests("sandbox", None)
+        assert result.status == "pass"
+        assert "tag drift detected" in result.detail
+        assert keys[0] in result.detail
 
-    def test_tag_drift_json_decode_error(self) -> None:
+    def test_tag_drift_json_decode_error(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
 
         def probe_side(op: str, args: Any, host_config: Any, **kwargs: Any) -> ProbeOutcome:
@@ -127,12 +132,12 @@ class TestCheckImageDigests:
                 return _ok()
             return _ok("NOT-JSON{{")
 
-        with patch("core.dispatch.probe", side_effect=probe_side):
-            result = check_image_digests("sandbox", None)
-            assert result.status == "pass"
-            assert "tag drift detected" not in result.detail
+        monkeypatch.setattr("core.dispatch.probe", probe_side)
+        result = check_image_digests("sandbox", None)
+        assert result.status == "pass"
+        assert "tag drift detected" not in result.detail
 
-    def test_tag_drift_probe_failure_ignored(self) -> None:
+    def test_tag_drift_probe_failure_ignored(self, monkeypatch: Any) -> None:
         """The tag-drift probe is best-effort: a failed/timed-out tag probe is
         silently ignored (no drift recorded, overall verdict still pass)."""
         from core.doctor import check_image_digests
@@ -142,12 +147,12 @@ class TestCheckImageDigests:
                 return _ok()
             return _timeout()  # tag-drift probe times out → best-effort skip
 
-        with patch("core.dispatch.probe", side_effect=probe_side):
-            result = check_image_digests("sandbox", None)
-            assert result.status == "pass"
-            assert "tag drift detected" not in result.detail
+        monkeypatch.setattr("core.dispatch.probe", probe_side)
+        result = check_image_digests("sandbox", None)
+        assert result.status == "pass"
+        assert "tag drift detected" not in result.detail
 
-    def test_auth_mode_threaded_into_host_config(self) -> None:
+    def test_auth_mode_threaded_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
         from core.host_config import MachinectlAuth
 
@@ -157,8 +162,8 @@ class TestCheckImageDigests:
             captured["host_config"] = host_config
             return _ok()
 
-        with patch("core.dispatch.probe", side_effect=capture):
-            check_image_digests("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+        monkeypatch.setattr("core.dispatch.probe", capture)
+        check_image_digests("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
         assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
         assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
