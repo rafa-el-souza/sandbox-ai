@@ -4,11 +4,14 @@ The Action carries only the typed instance name (design Q6 / D2): the
 ``--project`` / ``--env-file`` / ``--compose-file`` operands are NOT plan
 output — they are operator-side dev-context state that
 ``core.dispatch.build_invocation`` resolves internally from the instance
-name (the single compose-state resolver ``_resolve_compose_state``). Both
-the live ``.execute()`` path and the dry-run ``.describe()`` path derive
-their command from ``core.dispatch.build_invocation("compose-up",
-[instance_name], host_config)`` so they cannot drift and there is no
-parallel command construction (anti-hack rules 4 + 7 — one seam).
+name (the single compose-state resolver ``_resolve_compose_state``). The
+live ``.execute()`` path routes through ``core.dispatch.invoke``; the
+dry-run ``.render_command(host_config)`` path routes through
+``core.dispatch.build_invocation`` — the same seam ``invoke()`` consumes,
+so the live and dry-run commands cannot drift (anti-hack rules 4 + 7 — one
+seam). ``.describe()`` is a pure identity on the typed instance name (it
+cannot resolve the HostConfig-dependent command); the caller uses
+``.render_command(host_config)`` for the dry-run line.
 
 ``host_config`` is read from :class:`~core.actions.context.ActionContext`
 (the optional field only the compose-up construction site supplies).

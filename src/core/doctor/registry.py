@@ -60,7 +60,9 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
     When ``auth_mode == MachinectlAuth.POLKIT``, the `sudo` binary check is
     omitted from the registry and the `machinectl_reachable` check no longer
     depends on `sudo`. The 7 machinectl-invoking checks are partial-bound with
-    ``auth_mode`` so they construct command prefixes via ``machinectl_cmd()``.
+    ``auth_mode`` so they cross the privilege boundary via
+    ``core.dispatch.probe``, which builds the command prefix from the threaded
+    auth mode.
     """
     is_sudo = auth_mode == MachinectlAuth.SUDO
     machinectl_reachable_deps = (

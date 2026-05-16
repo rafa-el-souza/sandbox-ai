@@ -41,10 +41,9 @@ def check_image_digests(user: str, distro: str | None, auth_mode: MachinectlAuth
             stale.append(key)
             continue
 
-        # Best-effort upstream tag-drift detection. Q7: ``pin.tagged`` is a
-        # registry member (``{pin.pinned}`` union ``{pin.tagged}``) so this routes
-        # through the typed op rather than a direct ``machinectl_cmd`` call —
-        # the file no longer imports ``machinectl_cmd`` (Group 8 meta-test).
+        # Best-effort upstream tag-drift detection; ``pin.tagged`` is an
+        # ``IMAGE_REGISTRY`` member (design Q7) so it validates and routes
+        # through the typed ``docker-manifest-inspect`` op.
         tag_outcome = dispatch.probe(
             "docker-manifest-inspect", [pin.tagged], host_config, timeout=2
         )

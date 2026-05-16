@@ -15,27 +15,20 @@ it trusts the validation performed here (design D4). Both sides construct the
 same target argv from a shared JSON fixture so they stay in lockstep
 (``src/templates/dispatch/fixtures/target_argv_cases.json``).
 
-Milestone 3 status: the :class:`Op` enum + :class:`OpSpec` wiring, the per-op
-validators, and the per-op target-argv builders are real, and :func:`invoke`
-has its real body (validate -> Q6 compose wire-expansion / verbatim
-deterministic args -> ``machinectl_cmd`` + ``bash -c`` crossing -> sterile
-:class:`core.executor.Executor` run). The return type is
-``subprocess.CompletedProcess[str]`` — the sterile ``Executor`` is the only
-sanctioned execution path and it returns text-mode streams; an earlier draft's
-``[bytes]`` annotation predated wiring the Executor and was reconciled here
-(noted for the orchestrator as a resolved signature ambiguity). Callers are
-wired in Milestones 5-7.
-
-Milestone 6b status (design "Resolved Design Questions" Q7 + Q8):
-``docker-manifest-inspect``'s validator is now pure ``IMAGE_REGISTRY``
-set-membership (``{pin.pinned}`` union ``{pin.tagged}``, computed once at module
-load) rather than a digest-only regex, so the supply-chain tag-drift call
-routes through the op. A sibling :func:`probe` returns a typed
-:class:`ProbeOutcome` for probe-style callers (doctor checks, the cli
-``auth-probe`` preflight); :func:`invoke`/``Executor`` keep their
-raise-on-failure contract verbatim and are the SINGLE place that crosses the
-boundary — :func:`probe` is the SINGLE place the ``SandboxExecutionError`` /
-``__cause__`` timeout discrimination lives.
+Contract: :func:`invoke` validates the op, expands the Q6 compose wire form
+(or passes deterministic args verbatim), crosses the privilege boundary via
+``machinectl_cmd`` + ``bash -c``, and runs the result through the sterile
+:class:`core.executor.Executor`. It returns ``subprocess.CompletedProcess[str]``
+(the Executor is the only sanctioned execution path and yields text-mode
+streams) and keeps the raise-on-failure contract — a non-zero exit raises
+:class:`~core.exceptions.SandboxExecutionError`. ``docker-manifest-inspect``
+validates by ``IMAGE_REGISTRY`` membership (``{pin.pinned}`` union
+``{pin.tagged}``, computed once at module load; design Q7) so the supply-chain
+tag-drift call routes through the typed op. A sibling :func:`probe` returns a
+typed :class:`ProbeOutcome` for probe-style callers (doctor checks, the cli
+``auth-probe`` preflight) and is the SINGLE site the ``SandboxExecutionError``
+/ ``__cause__`` timeout discrimination lives (design Q8); :func:`invoke` is the
+SINGLE site that crosses the boundary.
 """
 
 from __future__ import annotations
@@ -748,6 +741,8 @@ def build_invocation(
     ]
 
 
+# Layer map: invoke() = Executor().run(build_invocation(...)); build_invocation()
+# = machinectl-crossed argv; build_target_argv() = the inner dispatcher-spawned argv.
 def invoke(
     op: Op | str,
     args: list[str],
