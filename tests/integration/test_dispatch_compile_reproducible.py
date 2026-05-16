@@ -11,18 +11,130 @@ output paths against identical source + the same digest-pinned
 ``golang:1.23-alpine`` image and asserts the two binaries' sha512 match
 (design D3 reproducibility; spec "Offline Reproducible Compile Recipe"
 scenario "Reproducible build across two invocations").
+
+Skips with a specific, log-greppable reason when any precondition is
+unavailable so a future CI log reader can identify what to fix. Mirrors
+the precondition-resolution pattern in ``test_helper_container_userns.py``
+and ``test_scaffold_helper_init_sequence.py`` (docker on PATH → real
+per-host toml resolvable → daemon user + subuid/subgid → machinectl
+crossing reachable → pinned image present), adapted to the
+``golang_alpine`` image that :func:`compile_dispatcher` pins and to
+``HostConfig.from_toml``'s not-initialized ``FileNotFoundError`` contract.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
+import pwd
+import shutil
+import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
 from core.dispatch import compile_dispatcher
-from core.host_config import HostConfig
+from core.host_config import (
+    HostConfig,
+    MachinectlAuth,
+    machinectl_cmd,
+    parse_subgid_for_user,
+    parse_subuid_for_user,
+)
+from core.hydration import IMAGE_REGISTRY
 
 pytestmark = pytest.mark.integration
+
+_TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
+_PROBE_TIMEOUT_S = 10
+
+
+def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
+    """Return ``(daemon_user, auth)`` or call ``pytest.skip`` with a specific reason.
+
+    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var (auth defaults
+    to SUDO); otherwise parse ``~/.sandbox-ai/config/sandbox-ai.toml``.
+    """
+    override = os.environ.get(_TEST_USER_ENV)
+    if override is not None:
+        return override, MachinectlAuth.SUDO
+    real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
+    if not real_toml.exists():
+        pytest.skip(f"skipped: {real_toml} not present and {_TEST_USER_ENV} unset")
+    try:
+        with open(real_toml, "rb") as f:
+            raw = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        pytest.skip(f"skipped: {real_toml} is malformed TOML: {exc}")
+    host_section = raw.get("host", {}) if isinstance(raw, dict) else {}
+    user = host_section.get("docker_unprivileged_user")
+    if not isinstance(user, str):
+        pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
+    auth_raw = host_section.get("machinectl_authentication", "sudo")
+    try:
+        auth = MachinectlAuth(auth_raw)
+    except ValueError:
+        pytest.skip(f"skipped: invalid [host].machinectl_authentication={auth_raw!r}")
+    return user, auth
+
+
+def _check_preconditions() -> tuple[str, MachinectlAuth]:
+    """Verify every precondition the compile recipe needs; skip with a specific reason if any fails."""
+    if shutil.which("docker") is None:
+        pytest.skip("skipped: docker binary not on PATH")
+
+    daemon_user, auth = _resolve_test_environment()
+
+    try:
+        pwd.getpwnam(daemon_user)
+    except KeyError:
+        pytest.skip(f"skipped: daemon user {daemon_user!r} does not exist on this host")
+
+    if not parse_subuid_for_user(daemon_user):
+        pytest.skip(f"skipped: /etc/subuid has no entry for {daemon_user!r}")
+    if not parse_subgid_for_user(daemon_user):
+        pytest.skip(f"skipped: /etc/subgid has no entry for {daemon_user!r}")
+
+    probe = [*machinectl_cmd(daemon_user, auth), "/bin/echo", "ok"]
+    try:
+        result = subprocess.run(
+            probe,
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_S,
+            text=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("skipped: machinectl binary not on PATH")
+    except subprocess.TimeoutExpired:
+        pytest.skip(
+            f"skipped: machinectl shell {daemon_user}@.host timed out after "
+            f"{_PROBE_TIMEOUT_S}s (sudo password not cached, or polkit rule missing)"
+        )
+    if result.returncode != 0:
+        pytest.skip(
+            f"skipped: machinectl shell {daemon_user}@.host exited "
+            f"{result.returncode} ({result.stderr.strip()!r})"
+        )
+
+    pin = IMAGE_REGISTRY["golang_alpine"].pinned
+    inspect = [
+        *machinectl_cmd(daemon_user, auth),
+        "/bin/bash",
+        "-c",
+        f"docker image inspect {pin} > /dev/null",
+    ]
+    try:
+        ins = subprocess.run(inspect, capture_output=True, timeout=_PROBE_TIMEOUT_S, text=True)
+    except subprocess.TimeoutExpired:
+        pytest.skip(f"skipped: docker image inspect {pin} timed out via machinectl")
+    if ins.returncode != 0:
+        pytest.skip(
+            f"skipped: golang image {pin} not present in {daemon_user}'s docker "
+            f"(stderr: {ins.stderr.strip()!r}); pre-pull with "
+            f"`{' '.join(machinectl_cmd(daemon_user, auth))} -- docker pull {pin}`"
+        )
+
+    return daemon_user, auth
 
 
 def _sha512(path: Path) -> str:
@@ -31,7 +143,11 @@ def _sha512(path: Path) -> str:
 
 def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     """Two compiles of identical source + pinned image are sha512-identical."""
-    host_config = HostConfig.from_toml()
+    _check_preconditions()
+    try:
+        host_config = HostConfig.from_toml()
+    except FileNotFoundError as exc:
+        pytest.skip(f"skipped: HostConfig.from_toml() unresolvable ({exc})")
 
     build_a = tmp_path / "build-a"
     build_b = tmp_path / "build-b"
