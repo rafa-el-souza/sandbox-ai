@@ -19,6 +19,9 @@ import typer
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
+    from core.dispatch import ProbeOutcome
+    from core.hydration import InstanceConfig
+
     from tests.unit.conftest import HostConfigFactory
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -1892,46 +1895,64 @@ class TestBuildAttachArgv:
 
 
 class TestComposeDownDirect:
-    """Direct test for _compose_down."""
+    """Direct test for _compose_down — routes through core.dispatch.invoke.
+
+    `_compose_down` raised on failure before the dispatcher refactor (no
+    branch — `sentinel=True` Executor.run with no try/except); it still does,
+    so it uses `invoke()` (raise-on-failure), not `probe()`. The stop-vs-
+    destroy distinction is the optional literal `--volumes` typed arg.
+    """
+
+    def _config(self) -> InstanceConfig:
+        from core.hydration import InstanceConfig
+
+        return InstanceConfig.model_validate(
+            {
+                "instance": {
+                    "name": "t",
+                    "host_uid": "1000",
+                },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
+            }
+        )
 
     def test_compose_down_plain(self) -> None:
         from cli.main import _compose_down
-        from core.hydration import InstanceConfig
+        from core.host_config import MachinectlAuth
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
-
-        with patch("cli.main.Executor") as MockExec:
-            _compose_down("/inst", "myproj", "sandbox", config, volumes=False)
-            cmd_str = MockExec.return_value.run.call_args[0][0][-1]
-            assert "down" in cmd_str
-            assert " -v" not in cmd_str
+        with patch("cli.main.dispatch.invoke") as mock_invoke:
+            _compose_down("/inst", "myproj", "sandbox", self._config(), volumes=False)
+            (op, args, host_config), kwargs = mock_invoke.call_args
+            assert op == "compose-down"
+            assert args == ["t"]
+            assert "--volumes" not in args
+            assert host_config.host.docker_unprivileged_user == "sandbox"
+            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_compose_down_volumes(self) -> None:
         from cli.main import _compose_down
-        from core.hydration import InstanceConfig
+        from core.host_config import MachinectlAuth
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
+        with patch("cli.main.dispatch.invoke") as mock_invoke:
+            _compose_down(
+                "/inst", "myproj", "sandbox", self._config(), volumes=True, auth=MachinectlAuth.POLKIT
+            )
+            (op, args, host_config), kwargs = mock_invoke.call_args
+            assert op == "compose-down"
+            assert args == ["t", "--volumes"]
+            assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
-        with patch("cli.main.Executor") as MockExec:
-            _compose_down("/inst", "myproj", "sandbox", config, volumes=True)
-            cmd_str = MockExec.return_value.run.call_args[0][0][-1]
-            assert "down -v" in cmd_str
+    def test_compose_down_raises_on_failure(self) -> None:
+        """`invoke()` (not `probe()`) — a non-zero exit propagates as
+        SandboxExecutionError exactly as the prior sentinel path did."""
+        from cli.main import _compose_down
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main.dispatch.invoke", side_effect=SandboxExecutionError("boom")),
+            pytest.raises(SandboxExecutionError),
+        ):
+            _compose_down("/inst", "myproj", "sandbox", self._config(), volumes=False)
 
 
 class TestRevokeACLsDirect:
@@ -3114,11 +3135,30 @@ class TestInitHostConfigResolution:
 
 
 class TestInitAuthProbe:
-    """Task 3.10: init-time auth mode probe tests."""
+    """Init-time auth mode probe tests.
+
+    The probe is a *branch* callsite (reachable → continue; unreachable →
+    guidance + exit 1), so per Q8 it routes through ``core.dispatch.probe``
+    (the non-raising typed-outcome entry point), NOT ``invoke``. These tests
+    mock ``cli.main.dispatch.probe`` at the boundary and assert the typed
+    ``ProbeOutcome`` is mapped to the original control flow / messages 1:1.
+    """
+
+    def _ok(self) -> ProbeOutcome:
+        from core.dispatch import ProbeOutcome
+
+        return ProbeOutcome(ok=True, timed_out=False, stdout="ok\n")
+
+    def _fail(self, *, timed_out: bool = False) -> ProbeOutcome:
+        from core.dispatch import ProbeOutcome
+
+        return ProbeOutcome(ok=False, timed_out=timed_out, stdout="")
 
     def test_probe_success_sudo(self, runner: CliRunner) -> None:
-        """Probe succeeds with sudo mode — init proceeds."""
+        """Probe succeeds with sudo mode — init proceeds; the probe's
+        host_config carries the resolved sudo auth + user."""
         from cli.main import app
+        from core.host_config import MachinectlAuth
         from core.hydration import InstanceConfig
 
         project_dir = "/home/user/probeproject"
@@ -3130,9 +3170,10 @@ class TestInitAuthProbe:
         )
 
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
+            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision") as mock_collision,
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3141,42 +3182,39 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
+            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 0
-            # Verify the probe was called with sudo prefix
-            probe_call = mock_run.call_args[0][0]
-            assert "sudo" in probe_call
-            assert "machinectl" in probe_call
+            (op, args, host_config), kwargs = mock_probe.call_args
+            assert op == "auth-probe"
+            assert args == []
+            assert kwargs["timeout"] == 5
+            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_probe_failure_exits_with_remediation(self, runner: CliRunner) -> None:
-        """Probe failure exits with error and remediation guidance."""
+        """Probe failure (not-ok, not-timeout) exits with error + remediation."""
         from cli.main import app
 
-        with (
-            patch(
-                "cli.main.subprocess.run",
-                return_value=subprocess.CompletedProcess([], 1, "", "permission denied"),
-            ),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail()):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
 
     def test_probe_timeout_exits_with_error(self, runner: CliRunner) -> None:
-        """Probe timeout exits with error."""
+        """Probe timeout (timed_out=True) exits with the exact original
+        'probe timed out after 5 seconds' message."""
         from cli.main import app
 
-        with (
-            patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="test", timeout=5)),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail(timed_out=True)):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
-            assert "timed out" in result.output.lower()
+            assert "probe timed out after 5 seconds" in result.output.lower()
 
     def test_probe_polkit_mode_no_sudo(self, runner: CliRunner) -> None:
-        """Polkit mode probe does not include sudo in command."""
+        """Polkit mode probe — host_config carries POLKIT auth."""
         from cli.main import app
+        from core.host_config import MachinectlAuth
         from core.hydration import InstanceConfig
 
         project_dir = "/home/user/polkit"
@@ -3188,9 +3226,10 @@ class TestInitAuthProbe:
         )
 
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
+            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision") as mock_collision,
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3199,22 +3238,18 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
+            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 0
-            probe_call = mock_run.call_args[0][0]
-            assert "sudo" not in probe_call
-            assert "machinectl" in probe_call
+            (op, args, host_config), kwargs = mock_probe.call_args
+            assert op == "auth-probe"
+            assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
     def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner) -> None:
         """Polkit probe failure shows polkit-specific remediation."""
         from cli.main import app
 
-        with (
-            patch(
-                "cli.main.subprocess.run",
-                return_value=subprocess.CompletedProcess([], 1, "", "auth failed"),
-            ),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail()):
             result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 1
             assert "polkit" in result.output.lower()
@@ -3227,16 +3262,18 @@ class TestInitAuthProbe:
         assert result.exit_code == 1
         assert "invalid" in result.output.lower()
 
-    def test_probe_file_not_found_exits_with_error(self, runner: CliRunner) -> None:
-        """Probe FileNotFoundError (command not on PATH) exits with error."""
+    def test_probe_file_not_found_consolidated_into_failure_branch(self, runner: CliRunner) -> None:
+        """The prior FileNotFoundError ("command not found on PATH") case now
+        collapses into the not-ok/not-timeout branch (Q8 narrowing —
+        ProbeOutcome carries no ENOENT discriminator); the consolidated
+        diagnostic still names that cause and exits 1."""
         from cli.main import app
 
-        with (
-            patch("cli.main.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail()):
             result = runner.invoke(app, ["init", "polkit"])
             assert result.exit_code == 1
-            assert "command not found" in result.output.lower()
+            assert "command not found on path" in result.output.lower()
+            assert "probe failed" in result.output.lower()
 
 
 class TestResolveHostConfig:
@@ -3464,16 +3501,18 @@ class TestCheckSecretsFirecrawl:
 
 
 class TestContainerStatus:
-    """Task 6.1: _container_status NDJSON parsing."""
+    """_container_status NDJSON parsing — routes through core.dispatch.probe.
 
-    def test_parses_ndjson_output(self, tmp_path: Path) -> None:
-        """Multiple NDJSON lines are parsed into ContainerInfo list."""
-        import subprocess as sp
+    `_container_status` *branched* on failure before the refactor (caught
+    SandboxExecutionError → returned []); per Q8 it now uses the non-raising
+    `probe()` and returns [] when `outcome.ok` is False — 1:1 preservation of
+    the empty-on-error contract. The op arg is the typed `[config.instance.name]`.
+    """
 
-        from cli.main import ContainerInfo, _container_status
+    def _config(self) -> InstanceConfig:
         from core.hydration import InstanceConfig
 
-        config = InstanceConfig.model_validate(
+        return InstanceConfig.model_validate(
             {
                 "instance": {
                     "name": "t",
@@ -3483,20 +3522,31 @@ class TestContainerStatus:
             }
         )
 
+    def _outcome(self, *, ok: bool, stdout: str = "") -> ProbeOutcome:
+        from core.dispatch import ProbeOutcome
+
+        return ProbeOutcome(ok=ok, timed_out=False, stdout=stdout)
+
+    def test_parses_ndjson_output(self, tmp_path: Path) -> None:
+        """Multiple NDJSON lines are parsed into ContainerInfo list."""
+        from cli.main import ContainerInfo, _container_status
+
         ndjson = (
             '{"Name":"t-core-1","Service":"core","State":"running","Health":"healthy","Status":"Up 5s"}\n'
             '{"Name":"t-admin-1","Service":"admin","State":"running","Health":"","Status":"Up 5s"}\n'
         )
-
-        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout=ndjson, stderr="")
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.return_value = mock_result
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch(
+            "cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout=ndjson)
+        ) as mock_probe:
+            containers = _container_status(str(tmp_path), "t", "s", self._config())
 
+        (op, args, _host_config), _kwargs = mock_probe.call_args
+        assert op == "compose-ps"
+        assert args == ["t"]
         assert len(containers) == 2
         assert containers[0].name == "t-core-1"
         assert containers[0].service == "core"
@@ -3505,56 +3555,29 @@ class TestContainerStatus:
         assert isinstance(containers[1], ContainerInfo)
 
     def test_empty_for_stopped_instance(self, tmp_path: Path) -> None:
-        """Stopped instance returns empty container list."""
-        import subprocess as sp
-
+        """Stopped instance (ok but empty stdout) returns empty list."""
         from cli.main import _container_status
-        from core.hydration import InstanceConfig
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
-
-        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.return_value = mock_result
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout="")):
+            containers = _container_status(str(tmp_path), "t", "s", self._config())
 
         assert containers == []
 
     def test_executor_error_returns_empty(self, tmp_path: Path) -> None:
-        """Executor error returns empty list instead of raising."""
+        """A failed probe (not-ok) returns empty list instead of raising —
+        1:1 with the prior `except SandboxExecutionError: return []`."""
         from cli.main import _container_status
-        from core.exceptions import SandboxExecutionError
-        from core.hydration import InstanceConfig
-
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
 
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.side_effect = SandboxExecutionError("fail")
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=False)):
+            containers = _container_status(str(tmp_path), "t", "s", self._config())
 
         assert containers == []
 
@@ -5172,11 +5195,13 @@ class TestContainerStatusEdgeCases:
 
         # Mix of blank, malformed, and valid NDJSON — blank between content lines survives strip()
         stdout = 'NOT-JSON\n   \n{"Name":"c1","Service":"svc","State":"running","Health":"","Status":"Up"}'
-        mock_result = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
 
-        from core.executor import Executor
+        from core.dispatch import ProbeOutcome
 
-        with patch.object(Executor, "run", return_value=mock_result):
+        with patch(
+            "cli.main.dispatch.probe",
+            return_value=ProbeOutcome(ok=True, timed_out=False, stdout=stdout),
+        ):
             containers = _container_status(str(tmp_path), "t", "s", config)
             assert len(containers) == 1
             assert containers[0].name == "c1"

@@ -52,7 +52,7 @@ _GRANDFATHERED_SUPPRESSIONS: frozenset[tuple[str, int]] = frozenset(
         # before an autouse patch replaces it. Removing the late import requires
         # redesigning the capture mechanism — non-trivial. Tracked in
         # openspec/deferred.md.
-        ("tests/unit/cli/test_cli.py", 86),
+        ("tests/unit/cli/test_cli.py", 89),
     }
 )
 

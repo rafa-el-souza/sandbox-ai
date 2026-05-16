@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pydantic
 import typer
+from core import dispatch
 from core.actions import (
     ActionContext,
     ComposeUpAction,
@@ -50,7 +51,6 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
-    machinectl_cmd,
     pipe_cmd,
     sandbox_ai_home,
     state_lock_path,
@@ -301,31 +301,21 @@ def _container_status(
     # Environment File Read ACL requirement. It survives `sandbox stop`, so
     # no idempotent re-grant is needed here before the compose-ps query.
 
-    compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(compose_files)
-
-    executor = Executor()
-    try:
-        result = executor.run(
-            [
-                *machinectl_cmd(host_user, auth),
-                "/bin/bash",
-                "-c",
-                (
-                    f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={project_name} "
-                    f"docker compose {files_str} "
-                    f"--env-file {os.path.join(instance_dir, '.sandbox.env')} "
-                    f"--ansi never ps --format json"
-                ),
-            ],
-            sentinel=True,
-        )
-    except SandboxExecutionError:
+    # `compose-ps` is a *probe* callsite: a non-zero exit (stopped instance,
+    # boundary error) must yield an empty list, not an abort. Per Q8 the
+    # probe-style entry point is ``core.dispatch.probe`` — it returns a typed
+    # ``ProbeOutcome`` and never raises for op failure. The Q6 project name /
+    # ``--compose-file`` / ``--env-file`` operands are resolved internally by
+    # ``invoke``'s single operator-side resolver (``_resolve_compose_state``),
+    # so they are no longer constructed here.
+    host_config = HostConfig(host=HostSettings(docker_unprivileged_user=host_user, machinectl_authentication=auth))
+    outcome = dispatch.probe("compose-ps", [config.instance.name], host_config)
+    if not outcome.ok:
         return []
 
     containers: list[ContainerInfo] = []
-    if result.stdout:
-        for line in result.stdout.strip().splitlines():
+    if outcome.stdout:
+        for line in outcome.stdout.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -1719,26 +1709,22 @@ def _compose_down(
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
-    """Run docker compose down via machinectl. Pass volumes=True for -v."""
-    compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(compose_files)
-    v_flag = " -v" if volumes else ""
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    cmd = (
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
-        f"--ansi never --env-file {env_file} down{v_flag}"
-    )
-    executor = Executor()
-    executor.run(
-        [
-            *machinectl_cmd(host_user, auth),
-            "/bin/bash",
-            "-c",
-            cmd,
-        ],
-        sentinel=True,
-    )
+    """Run docker compose down via the typed ``compose-down`` dispatcher op.
+
+    Routes through ``core.dispatch.invoke("compose-down", [inst (+ "--volumes")],
+    host_config)``. ``invoke`` raises :class:`SandboxExecutionError` on a
+    non-zero exit, preserving the abort behavior the prior ``sentinel=True``
+    path had (this callsite never branched on failure — ``stop`` propagates and
+    ``destroy`` demotes it to a warning at *their* call sites, not here). The
+    stop-vs-destroy distinction is the optional literal ``--volumes`` typed arg
+    (``volumes=True`` for ``destroy``/``stop --clean``); the env prefix /
+    ``--ansi never`` / ``--env-file`` / verb and the Q6 ``--project`` /
+    ``--compose-file`` expansion are all internal to the single
+    ``core.dispatch`` seam — not constructed here.
+    """
+    host_config = HostConfig(host=HostSettings(docker_unprivileged_user=host_user, machinectl_authentication=auth))
+    args = [config.instance.name, "--volumes"] if volumes else [config.instance.name]
+    dispatch.invoke("compose-down", args, host_config)
 
 
 def _revoke_acls(
@@ -2182,26 +2168,33 @@ def init(
     else:
         resolved_auth = MachinectlAuth.SUDO
 
-    # Init-time auth mode probe (D5)
+    # Init-time auth mode probe (D5). This is a *probe* callsite: it must
+    # branch (reachable → continue; unreachable/timeout → guidance + exit 1),
+    # not crash. Per Q8 the probe-style entry point is ``core.dispatch.probe``,
+    # which collapses the boundary-crossing outcome into a typed
+    # ``ProbeOutcome`` (``ok`` / ``timed_out``). The timeout branch preserves
+    # the exact original message; the non-timeout failure branch consolidates
+    # the prior non-zero (stderr) and ``FileNotFoundError`` ("command not found
+    # on PATH") cases — ``ProbeOutcome`` carries no stderr and does not
+    # discriminate ENOENT, the documented Q8 narrowing — into one diagnostic.
     if not dry_run:
-        probe_cmd = machinectl_cmd(resolved_user, resolved_auth)
-        probe_cmd_full = [*probe_cmd, "/bin/bash", "-c", "echo ok"]
-        try:
-            result = subprocess.run(
-                probe_cmd_full,
-                capture_output=True,
-                text=True,
-                timeout=5,
+        probe_host_config = HostConfig(
+            host=HostSettings(
+                docker_unprivileged_user=resolved_user,
+                machinectl_authentication=resolved_auth,
             )
-            if result.returncode != 0:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, result.stderr)
-                raise typer.Exit(code=1)
-        except subprocess.TimeoutExpired:
-            _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
-            raise typer.Exit(code=1) from None
-        except FileNotFoundError:
-            _emit_auth_probe_failure(resolved_auth, resolved_user, "command not found on PATH")
-            raise typer.Exit(code=1) from None
+        )
+        probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
+        if not probe_outcome.ok:
+            if probe_outcome.timed_out:
+                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
+            else:
+                _emit_auth_probe_failure(
+                    resolved_auth,
+                    resolved_user,
+                    "machinectl shell unreachable (non-zero exit or command not found on PATH)",
+                )
+            raise typer.Exit(code=1)
 
     # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
     # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
