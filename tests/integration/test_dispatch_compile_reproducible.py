@@ -3,8 +3,8 @@
 Marked ``@pytest.mark.integration`` — NOT collected by the default
 ``make test`` / ``make coverage`` gate (``pytest.testpaths = ["tests/unit"]``).
 Runs only via ``make test-integration`` on a real-docker host with the
-sandbox-ai privilege boundary configured (a real ``sandbox-ai.toml`` resolvable
-via :meth:`core.host_config.HostConfig.from_toml`).
+sandbox-ai privilege boundary configured (a real ``sandbox-ai.toml`` present
+at ``~/.sandbox-ai/config/sandbox-ai.toml``, read directly — see below).
 
 It invokes :func:`core.dispatch.compile_dispatcher` twice into two distinct
 output paths against identical source + the same digest-pinned
@@ -16,10 +16,14 @@ Skips with a specific, log-greppable reason when any precondition is
 unavailable so a future CI log reader can identify what to fix. Mirrors
 the precondition-resolution pattern in ``test_helper_container_userns.py``
 and ``test_scaffold_helper_init_sequence.py`` (docker on PATH → real
-per-host toml resolvable → daemon user + subuid/subgid → machinectl
-crossing reachable → pinned image present), adapted to the
-``golang_alpine`` image that :func:`compile_dispatcher` pins and to
-``HostConfig.from_toml``'s not-initialized ``FileNotFoundError`` contract.
+per-host toml present/parseable → daemon user + subuid/subgid →
+machinectl crossing reachable → pinned image present), adapted to the
+``golang_alpine`` image that :func:`compile_dispatcher` pins. The
+``HostConfig`` it needs is built from the real-toml-resolved
+``(daemon_user, auth)`` via :func:`core.host_config.minimal_host_config`
+(``compile_dispatcher`` reads only those two boundary fields) — NOT via
+``HostConfig.from_toml``, which the integration harness's
+``SANDBOX_AI_HOME``→tmp redirect makes permanently unresolvable.
 """
 
 from __future__ import annotations
@@ -35,9 +39,9 @@ from pathlib import Path
 import pytest
 from core.dispatch import compile_dispatcher
 from core.host_config import (
-    HostConfig,
     MachinectlAuth,
     machinectl_cmd,
+    minimal_host_config,
     parse_subgid_for_user,
     parse_subuid_for_user,
 )
@@ -143,11 +147,17 @@ def _sha512(path: Path) -> str:
 
 def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     """Two compiles of identical source + pinned image are sha512-identical."""
-    _check_preconditions()
-    try:
-        host_config = HostConfig.from_toml()
-    except FileNotFoundError as exc:
-        pytest.skip(f"skipped: HostConfig.from_toml() unresolvable ({exc})")
+    daemon_user, auth = _check_preconditions()
+    # ``_check_preconditions`` resolved ``(daemon_user, auth)`` from the REAL
+    # per-host ``~/.sandbox-ai/config/sandbox-ai.toml`` via
+    # ``_resolve_test_environment`` (the sibling idiom in
+    # ``test_helper_container_userns.py`` — read the real path directly, do
+    # NOT call ``HostConfig.from_toml()``, which the integration harness's
+    # ``SANDBOX_AI_HOME``→tmp redirect makes permanently unresolvable to an
+    # empty dir → permanent skip). ``compile_dispatcher`` reads only the two
+    # boundary fields, so build the minimal HostConfig from the resolved
+    # pair — the same construction ``minimal_host_config`` exists for.
+    host_config = minimal_host_config(daemon_user, auth)
 
     build_a = tmp_path / "build-a"
     build_b = tmp_path / "build-b"
