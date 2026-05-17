@@ -707,7 +707,8 @@ def build_invocation(
     :class:`~core.executor.Executor` run — per-op validation, the Q6 compose
     wire-expansion / deterministic passthrough, the ``dispatch <op> <wire>``
     inner string, and the ``machinectl_cmd`` + ``bash -c`` crossing. :func:`invoke`
-    is exactly ``Executor().run(build_invocation(...), timeout=...)``; the
+    is exactly ``Executor().run(build_invocation(...), sentinel=True,
+    timeout=...)``; the
     ``sandbox start --dry-run`` preview and :class:`core.actions.ComposeUpAction`
     derive their displayed/executed command from this same function so no
     parallel argv/inner construction exists anywhere.
@@ -741,8 +742,9 @@ def build_invocation(
     ]
 
 
-# Layer map: invoke() = Executor().run(build_invocation(...)); build_invocation()
-# = machinectl-crossed argv; build_target_argv() = the inner dispatcher-spawned argv.
+# Layer map: invoke() = Executor().run(build_invocation(...), sentinel=True);
+# build_invocation() = machinectl-crossed argv; build_target_argv() = the
+# inner dispatcher-spawned argv.
 def invoke(
     op: Op | str,
     args: list[str],
@@ -772,6 +774,17 @@ def invoke(
     boundary-crossing invocation (produced by the sterile
     :class:`core.executor.Executor`).
 
+    The crossing runs with the sterile ``Executor``'s ``sentinel=True``
+    mechanism: ``machinectl shell`` does NOT propagate the inner
+    ``/bin/bash -c`` payload's exit code (it exits 0 even when that payload
+    fails), so the Executor injects ``…; echo __SANDBOX_EXIT_<tok>_$?``,
+    parses the real in-container exit, and raises
+    :class:`~core.exceptions.SandboxExecutionError` on a non-zero inner
+    exit. Without this every dispatched op's failure would be silently
+    masked as success — :func:`probe` (which wraps :func:`invoke` and
+    catches that error) and the doctor verdicts depend on the recovered
+    inner exit being faithful.
+
     Flow (Q6):
 
     1. Resolve + validate the *typed* args (the unchanged "Per-Op Argument
@@ -792,9 +805,12 @@ def invoke(
     The command construction (validate -> Q6 wire-expand / passthrough ->
     inner -> crossed argv) lives in :func:`build_invocation`; :func:`invoke`
     is exactly that argv handed to the sterile :class:`~core.executor.Executor`
-    (anti-hack rules 4 + 7 — one seam, no parallel construction).
+    with ``sentinel=True`` (anti-hack rules 4 + 7 — one seam, no parallel
+    construction).
     """
-    return Executor().run(build_invocation(op, args, host_config), timeout=timeout)
+    return Executor().run(
+        build_invocation(op, args, host_config), sentinel=True, timeout=timeout
+    )
 
 
 def probe(

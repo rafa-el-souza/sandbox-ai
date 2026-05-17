@@ -38,6 +38,23 @@ SANDBOX_TOML = f"{INSTANCE_DIR}/sandbox.toml"
 HOST_USER = "sandbox"
 
 
+def _crossed_ok(stdout: str = "ok\n") -> subprocess.CompletedProcess[str]:
+    """A ``CompletedProcess`` simulating a SUCCESSFUL ``sentinel=True`` crossing.
+
+    ``dispatch.invoke`` (hence ``dispatch.probe``) crosses ``machinectl shell``
+    with the sterile ``Executor``'s ``sentinel=True`` mechanism, because
+    ``machinectl shell`` does not propagate the inner payload's exit code. A
+    real successful crossing therefore emits the inner command's stdout
+    followed by the injected ``__SANDBOX_EXIT_<token>_<code>`` echo line; the
+    Executor parses that line (any hex token, last-match) to recover the true
+    inner exit. A fake crossing stdout that omits it represents the *broken
+    pre-sentinel* contract, so simulate the line the way a recorded real
+    crossing would (exit 0). The token value is arbitrary — the Executor's
+    ``_SENTINEL_RE`` accepts any hex token.
+    """
+    return subprocess.CompletedProcess([], 0, f"{stdout}__SANDBOX_EXIT_0123456789abcdef_0\n", "")
+
+
 VALID_TOML_CONTENT = b"""
 [instance]
 name = "myproject"
@@ -2025,7 +2042,7 @@ class TestInitScaffoldDirect:
         with (
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs") as mock_dirs,
             patch("cli.main.write_sandbox_toml") as mock_toml,
             patch("cli.main._load_config", return_value=mock_config),
@@ -2080,7 +2097,7 @@ class TestInitScaffoldDirect:
         with (
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2182,7 +2199,7 @@ class TestInitFirecrawl:
         with (
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2398,7 +2415,7 @@ class TestInitHappyPath:
         with (
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2432,7 +2449,7 @@ class TestInitPerUserTreeCreation:
             patch("cli.main.run_check_subset", return_value=[]),
             patch(
                 "cli.main.subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, "ok\n", ""),
+                return_value=_crossed_ok(),
             ),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
@@ -2592,7 +2609,7 @@ class TestInitDoctorPreFlightFailure:
 
         failed_results = [CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")]
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results"),
         ):
@@ -2612,7 +2629,7 @@ class TestInitDoctorPreFlightFailure:
             category="Privilege Boundary",
         )
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.check_compose_project_name_collision", return_value=collision),
             patch("cli.main.render_results"),
@@ -2632,7 +2649,7 @@ class TestInitDoctorPreFlightFailure:
             category="Privilege Boundary",
         )
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.check_compose_project_name_collision", return_value=ok),
         ):
@@ -2665,7 +2682,7 @@ class TestInitNonTTY:
         with (
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2940,7 +2957,7 @@ class TestInitHostConfigResolution:
 
         with (
             patch("cli.main.HostConfig.from_toml", return_value=mock_project_config),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -3000,7 +3017,7 @@ class TestInitHostConfigResolution:
             ),
             patch("cli.main._stdin_is_tty", return_value=True),
             patch("cli.main.typer.prompt", side_effect=["sandbox-user", "sudo"]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -3045,7 +3062,7 @@ class TestInitHostConfigResolution:
             patch("cli.main._stdin_is_tty", return_value=True),
             # First prompt returns empty → re-prompt; second is non-empty user; third is auth.
             patch("cli.main.typer.prompt", side_effect=["", "sandbox", "polkit"]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -3112,7 +3129,7 @@ class TestInitHostConfigResolution:
                 wraps=_REAL_SEED_HOST_CONFIG,
             ),
             patch("cli.main.typer.prompt") as mock_prompt,
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
