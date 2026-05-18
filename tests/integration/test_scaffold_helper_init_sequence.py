@@ -66,6 +66,7 @@ finally:
 
 _TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
 _PROBE_TIMEOUT_S = 10
+_DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 # Cache/log leaf inventory subset that this test exercises end-to-end.
 # Stays in sync with ``orchestrator-volumes``'s "Cache/Log Leaf Inventory"
@@ -156,6 +157,29 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
             f"skipped: busybox image {pin} not present in {daemon_user}'s docker "
             f"(stderr: {ins.stderr.strip()!r}); pre-pull with "
             f"`{' '.join(machinectl_cmd(daemon_user, auth))} -- docker pull {pin}`"
+        )
+
+    # Post-C-001 the helper primitives cross the boundary as
+    # `dispatch helper-* …` and exec the root-owned dispatcher binary; it is
+    # installed by sister change C-002 (`sandbox setup`), not by this change.
+    # Probe it AS IT IS ACTUALLY INVOKED — via the machinectl crossing, where
+    # the binary runs as the daemon user — so a clean pre-C-002 skip replaces a
+    # loud (and, pre-C-002, expected) SandboxExecutionError.
+    dispatch_probe = [
+        *machinectl_cmd(daemon_user, auth),
+        "/bin/bash",
+        "-c",
+        f"test -x {_DISPATCH_BINARY}",
+    ]
+    try:
+        dp = subprocess.run(dispatch_probe, capture_output=True, timeout=_PROBE_TIMEOUT_S, text=True)
+    except subprocess.TimeoutExpired:
+        pytest.skip(f"skipped: dispatcher-present probe (test -x {_DISPATCH_BINARY}) timed out via machinectl")
+    if dp.returncode != 0:
+        pytest.skip(
+            f"skipped: dispatcher binary {_DISPATCH_BINARY} absent or non-executable "
+            f"for {daemon_user!r} (C-001 routes helper ops through it; it is installed "
+            f"by sister change C-002 — run `sudo sandbox setup` to install)"
         )
 
     return daemon_user, auth
