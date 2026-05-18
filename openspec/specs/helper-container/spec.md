@@ -6,13 +6,23 @@ This specification defines the disposable-helper-container primitives used by th
 
 The disposable-helper-container primitives SHALL reside in `src/core/helper_container.py` and expose two public functions: `helper_chown_files` and `helper_mkdir_chown_dirs`. All orchestrator code that needs to chown or mkdir as in-userns root SHALL invoke these primitives instead of constructing `docker run` commands inline.
 
+The two primitives SHALL route their cross-boundary invocation through `core.dispatch.invoke(op, args, host_config)` — `helper_chown_files` invokes the dispatcher op `helper-chown-files`; `helper_mkdir_chown_dirs` invokes `helper-mkdir-chown-dirs`. The primitives SHALL NOT call `machinectl_cmd(...)` or build the hardened-`docker run` argv directly; the dispatcher's target-argv builder (per `runtime-dispatcher`) is the sole producer of that argv. The primitives' public signatures (parameters, return values, raised errors) are preserved unchanged from the pre-dispatcher implementation; only the internal boundary-crossing mechanism changes.
+
 #### Scenario: Module exposes the two primitives
 - **WHEN** `core.helper_container` is imported
 - **THEN** `helper_chown_files` and `helper_mkdir_chown_dirs` are public callables
 
 #### Scenario: No inline docker run for chown
 - **WHEN** the codebase is searched for `docker run … busybox`
-- **THEN** the only matches are inside `core/helper_container.py`; all other call sites import the primitives
+- **THEN** the only matches are inside the dispatcher's target-argv builder for the `helper-chown-files` / `helper-mkdir-chown-dirs` ops (in `src/core/dispatch.py`); `core/helper_container.py` itself contains no inline `docker run` argv
+
+#### Scenario: Helpers route through core.dispatch
+- **WHEN** `helper_chown_files(host_user, parent, files, owner_uid, owner_gid, mode, machinectl_auth)` is invoked
+- **THEN** the internal implementation calls `core.dispatch.invoke("helper-chown-files", [parent, f"{mode:04o}", str(host_uid), str(host_gid), *files], host_config)` (with userns translation applied per the existing primitive contract); the resulting cross-boundary invocation is the dispatcher's `helper-chown-files` op, not a direct `machinectl_cmd` call
+
+#### Scenario: Helpers do not call machinectl_cmd directly
+- **WHEN** the convention meta-test in `tests/unit/test_conventions.py` runs against `src/core/helper_container.py`
+- **THEN** no `machinectl_cmd` usage is detected in that module; the meta-test passes (helpers are NOT in any allowlist category — the allowed direct callers are only `src/core/host_config.py`, `src/core/dispatch.py`, and the `src/core/setup/*.py` setup-phase package)
 
 ### Requirement: Helper Image Pinning
 

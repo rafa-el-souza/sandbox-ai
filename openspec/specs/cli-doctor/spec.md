@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox doctor` diagnostic command, which validates host readiness for sandbox operation by executing a dependency-ordered check pipeline covering binary availability, user existence, service state, Docker configuration, filesystem capabilities, and tooling plane integrity.
-
 ## Requirements
-
 ### Requirement: Doctor Command Interface
 The system SHALL provide a `sandbox doctor --user <name>` command that validates host readiness for sandbox operation. The `--user` parameter SHALL be mandatory with no default value. The doctor module SHALL also expose a programmatic subset API for use by other commands.
 
@@ -348,7 +346,6 @@ The system SHALL provide a function to execute a filtered subset of doctor check
 - **WHEN** the subset API returns results
 - **THEN** the return type is `list[CheckResult]`, identical to `run_checks`, and compatible with `render_results`
 
-
 ### Requirement: Per-User Tree Existence Check
 The `sandbox doctor` command SHALL include a check that the per-user tree (`<home>/`, `<home>/config/`, `<home>/state/`) exists. If any directory is missing, the doctor SHALL report the omission and direct the operator to run `sandbox init`. The check SHALL NOT auto-create the tree.
 
@@ -634,3 +631,35 @@ The doctor SHALL include a warn-only check `legacy_registry_shape` that detects 
 #### Scenario: Name-keyed registry passes
 - **WHEN** `sandbox doctor` runs and `instances.json` keys are valid instance names
 - **THEN** the check passes
+
+### Requirement: Doctor Cross-Boundary Invocation Routing
+
+All `sandbox doctor` checks that cross the `dev → <sandbox-user>` privilege boundary SHALL route their invocations through `core.dispatch.invoke(op, args, host_config)` using the typed op surface defined by `runtime-dispatcher`. The checks SHALL NOT call `core.host_config.machinectl_cmd(...)` directly. This routing applies to:
+
+- **machinectl Shell Reachability**: routes through `auth-probe` (no args). The 10-second timeout is enforced by the doctor check's invocation context, not by the dispatcher.
+- **Docker Availability**: routes through `docker-version` (no args). (Source `privilege_boundary.py:155` runs `docker version --format '{{.Server.Version}}'` — the `docker version` subcommand, NOT `docker info`; there is no `default` `docker-info` preset.)
+- **Docker Rootless Verification**: routes through `docker-info` with the `security-options` preset (`docker info --format '{{.SecurityOptions}}'`, source `:186`).
+- **gVisor Runtime Registration**: routes through `docker-info` with the `runtimes` preset (`docker info --format '{{json .Runtimes}}'`, source `:219`).
+- **runsc RuntimeArgs Validation**: routes through `docker-info` with the `runtimes` preset (source `:260`, same invocation shape).
+- **Host UDS Runtime Validation**: routes through `docker-info` with the `runtimes` preset (source `:323`, same invocation shape).
+- **Image Digest Resolvability Check**: routes through `docker-manifest-inspect`, invoked once per `IMAGE_REGISTRY` pin with that pin's `<name>@sha256:<64hex>` ref as the single arg. (Source `supply_chain.py:27` runs `docker manifest inspect <pinned-ref>` in a loop over `IMAGE_REGISTRY`.)
+- **Compose status / compose-related doctor checks** (e.g., compose-ls within Privilege Boundary chain): route through `compose-ls`.
+
+The semantic content of each affected doctor check (what it verifies, what PASS/WARN/FAIL means, the 10-second timeout for the auth probe, the format-string expectations, the cascading-skip dependencies) is preserved unchanged. Only the underlying boundary-crossing mechanism shifts from inline machinectl-cmd-built argv to dispatcher-routed typed ops.
+
+#### Scenario: machinectl Shell Reachability uses the auth-probe op
+- **WHEN** the `machinectl Shell Reachability` doctor check executes its probe
+- **THEN** the check invokes `core.dispatch.invoke("auth-probe", [], host_config)` (with a 10-second timeout from the check's invocation context); the dispatcher's target argv is `["/bin/bash", "-c", "echo ok"]` per `runtime-dispatcher`'s op contract; the resulting cross-boundary argv is `[*machinectl_cmd(<user>, <auth>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]`
+
+#### Scenario: gVisor Runtime Registration uses docker-info runtimes preset
+- **WHEN** the `gVisor Runtime Registration` doctor check executes its probe
+- **THEN** the check invokes `core.dispatch.invoke("docker-info", ["runtimes"], host_config)`; the dispatcher's target argv is `["/bin/bash", "-c", "docker info --format '{{json .Runtimes}}'"]`; the check parses the stdout JSON to extract `.runsc` (or `.sandbox-ai-runsc` post-sandbox-setup) and reports PASS/FAIL/WARN per the existing semantic contract
+
+#### Scenario: Doctor checks do not call machinectl_cmd directly
+- **WHEN** the convention meta-test in `tests/unit/test_conventions.py` runs against `src/core/doctor/checks/`
+- **THEN** no module under `src/core/doctor/checks/` contains `machinectl_cmd` references; the meta-test passes (doctor's check modules are NOT in any allowlist category — the allowed direct callers are only `src/core/host_config.py`, `src/core/dispatch.py`, and the `src/core/setup/*.py` setup-phase package)
+
+#### Scenario: Doctor check semantics preserved across the refactor
+- **WHEN** the refactored doctor runs against an unchanged host
+- **THEN** every check's PASS/WARN/FAIL verdict matches its pre-refactor behavior; the rendered output (column names, severity rendering, dependency cascading) is byte-identical to the pre-refactor doctor output (verified by a golden-file test or equivalent)
+

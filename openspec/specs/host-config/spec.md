@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox-ai.toml` per-host orchestrator configuration file — schema, location, Pydantic model, loader interface, and the centralized machinectl command prefix builder that consumes it.
-
 ## Requirements
-
 ### Requirement: Host Config File Location and Format
 The system SHALL read per-host orchestrator configuration from a file at the canonical path `<sandbox_ai_user_home()>/config/sandbox-ai.toml` (resolved via the `per-user-state-layout` capability). The file SHALL use TOML format with a `[host]` section. There is no CLI override for the path; testing uses the `SANDBOX_AI_USER_HOME` env var.
 
@@ -250,3 +248,36 @@ The system SHALL provide `autodetect_workspace_bridge_gid_recommendation(host_us
 #### Scenario: Subgid range fully populated raises NoFreeGidInSubgidRangeError
 - **WHEN** every gid in every subgid range is already in `grp.getgrall()`
 - **THEN** `NoFreeGidInSubgidRangeError` is raised
+
+### Requirement: Dispatcher-Only `machinectl_cmd` Call Sites
+
+After this change lands, `core.host_config.machinectl_cmd(...)` SHALL be called or imported in `src/` only by modules in the following three documented allowlist categories:
+
+1. `src/core/host_config.py` — the helper's own definition module (self-reference, allowed).
+2. `src/core/dispatch.py` — the typed dispatcher orchestration module that consumes the helper to build cross-boundary invocations.
+3. Any module matching `src/core/setup/*.py` — the setup-phase package (forward reference; created and populated by the sister change `sandbox-setup`). Setup phases run as `root` and MUST cross the privilege boundary *before* the dispatcher binary is installed, so they cannot route through `core.dispatch`; the `src/core/setup/` package boundary is the trust boundary for this category. The glob is bounded to exactly this one package directory — never `src/**` or any broader pattern.
+
+All other modules in `src/` (including `src/cli/main.py`, `src/core/doctor/checks/*`, `src/core/helper_container.py`, `src/core/actions/*`) SHALL route cross-boundary invocations through `core.dispatch` rather than building `machinectl_cmd(...)`-prefixed argv directly.
+
+A meta-test in `tests/unit/test_conventions.py` SHALL enforce this convention by walking `src/` for `machinectl_cmd` usage and failing the gate on any caller outside the three allowlist categories above. The allowlist SHALL be defined in exactly one place (the meta-test) as the two literal module paths plus the single bounded directory glob `src/core/setup/*.py` (enumerated at test time via `pathlib`, not a free `src/**` walk). The sister change `sandbox-setup` does NOT amend this allowlist — its setup modules simply match the already-present `src/core/setup/*.py` category (which matches nothing until that change lands, since `runtime-dispatcher` lands first per the integration order). Adding any caller outside the three categories, or broadening the glob beyond the `src/core/setup/` package, is a spec change — made visible by the deliberate-violation regression test and code review, never a silent expansion. (This supersedes an earlier draft that mandated a "literal two-entry tuple, no globs"; that wording contradicted `sandbox-setup`'s legitimate need for setup phases to call `machinectl_cmd` directly — phase-3 review finding B-4. The anti-silent-expansion intent is preserved by bounding the one permitted glob to a single named package, not by forbidding globs outright.)
+
+#### Scenario: Allowed modules call machinectl_cmd
+- **WHEN** the meta-test runs against the post-refactor codebase
+- **THEN** `src/core/host_config.py` (defining the function), `src/core/dispatch.py` (consuming the function), and any `src/core/setup/*.py` modules present (none until `sandbox-setup` lands) may contain `machinectl_cmd` references; the meta-test does not flag any of them
+
+#### Scenario: New unauthorized caller fails the gate
+- **WHEN** a developer adds `from core.host_config import machinectl_cmd` to a module outside the three allowlist categories (e.g. `src/cli/main.py`, `src/core/doctor/checks/foo.py`) and runs `make test` or `make coverage`
+- **THEN** the meta-test fails with output naming the offending file and line, instructing the developer to route through `core.dispatch` instead
+
+#### Scenario: Allowlist additions beyond the documented categories fail the gate
+- **WHEN** a developer broadens the meta-test's allowlist beyond the three documented categories — e.g. adds a new literal module path, or widens the glob from `src/core/setup/*.py` to `src/core/**` or `src/**`
+- **THEN** the deliberate-violation regression test (which asserts a known out-of-allowlist caller is rejected) and code review surface the change; the convention is documented in `CLAUDE.md`'s "Privilege boundary" section so reviewers refuse silent expansion. (A new module added *inside* `src/core/setup/` is intentionally permitted — that package is the trust boundary for category 3; gating new setup phases is a code-review concern, not this meta-test's job.)
+
+### Requirement: Dispatcher-Compose Routing in CLAUDE.md
+
+The repository's `CLAUDE.md` "Privilege boundary" section SHALL document that the orchestrator's cross-boundary invocations route through `core.dispatch` rather than `machinectl_cmd(...)` directly, and SHALL name the allowed direct-caller categories (the two boundary modules plus the `src/core/setup/` setup-phase package).
+
+#### Scenario: CLAUDE.md names the dispatcher route
+- **WHEN** a reader opens `CLAUDE.md` and reads the "Privilege boundary (load-bearing)" section
+- **THEN** the section mentions `core.dispatch` as the canonical orchestrator-to-sandbox crossing path and notes that `machinectl_cmd(...)` is consumed only by `core.host_config` (self), `core.dispatch`, and the `src/core/setup/` setup-phase package (the latter populated by the `sandbox-setup` change; setup phases cross the boundary as root before the dispatcher exists)
+
