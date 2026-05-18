@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -78,6 +79,11 @@ from core.scaffold import (
     write_initialized_sentinel,
     write_sandbox_toml,
 )
+from core.setup import cli_flow
+from core.setup.extras import selected_extras
+from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
+from core.setup.l6a_runsc import set_force_update
+from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
 from core.workspace_backups import (
@@ -2097,6 +2103,184 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
+
+
+# ─── `sandbox setup` (privileged host-provisioning ceremony) ─────────────────
+
+
+class _SetupAborted(Exception):
+    """Operator pressed Ctrl-C during the setup ceremony (exit 130)."""
+
+
+def _run_setup_update_runsc(ctx: SetupContext) -> int:
+    """``--update-runsc``: run ONLY the L6a phase with ``force=True``.
+
+    Per spec task 8.6 / R1: L6a is a distinct phase, so "run only L6a" is
+    well-defined — filter the discovered phase set to the ``l6a`` phase and
+    flip the module-local force toggle so ``install_pinned(force=True)``
+    bypasses the drift-skip.
+    """
+    set_force_update(True)
+    phases = [p for p in cli_flow.build_phase_list(()) if p.id == "l6a"]
+    plan = run_plan_pass(phases, ctx)
+    for line in cli_flow.render_plan(phases, plan):
+        console.print(line, markup=False)
+    apply_outcomes = run_apply_pass(phases, ctx)
+    for line in cli_flow.summarize_apply(phases, apply_outcomes):
+        console.print(line, markup=False)
+    return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
+
+
+@app.command()
+def setup(
+    operator: str | None = typer.Option(
+        None, "--operator", help="Operator user (precedence: this flag → $SUDO_USER → $PKEXEC_UID)"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Run only the plan pass; apply nothing"),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the untested-distro and apply-confirm prompts"
+    ),
+    update_runsc: bool = typer.Option(
+        False, "--update-runsc", help="Re-run ONLY the L6a runsc phase with force=True"
+    ),
+    enable_fapolicyd_integration: bool = typer.Option(
+        False, "--enable-fapolicyd-integration", help="Opt in to the fapolicyd trust drop-in phase"
+    ),
+    enable_aide_integration: bool = typer.Option(
+        False, "--enable-aide-integration", help="Opt in to the AIDE config drop-in phase"
+    ),
+) -> None:
+    """Provision the host: privileged plan/apply two-pass ceremony (run as root)."""
+    if os.geteuid() != 0:
+        console.print(
+            "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        ctx = _build_setup_context_with_operator(operator)
+    except OperatorResolutionError as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def _sigint(_signum: int, _frame: object) -> None:
+        raise _SetupAborted
+
+    signal.signal(signal.SIGINT, _sigint)
+    try:
+        exit_code = _setup_body(
+            ctx,
+            dry_run=dry_run,
+            yes=yes,
+            update_runsc=update_runsc,
+            flags={
+                "fapolicyd": enable_fapolicyd_integration,
+                "aide": enable_aide_integration,
+            },
+        )
+    except _SetupAborted:
+        print(
+            "aborted by operator (SIGINT). No mutations applied.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=130) from None
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+
+    raise typer.Exit(code=exit_code)
+
+
+def _build_setup_context_with_operator(operator_flag: str | None) -> SetupContext:
+    """Build the per-run :class:`SetupContext` for ``sandbox setup``.
+
+    On a fresh host ``<sandbox_ai_home()>/config/sandbox-ai.toml`` does not
+    exist yet — phase L4 is what seeds it — but the CLI needs a
+    :class:`HostConfig` to construct the context *before* any phase runs. The
+    spec is silent on the absent-toml CLI bootstrap; per the brief we take the
+    simplest spec-consistent option: when the toml is absent, use a
+    defaults-based config (``minimal_host_config`` with the same defaults L4's
+    ``_SEED_DEFAULTS`` writes — ``docker_unprivileged_user="sandbox"``, SUDO
+    auth). When the toml is present, the real loaded config is used. Operator
+    is resolved once via the canonical L0 resolver, threading ``--operator``.
+    """
+    try:
+        host_config = HostConfig.from_toml()
+    except FileNotFoundError:
+        host_config = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+    return SetupContext(
+        host_config=host_config, operator=resolve_operator(operator_flag)
+    )
+
+
+def _setup_body(
+    ctx: SetupContext,
+    *,
+    dry_run: bool,
+    yes: bool,
+    update_runsc: bool,
+    flags: dict[str, bool],
+) -> int:
+    """The setup ceremony proper. Returns the process exit code.
+
+    SIGINT is handled by the caller (translated to exit 130); the distro gate,
+    plan pass, gating decision, prompt, and apply pass all run here.
+    """
+    if update_runsc:
+        return _run_setup_update_runsc(ctx)
+
+    emit_distro_gate(is_tty=_stdin_is_tty(), assume_yes=yes)
+
+    extras = selected_extras(flags)
+    phases = cli_flow.build_phase_list(extras)
+
+    plan = run_plan_pass(phases, ctx)
+    for line in cli_flow.render_plan(phases, plan):
+        console.print(line, markup=False)
+    tally = cli_flow.tally_plan(plan)
+    console.print(cli_flow.plan_summary_line(tally), markup=False)
+
+    decision = cli_flow.decide_gate(
+        plan, is_tty=_stdin_is_tty(), assume_yes=yes
+    )
+
+    if dry_run:
+        return 0
+
+    if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
+        console.print("Nothing to apply. Setup is complete.", markup=False)
+        return 0
+
+    if decision.outcome == cli_flow.GateOutcome.REFUSED:
+        for line in cli_flow.refusal_lines(phases, plan):
+            console.print(line, markup=False)
+        console.print("Setup will not enter the apply pass.", markup=False)
+        return 1
+
+    if decision.outcome == cli_flow.GateOutcome.NON_TTY_NEEDS_YES:
+        console.print(
+            "non-interactive context requires --yes flag to apply mutations",
+            style="red",
+            markup=False,
+        )
+        return 1
+
+    if decision.outcome == cli_flow.GateOutcome.PROMPT:
+        response = input("Proceed with apply? [y/N]: ")
+        if not cli_flow.prompt_response_proceeds(response):
+            console.print(
+                "aborted by operator (n). No mutations applied.",
+                markup=False,
+            )
+            return 0
+
+    apply_outcomes = run_apply_pass(phases, ctx)
+    for line in cli_flow.summarize_apply(phases, apply_outcomes):
+        console.print(line, markup=False)
+    return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
 
 
 @app.command()
