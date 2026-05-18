@@ -1,0 +1,15 @@
+# sandbox-ai managed — do not edit; rerun 'sudo sandbox setup'
+Defaults fast_glob
+Cmnd_Alias SANDBOX_OPS = \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ auth-probe, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-up\ *, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-down\ *, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ps\ *, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ls, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-version, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-info\ *, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-manifest-inspect\ *, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-chown-files\ *, \
+    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-mkdir-chown-dirs\ *
+
+alice testhost=(root) NOPASSWD: NOSETENV: SANDBOX_OPS
