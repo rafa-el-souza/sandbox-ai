@@ -23,8 +23,13 @@ unavailable so a future CI log reader can identify what to fix. Mirrors
 the precondition-resolution pattern in ``test_helper_container_userns.py``
 and ``test_scaffold_helper_init_sequence.py`` (docker on PATH → real
 per-host toml present/parseable → daemon user + subuid/subgid →
-machinectl crossing reachable → pinned image present), adapted to the
-``golang_alpine`` image that :func:`compile_dispatcher` pins. The
+boundary crossing reachable → pinned image present), adapted to the
+``golang_alpine`` image that :func:`compile_dispatcher` pins. Because
+``compile_dispatcher`` now crosses via ``pipe_cmd`` (binary-frame
+transport, no PTY), these precondition probes ALSO cross via ``pipe_cmd``
+— it propagates the inner exit, so ``subprocess.run(...).returncode`` is
+the REAL exit and the image-absent / unreachable cases skip correctly
+instead of failing OPEN behind the masked ``machinectl`` returncode. The
 ``HostConfig`` it needs is built from the real-toml-resolved
 ``(daemon_user, auth)`` via :func:`core.host_config.minimal_host_config`
 (``compile_dispatcher`` reads only those two boundary fields) — NOT via
@@ -46,10 +51,10 @@ import pytest
 from core.dispatch import compile_dispatcher
 from core.host_config import (
     MachinectlAuth,
-    machinectl_cmd,
     minimal_host_config,
     parse_subgid_for_user,
     parse_subuid_for_user,
+    pipe_cmd,
 )
 from core.hydration import IMAGE_REGISTRY
 
@@ -105,7 +110,14 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     if not parse_subgid_for_user(daemon_user):
         pytest.skip(f"skipped: /etc/subgid has no entry for {daemon_user!r}")
 
-    probe = [*machinectl_cmd(daemon_user, auth), "/bin/echo", "ok"]
+    # A precondition that branches on a crossed command's exit MUST recover
+    # the REAL inner exit, never the raw masked ``machinectl shell`` returncode
+    # (Finding-I / F-004 silent-footgun class — a masked exit makes the guard
+    # fail OPEN). ``compile_dispatcher`` now crosses via ``pipe_cmd``
+    # (``systemd-run --pipe``), which PROPAGATES the inner ``/bin/bash -c``
+    # exit, so probing through the SAME ``pipe_cmd`` crossing means
+    # ``subprocess.run(...).returncode`` is the real exit — no sentinel needed.
+    probe = [*pipe_cmd(daemon_user), "/bin/echo", "ok"]
     try:
         result = subprocess.run(
             probe,
@@ -114,21 +126,21 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
             text=True,
         )
     except FileNotFoundError:
-        pytest.skip("skipped: machinectl binary not on PATH")
+        pytest.skip("skipped: systemd-run binary not on PATH")
     except subprocess.TimeoutExpired:
         pytest.skip(
-            f"skipped: machinectl shell {daemon_user}@.host timed out after "
-            f"{_PROBE_TIMEOUT_S}s (sudo password not cached, or polkit rule missing)"
+            f"skipped: pipe_cmd crossing into {daemon_user} timed out after "
+            f"{_PROBE_TIMEOUT_S}s (systemd-run manage-units polkit rule missing)"
         )
     if result.returncode != 0:
         pytest.skip(
-            f"skipped: machinectl shell {daemon_user}@.host exited "
+            f"skipped: pipe_cmd crossing into {daemon_user} exited "
             f"{result.returncode} ({result.stderr.strip()!r})"
         )
 
     pin = IMAGE_REGISTRY["golang_alpine"].pinned
     inspect = [
-        *machinectl_cmd(daemon_user, auth),
+        *pipe_cmd(daemon_user),
         "/bin/bash",
         "-c",
         f"docker image inspect {pin} > /dev/null",
@@ -136,12 +148,15 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     try:
         ins = subprocess.run(inspect, capture_output=True, timeout=_PROBE_TIMEOUT_S, text=True)
     except subprocess.TimeoutExpired:
-        pytest.skip(f"skipped: docker image inspect {pin} timed out via machinectl")
+        pytest.skip(f"skipped: docker image inspect {pin} timed out via pipe_cmd")
+    # ``pipe_cmd`` propagates the inner exit → an absent image yields a REAL
+    # non-zero returncode here, so the image-absent case SKIPS correctly
+    # instead of failing OPEN and triggering a multi-MB pull mid-test.
     if ins.returncode != 0:
         pytest.skip(
             f"skipped: golang image {pin} not present in {daemon_user}'s docker "
             f"(stderr: {ins.stderr.strip()!r}); pre-pull with "
-            f"`{' '.join(machinectl_cmd(daemon_user, auth))} -- docker pull {pin}`"
+            f"`{' '.join(pipe_cmd(daemon_user))} /bin/bash -c 'docker pull {pin}'`"
         )
 
     return daemon_user, auth

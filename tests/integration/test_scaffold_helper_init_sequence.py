@@ -36,7 +36,6 @@ from __future__ import annotations
 import os
 import pwd
 import shutil
-import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
@@ -49,6 +48,8 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 try:
+    from core.exceptions import SandboxExecutionError
+    from core.executor import Executor
     from core.helper_container import helper_mkdir_chown_dirs
     from core.host_config import (
         MachinectlAuth,
@@ -119,25 +120,24 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     if not parse_subgid_for_user(daemon_user):
         pytest.skip(f"skipped: /etc/subgid has no entry for {daemon_user!r}")
 
-    probe = [*machinectl_cmd(daemon_user, auth), "/bin/echo", "ok"]
+    # The helper ops under test cross via ``machinectl_cmd`` → the dispatcher
+    # binary, and ``machinectl shell`` does NOT propagate the inner
+    # ``/bin/bash -c`` exit (Finding-I / F-004 silent-footgun class). A
+    # precondition that branches on a crossed command's exit MUST recover the
+    # REAL inner exit — for a ``machinectl_cmd`` crossing that means the
+    # Executor sentinel mechanism (``sentinel=True`` recovers the in-container
+    # exit and raises ``SandboxExecutionError`` on non-zero/timeout), NEVER the
+    # raw masked ``subprocess.run().returncode``. A masked exit would make
+    # these guards (esp. the Finding-H ``test -x dispatch`` guard below) fail
+    # OPEN — absent infra read as present → the e2e tests run loud instead of
+    # skipping cleanly pre-C-002.
+    echo_probe = [*machinectl_cmd(daemon_user, auth), "/bin/bash", "-c", "echo ok"]
     try:
-        result = subprocess.run(
-            probe,
-            capture_output=True,
-            timeout=_PROBE_TIMEOUT_S,
-            text=True,
-        )
-    except FileNotFoundError:
-        pytest.skip("skipped: machinectl binary not on PATH")
-    except subprocess.TimeoutExpired:
+        Executor().run(echo_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
+    except SandboxExecutionError as exc:
         pytest.skip(
-            f"skipped: machinectl shell {daemon_user}@.host timed out after "
-            f"{_PROBE_TIMEOUT_S}s (sudo password not cached, or polkit rule missing)"
-        )
-    if result.returncode != 0:
-        pytest.skip(
-            f"skipped: machinectl shell {daemon_user}@.host exited "
-            f"{result.returncode} ({result.stderr.strip()!r})"
+            f"skipped: machinectl shell {daemon_user}@.host crossing not "
+            f"usable (sentinel-recovered failure: {exc})"
         )
 
     pin = IMAGE_REGISTRY["busybox_musl"].pinned
@@ -148,13 +148,13 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
         f"docker image inspect {pin} > /dev/null",
     ]
     try:
-        ins = subprocess.run(inspect, capture_output=True, timeout=_PROBE_TIMEOUT_S, text=True)
-    except subprocess.TimeoutExpired:
-        pytest.skip(f"skipped: docker image inspect {pin} timed out via machinectl")
-    if ins.returncode != 0:
+        Executor().run(inspect, sentinel=True, timeout=_PROBE_TIMEOUT_S)
+    except SandboxExecutionError as exc:
+        # Sentinel-recovered non-zero inner exit (image absent) or timeout —
+        # the REAL result, not the masked machinectl returncode.
         pytest.skip(
             f"skipped: busybox image {pin} not present in {daemon_user}'s docker "
-            f"(stderr: {ins.stderr.strip()!r}); pre-pull with "
+            f"(sentinel-recovered: {exc}); pre-pull with "
             f"`{' '.join(machinectl_cmd(daemon_user, auth))} -- docker pull {pin}`"
         )
 
@@ -162,8 +162,10 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     # `dispatch helper-* …` and exec the root-owned dispatcher binary; it is
     # installed by sister change C-002 (`sandbox setup`), not by this change.
     # Probe it AS IT IS ACTUALLY INVOKED — via the machinectl crossing, where
-    # the binary runs as the daemon user — so a clean pre-C-002 skip replaces a
-    # loud (and, pre-C-002, expected) SandboxExecutionError.
+    # the binary runs as the daemon user — AND recover the real inner exit via
+    # the sentinel (Finding-H must be exit-aware: a masked exit reads an absent
+    # binary as present and fails OPEN, so the e2e tests run loud instead of a
+    # clean pre-C-002 skip).
     dispatch_probe = [
         *machinectl_cmd(daemon_user, auth),
         "/bin/bash",
@@ -171,14 +173,13 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
         f"test -x {_DISPATCH_BINARY}",
     ]
     try:
-        dp = subprocess.run(dispatch_probe, capture_output=True, timeout=_PROBE_TIMEOUT_S, text=True)
-    except subprocess.TimeoutExpired:
-        pytest.skip(f"skipped: dispatcher-present probe (test -x {_DISPATCH_BINARY}) timed out via machinectl")
-    if dp.returncode != 0:
+        Executor().run(dispatch_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
+    except SandboxExecutionError as exc:
         pytest.skip(
             f"skipped: dispatcher binary {_DISPATCH_BINARY} absent or non-executable "
-            f"for {daemon_user!r} (C-001 routes helper ops through it; it is installed "
-            f"by sister change C-002 — run `sudo sandbox setup` to install)"
+            f"for {daemon_user!r} (sentinel-recovered: {exc}; C-001 routes helper ops "
+            f"through it; it is installed by sister change C-002 — run "
+            f"`sudo sandbox setup` to install)"
         )
 
     return daemon_user, auth
