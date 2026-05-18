@@ -23,9 +23,8 @@ import pwd
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -164,77 +163,13 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     return daemon_user, auth
 
 
-@pytest.fixture
-def cross_boundary_tmpdir() -> Iterator[Path]:
-    """Tmpdir visible to both ``dev`` and the daemon user.
-
-    pytest's built-in ``tmp_path`` lands under ``/tmp/pytest-of-<user>/``,
-    which is on the dev user's per-user mount (``user@.service`` defaults to
-    ``PrivateTmp=`` under systemd, isolating ``/tmp`` per user). The rootless
-    docker daemon runs as a *different* user with its own ``/tmp`` view, so a
-    bind mount from a dev-side ``/tmp/pytest-of-dev/...`` path silently
-    resolves to an empty directory inside the helper container — assertions
-    against the dev-side path then see nothing.
-
-    Use the repo-rooted ``temp/integration-test-tmp/`` instead. Both privilege
-    contexts see the repo on the same filesystem; the ``temp/`` dir is
-    already established as the project's scratch area (gitignored). Keeping
-    test fixtures inside the repo means stragglers show up in ``git status``
-    if cleanup ever fails — a small audit safety net.
-    """
-    base = REPO_ROOT / "temp" / "integration-test-tmp"
-    base.mkdir(parents=True, exist_ok=True)
-    d = Path(tempfile.mkdtemp(dir=str(base)))
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def _grant_parent_access(parent: Path, daemon_user: str) -> None:
-    """Apply effective + default ACLs on ``parent`` plus traverse on every
-    ancestor up to ``Path.home()``, so the daemon user can reach and modify
-    files under ``parent``.
-
-    Mirrors the production phase ordering: the cli's `_phase_acl_grant` runs
-    its ancestor walker (`u:<daemon>:--x`) plus the per-target effective +
-    default ACLs before any helper container is launched.
-    """
-    if shutil.which("setfacl") is None:
-        pytest.skip("skipped: setfacl not on PATH (required to bridge the dev↔daemon-user fence)")
-    home = Path.home()
-    cursor = parent.parent
-    while True:
-        subprocess.run(
-            ["setfacl", "-m", f"u:{daemon_user}:--x", str(cursor)],
-            check=True,
-            capture_output=True,
-        )
-        if cursor == home or cursor == cursor.parent:
-            break
-        cursor = cursor.parent
-    subprocess.run(
-        ["setfacl", "-m", f"u:{daemon_user}:rwx", str(parent)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "setfacl",
-            "-d",
-            "-m",
-            f"u::rwx,g::rwx,o::---,m::rwx,u:{daemon_user}:rwx",
-            str(parent),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
-def test_helper_mkdir_chown_dirs_lands_host_absolute_ownership(cross_boundary_tmpdir: Path) -> None:
+def test_helper_mkdir_chown_dirs_lands_host_absolute_ownership(
+    cross_boundary_tmpdir: Path,
+    grant_parent_access: Callable[[Path], None],
+) -> None:
     daemon_user, auth = _check_preconditions()
     tmp_path = cross_boundary_tmpdir
-    _grant_parent_access(tmp_path, daemon_user)
+    grant_parent_access(tmp_path)
 
     target_uid = host_id_for_in_container(1000, daemon_user)
     target_gid = host_gid_for_in_container(1000, daemon_user)
@@ -258,10 +193,13 @@ def test_helper_mkdir_chown_dirs_lands_host_absolute_ownership(cross_boundary_tm
     assert st.st_gid == target_gid, f"st_gid={st.st_gid} != target {target_gid}"
 
 
-def test_helper_chown_files_lands_host_absolute_ownership_and_mode(cross_boundary_tmpdir: Path) -> None:
+def test_helper_chown_files_lands_host_absolute_ownership_and_mode(
+    cross_boundary_tmpdir: Path,
+    grant_parent_access: Callable[[Path], None],
+) -> None:
     daemon_user, auth = _check_preconditions()
     tmp_path = cross_boundary_tmpdir
-    _grant_parent_access(tmp_path, daemon_user)
+    grant_parent_access(tmp_path)
 
     target_uid = host_id_for_in_container(1000, daemon_user)
     target_gid = host_gid_for_in_container(1000, daemon_user)

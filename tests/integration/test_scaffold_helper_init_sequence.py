@@ -38,9 +38,8 @@ import pwd
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -185,63 +184,6 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     return daemon_user, auth
 
 
-@pytest.fixture
-def cross_boundary_tmpdir() -> Iterator[Path]:
-    """Tmpdir visible to both ``dev`` and the daemon user.
-
-    Mirrors ``test_helper_container_userns.py``'s relocated fixture
-    (commit ``9a3b426``): pytest's ``tmp_path`` lands under the dev user's
-    per-user ``/tmp/pytest-of-dev/`` mount which the daemon's rootless
-    docker cannot see (PrivateTmp= split). Use ``<repo>/temp/integration-
-    test-tmp/`` instead — already established as project scratch
-    (gitignored), shared filesystem view, stragglers visible in
-    ``git status`` if cleanup ever fails.
-    """
-    base = REPO_ROOT / "temp" / "integration-test-tmp"
-    base.mkdir(parents=True, exist_ok=True)
-    d = Path(tempfile.mkdtemp(dir=str(base)))
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def _grant_parent_access(parent: Path, daemon_user: str) -> None:
-    """Apply effective + default ACLs on ``parent`` plus traverse on every
-    ancestor up to ``Path.home()`` so the daemon user can reach and modify
-    files under ``parent``.
-    """
-    if shutil.which("setfacl") is None:
-        pytest.skip("skipped: setfacl not on PATH (required to bridge the dev↔daemon-user fence)")
-    home = Path.home()
-    cursor = parent.parent
-    while True:
-        subprocess.run(
-            ["setfacl", "-m", f"u:{daemon_user}:--x", str(cursor)],
-            check=True,
-            capture_output=True,
-        )
-        if cursor == home or cursor == cursor.parent:
-            break
-        cursor = cursor.parent
-    subprocess.run(
-        ["setfacl", "-m", f"u:{daemon_user}:rwx", str(parent)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "setfacl",
-            "-d",
-            "-m",
-            f"u::rwx,g::rwx,o::---,m::rwx,u:{daemon_user}:rwx",
-            str(parent),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
 def test_post_init_leaves_absent(cross_boundary_tmpdir: Path) -> None:
     """``create_instance_dirs`` does not pre-create cache/log helper-recipe leaves.
 
@@ -267,7 +209,10 @@ def test_post_init_leaves_absent(cross_boundary_tmpdir: Path) -> None:
         assert parent.is_dir(), f"scaffold should have created parent {parent}"
 
 
-def test_post_helper_leaves_consumer_owned(cross_boundary_tmpdir: Path) -> None:
+def test_post_helper_leaves_consumer_owned(
+    cross_boundary_tmpdir: Path,
+    grant_parent_access: Callable[[Path], None],
+) -> None:
     """``helper_mkdir_chown_dirs`` creates each cache leaf and chowns to the consumer subuid."""
     daemon_user, auth = _check_preconditions()
     instance_dir = cross_boundary_tmpdir / "instances" / "regression-target"
@@ -278,7 +223,7 @@ def test_post_helper_leaves_consumer_owned(cross_boundary_tmpdir: Path) -> None:
 
     for parent_rel, leaf_name in HELPER_RECIPE_CACHE_LEAVES:
         parent = instance_dir / parent_rel
-        _grant_parent_access(parent, daemon_user)
+        grant_parent_access(parent)
         helper_mkdir_chown_dirs(
             daemon_user,
             str(parent),
