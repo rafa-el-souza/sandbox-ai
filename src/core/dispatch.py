@@ -34,6 +34,7 @@ SINGLE site that crosses the boundary.
 from __future__ import annotations
 
 import base64
+import gzip
 import io
 import os
 import re
@@ -926,17 +927,22 @@ def _dispatch_source_b64() -> str:
     bind-mounted and has no daemon-reachability constraint) and discarded.
 
     The tar is built deterministically (sorted member order, fixed mtime /
-    mode / uid / gid) so the embedded payload contributes nothing host- or
-    time-specific to reproducibility. Returns an ASCII string containing only
-    ``[A-Za-z0-9+/=]`` — safe to interpolate into a single-quoted shell
-    literal.
+    mode / uid / gid) and gzipped with an explicit ``mtime=0`` — the gzip
+    *stream header* carries its own modification-time field that the per-member
+    :func:`_deterministic_tarinfo` does NOT normalise, so the tar is produced
+    uncompressed and then gzipped separately with ``mtime=0`` (a plain
+    ``tarfile.open(mode="w:gz")`` would stamp wall-clock time into that header
+    and break byte-determinism). The embedded payload therefore contributes
+    nothing host- or time-specific to reproducibility. Returns an ASCII string
+    containing only ``[A-Za-z0-9+/=]`` — safe to interpolate into a
+    single-quoted shell literal.
     """
     dispatch_root = _resource_files("templates").joinpath("dispatch")
     with tempfile.TemporaryDirectory() as staging:
         for entry in _DISPATCH_SOURCE_ENTRIES:
             _stage_resource(dispatch_root.joinpath(entry), os.path.join(staging, entry))
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9) as tar:
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
             for entry in sorted(_DISPATCH_SOURCE_ENTRIES):
                 tar.add(
                     os.path.join(staging, entry),
@@ -944,7 +950,10 @@ def _dispatch_source_b64() -> str:
                     recursive=True,
                     filter=_deterministic_tarinfo,
                 )
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    gz_buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=9, mtime=0) as gz:
+        gz.write(tar_buf.getvalue())
+    return base64.b64encode(gz_buf.getvalue()).decode("ascii")
 
 
 def _deterministic_tarinfo(ti: tarfile.TarInfo) -> tarfile.TarInfo:
