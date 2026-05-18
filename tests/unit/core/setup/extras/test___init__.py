@@ -1,10 +1,11 @@
 """Unit tests for :mod:`core.setup.extras` — registry + sticky-opt-in predicate.
 
-The real ``fapolicyd``/``aide`` extra modules do not exist yet (Milestone F's
-G8b creates them); these tests therefore use a STUB :class:`ExtraSpec`/``Phase``
-to prove the registry shape, the lazy loader, and the sticky-opt-in predicate
-(design D11) without those modules — exactly the contract Milestone F builds
-against.
+These tests isolate the registry shape, the lazy loader, and the sticky-opt-in
+predicate (design D11) from the concrete ``fapolicyd``/``aide`` modules by using
+a STUB :class:`ExtraSpec`/``Phase`` — the contract Milestone F's G8b modules
+satisfy. Those modules now exist; these tests stay deliberately decoupled from
+them (the loader's absent-module behavior is keyed at a synthetic missing
+module, not at a real extra).
 """
 
 from __future__ import annotations
@@ -37,10 +38,18 @@ def test_extraspec_is_frozen() -> None:
 
 
 def test_load_phase_is_lazy_and_raises_when_module_absent() -> None:
-    # Milestone F has NOT landed core.setup.extras.fapolicyd yet — the lazy
-    # loader must fail loudly (ModuleNotFoundError), never silently.
+    # The lazy loader must fail loudly (ModuleNotFoundError), never silently,
+    # when its target module is absent. Keyed at a deliberately-absent module
+    # (the real fapolicyd/aide extras now exist post-F, so this invariant is
+    # asserted against a synthetic missing target instead).
+    spec = ExtraSpec(
+        name="absent",
+        flag="--enable-absent-integration",
+        dropin_path="/etc/absent/sandbox-ai.conf",
+        module="core.setup.extras._definitely_absent_module",
+    )
     with pytest.raises(ModuleNotFoundError):
-        EXTRAS["fapolicyd"].load_phase()
+        spec.load_phase()
 
 
 def test_load_phase_imports_module_and_returns_phase(
