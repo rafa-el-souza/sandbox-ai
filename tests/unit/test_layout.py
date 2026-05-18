@@ -40,7 +40,7 @@ _LAYOUT_ALLOWLIST: dict[str, str] = {
 # Test files that intentionally don't mirror a src/<pkg>/<module>.py — usually
 # because their target lives outside src/ (e.g., developer scripts).
 _ORPHAN_ALLOWLIST: dict[str, str] = {
-    "core/test_rotate_digests.py": "Tests scripts/rotate_digests.py (developer tool, not under src/).",
+    "scripts/test_rotate_pins.py": "Tests scripts/rotate_pins.py (developer tool, not under src/).",
 }
 
 
