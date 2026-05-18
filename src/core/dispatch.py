@@ -903,16 +903,23 @@ def probe(
 #     ``[ -d "$RD" ]`` guard makes an absent runtime dir exit non-zero.
 #   * cleanup:    ``trap 'rm -rf "$DIR"' EXIT`` is armed immediately, BEFORE
 #     any work, so it fires on success AND every failure path; tmpfs
-#     evaporation is only a SIGKILL-before-trap backstop. ``Executor`` wraps
-#     the payload as ``{ <inner>; }; echo __SANDBOX_EXIT_..._$?`` so the trap
-#     fires AFTER stdout is captured and the sentinel echoed — the binary is
-#     captured before cleanup, no race.
-#   * binary-out: docker/go chatter is redirected to stderr (``1>&2``) so
-#     stdout carries ONLY ``base64 -w0 "$DIR/dispatch"`` (no ``\n``/``\r`` →
-#     PTY-``onlcr``-safe). The host ``.strip()``s + ``base64.b64decode``s
-#     ``result.stdout`` and writes ``output_path`` (mode 0755) ONLY after the
-#     crossing exits 0; any failure raises ``SandboxExecutionError`` before
-#     the write, so ``output_path`` is untouched on every failure path.
+#     evaporation is only a SIGKILL-before-trap backstop. The recipe crosses
+#     via ``pipe_cmd`` (a real byte pipe, NO PTY → no ``onlcr`` rewrite),
+#     run through ``Executor().run(cmd)`` with the default ``sentinel=False``
+#     — ``pipe_cmd`` propagates the inner exit verbatim, so there is no
+#     sentinel echo to order against. The shell emits the ``base64`` blob,
+#     the pipe drains it, then the inner shell exits and the ``EXIT`` trap
+#     fires; the host has the full frame before cleanup runs, no race.
+#   * binary-out: docker/go chatter is redirected to stderr (``1>&2``); over
+#     ``pipe_cmd`` stdout and stderr are genuinely separate byte streams
+#     (no shared PTY), so that redirect actually diverts the chatter and
+#     stdout carries ONLY the raw ``base64 -w0 "$DIR/dispatch"`` frame as an
+#     unbounded byte stream (no ``onlcr`` ``\n``→``\r\n`` corruption to
+#     guard against). ``Executor().run(cmd)`` runs with ``check=True``, so
+#     any non-zero inner exit raises ``SandboxExecutionError`` BEFORE the
+#     decode+write — the host ``.strip()``s + ``base64.b64decode``s
+#     ``result.stdout`` and writes ``output_path`` (mode 0755) only on a
+#     clean exit 0, leaving ``output_path`` untouched on every failure path.
 #
 # Reproducibility is location-neutral: the container always bind-mounts the
 # ephemeral dir at the fixed ``_BUILD_MOUNT_DST`` and ``-trimpath`` strips
