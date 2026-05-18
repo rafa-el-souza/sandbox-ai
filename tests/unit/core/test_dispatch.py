@@ -1223,14 +1223,23 @@ class TestCompilePayload:
 
         return _compile_payload(_GOLANG_PINNED, "QUJDPT0=")
 
-    def test_payload_mktemps_under_xdg_runtime_dir(self) -> None:
+    def test_payload_mktemps_under_per_user_runtime_dir(self) -> None:
         payload = self._payload()
-        # Ephemeral per-call build dir under claude-sandbox's $XDG_RUNTIME_DIR;
-        # the :? makes an unset $XDG_RUNTIME_DIR fail loudly.
+        # Ephemeral per-call build dir under the lingering daemon user's
+        # per-user runtime dir /run/user/<uid> (created by systemd-logind
+        # independent of any login session, so reachable under the
+        # PAM-skipping pipe_cmd crossing where $XDG_RUNTIME_DIR is unset). A
+        # fail-closed [ -d "$RD" ] guard makes an absent runtime dir exit
+        # non-zero.
+        assert 'RD="/run/user/$(id -u)"' in payload
         assert (
-            'DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"'
+            '[ -d "$RD" ] || { echo "sandbox-ai: per-user runtime dir $RD absent '
+            '(is the daemon user lingering? sister-change L5 enables linger)" 1>&2; exit 1; }'
             in payload
         )
+        assert 'DIR="$(mktemp -d "$RD/sandbox-ai-build-XXXXXX")"' in payload
+        # The guard precedes the mktemp (fail-closed before any work).
+        assert payload.index('[ -d "$RD" ]') < payload.index('mktemp -d "$RD/')
 
     def test_payload_arms_exit_trap_before_any_work(self) -> None:
         payload = self._payload()
@@ -1302,7 +1311,9 @@ class TestCompileDispatcher:
 
     All tests mock ``Executor.run`` — no real docker/pipe_cmd is executed.
     The signature is ``compile_dispatcher(output_path, host_config)``: the
-    build dir is derived inside the crossing (claude-sandbox $XDG_RUNTIME_DIR)
+    build dir is derived inside the crossing (the lingering daemon user's
+    /run/user/$(id -u), reachable under the PAM-skipping pipe_cmd crossing
+    where $XDG_RUNTIME_DIR is unset)
     and never supplied/seen host-side; the built binary returns over captured
     stdout as ``base64 -w0`` and the host decodes + writes ``output_path``.
     The crossing is :func:`~core.host_config.pipe_cmd` (binary-frame transport,
@@ -1358,7 +1369,9 @@ class TestCompileDispatcher:
         from core.dispatch import _compile_payload, _dispatch_source_b64
 
         assert inner == _compile_payload(_GOLANG_PINNED, _dispatch_source_b64())
-        assert 'mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX"' in inner
+        assert 'RD="/run/user/$(id -u)"' in inner
+        assert '[ -d "$RD" ] ||' in inner
+        assert 'mktemp -d "$RD/sandbox-ai-build-XXXXXX"' in inner
         assert "trap 'rm -rf \"$DIR\"' EXIT;" in inner
         assert "--network none" in inner
         assert '--mount type=bind,src="$DIR",dst=/build' in inner
@@ -1418,8 +1431,9 @@ class TestCompileDispatcher:
     def test_failure_raises_and_writes_no_binary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A non-zero `go test` (fixture drift), build failure, or unset
-        # $XDG_RUNTIME_DIR: the sterile Executor raises SandboxExecutionError
+        # A non-zero `go test` (fixture drift), build failure, or absent
+        # /run/user/$(id -u) (the [ -d "$RD" ] guard): the sterile Executor
+        # raises SandboxExecutionError
         # BEFORE the decode+write, so output_path is never created.
         output_path = tmp_path / "out" / "dispatch"
 

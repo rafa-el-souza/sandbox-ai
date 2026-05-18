@@ -70,9 +70,9 @@ _DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 _DISPATCH_SOURCE_ENTRIES = ("main.go", "main_test.go", "go.mod", "go.sum", "vendor", "fixtures")
 
 # In-container build dir (the bind-mount target). The host build directory is
-# an ephemeral per-call ``mktemp -d`` under claude-sandbox's
-# ``$XDG_RUNTIME_DIR`` (resolved INSIDE the crossing — never named host-side);
-# the container always sees it at this fixed path so ``-trimpath`` keeps the
+# an ephemeral per-call ``mktemp -d`` under the lingering daemon user's
+# per-user runtime dir ``/run/user/$(id -u)`` (resolved INSIDE the crossing —
+# never named host-side); the container always sees it at this fixed path so ``-trimpath`` keeps the
 # build location out of the binary (reproducibility is location-neutral).
 # ``go test ./...`` runs the Python<->Go fixture-parity suite BEFORE
 # ``go build`` in the SAME ``docker run`` (spec C-e enforcement): a fixture
@@ -888,13 +888,19 @@ def probe(
 #   * source-in:  the host tars ``_DISPATCH_SOURCE_ENTRIES`` (gzip-9) and
 #     base64-w0-encodes it (~20 KB, 6x under Linux ``MAX_ARG_STRLEN`` 131072);
 #     the literal is interpolated into the ``bash -c`` payload.
-#   * build dir:  the crossed script, running AS claude-sandbox, does
-#     ``DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"`` —
+#   * build dir:  the crossed script, running AS claude-sandbox, derives
+#     ``RD="/run/user/$(id -u)"`` and does
+#     ``DIR="$(mktemp -d "$RD/sandbox-ai-build-XXXXXX")"`` —
 #     a per-call tmpfs dir under ``/run/user/<sb-uid>`` (0700, owner-only;
 #     ancestors ``/run`` + ``/run/user`` are 0755 → ZERO operator-tree ACLs).
-#     ``$XDG_RUNTIME_DIR`` is an architectural invariant: sister-change L5
-#     hard-requires ``loginctl enable-linger`` for rootless dockerd, so no
-#     linger ⇒ no daemon ⇒ no compile.
+#     ``/run/user/<uid>`` is the lingering daemon user's per-user runtime dir,
+#     created by ``systemd-logind`` independent of any login session, so it is
+#     reachable under the PAM-skipping ``pipe_cmd`` crossing where
+#     ``$XDG_RUNTIME_DIR`` is unset; linger is therefore an architectural
+#     prerequisite (sister-change ``sandbox-setup`` L5 hard-requires
+#     ``loginctl enable-linger`` for rootless dockerd, so no linger ⇒ no
+#     ``/run/user/<uid>`` ⇒ no daemon ⇒ no compile). A fail-closed
+#     ``[ -d "$RD" ]`` guard makes an absent runtime dir exit non-zero.
 #   * cleanup:    ``trap 'rm -rf "$DIR"' EXIT`` is armed immediately, BEFORE
 #     any work, so it fires on success AND every failure path; tmpfs
 #     evaporation is only a SIGKILL-before-trap backstop. ``Executor`` wraps
@@ -989,9 +995,14 @@ def _compile_payload(image: str, source_b64: str) -> str:
 
     The payload (Finding L — ratified handoff §11):
 
-    1. ``DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"`` —
-       a per-call tmpfs build dir under claude-sandbox's runtime dir; the
-       ``:?`` makes an unset ``$XDG_RUNTIME_DIR`` fail loudly.
+    1. ``RD="/run/user/$(id -u)"``; a fail-closed ``[ -d "$RD" ]`` guard;
+       ``DIR="$(mktemp -d "$RD/sandbox-ai-build-XXXXXX")"`` — a per-call tmpfs
+       build dir under the lingering daemon user's per-user runtime dir,
+       created by ``systemd-logind`` independent of any login session, so it
+       is reachable under the PAM-skipping ``pipe_cmd`` crossing where
+       ``$XDG_RUNTIME_DIR`` is unset; linger is therefore an architectural
+       prerequisite (sister-change ``sandbox-setup`` L5). The ``[ -d "$RD" ]``
+       guard makes an absent runtime dir fail loudly (non-zero exit).
     2. ``trap 'rm -rf "$DIR"' EXIT`` armed BEFORE any work → fires on success
        AND every failure path.
     3. decode the embedded source: ``printf %s '<b64>' | base64 -d |
@@ -1027,7 +1038,10 @@ def _compile_payload(image: str, source_b64: str) -> str:
         f"/bin/sh -c {shlex.quote(_COMPILE_INNER)}"
     )
     return (
-        'DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"; '
+        'RD="/run/user/$(id -u)"; '
+        '[ -d "$RD" ] || { echo "sandbox-ai: per-user runtime dir $RD absent '
+        '(is the daemon user lingering? sister-change L5 enables linger)" 1>&2; exit 1; }; '
+        'DIR="$(mktemp -d "$RD/sandbox-ai-build-XXXXXX")"; '
         "trap 'rm -rf \"$DIR\"' EXIT; "
         f"printf %s '{source_b64}' | base64 -d | tar -xz -C \"$DIR\" 1>&2; "
         f"{docker_run} 1>&2; "
@@ -1060,8 +1074,13 @@ def compile_dispatcher(
     fixed, audited, one-shot build path with a session-bounded lifetime.
 
     Running AS the unprivileged docker user, that payload ``mktemp -d``'s an
-    ephemeral build dir under ``$XDG_RUNTIME_DIR`` (tmpfs, claude-sandbox-owned,
-    ZERO operator-tree ACLs), arms a ``trap … EXIT`` cleanup, unpacks the
+    ephemeral build dir under ``/run/user/$(id -u)`` — the lingering daemon
+    user's per-user runtime dir, created by ``systemd-logind`` independent of
+    any login session, so it is reachable under the PAM-skipping ``pipe_cmd``
+    crossing where ``$XDG_RUNTIME_DIR`` is unset (linger is therefore an
+    architectural prerequisite, sister-change ``sandbox-setup`` L5) — (tmpfs,
+    claude-sandbox-owned, ZERO operator-tree ACLs), arms a ``trap … EXIT``
+    cleanup, unpacks the
     source, and in ONE ``docker run --rm --network none`` invocation inside the
     digest-pinned ``IMAGE_REGISTRY["golang_alpine"]`` image with
     ``GOFLAGS=-mod=vendor`` runs::
@@ -1078,8 +1097,9 @@ def compile_dispatcher(
     :class:`~core.executor.Executor` with the default ``sentinel=False``:
     ``pipe_cmd`` propagates the inner ``/bin/bash -c`` exit, so the Executor's
     ``check=True`` raises :class:`~core.exceptions.SandboxExecutionError` on any
-    non-zero exit (unset ``$XDG_RUNTIME_DIR`` via ``:?``, ``go test`` fixture
-    drift, ``go build`` failure, container start failure, or timeout) WITHOUT
+    non-zero exit (absent ``/run/user/$(id -u)`` via the ``[ -d "$RD" ]``
+    guard, ``go test`` fixture drift, ``go build`` failure, container start
+    failure, or timeout) WITHOUT
     needing a sentinel echo. On exit 0 the host strips + base64-decodes
     ``result.stdout`` (the byte-pipe crossing emits no stdout banner, and there
     is no PTY so no ``\\r``/``onlcr`` — ``.strip()`` handles any trailing
@@ -1101,7 +1121,8 @@ def compile_dispatcher(
     Raises:
         SandboxExecutionError: ``go test`` failed (fixture drift / build
             failure), the container could not start, it timed out, or
-            ``$XDG_RUNTIME_DIR`` was unset. No binary is placed at
+            ``/run/user/$(id -u)`` was absent (the ``[ -d "$RD" ]`` guard
+            fired). No binary is placed at
             ``output_path`` in any failure case.
     """
     image = IMAGE_REGISTRY["golang_alpine"].pinned
@@ -1116,7 +1137,8 @@ def compile_dispatcher(
     # byte-pipe transport, unlike machinectl's PTY), so the Executor's
     # default ``check=True`` raises
     # SandboxExecutionError on a non-zero ``go test`` (fixture drift), ``go
-    # build``, container-start failure, timeout, or unset ``$XDG_RUNTIME_DIR``
+    # build``, container-start failure, timeout, or absent
+    # ``/run/user/$(id -u)`` (the ``[ -d "$RD" ]`` guard)
     # WITHOUT a sentinel. The decode+write below runs ONLY on a clean return,
     # so no binary is placed at ``output_path`` on any failure path.
     result = Executor().run(cmd)
