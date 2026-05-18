@@ -1,0 +1,487 @@
+"""Phase-runner contract for setup's probe-act-reverify ceremony.
+
+``sandbox setup`` runs a phased host-provisioning ceremony (L0..L8 plus the
+named sub-phases L6a/L6.5). Each phase is a self-contained module under
+:mod:`core.setup` that exports a single module-level ``PHASE: Phase`` object;
+this module discovers them, schedules them by their ``depends_on`` graph, and
+runs the two-pass plan/apply ceremony over them (design D5).
+
+Two passes, one code path:
+
+- **Plan pass** (:func:`run_plan_pass`) — every phase's probe runs; nothing is
+  mutated. ``sandbox setup --dry-run`` IS this pass. Output is a list of
+  :class:`PhasePlanOutcome`.
+- **Apply pass** (:func:`run_apply_pass`) — re-probe; if a phase is already
+  correct, skip; otherwise ``act`` then ``reverify``. A phase failure marks its
+  transitive dependents ``BLOCKED_BY`` and the pass *continues* with the
+  independent phases (operators see every reachable failure in one run, design
+  D5). A phase that carries a ``rollback`` callable has it fired when the phase
+  fails (the L3a sudoers-probe case, design D1) — other phases are never rolled
+  back.
+
+Content-aware probe contract (design D10 — load-bearing, shared by every phase
+author): a phase's ``probe`` MUST be **content-aware**. It computes the
+*expected* state from the current source of truth (the ``core.dispatch.Op``
+enum, the dispatcher source bundle, a ``BINARY_REGISTRY`` pin, the operator's
+hand-edited toml, …) and compares it against the *observed* state on disk. A
+naive file-exists probe is forbidden: it would silently skip work after a wheel
+upgrade changed the expected state (a stale sudoers rule, a stale dispatcher
+binary). The :class:`Phase` docstring restates this so all phase authors share
+the contract; the ``assert_phase_content_aware`` test fixture (in
+``tests/unit/core/setup/conftest.py``) mechanically enforces it by driving a
+phase's probe against synthetic stale-content inputs and asserting it returns
+``DRIFT`` rather than ``ALREADY_CORRECT``.
+
+Identity routing (design D3): setup straddles three identities, each with a
+fixed cross-boundary primitive. :func:`route` maps an :class:`Identity` to the
+argv prefix — ``[]`` for ROOT, ``pipe_cmd(<operator>)`` for OPERATOR,
+``machinectl_cmd(<sandbox-user>, <auth-mode>)`` for SANDBOX. Setup modules may
+import ``machinectl_cmd`` directly: they match the pre-existing
+``src/core/setup/*.py`` allowlist category the ``host-config`` capability
+defines (no allowlist amendment by this change).
+"""
+
+from __future__ import annotations
+
+import importlib
+import pkgutil
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING
+
+import core.setup as _setup_package
+from core.host_config import machinectl_cmd, pipe_cmd
+
+if TYPE_CHECKING:
+    from types import ModuleType
+
+    from core.host_config import HostConfig
+
+
+class Identity(StrEnum):
+    """The identity a phase's cross-boundary work runs as (design D3).
+
+    - ``ROOT`` — no prefix; the ``sudo sandbox setup`` process itself.
+    - ``OPERATOR`` — crossed via ``pipe_cmd(<operator>)``.
+    - ``SANDBOX`` — crossed via ``machinectl_cmd(<sandbox-user>, <auth-mode>)``.
+    """
+
+    ROOT = "root"
+    OPERATOR = "operator"
+    SANDBOX = "sandbox"
+
+
+class PhaseResult(StrEnum):
+    """The outcome classification of a single phase's probe or apply.
+
+    - ``ALREADY_CORRECT`` — observed state matches expected; nothing to do.
+    - ``MISSING`` — the owned state is absent; the act would create it.
+    - ``DRIFT`` — the owned state exists but does not match expected source
+      (the content-aware-probe signal; the act would converge it).
+    - ``CONFLICT`` — observed state is incompatible and cannot be safely
+      converged (e.g. an operator value the phase refuses to overwrite).
+    - ``FAIL`` — the act or reverify failed.
+    - ``BLOCKED_BY`` — a transitive ``depends_on`` ancestor failed; this phase
+      was not run.
+    - ``SKIPPED`` — the phase was deliberately not run (e.g. plan pass for a
+      phase outside the requested subset, or a non-applicable phase).
+    """
+
+    ALREADY_CORRECT = "already-correct"
+    MISSING = "missing"
+    DRIFT = "drift"
+    CONFLICT = "conflict"
+    FAIL = "fail"
+    BLOCKED_BY = "blocked-by"
+    SKIPPED = "skipped"
+
+
+# A probe inspects observed vs. expected state and returns a (result, detail)
+# pair. It MUST NOT mutate the host. ``detail`` is operator-facing text.
+ProbeFn = Callable[["HostConfig"], "tuple[PhaseResult, str]"]
+
+# An act performs the phase's mutation. It returns operator-facing detail text;
+# raising signals failure (the runner catches and classifies as FAIL).
+ActFn = Callable[["HostConfig"], str]
+
+# A reverify re-checks state after the act. It returns ``True`` iff the act
+# converged the phase to the expected state.
+ReverifyFn = Callable[["HostConfig"], bool]
+
+# A rollback undoes a failed phase's partial mutation (the L3a case).
+RollbackFn = Callable[["HostConfig"], None]
+
+
+@dataclass(frozen=True)
+class Phase:
+    """An immutable setup phase: probe-act-reverify with explicit dependencies.
+
+    **Content-aware probe contract (design D10 — every phase author MUST honor
+    this).** ``probe`` MUST be content-aware: it computes the *expected* state
+    from the current source of truth (the ``core.dispatch.Op`` enum, the
+    dispatcher source bundle, a ``BINARY_REGISTRY`` pin, the operator's
+    hand-edited toml, …) and compares it against the *observed* state on disk.
+    A file-exists-only probe is FORBIDDEN — it would silently skip work after a
+    wheel upgrade changed the expected state (a stale sudoers rule after the Op
+    enum grew, a stale dispatcher binary after the source bundle changed). A
+    probe that finds the owned state present but not matching current source
+    MUST return ``DRIFT`` (not ``ALREADY_CORRECT``); absent state returns
+    ``MISSING``; an unconvergeable conflict returns ``CONFLICT``. The
+    ``assert_phase_content_aware`` test fixture enforces this mechanically.
+
+    Attributes:
+        id: Stable phase identifier (e.g. ``"l0"``, ``"l6a"``, ``"l65"``).
+        name: Human-readable phase name for operator-facing output.
+        identity: Which :class:`Identity` the phase's cross-boundary work runs
+            as (drives :func:`route`).
+        probe: Content-aware probe (see contract above). No mutations.
+        act: Performs the phase's mutation; returns detail, raises on failure.
+        reverify: Re-checks state after ``act``; ``True`` iff converged.
+        depends_on: Phase ids that must succeed before this phase runs. The
+            canonical L0→…→L8 order is expressed via these edges, NOT a literal
+            hardcoded sequence (orchestrator decision 1).
+        rollback: Optional undo for a failed phase (the L3a sudoers-probe case,
+            design D1). ``None`` for phases that are not rolled back.
+    """
+
+    id: str
+    name: str
+    identity: Identity
+    probe: ProbeFn
+    act: ActFn
+    reverify: ReverifyFn
+    depends_on: tuple[str, ...] = ()
+    rollback: RollbackFn | None = None
+
+
+@dataclass(frozen=True)
+class PhasePlanOutcome:
+    """Immutable result of a single phase's plan-pass probe.
+
+    Distinct from :class:`core.dispatch.ProbeOutcome` (the dispatcher-op probe
+    result) — this is the setup-phase-local plan outcome (orchestrator
+    decision 2).
+
+    Attributes:
+        phase_id: The phase's :attr:`Phase.id`.
+        result: The :class:`PhaseResult` classification.
+        detail: Operator-facing human-readable detail text.
+    """
+
+    phase_id: str
+    result: PhaseResult
+    detail: str
+
+
+@dataclass(frozen=True)
+class PhaseApplyOutcome:
+    """Immutable result of a single phase's apply-pass run.
+
+    Attributes:
+        phase_id: The phase's :attr:`Phase.id`.
+        result: The :class:`PhaseResult` classification.
+        detail: Operator-facing human-readable detail text.
+        reverified: ``True`` iff the phase acted and its reverify confirmed
+            convergence; ``False`` for skipped / blocked / failed phases.
+    """
+
+    phase_id: str
+    result: PhaseResult
+    detail: str
+    reverified: bool
+
+
+class PhaseDependencyError(ValueError):
+    """The phase graph is malformed: a dependency cycle or an unknown id.
+
+    Raised by :func:`order_phases` (and therefore by both passes) before any
+    probe or act runs — a malformed graph is a programming error in the phase
+    modules, not an operator-recoverable condition.
+    """
+
+
+class PhaseDiscoveryError(ValueError):
+    """A discovered phase module is missing its module-level ``PHASE`` object.
+
+    Every ``l<digits>[a]?_*`` submodule of :mod:`core.setup` MUST export a
+    module-level ``PHASE: Phase``. A module that matches the phase-module name
+    pattern but lacks ``PHASE`` is a programming error (fail loud, do not skip
+    silently) — orchestrator decision / design constraint.
+    """
+
+
+# A phase module's name matches ``l<digits>[a]?_<rest>`` — e.g. ``l0_identity``,
+# ``l1_kernel``, ``l6a_runsc``, ``l65_dispatcher``, ``l3a_per_op_probe``. The
+# package marker (``__init__``), this runner, and helper modules (``conftest``,
+# the ``extras`` sub-package) do not match and are skipped. The optional single
+# ``a`` is the L6a / L3a sub-phase convention; ``_<rest>`` must be non-empty.
+_PHASE_MODULE_RE = re.compile(r"^l\d+a?_.+$")
+
+
+def _is_phase_module_name(name: str) -> bool:
+    """``True`` iff ``name`` is a ``l<digits>[a]?_<rest>`` phase-module name."""
+    return _PHASE_MODULE_RE.match(name) is not None
+
+
+def discover_phases(package: ModuleType = _setup_package) -> list[Phase]:
+    """Import every phase submodule of ``package`` and collect its ``PHASE``.
+
+    ``package`` is a test seam passed as a parameter (orchestrator decision 1,
+    anti-hack rule 5): production callers pass nothing and discovery runs over
+    the real :mod:`core.setup` package; tests pass a synthetic package whose
+    ``lN_*`` stub modules each expose a ``PHASE`` (or deliberately omit it to
+    exercise the missing-``PHASE`` contract).
+
+    A submodule whose name matches the ``l<digits>[a]?_*`` phase-module pattern
+    MUST expose a module-level ``PHASE: Phase``; one that does not raises
+    :class:`PhaseDiscoveryError` (fail loud — a phase module without ``PHASE``
+    is a programming error). Non-matching submodules (helpers, sub-packages)
+    are skipped. The returned list is unordered; callers pass it to
+    :func:`run_plan_pass` / :func:`run_apply_pass`, which order it by the
+    ``depends_on`` graph.
+
+    Returns:
+        Every discovered phase, in module-iteration order (NOT dependency
+        order — the passes topologically sort).
+    """
+    phases: list[Phase] = []
+    for module_info in pkgutil.iter_modules(package.__path__):
+        if not _is_phase_module_name(module_info.name):
+            continue
+        full_name = f"{package.__name__}.{module_info.name}"
+        module = importlib.import_module(full_name)
+        phase = getattr(module, "PHASE", None)
+        if not isinstance(phase, Phase):
+            raise PhaseDiscoveryError(
+                f"phase module {full_name!r} matches the phase-module pattern "
+                f"but does not export a module-level `PHASE: Phase` object"
+            )
+        phases.append(phase)
+    return phases
+
+
+def order_phases(phases: list[Phase]) -> list[Phase]:
+    """Topologically sort ``phases`` by their ``depends_on`` edges.
+
+    Deterministic: ties are broken by phase ``id`` so the operator-facing
+    ordering is stable across runs. Raises :class:`PhaseDependencyError` on an
+    unknown dependency id or a dependency cycle.
+    """
+    by_id: dict[str, Phase] = {p.id: p for p in phases}
+    for phase in phases:
+        for dep in phase.depends_on:
+            if dep not in by_id:
+                raise PhaseDependencyError(
+                    f"phase {phase.id!r} depends on unknown phase {dep!r}"
+                )
+    ordered: list[Phase] = []
+    placed: set[str] = set()
+    # Kahn-style with deterministic id-sorted selection.
+    remaining = sorted(by_id.values(), key=lambda p: p.id)
+    while remaining:
+        ready = [p for p in remaining if all(d in placed for d in p.depends_on)]
+        if not ready:
+            cycle = sorted(p.id for p in remaining)
+            raise PhaseDependencyError(
+                f"dependency cycle among phases: {cycle}"
+            )
+        nxt = ready[0]
+        ordered.append(nxt)
+        placed.add(nxt.id)
+        remaining.remove(nxt)
+    return ordered
+
+
+def route(
+    identity: Identity,
+    host_config: HostConfig,
+    operator: str,
+    sandbox_user: str,
+) -> list[str]:
+    """Return the argv prefix for ``identity``'s cross-boundary work (design D3).
+
+    - :attr:`Identity.ROOT` → ``[]`` (the ``sudo sandbox setup`` process runs
+      these directly as root).
+    - :attr:`Identity.OPERATOR` → ``pipe_cmd(operator)`` (the byte-pipe
+      crossing into the operator; its ``--uid`` transient unit re-runs
+      ``initgroups`` so a fresh unit reflects the post-``usermod`` group set).
+    - :attr:`Identity.SANDBOX` → ``machinectl_cmd(sandbox_user, <auth-mode>)``
+      where the auth mode is ``host_config.host.machinectl_authentication``;
+      identical to the runtime orchestrator's primitive.
+    """
+    if identity == Identity.ROOT:
+        return []
+    if identity == Identity.OPERATOR:
+        return pipe_cmd(operator)
+    return machinectl_cmd(sandbox_user, host_config.host.machinectl_authentication)
+
+
+# ``PhaseResult`` values that mean "the phase converged / nothing to do" — a
+# phase in one of these is NOT a mutation and does NOT block dependents.
+_NON_MUTATING_RESULTS: frozenset[PhaseResult] = frozenset(
+    {PhaseResult.ALREADY_CORRECT, PhaseResult.SKIPPED}
+)
+
+
+def run_plan_pass(
+    phases: list[Phase], host_config: HostConfig
+) -> list[PhasePlanOutcome]:
+    """Run every phase's probe in dependency order. NO mutations.
+
+    This IS ``sandbox setup --dry-run`` (design D5): the only difference from
+    the apply pass is that ``act`` is never invoked. The probe is content-aware
+    (design D10) so the plan reflects state-vs-source, not mere file presence.
+
+    Returns one :class:`PhasePlanOutcome` per phase in dependency order.
+    """
+    ordered = order_phases(phases)
+    outcomes: list[PhasePlanOutcome] = []
+    for phase in ordered:
+        result, detail = phase.probe(host_config)
+        outcomes.append(PhasePlanOutcome(phase.id, result, detail))
+    return outcomes
+
+
+def run_apply_pass(
+    phases: list[Phase], host_config: HostConfig
+) -> list[PhaseApplyOutcome]:
+    """Re-probe each phase; act + reverify the mutable ones (design D5).
+
+    For each phase in dependency order:
+
+    - if any transitive ``depends_on`` ancestor failed (or was itself
+      ``BLOCKED_BY``), record ``BLOCKED_BY`` and skip — the apply pass
+      *continues* with independent phases so operators see every reachable
+      failure in one run;
+    - re-probe; ``ALREADY_CORRECT`` / ``SKIPPED`` → record as-is, no mutation,
+      does NOT block dependents;
+    - ``CONFLICT`` → a clean refusal: the observed state is incompatible and
+      the phase will not overwrite it (design D10; the spec's "refuse with
+      diagnostic, do NOT overwrite"). The runner records ``CONFLICT`` and
+      NEVER calls ``act`` / ``reverify`` — the "never overwrite operator data
+      on conflict" guarantee is centralized here, not delegated to every phase
+      author remembering to raise inside ``act``. ``rollback`` is NOT fired (a
+      refusal mutated nothing; rollback is only for a ``FAIL`` of a phase
+      carrying a rollback callable). A ``CONFLICT`` phase marks its transitive
+      dependents ``BLOCKED_BY`` (a refused prerequisite blocks its subtree);
+    - otherwise ``act`` then ``reverify``. A raising ``act``, a raising
+      ``reverify``, or a ``reverify`` that returns ``False`` is a ``FAIL``.
+
+    On a ``FAIL`` for a phase that carries a ``rollback`` callable, the
+    rollback is fired (the L3a sudoers-probe case, design D1) — other phases
+    are never rolled back. A failed phase marks its transitive dependents
+    ``BLOCKED_BY``.
+
+    Returns one :class:`PhaseApplyOutcome` per phase in dependency order.
+    """
+    ordered = order_phases(phases)
+    outcomes: list[PhaseApplyOutcome] = []
+    failed_ids: set[str] = set()
+
+    for phase in ordered:
+        blocker = next(
+            (dep for dep in phase.depends_on if dep in failed_ids), None
+        )
+        if blocker is not None:
+            failed_ids.add(phase.id)
+            outcomes.append(
+                PhaseApplyOutcome(
+                    phase.id,
+                    PhaseResult.BLOCKED_BY,
+                    f"blocked by failed phase {blocker!r}",
+                    reverified=False,
+                )
+            )
+            continue
+
+        result, detail = phase.probe(host_config)
+        if result in _NON_MUTATING_RESULTS:
+            outcomes.append(
+                PhaseApplyOutcome(phase.id, result, detail, reverified=False)
+            )
+            continue
+
+        if result == PhaseResult.CONFLICT:
+            # A clean refusal: the phase will not overwrite an incompatible
+            # observed state. Never act / reverify / rollback; record the
+            # refusal and block the dependent subtree.
+            failed_ids.add(phase.id)
+            outcomes.append(
+                PhaseApplyOutcome(
+                    phase.id, PhaseResult.CONFLICT, detail, reverified=False
+                )
+            )
+            continue
+
+        outcome = _apply_one(phase, host_config)
+        if outcome.result == PhaseResult.FAIL:
+            failed_ids.add(phase.id)
+        outcomes.append(outcome)
+
+    return outcomes
+
+
+def _apply_one(phase: Phase, host_config: HostConfig) -> PhaseApplyOutcome:
+    """Act + reverify a single mutable phase; fire rollback on failure.
+
+    Extracted so the failure/rollback ceremony lives in one place (design D1:
+    only a phase with a ``rollback`` callable is rolled back; the rollback's
+    own failure is surfaced in the detail, never swallowed).
+    """
+    try:
+        act_detail = phase.act(host_config)
+        reverified = phase.reverify(host_config)
+    except Exception as exc:
+        # Any exception from act or reverify classifies the phase as FAIL;
+        # the runner is the boundary that turns it into a typed outcome.
+        return _failed(phase, host_config, f"act/reverify raised: {exc}")
+
+    if reverified:
+        return PhaseApplyOutcome(
+            phase.id, PhaseResult.ALREADY_CORRECT, act_detail, reverified=True
+        )
+    return _failed(phase, host_config, "reverify did not confirm convergence")
+
+
+def _failed(
+    phase: Phase, host_config: HostConfig, detail: str
+) -> PhaseApplyOutcome:
+    """Build a ``FAIL`` outcome, firing ``phase.rollback`` if one is present."""
+    if phase.rollback is None:
+        return PhaseApplyOutcome(
+            phase.id, PhaseResult.FAIL, detail, reverified=False
+        )
+    try:
+        phase.rollback(host_config)
+        rollback_note = "rolled back"
+    except Exception as exc:
+        # A failing rollback must be surfaced in the detail, never swallowed.
+        rollback_note = f"rollback also failed: {exc}"
+    return PhaseApplyOutcome(
+        phase.id,
+        PhaseResult.FAIL,
+        f"{detail} ({rollback_note})",
+        reverified=False,
+    )
+
+
+__all__ = [
+    "ActFn",
+    "Identity",
+    "Phase",
+    "PhaseApplyOutcome",
+    "PhaseDependencyError",
+    "PhaseDiscoveryError",
+    "PhasePlanOutcome",
+    "PhaseResult",
+    "ProbeFn",
+    "ReverifyFn",
+    "RollbackFn",
+    "discover_phases",
+    "order_phases",
+    "route",
+    "run_apply_pass",
+    "run_plan_pass",
+]
