@@ -23,25 +23,24 @@ import pytest
 from core.setup.phase_runner import PhaseResult
 
 if TYPE_CHECKING:
-    from core.host_config import HostConfig
-    from core.setup.phase_runner import Phase
+    from core.setup.phase_runner import Phase, SetupContext
 
 # The callable a consuming test receives. It takes the phase under test, a
-# ``HostConfig``, and a ``make_stale`` callable that mutates the test world so
-# the phase's owned on-disk state no longer matches the current source of
+# ``SetupContext``, and a ``make_stale`` callable that mutates the test world
+# so the phase's owned on-disk state no longer matches the current source of
 # truth. It asserts:
 #   1. before ``make_stale()``  → probe returns ALREADY_CORRECT (the world was
 #      set up to match current source);
 #   2. after  ``make_stale()``  → probe returns DRIFT (NOT ALREADY_CORRECT) —
 #      proving the probe compares content, not mere presence.
 ContentAwareAssertion = Callable[
-    ["Phase", "HostConfig", Callable[[], None]], None
+    ["Phase", "SetupContext", Callable[[], None]], None
 ]
 
 
 def _assert_phase_content_aware(
     phase: Phase,
-    host_config: HostConfig,
+    ctx: SetupContext,
     make_stale: Callable[[], None],
 ) -> None:
     """Drive ``phase.probe`` across a correct→stale transition.
@@ -52,13 +51,13 @@ def _assert_phase_content_aware(
     MUST report ``ALREADY_CORRECT`` while the world matches current source and
     ``DRIFT`` once ``make_stale`` has run — never ``ALREADY_CORRECT`` after.
     """
-    before_result, _ = phase.probe(host_config)
+    before_result, _ = phase.probe(ctx)
     assert before_result == PhaseResult.ALREADY_CORRECT, (
         f"phase {phase.id!r}: probe must report ALREADY_CORRECT when on-disk "
         f"state matches current source, got {before_result!r}"
     )
     make_stale()
-    after_result, _ = phase.probe(host_config)
+    after_result, _ = phase.probe(ctx)
     assert after_result == PhaseResult.DRIFT, (
         f"phase {phase.id!r}: probe must report DRIFT (not "
         f"{PhaseResult.ALREADY_CORRECT!r}) when on-disk state no longer "

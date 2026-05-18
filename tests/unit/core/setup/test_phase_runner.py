@@ -27,6 +27,7 @@ from core.setup.phase_runner import (
     PhaseDiscoveryError,
     PhasePlanOutcome,
     PhaseResult,
+    SetupContext,
     _is_phase_module_name,
     discover_phases,
     order_phases,
@@ -39,19 +40,21 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from core.host_config import HostConfig
-
     SyntheticPkgFactory = Callable[[dict[str, str]], ModuleType]
     ContentAwareAssertion = Callable[
-        [Phase, HostConfig, Callable[[], None]], None
+        [Phase, SetupContext, Callable[[], None]], None
     ]
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
-def _hc() -> HostConfig:
-    return minimal_host_config("sandboxuser", MachinectlAuth.SUDO)
+def _ctx(
+    user: str = "sandboxuser", auth: MachinectlAuth = MachinectlAuth.SUDO
+) -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(user, auth), operator="op"
+    )
 
 
 def _phase(
@@ -60,11 +63,11 @@ def _phase(
     identity: Identity = Identity.ROOT,
     probe_result: PhaseResult = PhaseResult.ALREADY_CORRECT,
     depends_on: tuple[str, ...] = (),
-    act: Callable[[HostConfig], str] | None = None,
-    reverify: Callable[[HostConfig], bool] | None = None,
-    rollback: Callable[[HostConfig], None] | None = None,
+    act: Callable[[SetupContext], str] | None = None,
+    reverify: Callable[[SetupContext], bool] | None = None,
+    rollback: Callable[[SetupContext], None] | None = None,
 ) -> Phase:
-    def _probe(_hcfg: HostConfig) -> tuple[PhaseResult, str]:
+    def _probe(_c: SetupContext) -> tuple[PhaseResult, str]:
         return probe_result, f"{pid} probed {probe_result}"
 
     return Phase(
@@ -72,8 +75,8 @@ def _phase(
         name=f"phase {pid}",
         identity=identity,
         probe=_probe,
-        act=act if act is not None else (lambda _h: f"{pid} acted"),
-        reverify=reverify if reverify is not None else (lambda _h: True),
+        act=act if act is not None else (lambda _c: f"{pid} acted"),
+        reverify=reverify if reverify is not None else (lambda _c: True),
         depends_on=depends_on,
         rollback=rollback,
     )
@@ -212,10 +215,19 @@ def test_discover_phases_PHASE_wrong_type_raises(
 
 
 def test_discover_phases_default_is_real_core_setup() -> None:
-    # Production default: the real core.setup package. No lN_* phase modules
-    # exist yet (this milestone is "complete but unwired"), so the result is
-    # empty — but the call must succeed against the real package object.
-    assert discover_phases() == []
+    # Production default: the real core.setup package, now populated with the
+    # twelve wired phase modules. This is the cross-module integration check —
+    # it fails if any phase module drifts its id/depends_on out of the
+    # canonical graph, or a module stops exporting a valid PHASE.
+    discovered = discover_phases()
+    assert sorted(p.id for p in discovered) == sorted(
+        ["l0", "l1", "l2", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"]
+    )
+    # The depends_on edges across all twelve modules must topologically
+    # resolve to the single canonical setup chain.
+    assert [p.id for p in order_phases(discovered)] == [
+        "l0", "l1", "l2", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"
+    ]
 
 
 # ── order_phases ─────────────────────────────────────────────────────────────
@@ -251,23 +263,33 @@ def test_order_phases_cycle() -> None:
 
 
 def test_route_root_is_empty_prefix() -> None:
-    assert route(Identity.ROOT, _hc(), "op", "sb") == []
+    assert route(Identity.ROOT, _ctx()) == []
 
 
 def test_route_operator_is_pipe_cmd() -> None:
-    assert route(Identity.OPERATOR, _hc(), "alice", "sb") == pipe_cmd("alice")
+    ctx = SetupContext(
+        host_config=minimal_host_config("sb", MachinectlAuth.SUDO),
+        operator="alice",
+    )
+    assert route(Identity.OPERATOR, ctx) == pipe_cmd("alice")
 
 
 def test_route_sandbox_is_machinectl_cmd_sudo() -> None:
-    hc = minimal_host_config("sb", MachinectlAuth.SUDO)
-    assert route(Identity.SANDBOX, hc, "alice", "sbuser") == machinectl_cmd(
+    ctx = SetupContext(
+        host_config=minimal_host_config("sbuser", MachinectlAuth.SUDO),
+        operator="alice",
+    )
+    assert route(Identity.SANDBOX, ctx) == machinectl_cmd(
         "sbuser", MachinectlAuth.SUDO
     )
 
 
 def test_route_sandbox_is_machinectl_cmd_polkit() -> None:
-    hc = minimal_host_config("sb", MachinectlAuth.POLKIT)
-    assert route(Identity.SANDBOX, hc, "alice", "sbuser") == machinectl_cmd(
+    ctx = SetupContext(
+        host_config=minimal_host_config("sbuser", MachinectlAuth.POLKIT),
+        operator="alice",
+    )
+    assert route(Identity.SANDBOX, ctx) == machinectl_cmd(
         "sbuser", MachinectlAuth.POLKIT
     )
 
@@ -278,7 +300,7 @@ def test_route_sandbox_is_machinectl_cmd_polkit() -> None:
 def test_plan_pass_probes_only_no_mutation() -> None:
     acted: list[str] = []
 
-    def _spy_act(_h: HostConfig) -> str:
+    def _spy_act(_c: SetupContext) -> str:
         acted.append("ran")
         return "x"
 
@@ -287,7 +309,7 @@ def test_plan_pass_probes_only_no_mutation() -> None:
         _phase("b", probe_result=PhaseResult.MISSING, depends_on=("a",), act=_spy_act),
         _phase("c", probe_result=PhaseResult.DRIFT, depends_on=("b",)),
     ]
-    out = run_plan_pass(phases, _hc())
+    out = run_plan_pass(phases, _ctx())
     assert acted == []  # no act ever invoked in plan pass
     assert [o.phase_id for o in out] == ["a", "b", "c"]  # dependency order
     assert all(isinstance(o, PhasePlanOutcome) for o in out)
@@ -301,11 +323,11 @@ def test_plan_pass_probes_only_no_mutation() -> None:
 
 
 def test_apply_pass_already_correct_skips_act() -> None:
-    def _boom(_h: HostConfig) -> str:
+    def _boom(_c: SetupContext) -> str:
         raise AssertionError("act must not run for an already-correct phase")
 
     out = run_apply_pass(
-        [_phase("a", probe_result=PhaseResult.ALREADY_CORRECT, act=_boom)], _hc()
+        [_phase("a", probe_result=PhaseResult.ALREADY_CORRECT, act=_boom)], _ctx()
     )
     assert out[0].result == PhaseResult.ALREADY_CORRECT
     assert out[0].reverified is False
@@ -313,7 +335,7 @@ def test_apply_pass_already_correct_skips_act() -> None:
 
 
 def test_apply_pass_skipped_probe_result_is_passed_through() -> None:
-    out = run_apply_pass([_phase("a", probe_result=PhaseResult.SKIPPED)], _hc())
+    out = run_apply_pass([_phase("a", probe_result=PhaseResult.SKIPPED)], _ctx())
     assert out[0].result == PhaseResult.SKIPPED
     assert out[0].reverified is False
 
@@ -321,17 +343,17 @@ def test_apply_pass_skipped_probe_result_is_passed_through() -> None:
 def test_apply_pass_drift_acts_and_reverifies() -> None:
     seq: list[str] = []
 
-    def _act(_h: HostConfig) -> str:
+    def _act(_c: SetupContext) -> str:
         seq.append("act")
         return "did the thing"
 
-    def _reverify(_h: HostConfig) -> bool:
+    def _reverify(_c: SetupContext) -> bool:
         seq.append("reverify")
         return True
 
     out = run_apply_pass(
         [_phase("a", probe_result=PhaseResult.MISSING, act=_act, reverify=_reverify)],
-        _hc(),
+        _ctx(),
     )
     assert seq == ["act", "reverify"]
     assert out[0].result == PhaseResult.ALREADY_CORRECT
@@ -340,11 +362,11 @@ def test_apply_pass_drift_acts_and_reverifies() -> None:
 
 
 def test_apply_pass_act_raises_is_fail_no_rollback() -> None:
-    def _act(_h: HostConfig) -> str:
+    def _act(_c: SetupContext) -> str:
         raise RuntimeError("act blew up")
 
     out = run_apply_pass(
-        [_phase("a", probe_result=PhaseResult.DRIFT, act=_act)], _hc()
+        [_phase("a", probe_result=PhaseResult.DRIFT, act=_act)], _ctx()
     )
     assert out[0].result == PhaseResult.FAIL
     assert "act blew up" in out[0].detail
@@ -360,18 +382,18 @@ def test_apply_pass_reverify_false_is_fail() -> None:
                 reverify=lambda _h: False,
             )
         ],
-        _hc(),
+        _ctx(),
     )
     assert out[0].result == PhaseResult.FAIL
     assert "did not confirm convergence" in out[0].detail
 
 
 def test_apply_pass_reverify_raises_is_fail() -> None:
-    def _reverify(_h: HostConfig) -> bool:
+    def _reverify(_c: SetupContext) -> bool:
         raise RuntimeError("reverify exploded")
 
     out = run_apply_pass(
-        [_phase("a", probe_result=PhaseResult.DRIFT, reverify=_reverify)], _hc()
+        [_phase("a", probe_result=PhaseResult.DRIFT, reverify=_reverify)], _ctx()
     )
     assert out[0].result == PhaseResult.FAIL
     assert "reverify exploded" in out[0].detail
@@ -380,10 +402,10 @@ def test_apply_pass_reverify_raises_is_fail() -> None:
 def test_apply_pass_rollback_fires_on_failure() -> None:
     rolled: list[str] = []
 
-    def _act(_h: HostConfig) -> str:
+    def _act(_c: SetupContext) -> str:
         raise RuntimeError("L3a probe rejected")
 
-    def _rollback(_h: HostConfig) -> None:
+    def _rollback(_c: SetupContext) -> None:
         rolled.append("rm drop-in")
 
     out = run_apply_pass(
@@ -395,7 +417,7 @@ def test_apply_pass_rollback_fires_on_failure() -> None:
                 rollback=_rollback,
             )
         ],
-        _hc(),
+        _ctx(),
     )
     assert rolled == ["rm drop-in"]
     assert out[0].result == PhaseResult.FAIL
@@ -403,10 +425,10 @@ def test_apply_pass_rollback_fires_on_failure() -> None:
 
 
 def test_apply_pass_rollback_itself_failing_is_surfaced() -> None:
-    def _act(_h: HostConfig) -> str:
+    def _act(_c: SetupContext) -> str:
         raise RuntimeError("primary failure")
 
-    def _rollback(_h: HostConfig) -> None:
+    def _rollback(_c: SetupContext) -> None:
         raise RuntimeError("rollback broke too")
 
     out = run_apply_pass(
@@ -418,14 +440,14 @@ def test_apply_pass_rollback_itself_failing_is_surfaced() -> None:
                 rollback=_rollback,
             )
         ],
-        _hc(),
+        _ctx(),
     )
     assert out[0].result == PhaseResult.FAIL
     assert "rollback also failed: rollback broke too" in out[0].detail
 
 
 def test_apply_pass_blocked_by_transitive_propagation() -> None:
-    def _fail_act(_h: HostConfig) -> str:
+    def _fail_act(_c: SetupContext) -> str:
         raise RuntimeError("a failed")
 
     a = _phase("a", probe_result=PhaseResult.MISSING, act=_fail_act)
@@ -433,7 +455,7 @@ def test_apply_pass_blocked_by_transitive_propagation() -> None:
     c = _phase("c", probe_result=PhaseResult.MISSING, depends_on=("b",))
     independent = _phase("z", probe_result=PhaseResult.MISSING)
 
-    out = {o.phase_id: o for o in run_apply_pass([a, b, c, independent], _hc())}
+    out = {o.phase_id: o for o in run_apply_pass([a, b, c, independent], _ctx())}
     assert out["a"].result == PhaseResult.FAIL
     assert out["b"].result == PhaseResult.BLOCKED_BY
     assert "blocked by failed phase 'a'" in out["b"].detail
@@ -448,11 +470,11 @@ def test_apply_pass_blocked_by_transitive_propagation() -> None:
 def test_apply_pass_conflict_is_refusal_never_acts() -> None:
     calls: list[str] = []
 
-    def _act(_h: HostConfig) -> str:
+    def _act(_c: SetupContext) -> str:
         calls.append("act")
         return "should not happen"
 
-    def _reverify(_h: HostConfig) -> bool:
+    def _reverify(_c: SetupContext) -> bool:
         calls.append("reverify")
         return True
 
@@ -465,7 +487,7 @@ def test_apply_pass_conflict_is_refusal_never_acts() -> None:
                 reverify=_reverify,
             )
         ],
-        _hc(),
+        _ctx(),
     )
     assert calls == []  # neither act nor reverify ever invoked on a refusal
     assert out[0].result == PhaseResult.CONFLICT
@@ -479,7 +501,7 @@ def test_apply_pass_conflict_blocks_dependents() -> None:
     b = _phase("b", probe_result=PhaseResult.MISSING, depends_on=("a",))
     c = _phase("c", probe_result=PhaseResult.MISSING, depends_on=("b",))
 
-    out = {o.phase_id: o for o in run_apply_pass([a, b, c], _hc())}
+    out = {o.phase_id: o for o in run_apply_pass([a, b, c], _ctx())}
     assert out["a"].result == PhaseResult.CONFLICT
     assert out["b"].result == PhaseResult.BLOCKED_BY
     assert "blocked by failed phase 'a'" in out["b"].detail
@@ -491,7 +513,7 @@ def test_apply_pass_conflict_blocks_dependents() -> None:
 def test_apply_pass_conflict_does_not_fire_rollback() -> None:
     rolled: list[str] = []
 
-    def _rollback(_h: HostConfig) -> None:
+    def _rollback(_c: SetupContext) -> None:
         rolled.append("rolled")
 
     out = run_apply_pass(
@@ -502,7 +524,7 @@ def test_apply_pass_conflict_does_not_fire_rollback() -> None:
                 rollback=_rollback,
             )
         ],
-        _hc(),
+        _ctx(),
     )
     assert rolled == []  # a clean refusal mutated nothing; nothing to roll back
     assert out[0].result == PhaseResult.CONFLICT
@@ -517,7 +539,7 @@ def test_content_aware_fixture_accepts_a_compliant_probe(
 ) -> None:
     state = {"stale": False}
 
-    def _probe(_h: HostConfig) -> tuple[PhaseResult, str]:
+    def _probe(_c: SetupContext) -> tuple[PhaseResult, str]:
         if state["stale"]:
             return PhaseResult.DRIFT, "source changed under us"
         return PhaseResult.ALREADY_CORRECT, "matches source"
@@ -530,7 +552,7 @@ def test_content_aware_fixture_accepts_a_compliant_probe(
         act=lambda _h: "acted",
         reverify=lambda _h: True,
     )
-    assert_phase_content_aware(phase, _hc(), lambda: state.__setitem__("stale", True))
+    assert_phase_content_aware(phase, _ctx(), lambda: state.__setitem__("stale", True))
 
 
 def test_content_aware_fixture_rejects_a_file_exists_only_probe(
@@ -540,4 +562,4 @@ def test_content_aware_fixture_rejects_a_file_exists_only_probe(
     # must be caught by the fixture: it never reports DRIFT after make_stale.
     phase = _phase("naive", probe_result=PhaseResult.ALREADY_CORRECT)
     with pytest.raises(AssertionError, match="must report DRIFT"):
-        assert_phase_content_aware(phase, _hc(), lambda: None)
+        assert_phase_content_aware(phase, _ctx(), lambda: None)

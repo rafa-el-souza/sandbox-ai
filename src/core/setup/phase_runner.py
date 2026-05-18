@@ -39,6 +39,17 @@ argv prefix — ``[]`` for ROOT, ``pipe_cmd(<operator>)`` for OPERATOR,
 import ``machinectl_cmd`` directly: they match the pre-existing
 ``src/core/setup/*.py`` allowlist category the ``host-config`` capability
 defines (no allowlist amendment by this change).
+
+Phase context (the explicit transport): every phase callback (``probe``,
+``act``, ``reverify``, ``rollback``) receives a single immutable
+:class:`SetupContext` carrying the parsed :class:`~core.host_config.HostConfig`
+and the already-resolved ``operator`` user name. The ``--operator`` flag is CLI
+input that is NOT re-derivable from the host, so it is *transported* into the
+phases via this object — there is no hidden module state / environment
+side-channel (the project bans it). ``operator`` is resolved once by
+:func:`core.setup.l0_identity.resolve_operator`; the sandbox user is read from
+``ctx.host_config.host.docker_unprivileged_user`` (single source — it is not a
+separate context field).
 """
 
 from __future__ import annotations
@@ -58,6 +69,27 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from core.host_config import HostConfig
+
+
+@dataclass(frozen=True)
+class SetupContext:
+    """Immutable per-run context threaded through every phase callback.
+
+    The explicit transport for state a phase needs but cannot re-derive from
+    the host alone (the project bans hidden module / environment state):
+
+    Attributes:
+        host_config: The parsed :class:`~core.host_config.HostConfig`. The
+            sandbox user is ``host_config.host.docker_unprivileged_user`` (a
+            single source — deliberately NOT a separate context field).
+        operator: The already-resolved operator user name (the
+            :func:`core.setup.l0_identity.resolve_operator` result — the
+            ``--operator`` flag is CLI input, not host-re-derivable, so it is
+            carried here rather than re-resolved per phase).
+    """
+
+    host_config: HostConfig
+    operator: str
 
 
 class Identity(StrEnum):
@@ -100,18 +132,18 @@ class PhaseResult(StrEnum):
 
 # A probe inspects observed vs. expected state and returns a (result, detail)
 # pair. It MUST NOT mutate the host. ``detail`` is operator-facing text.
-ProbeFn = Callable[["HostConfig"], "tuple[PhaseResult, str]"]
+ProbeFn = Callable[["SetupContext"], "tuple[PhaseResult, str]"]
 
 # An act performs the phase's mutation. It returns operator-facing detail text;
 # raising signals failure (the runner catches and classifies as FAIL).
-ActFn = Callable[["HostConfig"], str]
+ActFn = Callable[["SetupContext"], str]
 
 # A reverify re-checks state after the act. It returns ``True`` iff the act
 # converged the phase to the expected state.
-ReverifyFn = Callable[["HostConfig"], bool]
+ReverifyFn = Callable[["SetupContext"], bool]
 
 # A rollback undoes a failed phase's partial mutation (the L3a case).
-RollbackFn = Callable[["HostConfig"], None]
+RollbackFn = Callable[["SetupContext"], None]
 
 
 @dataclass(frozen=True)
@@ -130,6 +162,12 @@ class Phase:
     MUST return ``DRIFT`` (not ``ALREADY_CORRECT``); absent state returns
     ``MISSING``; an unconvergeable conflict returns ``CONFLICT``. The
     ``assert_phase_content_aware`` test fixture enforces this mechanically.
+
+    ``probe``, ``act``, ``reverify`` and ``rollback`` each receive a single
+    :class:`SetupContext` (the parsed :class:`~core.host_config.HostConfig` plus
+    the already-resolved ``operator``). A phase reads the sandbox user from
+    ``ctx.host_config.host.docker_unprivileged_user`` and the operator from
+    ``ctx.operator`` — it never re-resolves the operator itself.
 
     Attributes:
         id: Stable phase identifier (e.g. ``"l0"``, ``"l6a"``, ``"l65"``).
@@ -294,28 +332,28 @@ def order_phases(phases: list[Phase]) -> list[Phase]:
     return ordered
 
 
-def route(
-    identity: Identity,
-    host_config: HostConfig,
-    operator: str,
-    sandbox_user: str,
-) -> list[str]:
+def route(identity: Identity, ctx: SetupContext) -> list[str]:
     """Return the argv prefix for ``identity``'s cross-boundary work (design D3).
 
     - :attr:`Identity.ROOT` → ``[]`` (the ``sudo sandbox setup`` process runs
       these directly as root).
-    - :attr:`Identity.OPERATOR` → ``pipe_cmd(operator)`` (the byte-pipe
+    - :attr:`Identity.OPERATOR` → ``pipe_cmd(ctx.operator)`` (the byte-pipe
       crossing into the operator; its ``--uid`` transient unit re-runs
       ``initgroups`` so a fresh unit reflects the post-``usermod`` group set).
-    - :attr:`Identity.SANDBOX` → ``machinectl_cmd(sandbox_user, <auth-mode>)``
-      where the auth mode is ``host_config.host.machinectl_authentication``;
-      identical to the runtime orchestrator's primitive.
+    - :attr:`Identity.SANDBOX` →
+      ``machinectl_cmd(ctx.host_config.host.docker_unprivileged_user,
+      ctx.host_config.host.machinectl_authentication)`` — the sandbox user and
+      auth mode are read from the context's host config; identical to the
+      runtime orchestrator's primitive.
     """
     if identity == Identity.ROOT:
         return []
     if identity == Identity.OPERATOR:
-        return pipe_cmd(operator)
-    return machinectl_cmd(sandbox_user, host_config.host.machinectl_authentication)
+        return pipe_cmd(ctx.operator)
+    return machinectl_cmd(
+        ctx.host_config.host.docker_unprivileged_user,
+        ctx.host_config.host.machinectl_authentication,
+    )
 
 
 # ``PhaseResult`` values that mean "the phase converged / nothing to do" — a
@@ -326,7 +364,7 @@ _NON_MUTATING_RESULTS: frozenset[PhaseResult] = frozenset(
 
 
 def run_plan_pass(
-    phases: list[Phase], host_config: HostConfig
+    phases: list[Phase], ctx: SetupContext
 ) -> list[PhasePlanOutcome]:
     """Run every phase's probe in dependency order. NO mutations.
 
@@ -339,13 +377,13 @@ def run_plan_pass(
     ordered = order_phases(phases)
     outcomes: list[PhasePlanOutcome] = []
     for phase in ordered:
-        result, detail = phase.probe(host_config)
+        result, detail = phase.probe(ctx)
         outcomes.append(PhasePlanOutcome(phase.id, result, detail))
     return outcomes
 
 
 def run_apply_pass(
-    phases: list[Phase], host_config: HostConfig
+    phases: list[Phase], ctx: SetupContext
 ) -> list[PhaseApplyOutcome]:
     """Re-probe each phase; act + reverify the mutable ones (design D5).
 
@@ -396,7 +434,7 @@ def run_apply_pass(
             )
             continue
 
-        result, detail = phase.probe(host_config)
+        result, detail = phase.probe(ctx)
         if result in _NON_MUTATING_RESULTS:
             outcomes.append(
                 PhaseApplyOutcome(phase.id, result, detail, reverified=False)
@@ -415,7 +453,7 @@ def run_apply_pass(
             )
             continue
 
-        outcome = _apply_one(phase, host_config)
+        outcome = _apply_one(phase, ctx)
         if outcome.result == PhaseResult.FAIL:
             failed_ids.add(phase.id)
         outcomes.append(outcome)
@@ -423,7 +461,7 @@ def run_apply_pass(
     return outcomes
 
 
-def _apply_one(phase: Phase, host_config: HostConfig) -> PhaseApplyOutcome:
+def _apply_one(phase: Phase, ctx: SetupContext) -> PhaseApplyOutcome:
     """Act + reverify a single mutable phase; fire rollback on failure.
 
     Extracted so the failure/rollback ceremony lives in one place (design D1:
@@ -431,22 +469,22 @@ def _apply_one(phase: Phase, host_config: HostConfig) -> PhaseApplyOutcome:
     own failure is surfaced in the detail, never swallowed).
     """
     try:
-        act_detail = phase.act(host_config)
-        reverified = phase.reverify(host_config)
+        act_detail = phase.act(ctx)
+        reverified = phase.reverify(ctx)
     except Exception as exc:
         # Any exception from act or reverify classifies the phase as FAIL;
         # the runner is the boundary that turns it into a typed outcome.
-        return _failed(phase, host_config, f"act/reverify raised: {exc}")
+        return _failed(phase, ctx, f"act/reverify raised: {exc}")
 
     if reverified:
         return PhaseApplyOutcome(
             phase.id, PhaseResult.ALREADY_CORRECT, act_detail, reverified=True
         )
-    return _failed(phase, host_config, "reverify did not confirm convergence")
+    return _failed(phase, ctx, "reverify did not confirm convergence")
 
 
 def _failed(
-    phase: Phase, host_config: HostConfig, detail: str
+    phase: Phase, ctx: SetupContext, detail: str
 ) -> PhaseApplyOutcome:
     """Build a ``FAIL`` outcome, firing ``phase.rollback`` if one is present."""
     if phase.rollback is None:
@@ -454,7 +492,7 @@ def _failed(
             phase.id, PhaseResult.FAIL, detail, reverified=False
         )
     try:
-        phase.rollback(host_config)
+        phase.rollback(ctx)
         rollback_note = "rolled back"
     except Exception as exc:
         # A failing rollback must be surfaced in the detail, never swallowed.
@@ -479,6 +517,7 @@ __all__ = [
     "ProbeFn",
     "ReverifyFn",
     "RollbackFn",
+    "SetupContext",
     "discover_phases",
     "order_phases",
     "route",
