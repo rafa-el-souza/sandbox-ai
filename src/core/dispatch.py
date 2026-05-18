@@ -52,7 +52,7 @@ from core.compose import compose_project_name
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.helper_container import _hardened_docker_run
-from core.host_config import machinectl_cmd
+from core.host_config import machinectl_cmd, pipe_cmd
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
 from core.registry import InstanceRegistry
 
@@ -999,9 +999,17 @@ def _compile_payload(image: str, source_b64: str) -> str:
        ``[A-Za-z0-9+/=]`` so it has no shell metacharacters).
     4. ``docker run`` the unchanged offline recipe with bind-src ``"$DIR"``,
        with ALL docker/go stdout redirected to stderr (``1>&2``) so build
-       chatter never pollutes the captured stream.
-    5. on success emit ONLY the binary to stdout: ``base64 -w0 "$DIR/dispatch"``
-       (no ``\\n``/``\\r`` → PTY-``onlcr``-safe).
+       chatter never pollutes the captured stream. Because the crossing is
+       :func:`~core.host_config.pipe_cmd` (a real byte pipe, no PTY where
+       stdout ≡ stderr), this ``1>&2`` separation is genuine — go/docker
+       chatter lands on a *distinct* stderr stream and never interleaves with
+       the binary on stdout.
+    5. on success emit ONLY the binary to stdout: ``base64 -w0 "$DIR/dispatch"``.
+       The crossing carries this as a raw byte frame over ``pipe_cmd`` (no PTY
+       → no ``onlcr`` ``\\n``→``\\r\\n`` rewrite, unbounded stream); no exit
+       sentinel is echoed (``pipe_cmd`` propagates the inner exit, so
+       :class:`~core.executor.Executor` runs with the default ``sentinel=False``
+       and ``check=True`` raises on any non-zero exit).
 
     ``GOFLAGS=-mod=vendor`` is delivered via ``docker run --env`` so it is set
     INSIDE the build container (a host-side prefix would only set it on the
@@ -1034,12 +1042,27 @@ def compile_dispatcher(
     """Compile the Go dispatcher offline, reproducibly, across the boundary.
 
     The host embeds the dispatcher source (gzip+base64 tar) in a single
-    ``bash -c`` payload crossed via :func:`~core.host_config.machinectl_cmd`
-    (same unprivileged docker user / machinectl auth mode :func:`invoke` uses).
-    Running AS claude-sandbox, that payload ``mktemp -d``'s an ephemeral build
-    dir under ``$XDG_RUNTIME_DIR`` (tmpfs, claude-sandbox-owned, ZERO
-    operator-tree ACLs), arms a ``trap … EXIT`` cleanup, unpacks the source,
-    and in ONE ``docker run --rm --network none`` invocation inside the
+    ``bash -c`` payload crossed via :func:`~core.host_config.pipe_cmd` — NOT
+    :func:`~core.host_config.machinectl_cmd`. The 10 runtime ops
+    (:func:`invoke`/:func:`probe`) cross via ``machinectl_cmd`` because they
+    carry small text results; this compile recipe carries a multi-MB **binary
+    frame** (the built dispatcher binary, base64'd on stdout), so it MUST use
+    the byte-pipe primitive: ``machinectl_cmd`` allocates a PTY where
+    ``stdout ≡ stderr`` and whose ``onlcr`` line discipline would corrupt the
+    stream, while ``pipe_cmd`` is a real byte pipe with distinct stdout/stderr
+    and no ``onlcr`` (see :func:`~core.host_config.pipe_cmd` for the underlying
+    transport). This is the correct application of the CLAUDE.md
+    byte-pipe-for-binary-frames doctrine, not a violation of the "dispatcher is
+    minimal / machinectl for ops" stance. ``pipe_cmd`` is auth-mode-independent
+    (its ``manage-units`` polkit action is the only authorization layer); the
+    per-host ``machinectl_authentication`` setting is unused on this path. The PAM-skip
+    trade-off is acceptable here per the boundary-primitive doctrine: this is a
+    fixed, audited, one-shot build path with a session-bounded lifetime.
+
+    Running AS the unprivileged docker user, that payload ``mktemp -d``'s an
+    ephemeral build dir under ``$XDG_RUNTIME_DIR`` (tmpfs, claude-sandbox-owned,
+    ZERO operator-tree ACLs), arms a ``trap … EXIT`` cleanup, unpacks the
+    source, and in ONE ``docker run --rm --network none`` invocation inside the
     digest-pinned ``IMAGE_REGISTRY["golang_alpine"]`` image with
     ``GOFLAGS=-mod=vendor`` runs::
 
@@ -1049,25 +1072,31 @@ def compile_dispatcher(
     runs BEFORE ``go build`` in the same container (spec C-e): a fixture drift
     fails ``go test``, the ``&&`` short-circuits, ``go build`` never runs, and
     no ``/build/dispatch`` is produced. All docker/go chatter is redirected to
-    stderr; on success the payload emits ONLY ``base64 -w0`` of the built
-    binary to stdout. The crossing runs through the sterile
-    :class:`~core.executor.Executor` with ``sentinel=True`` (recovers the
-    in-container exit through the machinectl PTY; the ``EXIT`` trap fires after
-    stdout is captured + the sentinel echoed, so the binary is captured before
-    cleanup). On exit 0 the host strips + base64-decodes ``result.stdout`` and
-    writes it to ``output_path`` mode ``0o755``; any failure raises
-    :class:`~core.exceptions.SandboxExecutionError` BEFORE the write, so
-    ``output_path`` is untouched on every failure path. The ephemeral build
-    dir self-cleans (``trap``) on success AND failure — no operator-tree
-    residue, no ACL to revoke.
+    stderr — and because ``pipe_cmd`` keeps stderr genuinely distinct from
+    stdout, the only thing on stdout is the final ``base64 -w0`` of the built
+    binary. The crossing runs through the sterile
+    :class:`~core.executor.Executor` with the default ``sentinel=False``:
+    ``pipe_cmd`` propagates the inner ``/bin/bash -c`` exit, so the Executor's
+    ``check=True`` raises :class:`~core.exceptions.SandboxExecutionError` on any
+    non-zero exit (unset ``$XDG_RUNTIME_DIR`` via ``:?``, ``go test`` fixture
+    drift, ``go build`` failure, container start failure, or timeout) WITHOUT
+    needing a sentinel echo. On exit 0 the host strips + base64-decodes
+    ``result.stdout`` (the byte-pipe crossing emits no stdout banner, and there
+    is no PTY so no ``\\r``/``onlcr`` — ``.strip()`` handles any trailing
+    newline) and writes it to ``output_path`` mode ``0o755``; any failure raises BEFORE
+    the write, so ``output_path`` is untouched on every failure path. The
+    ephemeral build dir self-cleans (``trap``) on success AND failure — no
+    operator-tree residue, no ACL to revoke.
 
     Args:
         output_path: Host path the freshly-built binary is written to (mode
             ``0o755``) on success. Untouched on any failure. The build dir is
             derived inside the crossing — callers never supply or see it.
         host_config: Resolved :class:`~core.host_config.HostConfig` supplying
-            the unprivileged docker user + machinectl auth mode for the
-            boundary crossing (same path as :func:`invoke`).
+            the unprivileged docker user for the byte-pipe boundary crossing.
+            The ``machinectl_authentication`` field is unused on this path
+            (``pipe_cmd`` is auth-mode-independent); the parameter is retained
+            for signature symmetry with :func:`invoke`.
 
     Raises:
         SandboxExecutionError: ``go test`` failed (fixture drift / build
@@ -1078,19 +1107,19 @@ def compile_dispatcher(
     image = IMAGE_REGISTRY["golang_alpine"].pinned
     payload = _compile_payload(image, _dispatch_source_b64())
     cmd = [
-        *machinectl_cmd(
-            host_config.host.docker_unprivileged_user,
-            host_config.host.machinectl_authentication,
-        ),
+        *pipe_cmd(host_config.host.docker_unprivileged_user),
         "/bin/bash",
         "-c",
         payload,
     ]
-    # ``sentinel=True`` recovers the in-container exit code through the
-    # machinectl PTY: a non-zero ``go test`` (fixture drift), ``go build``, or
-    # an unset ``$XDG_RUNTIME_DIR`` raises SandboxExecutionError here, so the
-    # decode+write below never runs and no binary is placed at ``output_path``.
-    result = Executor().run(cmd, sentinel=True)
+    # ``pipe_cmd`` propagates the inner ``/bin/bash -c`` exit code (its
+    # byte-pipe transport, unlike machinectl's PTY), so the Executor's
+    # default ``check=True`` raises
+    # SandboxExecutionError on a non-zero ``go test`` (fixture drift), ``go
+    # build``, container-start failure, timeout, or unset ``$XDG_RUNTIME_DIR``
+    # WITHOUT a sentinel. The decode+write below runs ONLY on a clean return,
+    # so no binary is placed at ``output_path`` on any failure path.
+    result = Executor().run(cmd)
     binary = base64.b64decode(result.stdout.strip())
     with open(output_path, "wb") as fh:
         fh.write(binary)

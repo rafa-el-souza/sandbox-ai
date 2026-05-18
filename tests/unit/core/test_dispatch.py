@@ -1288,8 +1288,9 @@ class TestCompilePayload:
 
     def test_payload_redirects_chatter_to_stderr_and_emits_only_binary(self) -> None:
         payload = self._payload()
-        # docker/go chatter -> stderr; stdout carries ONLY the binary base64
-        # (no \n/\r → PTY-onlcr-safe), as the LAST thing the payload does.
+        # docker/go chatter -> stderr (genuinely distinct under pipe_cmd's
+        # real byte pipe, no PTY where stdout ≡ stderr); stdout carries ONLY
+        # the binary base64, as the LAST thing the payload does.
         assert "tar -xz -C \"$DIR\" 1>&2;" in payload
         assert "/bin/sh -c " in payload
         assert " 1>&2; " in payload
@@ -1299,11 +1300,14 @@ class TestCompilePayload:
 class TestCompileDispatcher:
     """Group 4: the docker-based offline reproducible compile recipe.
 
-    All tests mock ``Executor.run`` — no real docker/machinectl is executed.
-    The new signature is ``compile_dispatcher(output_path, host_config)``: the
+    All tests mock ``Executor.run`` — no real docker/pipe_cmd is executed.
+    The signature is ``compile_dispatcher(output_path, host_config)``: the
     build dir is derived inside the crossing (claude-sandbox $XDG_RUNTIME_DIR)
     and never supplied/seen host-side; the built binary returns over captured
     stdout as ``base64 -w0`` and the host decodes + writes ``output_path``.
+    The crossing is :func:`~core.host_config.pipe_cmd` (binary-frame transport,
+    no PTY) — ``Executor().run`` is called WITHOUT ``sentinel=True`` because
+    ``systemd-run --pipe`` propagates the inner exit (``check=True`` raises).
     """
 
     def _fake_hc(self) -> HostConfig:
@@ -1331,14 +1335,19 @@ class TestCompileDispatcher:
         # The whole embed-source/build/capture script is the bash -c payload.
         return cmd[-1], captured
 
-    def test_crosses_boundary_with_invoke_user_auth_path(
+    def test_crosses_boundary_via_pipe_cmd_binary_frame_transport(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _, captured = self._capture_cmd(tmp_path, monkeypatch)
         cmd = cast("list[str]", captured["cmd"])
-        # Crossed via machinectl_cmd with the SAME user/auth path invoke() uses.
-        assert cmd[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
+        # Crossed via pipe_cmd (binary-frame transport, no PTY) — NOT
+        # machinectl_cmd. pipe_cmd takes only the unprivileged docker user
+        # (auth-mode-independent: no machinectl auth in the prefix).
+        assert cmd[:4] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]
         assert cmd[4:6] == ["/bin/bash", "-c"]
+        # No machinectl/sudo anywhere in the crossing.
+        assert "machinectl" not in cmd
+        assert "sudo" not in cmd
 
     def test_payload_is_the_ephemeral_embed_capture_script(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1355,13 +1364,16 @@ class TestCompileDispatcher:
         assert '--mount type=bind,src="$DIR",dst=/build' in inner
         assert inner.rstrip().endswith('base64 -w0 "$DIR/dispatch"')
 
-    def test_polkit_auth_drops_sudo_prefix(
+    def test_pipe_cmd_prefix_is_auth_mode_independent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import subprocess
 
         from core.host_config import MachinectlAuth
 
+        # pipe_cmd ignores machinectl_authentication entirely: the POLKIT
+        # config yields the SAME systemd-run prefix as the SUDO config (the
+        # default _fake_hc()), with no sudo and no machinectl.
         captured: dict[str, object] = {}
 
         def fake_run(
@@ -1374,7 +1386,9 @@ class TestCompileDispatcher:
         hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
         compile_dispatcher(str(tmp_path / "out"), hc)
         cmd = cast("list[str]", captured["cmd"])
-        assert cmd[:3] == ["machinectl", "shell", "sandbox@.host"]
+        assert cmd[:4] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert "machinectl" not in cmd
+        assert "sudo" not in cmd
 
     def test_successful_compile_writes_decoded_binary_mode_0755(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1385,8 +1399,10 @@ class TestCompileDispatcher:
 
         output_path = tmp_path / "out" / "dispatch"
         output_path.parent.mkdir()
-        # The crossing returns ONLY base64 of the built binary on stdout (the
-        # PTY may add trailing \r\n the host .strip()s before decoding).
+        # The crossing returns ONLY base64 of the built binary on stdout.
+        # pipe_cmd has no PTY (no onlcr \r), but the host .strip()s any
+        # trailing whitespace/newline before decoding regardless — assert
+        # that robustness by appending stray \r\n here.
         stdout = base64.b64encode(b"\x7fELF-real").decode("ascii") + "\r\n"
 
         def fake_run(
@@ -1419,7 +1435,7 @@ class TestCompileDispatcher:
             compile_dispatcher(str(output_path), self._fake_hc())
         assert not output_path.exists()
 
-    def test_run_uses_sentinel_for_in_container_exit_detection(
+    def test_run_uses_no_sentinel_pipe_cmd_propagates_inner_exit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import subprocess
@@ -1427,14 +1443,19 @@ class TestCompileDispatcher:
         captured: dict[str, object] = {}
 
         def fake_run(
-            self: object, cmd: list[str], **kwargs: object
+            self: object, cmd: list[str], *args: object, **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
+            captured["args"] = args
             captured["kwargs"] = kwargs
             return subprocess.CompletedProcess(cmd, 0, _fake_binary_b64(), "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         compile_dispatcher(str(tmp_path / "out"), self._fake_hc())
-        # sentinel=True recovers the in-container go test/build exit code
-        # through the machinectl PTY (so a drift raises) AND its echo line
-        # fires AFTER stdout is captured + the trap cleanup (no race).
-        assert cast("dict[str, object]", captured["kwargs"])["sentinel"] is True
+        # pipe_cmd (systemd-run --pipe) propagates the inner /bin/bash -c exit,
+        # so the crossing runs with the DEFAULT sentinel=False (no sentinel
+        # echo): Executor's check=True raises on any non-zero exit. The call
+        # site passes no sentinel kwarg and no positional sentinel arg at all.
+        kwargs = cast("dict[str, object]", captured["kwargs"])
+        assert "sentinel" not in kwargs
+        assert kwargs.get("sentinel", False) is False
+        assert cast("tuple[object, ...]", captured["args"]) == ()
