@@ -33,11 +33,14 @@ SINGLE site that crosses the boundary.
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import re
 import shlex
-import shutil
 import subprocess
+import tarfile
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -59,19 +62,23 @@ if TYPE_CHECKING:
 
 _DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
-# The Go dispatcher source staged into the build dir and compiled offline.
-# ``vendor`` / ``fixtures`` are directories; the rest are files. The recipe
-# stages exactly these so the build context is hermetic (no stray host files).
+# The Go dispatcher source tar'd into the crossed payload and compiled
+# offline. ``vendor`` / ``fixtures`` are directories; the rest are files. The
+# producer tars exactly these so the build context is hermetic (no stray host
+# files).
 _DISPATCH_SOURCE_ENTRIES = ("main.go", "main_test.go", "go.mod", "go.sum", "vendor", "fixtures")
 
-# In-container build dir (the bind-mount target) and the built binary path
-# inside it. ``go test ./...`` runs the Python<->Go fixture-parity suite BEFORE
+# In-container build dir (the bind-mount target). The host build directory is
+# an ephemeral per-call ``mktemp -d`` under claude-sandbox's
+# ``$XDG_RUNTIME_DIR`` (resolved INSIDE the crossing — never named host-side);
+# the container always sees it at this fixed path so ``-trimpath`` keeps the
+# build location out of the binary (reproducibility is location-neutral).
+# ``go test ./...`` runs the Python<->Go fixture-parity suite BEFORE
 # ``go build`` in the SAME ``docker run`` (spec C-e enforcement): a fixture
 # mismatch fails ``go test`` -> the ``&&`` short-circuits -> no binary is
 # produced, and the non-zero exit propagates out of :func:`compile_dispatcher`
 # as a hard failure (no binary is placed at ``output_path``).
 _BUILD_MOUNT_DST = "/build"
-_BUILD_OUTPUT_IN_CONTAINER = "/build/dispatch"
 _COMPILE_INNER = (
     "go test ./... && "
     "go build -trimpath -ldflags '-s -w' -o /build/dispatch ."
@@ -867,21 +874,93 @@ def probe(
 # and no binary is ever placed at ``output_path``. Two *successful* compiles of
 # the same source against the same pinned image are byte-identical
 # (``-trimpath`` strips embedded paths; ``go test`` does not write the output).
+#
+# Build-dir transport (Finding L — ratified handoff §11). The host NEVER names
+# or stages a build directory: the rootless docker daemon runs in the
+# claude-sandbox session whose ``user@.service`` has ``PrivateTmp=`` (so dev's
+# ``/tmp`` *and* ``/var/tmp`` are invisible to it), and granting the daemon an
+# ACL onto a shared operator-tree path would leak a persistent privilege grant.
+# Instead the source is *embedded* in the crossed payload and the binary is
+# *captured* back over stdout, so neither caller (root ``sandbox setup`` L6.5
+# nor the dev integration test) ever touches the build dir:
+#
+#   * source-in:  the host tars ``_DISPATCH_SOURCE_ENTRIES`` (gzip-9) and
+#     base64-w0-encodes it (~20 KB, 6x under Linux ``MAX_ARG_STRLEN`` 131072);
+#     the literal is interpolated into the ``bash -c`` payload.
+#   * build dir:  the crossed script, running AS claude-sandbox, does
+#     ``DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"`` —
+#     a per-call tmpfs dir under ``/run/user/<sb-uid>`` (0700, owner-only;
+#     ancestors ``/run`` + ``/run/user`` are 0755 → ZERO operator-tree ACLs).
+#     ``$XDG_RUNTIME_DIR`` is an architectural invariant: sister-change L5
+#     hard-requires ``loginctl enable-linger`` for rootless dockerd, so no
+#     linger ⇒ no daemon ⇒ no compile.
+#   * cleanup:    ``trap 'rm -rf "$DIR"' EXIT`` is armed immediately, BEFORE
+#     any work, so it fires on success AND every failure path; tmpfs
+#     evaporation is only a SIGKILL-before-trap backstop. ``Executor`` wraps
+#     the payload as ``{ <inner>; }; echo __SANDBOX_EXIT_..._$?`` so the trap
+#     fires AFTER stdout is captured and the sentinel echoed — the binary is
+#     captured before cleanup, no race.
+#   * binary-out: docker/go chatter is redirected to stderr (``1>&2``) so
+#     stdout carries ONLY ``base64 -w0 "$DIR/dispatch"`` (no ``\n``/``\r`` →
+#     PTY-``onlcr``-safe). The host ``.strip()``s + ``base64.b64decode``s
+#     ``result.stdout`` and writes ``output_path`` (mode 0755) ONLY after the
+#     crossing exits 0; any failure raises ``SandboxExecutionError`` before
+#     the write, so ``output_path`` is untouched on every failure path.
+#
+# Reproducibility is location-neutral: the container always bind-mounts the
+# ephemeral dir at the fixed ``_BUILD_MOUNT_DST`` and ``-trimpath`` strips
+# module paths, so two compiles into two distinct ``mktemp`` dirs are
+# byte-identical.
 
 
-def _stage_dispatch_source(build_dir: str) -> None:
-    """Stage the Go dispatcher source tree into ``build_dir``.
+def _dispatch_source_b64() -> str:
+    """Return a gzip-9 + base64-w0 tar of the Go dispatcher source tree.
 
-    Copies ``src/templates/dispatch/{main.go, main_test.go, go.mod, go.sum,
+    Tars ``src/templates/dispatch/{main.go, main_test.go, go.mod, go.sum,
     vendor/, fixtures/}`` from the shipped ``templates`` package (resolved via
     :func:`importlib.resources.files`, so it works from both the source tree
-    and an installed wheel) into ``build_dir``. The staged tree is the entire
-    build context — nothing else is mounted into the container.
+    and an installed wheel). The resources may be a real directory OR an
+    :mod:`importlib.resources` traversable inside a wheel; either way they are
+    materialised into a throwaway :class:`tempfile.TemporaryDirectory` purely
+    to build the tar bytes (this temp dir is NOT the build dir — it is never
+    bind-mounted and has no daemon-reachability constraint) and discarded.
+
+    The tar is built deterministically (sorted member order, fixed mtime /
+    mode / uid / gid) so the embedded payload contributes nothing host- or
+    time-specific to reproducibility. Returns an ASCII string containing only
+    ``[A-Za-z0-9+/=]`` — safe to interpolate into a single-quoted shell
+    literal.
     """
-    os.makedirs(build_dir, exist_ok=True)
     dispatch_root = _resource_files("templates").joinpath("dispatch")
-    for entry in _DISPATCH_SOURCE_ENTRIES:
-        _stage_resource(dispatch_root.joinpath(entry), os.path.join(build_dir, entry))
+    with tempfile.TemporaryDirectory() as staging:
+        for entry in _DISPATCH_SOURCE_ENTRIES:
+            _stage_resource(dispatch_root.joinpath(entry), os.path.join(staging, entry))
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9) as tar:
+            for entry in sorted(_DISPATCH_SOURCE_ENTRIES):
+                tar.add(
+                    os.path.join(staging, entry),
+                    arcname=entry,
+                    recursive=True,
+                    filter=_deterministic_tarinfo,
+                )
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _deterministic_tarinfo(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Normalise a :class:`tarfile.TarInfo` so the tar bytes are reproducible.
+
+    Strips host- and time-specific metadata (mtime, owner ids/names, and the
+    on-disk mode) so the embedded source payload is a pure function of file
+    *content* + layout — never the building host or the moment of build.
+    """
+    ti.mtime = 0
+    ti.uid = 0
+    ti.gid = 0
+    ti.uname = ""
+    ti.gname = ""
+    ti.mode = 0o755 if ti.isdir() else 0o644
+    return ti
 
 
 def _stage_resource(src: Traversable, dst: str) -> None:
@@ -896,63 +975,99 @@ def _stage_resource(src: Traversable, dst: str) -> None:
             fh.write(src.read_bytes())
 
 
+def _compile_payload(image: str, source_b64: str) -> str:
+    """Build the ``bash -c`` payload run AS claude-sandbox across the crossing.
+
+    The payload (Finding L — ratified handoff §11):
+
+    1. ``DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"`` —
+       a per-call tmpfs build dir under claude-sandbox's runtime dir; the
+       ``:?`` makes an unset ``$XDG_RUNTIME_DIR`` fail loudly.
+    2. ``trap 'rm -rf "$DIR"' EXIT`` armed BEFORE any work → fires on success
+       AND every failure path.
+    3. decode the embedded source: ``printf %s '<b64>' | base64 -d |
+       tar -xz -C "$DIR"`` (the literal is single-quoted; it contains only
+       ``[A-Za-z0-9+/=]`` so it has no shell metacharacters).
+    4. ``docker run`` the unchanged offline recipe with bind-src ``"$DIR"``,
+       with ALL docker/go stdout redirected to stderr (``1>&2``) so build
+       chatter never pollutes the captured stream.
+    5. on success emit ONLY the binary to stdout: ``base64 -w0 "$DIR/dispatch"``
+       (no ``\\n``/``\\r`` → PTY-``onlcr``-safe).
+
+    ``GOFLAGS=-mod=vendor`` is delivered via ``docker run --env`` so it is set
+    INSIDE the build container (a host-side prefix would only set it on the
+    host docker *client* and never reach the in-container build); ``--env``
+    does not affect ``--network none``. This is the single source of truth for
+    the setting (it is not also set host-side).
+    """
+    docker_run = (
+        "docker run --rm "
+        "--network none "
+        "--env GOFLAGS=-mod=vendor "
+        f'--mount type=bind,src="$DIR",dst={_BUILD_MOUNT_DST} '
+        f"--workdir {_BUILD_MOUNT_DST} "
+        f"{shlex.quote(image)} "
+        f"/bin/sh -c {shlex.quote(_COMPILE_INNER)}"
+    )
+    return (
+        'DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"; '
+        "trap 'rm -rf \"$DIR\"' EXIT; "
+        f"printf %s '{source_b64}' | base64 -d | tar -xz -C \"$DIR\" 1>&2; "
+        f"{docker_run} 1>&2; "
+        'base64 -w0 "$DIR/dispatch"'
+    )
+
+
 def compile_dispatcher(
-    build_dir: str,
     output_path: str,
     host_config: HostConfig,
 ) -> None:
     """Compile the Go dispatcher offline, reproducibly, across the boundary.
 
-    Stages the dispatcher source into ``build_dir``, then in ONE
-    ``docker run --rm --network none`` invocation (crossed via
-    :func:`~core.host_config.machinectl_cmd` using the same unprivileged
-    docker user / machinectl auth mode :func:`invoke` uses) runs, inside the
+    The host embeds the dispatcher source (gzip+base64 tar) in a single
+    ``bash -c`` payload crossed via :func:`~core.host_config.machinectl_cmd`
+    (same unprivileged docker user / machinectl auth mode :func:`invoke` uses).
+    Running AS claude-sandbox, that payload ``mktemp -d``'s an ephemeral build
+    dir under ``$XDG_RUNTIME_DIR`` (tmpfs, claude-sandbox-owned, ZERO
+    operator-tree ACLs), arms a ``trap … EXIT`` cleanup, unpacks the source,
+    and in ONE ``docker run --rm --network none`` invocation inside the
     digest-pinned ``IMAGE_REGISTRY["golang_alpine"]`` image with
-    ``GOFLAGS=-mod=vendor``::
+    ``GOFLAGS=-mod=vendor`` runs::
 
         go test ./... && go build -trimpath -ldflags '-s -w' -o /build/dispatch .
 
     ``go test ./...`` (the ``main_test.go`` Python<->Go fixture-parity suite)
     runs BEFORE ``go build`` in the same container (spec C-e): a fixture drift
     fails ``go test``, the ``&&`` short-circuits, ``go build`` never runs, and
-    no ``/build/dispatch`` is produced. The non-zero container exit is detected
-    by the sterile :class:`~core.executor.Executor` (``sentinel=True``) and
-    raised as :class:`~core.exceptions.SandboxExecutionError`; the built binary
-    is copied to ``output_path`` ONLY after the container exits 0, so a failed
-    ``go test`` (or build) guarantees no binary at ``output_path``.
+    no ``/build/dispatch`` is produced. All docker/go chatter is redirected to
+    stderr; on success the payload emits ONLY ``base64 -w0`` of the built
+    binary to stdout. The crossing runs through the sterile
+    :class:`~core.executor.Executor` with ``sentinel=True`` (recovers the
+    in-container exit through the machinectl PTY; the ``EXIT`` trap fires after
+    stdout is captured + the sentinel echoed, so the binary is captured before
+    cleanup). On exit 0 the host strips + base64-decodes ``result.stdout`` and
+    writes it to ``output_path`` mode ``0o755``; any failure raises
+    :class:`~core.exceptions.SandboxExecutionError` BEFORE the write, so
+    ``output_path`` is untouched on every failure path. The ephemeral build
+    dir self-cleans (``trap``) on success AND failure — no operator-tree
+    residue, no ACL to revoke.
 
     Args:
-        build_dir: Host directory to stage the source into and bind-mount at
-            ``/build``. Created if absent.
-        output_path: Host path the freshly-built binary is copied to on
-            success. Untouched on any failure.
+        output_path: Host path the freshly-built binary is written to (mode
+            ``0o755``) on success. Untouched on any failure. The build dir is
+            derived inside the crossing — callers never supply or see it.
         host_config: Resolved :class:`~core.host_config.HostConfig` supplying
             the unprivileged docker user + machinectl auth mode for the
             boundary crossing (same path as :func:`invoke`).
 
     Raises:
         SandboxExecutionError: ``go test`` failed (fixture drift / build
-            failure), the container could not start, or it timed out. No binary
-            is placed at ``output_path`` in any failure case.
+            failure), the container could not start, it timed out, or
+            ``$XDG_RUNTIME_DIR`` was unset. No binary is placed at
+            ``output_path`` in any failure case.
     """
-    _stage_dispatch_source(build_dir)
     image = IMAGE_REGISTRY["golang_alpine"].pinned
-    # ``GOFLAGS=-mod=vendor`` MUST be delivered via ``docker run --env`` so it
-    # is set inside the ``golang:1.23-alpine`` build container: a host-side
-    # ``GOFLAGS=… docker run …`` prefix would only assign the variable on the
-    # host ``docker`` *client* process and never reach the in-container build,
-    # leaving the offline-reproducible vendor-mode contract unsatisfied.
-    # ``--env`` does not affect ``--network none``. This is the single source of
-    # truth for the setting (it is not also set host-side).
-    docker_run = (
-        "docker run --rm "
-        "--network none "
-        "--env GOFLAGS=-mod=vendor "
-        f"--mount type=bind,src={shlex.quote(build_dir)},dst={_BUILD_MOUNT_DST} "
-        f"--workdir {_BUILD_MOUNT_DST} "
-        f"{shlex.quote(image)} "
-        f"/bin/sh -c {shlex.quote(_COMPILE_INNER)}"
-    )
+    payload = _compile_payload(image, _dispatch_source_b64())
     cmd = [
         *machinectl_cmd(
             host_config.host.docker_unprivileged_user,
@@ -960,12 +1075,14 @@ def compile_dispatcher(
         ),
         "/bin/bash",
         "-c",
-        docker_run,
+        payload,
     ]
     # ``sentinel=True`` recovers the in-container exit code through the
-    # machinectl PTY: a non-zero ``go test`` (fixture drift) or ``go build``
-    # raises SandboxExecutionError here, so the copy below never runs and no
-    # binary is placed at ``output_path``.
-    Executor().run(cmd, sentinel=True)
-    built = os.path.join(build_dir, "dispatch")
-    shutil.copyfile(built, output_path)
+    # machinectl PTY: a non-zero ``go test`` (fixture drift), ``go build``, or
+    # an unset ``$XDG_RUNTIME_DIR`` raises SandboxExecutionError here, so the
+    # decode+write below never runs and no binary is placed at ``output_path``.
+    result = Executor().run(cmd, sentinel=True)
+    binary = base64.b64decode(result.stdout.strip())
+    with open(output_path, "wb") as fh:
+        fh.write(binary)
+    os.chmod(output_path, 0o755)

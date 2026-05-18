@@ -10,7 +10,13 @@ It invokes :func:`core.dispatch.compile_dispatcher` twice into two distinct
 output paths against identical source + the same digest-pinned
 ``golang:1.23-alpine`` image and asserts the two binaries' sha512 match
 (design D3 reproducibility; spec "Offline Reproducible Compile Recipe"
-scenario "Reproducible build across two invocations").
+scenario "Reproducible build across two invocations"). ``compile_dispatcher``
+takes no build dir — it embeds the source in the crossed payload, builds in
+an ephemeral per-call ``mktemp -d`` under claude-sandbox's
+``$XDG_RUNTIME_DIR`` (tmpfs, ZERO operator-tree ACLs, self-cleaning via
+``trap … EXIT``), and returns the binary over captured stdout — so this test
+has no cross-boundary build dir / ACL grant to tear down (reproducibility is
+location-neutral: the container always mounts at a fixed path + ``-trimpath``).
 
 Skips with a specific, log-greppable reason when any precondition is
 unavailable so a future CI log reader can identify what to fix. Mirrors
@@ -159,17 +165,30 @@ def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     # pair — the same construction ``minimal_host_config`` exists for.
     host_config = minimal_host_config(daemon_user, auth)
 
-    build_a = tmp_path / "build-a"
-    build_b = tmp_path / "build-b"
+    # No build dirs: ``compile_dispatcher`` embeds the source in the crossed
+    # payload and the binary returns over captured stdout. The actual build
+    # dir is an ephemeral per-call ``mktemp -d`` under claude-sandbox's
+    # ``$XDG_RUNTIME_DIR`` (tmpfs, claude-sandbox-owned, ZERO operator-tree
+    # ACLs) that self-cleans via ``trap … EXIT`` on success AND failure — so
+    # this test has NO ACL to revoke and no cross-boundary dir to tear down.
+    # ``tmp_path`` holds only the two output binaries (pytest auto-cleans it).
     out_a = tmp_path / "dispatch-a"
     out_b = tmp_path / "dispatch-b"
 
-    compile_dispatcher(str(build_a), str(out_a), host_config)
-    compile_dispatcher(str(build_b), str(out_b), host_config)
+    try:
+        compile_dispatcher(str(out_a), host_config)
+        compile_dispatcher(str(out_b), host_config)
 
-    assert out_a.is_file(), "first compile produced no binary"
-    assert out_b.is_file(), "second compile produced no binary"
-    assert out_a.stat().st_size > 0
-    assert _sha512(out_a) == _sha512(out_b), (
-        "compile is not byte-reproducible: the two output binaries differ"
-    )
+        assert out_a.is_file(), "first compile produced no binary"
+        assert out_b.is_file(), "second compile produced no binary"
+        assert out_a.stat().st_size > 0
+        assert _sha512(out_a) == _sha512(out_b), (
+            "compile is not byte-reproducible: the two output binaries differ"
+        )
+    finally:
+        # Belt-and-braces: drop the two operator-side output binaries even if
+        # an assertion failed. There are no ACLs / cross-boundary dirs to
+        # revoke — the ephemeral build dir is claude-sandbox-side and self-
+        # cleaning. ``tmp_path`` itself is pytest-managed.
+        out_a.unlink(missing_ok=True)
+        out_b.unlink(missing_ok=True)

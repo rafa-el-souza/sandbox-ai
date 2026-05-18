@@ -1153,10 +1153,157 @@ class TestProbe:
 _GOLANG_PINNED = IMAGE_REGISTRY["golang_alpine"].pinned
 
 
+def _fake_binary_b64() -> str:
+    """A captured-stdout payload: base64 of a fake ELF (what the crossing emits)."""
+    import base64
+
+    return base64.b64encode(b"\x7fELF-fake-binary").decode("ascii")
+
+
+class TestDispatchSourceB64:
+    """``_dispatch_source_b64()``: the gzip+base64 source-tar producer."""
+
+    def test_decodes_to_a_tar_with_the_full_source_tree(self) -> None:
+        import base64
+        import io
+        import tarfile
+
+        from core.dispatch import _DISPATCH_SOURCE_ENTRIES, _dispatch_source_b64
+
+        b64 = _dispatch_source_b64()
+        # ASCII, base64 alphabet only — safe to interpolate into a single-
+        # quoted shell literal (no shell metacharacters).
+        assert b64.isascii()
+        assert set(b64) <= set(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+        )
+        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(b64)), mode="r:gz") as tar:
+            names = set(tar.getnames())
+        # The full source tree is present, including the fixtures/ corpus the
+        # in-container `go test ./...` consumes for the C-e parity check.
+        assert "main.go" in names
+        assert "main_test.go" in names
+        assert "go.mod" in names
+        assert "go.sum" in names
+        assert any(n == "vendor" or n.startswith("vendor/") for n in names)
+        assert "vendor/modules.txt" in names
+        assert "fixtures/target_argv_cases.json" in names
+        # Exactly the declared top-level entries (hermetic — no stray files).
+        top = {n.split("/", 1)[0] for n in names}
+        assert top == set(_DISPATCH_SOURCE_ENTRIES)
+
+    def test_is_byte_deterministic_and_carries_fixture_content(self) -> None:
+        import base64
+        import io
+        import tarfile
+
+        from core.dispatch import _dispatch_source_b64
+
+        # Two producer calls yield byte-identical output (mtime/uid/gid/mode
+        # normalised) — the embedded payload contributes nothing host- or
+        # time-specific to the V7/J reproducibility contract.
+        assert _dispatch_source_b64() == _dispatch_source_b64()
+        with tarfile.open(
+            fileobj=io.BytesIO(base64.b64decode(_dispatch_source_b64())), mode="r:gz"
+        ) as tar:
+            member = tar.extractfile("fixtures/target_argv_cases.json")
+            assert member is not None
+            assert member.read() == _FIXTURE_PATH.read_bytes()
+            info = tar.getmember("fixtures/target_argv_cases.json")
+            assert info.mtime == 0
+            assert info.uid == 0
+            assert info.gid == 0
+
+
+class TestCompilePayload:
+    """``_compile_payload()``: the ephemeral-build-dir crossed bash payload."""
+
+    def _payload(self) -> str:
+        from core.dispatch import _compile_payload
+
+        return _compile_payload(_GOLANG_PINNED, "QUJDPT0=")
+
+    def test_payload_mktemps_under_xdg_runtime_dir(self) -> None:
+        payload = self._payload()
+        # Ephemeral per-call build dir under claude-sandbox's $XDG_RUNTIME_DIR;
+        # the :? makes an unset $XDG_RUNTIME_DIR fail loudly.
+        assert (
+            'DIR="$(mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX")"'
+            in payload
+        )
+
+    def test_payload_arms_exit_trap_before_any_work(self) -> None:
+        payload = self._payload()
+        assert "trap 'rm -rf \"$DIR\"' EXIT;" in payload
+        # The trap is armed BEFORE the source-decode, docker run, and capture.
+        assert payload.index("trap 'rm -rf") < payload.index("base64 -d")
+        assert payload.index("trap 'rm -rf") < payload.index("docker run")
+        assert payload.index("trap 'rm -rf") < payload.index('base64 -w0 "$DIR/dispatch"')
+
+    def test_payload_decodes_embedded_source_into_the_build_dir(self) -> None:
+        payload = self._payload()
+        assert "printf %s 'QUJDPT0=' | base64 -d | tar -xz -C \"$DIR\" 1>&2;" in payload
+
+    def test_payload_runs_offline_pinned_single_docker_run(self) -> None:
+        payload = self._payload()
+        assert payload.count("docker run") == 1
+        assert "--network none" in payload
+        assert _GOLANG_PINNED in payload
+        assert "@sha256:" in _GOLANG_PINNED
+        # The mutable tag form must NOT appear.
+        assert "golang:1.23-alpine " not in payload
+        assert f"{IMAGE_REGISTRY['golang_alpine'].ref}:" not in payload
+        # Bind-src is the ephemeral $DIR (NOT a host-named build dir); the
+        # container always sees the fixed mount target so -trimpath keeps the
+        # build location out of the binary (location-neutral reproducibility).
+        assert '--mount type=bind,src="$DIR",dst=/build' in payload
+        assert "--workdir /build" in payload
+
+    def test_payload_delivers_goflags_into_the_container_only(self) -> None:
+        payload = self._payload()
+        # Vendored-deps GOFLAGS via `docker run --env` (into the build
+        # container), NOT a host-side prefix that never reaches the build.
+        assert "--env GOFLAGS=-mod=vendor" in payload
+        assert "GOFLAGS=-mod=vendor docker run" not in payload
+        assert payload.index("--env GOFLAGS=-mod=vendor") < payload.index(_GOLANG_PINNED)
+
+    def test_payload_runs_test_then_build_in_one_container(self) -> None:
+        from core.dispatch import _COMPILE_INNER
+
+        # C-e: `go test ./...` strictly precedes `go build`, joined by `&&` in
+        # ONE docker run — a parity failure fails go test, the && short-
+        # circuits, no binary is produced.
+        assert _COMPILE_INNER == (
+            "go test ./... && "
+            "go build -trimpath -ldflags '-s -w' -o /build/dispatch ."
+        )
+        payload = self._payload()
+        assert "go test ./..." in payload
+        assert "go build" in payload
+        assert "/bin/sh -c " in payload
+        assert payload.index("go test ./...") < payload.index("go build")
+        assert "-trimpath" in payload
+        assert "-s -w" in payload
+        assert "-o /build/dispatch ." in payload
+
+    def test_payload_redirects_chatter_to_stderr_and_emits_only_binary(self) -> None:
+        payload = self._payload()
+        # docker/go chatter -> stderr; stdout carries ONLY the binary base64
+        # (no \n/\r → PTY-onlcr-safe), as the LAST thing the payload does.
+        assert "tar -xz -C \"$DIR\" 1>&2;" in payload
+        assert "/bin/sh -c " in payload
+        assert " 1>&2; " in payload
+        assert payload.rstrip().endswith('base64 -w0 "$DIR/dispatch"')
+
+
 class TestCompileDispatcher:
     """Group 4: the docker-based offline reproducible compile recipe.
 
     All tests mock ``Executor.run`` — no real docker/machinectl is executed.
+    The new signature is ``compile_dispatcher(output_path, host_config)``: the
+    build dir is derived inside the crossing (claude-sandbox $XDG_RUNTIME_DIR)
+    and never supplied/seen host-side; the built binary returns over captured
+    stdout as ``base64 -w0`` and the host decodes + writes ``output_path``.
     """
 
     def _fake_hc(self) -> HostConfig:
@@ -1164,45 +1311,11 @@ class TestCompileDispatcher:
 
         return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
 
-    def test_stages_source_tree_into_build_dir(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import subprocess
-
-        build_dir = tmp_path / "build"
-
-        def fake_run(
-            self: object, cmd: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[str]:
-            # Simulate a successful compile: drop the built binary in place so
-            # the post-run copy succeeds.
-            (build_dir / "dispatch").write_bytes(b"\x7fELF-fake-binary")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-
-        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        compile_dispatcher(str(build_dir), str(tmp_path / "out"), self._fake_hc())
-
-        # The full source tree is staged, including the fixtures/ dir (the
-        # Python<->Go parity corpus go test ./... consumes for C-e).
-        assert (build_dir / "main.go").is_file()
-        assert (build_dir / "main_test.go").is_file()
-        assert (build_dir / "go.mod").is_file()
-        assert (build_dir / "go.sum").is_file()
-        assert (build_dir / "vendor").is_dir()
-        assert (build_dir / "vendor" / "modules.txt").is_file()
-        assert (build_dir / "fixtures").is_dir()
-        assert (build_dir / "fixtures" / "target_argv_cases.json").is_file()
-        # Staged fixture content matches the shipped source-of-truth fixture.
-        assert (
-            build_dir / "fixtures" / "target_argv_cases.json"
-        ).read_bytes() == _FIXTURE_PATH.read_bytes()
-
     def _capture_cmd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> tuple[str, dict[str, object]]:
         import subprocess
 
-        build_dir = tmp_path / "build"
         captured: dict[str, object] = {}
 
         def fake_run(
@@ -1210,78 +1323,37 @@ class TestCompileDispatcher:
         ) -> subprocess.CompletedProcess[str]:
             captured["cmd"] = cmd
             captured["kwargs"] = kwargs
-            (build_dir / "dispatch").write_bytes(b"binary")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, _fake_binary_b64(), "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        compile_dispatcher(str(build_dir), str(tmp_path / "out"), self._fake_hc())
+        compile_dispatcher(str(tmp_path / "out"), self._fake_hc())
         cmd = cast("list[str]", captured["cmd"])
-        # The whole docker invocation is the single bash -c payload.
+        # The whole embed-source/build/capture script is the bash -c payload.
         return cmd[-1], captured
 
-    def test_invocation_is_offline_single_docker_run(
+    def test_crosses_boundary_with_invoke_user_auth_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        inner, captured = self._capture_cmd(tmp_path, monkeypatch)
-        # Crossed via machinectl_cmd with the SAME user/auth path invoke() uses.
+        _, captured = self._capture_cmd(tmp_path, monkeypatch)
         cmd = cast("list[str]", captured["cmd"])
+        # Crossed via machinectl_cmd with the SAME user/auth path invoke() uses.
         assert cmd[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
         assert cmd[4:6] == ["/bin/bash", "-c"]
-        # Offline: --network none.
+
+    def test_payload_is_the_ephemeral_embed_capture_script(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inner, _ = self._capture_cmd(tmp_path, monkeypatch)
+        # The crossed payload is exactly _compile_payload(...) over the real
+        # source tar — the embedded literal must be the actual base64 source.
+        from core.dispatch import _compile_payload, _dispatch_source_b64
+
+        assert inner == _compile_payload(_GOLANG_PINNED, _dispatch_source_b64())
+        assert 'mktemp -d "${XDG_RUNTIME_DIR:?}/sandbox-ai-build-XXXXXX"' in inner
+        assert "trap 'rm -rf \"$DIR\"' EXIT;" in inner
         assert "--network none" in inner
-        # Exactly ONE docker run (no second pull/run).
-        assert inner.count("docker run") == 1
-        # Vendored deps, no network fetch: GOFLAGS=-mod=vendor MUST be
-        # delivered INTO the build container via `docker run --env`, not as a
-        # host-side shell prefix (which would only set it on the host docker
-        # client process and never reach the in-container build).
-        assert "--env GOFLAGS=-mod=vendor" in inner
-        # Single source of truth: it is NOT also set as a host-side prefix on
-        # the docker invocation.
-        assert "GOFLAGS=-mod=vendor docker run" not in inner
-        # The --env arg is positioned before the image as a `docker run` flag.
-        assert inner.index("--env GOFLAGS=-mod=vendor") < inner.index(_GOLANG_PINNED)
-
-    def test_uses_digest_pinned_golang_image_not_tag(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        inner, _ = self._capture_cmd(tmp_path, monkeypatch)
-        assert _GOLANG_PINNED in inner
-        assert "@sha256:" in _GOLANG_PINNED
-        # The mutable tag form must NOT appear.
-        assert "golang:1.23-alpine " not in inner
-        assert f"{IMAGE_REGISTRY['golang_alpine'].ref}:" not in inner
-
-    def test_bind_mounts_build_dir_to_slash_build(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        build_dir = tmp_path / "build"
-        inner, _ = self._capture_cmd(tmp_path, monkeypatch)
-        assert f"--mount type=bind,src={build_dir},dst=/build" in inner
-        assert "--workdir /build" in inner
-
-    def test_in_container_command_is_test_then_build(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from core.dispatch import _COMPILE_INNER
-
-        # C-e: the in-container sequence is exactly `go test ./...` THEN
-        # `go build` joined by `&&` in ONE docker run — a fixture-parity
-        # failure fails go test, the && short-circuits, no binary is produced.
-        assert _COMPILE_INNER == (
-            "go test ./... && "
-            "go build -trimpath -ldflags '-s -w' -o /build/dispatch ."
-        )
-        inner, _ = self._capture_cmd(tmp_path, monkeypatch)
-        # The exact sequence is passed to the container's `/bin/sh -c` (shell-
-        # quoted as one argument); go test strictly precedes go build.
-        assert "go test ./..." in inner
-        assert "go build" in inner
-        assert "/bin/sh -c " in inner
-        assert inner.index("go test ./...") < inner.index("go build")
-        assert "-trimpath" in inner
-        assert "-s -w" in inner
-        assert "-o /build/dispatch ." in inner
+        assert '--mount type=bind,src="$DIR",dst=/build' in inner
+        assert inner.rstrip().endswith('base64 -w0 "$DIR/dispatch"')
 
     def test_polkit_auth_drops_sudo_prefix(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1290,48 +1362,49 @@ class TestCompileDispatcher:
 
         from core.host_config import MachinectlAuth
 
-        build_dir = tmp_path / "build"
         captured: dict[str, object] = {}
 
         def fake_run(
             self: object, cmd: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
             captured["cmd"] = cmd
-            (build_dir / "dispatch").write_bytes(b"binary")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, _fake_binary_b64(), "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
-        compile_dispatcher(str(build_dir), str(tmp_path / "out"), hc)
+        compile_dispatcher(str(tmp_path / "out"), hc)
         cmd = cast("list[str]", captured["cmd"])
         assert cmd[:3] == ["machinectl", "shell", "sandbox@.host"]
 
-    def test_successful_compile_places_binary_at_output_path(
+    def test_successful_compile_writes_decoded_binary_mode_0755(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import base64
+        import stat
         import subprocess
 
-        build_dir = tmp_path / "build"
         output_path = tmp_path / "out" / "dispatch"
         output_path.parent.mkdir()
+        # The crossing returns ONLY base64 of the built binary on stdout (the
+        # PTY may add trailing \r\n the host .strip()s before decoding).
+        stdout = base64.b64encode(b"\x7fELF-real").decode("ascii") + "\r\n"
 
         def fake_run(
             self: object, cmd: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
-            (build_dir / "dispatch").write_bytes(b"\x7fELF-real")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        compile_dispatcher(str(build_dir), str(output_path), self._fake_hc())
+        compile_dispatcher(str(output_path), self._fake_hc())
         assert output_path.read_bytes() == b"\x7fELF-real"
+        assert stat.S_IMODE(output_path.stat().st_mode) == 0o755
 
-    def test_go_test_failure_propagates_and_places_no_binary(
+    def test_failure_raises_and_writes_no_binary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Simulate a non-zero `go test` (e.g. Python<->Go fixture drift): the
-        # sterile Executor raises SandboxExecutionError. Per C-e, no binary is
-        # produced and none is placed at output_path.
-        build_dir = tmp_path / "build"
+        # A non-zero `go test` (fixture drift), build failure, or unset
+        # $XDG_RUNTIME_DIR: the sterile Executor raises SandboxExecutionError
+        # BEFORE the decode+write, so output_path is never created.
         output_path = tmp_path / "out" / "dispatch"
 
         def fake_run(
@@ -1343,29 +1416,25 @@ class TestCompileDispatcher:
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         with pytest.raises(SandboxExecutionError):
-            compile_dispatcher(str(build_dir), str(output_path), self._fake_hc())
-        # No binary anywhere: go test failed -> && short-circuited -> no
-        # /build/dispatch -> the post-run copy never ran.
+            compile_dispatcher(str(output_path), self._fake_hc())
         assert not output_path.exists()
-        assert not (build_dir / "dispatch").exists()
 
     def test_run_uses_sentinel_for_in_container_exit_detection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import subprocess
 
-        build_dir = tmp_path / "build"
         captured: dict[str, object] = {}
 
         def fake_run(
             self: object, cmd: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
             captured["kwargs"] = kwargs
-            (build_dir / "dispatch").write_bytes(b"binary")
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, _fake_binary_b64(), "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        compile_dispatcher(str(build_dir), str(tmp_path / "out"), self._fake_hc())
-        # sentinel=True is what recovers the in-container go test/build exit
-        # code through the machinectl PTY (so a drift raises).
+        compile_dispatcher(str(tmp_path / "out"), self._fake_hc())
+        # sentinel=True recovers the in-container go test/build exit code
+        # through the machinectl PTY (so a drift raises) AND its echo line
+        # fires AFTER stdout is captured + the trap cleanup (no race).
         assert cast("dict[str, object]", captured["kwargs"])["sentinel"] is True
