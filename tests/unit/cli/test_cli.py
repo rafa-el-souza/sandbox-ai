@@ -14,11 +14,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
+import cli.main as _cli_main_module
 import pytest
 import typer
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
+    from core.dispatch import ProbeOutcome
+    from core.hydration import InstanceConfig
+
     from tests.unit.conftest import HostConfigFactory
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -32,6 +36,23 @@ REGISTRY_PATH = f"{STATE_DIR}/instances.json"
 IPAM_PATH = f"{STATE_DIR}/ipam.json"
 SANDBOX_TOML = f"{INSTANCE_DIR}/sandbox.toml"
 HOST_USER = "sandbox"
+
+
+def _crossed_ok(stdout: str = "ok\n") -> subprocess.CompletedProcess[str]:
+    """A ``CompletedProcess`` simulating a SUCCESSFUL ``sentinel=True`` crossing.
+
+    ``dispatch.invoke`` (hence ``dispatch.probe``) crosses ``machinectl shell``
+    with the sterile ``Executor``'s ``sentinel=True`` mechanism, because
+    ``machinectl shell`` does not propagate the inner payload's exit code. A
+    real successful crossing therefore emits the inner command's stdout
+    followed by the injected ``__SANDBOX_EXIT_<token>_<code>`` echo line; the
+    Executor parses that line (any hex token, last-match) to recover the true
+    inner exit. A fake crossing stdout that omits it represents the *broken
+    pre-sentinel* contract, so simulate the line the way a recorded real
+    crossing would (exit 0). The token value is arbitrary — the Executor's
+    ``_SENTINEL_RE`` accepts any hex token.
+    """
+    return subprocess.CompletedProcess([], 0, f"{stdout}__SANDBOX_EXIT_0123456789abcdef_0\n", "")
 
 
 VALID_TOML_CONTENT = b"""
@@ -80,11 +101,9 @@ domains = [".github.com"]
 RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-instance"')
 
 
-# Capture the real seeder before any autouse patching can replace it. Tests that
-# want the real seeder to run apply ``wraps=_REAL_SEED_HOST_CONFIG`` so the
-# autouse no-op below is effectively bypassed.
-import cli.main as _cli_main_module  # noqa: E402
-
+# Real seeder captured at import time; the autouse fixture below patches
+# ``cli.main._seed_host_config_if_absent`` at test-setup, so tests opt back
+# in via ``wraps=_REAL_SEED_HOST_CONFIG``.
 _REAL_SEED_HOST_CONFIG = _cli_main_module._seed_host_config_if_absent
 
 
@@ -876,9 +895,9 @@ class TestStartSshKeypairGeneration:
         place (no helper-cp ownership transfer). Spans two sub-categories:
 
         1. **Compose YAML inputs** consumed via ``docker compose -f``.
-           Must match ``_build_compose_files``'s output: ``compose.yml``
-           unconditionally + conditional ``db-postgres.yml`` /
-           ``mcp-firecrawl.yml`` extras.
+           Must match ``core.dispatch._resolve_compose_state``'s
+           compose-file list: ``compose.yml`` unconditionally +
+           conditional ``db-postgres.yml`` / ``mcp-firecrawl.yml`` extras.
         2. **Build context** consumed by buildkit during
            ``docker compose up --build``: rendered/copied Dockerfiles
            + their local-COPY sources (e.g. ``admin/entrypoint.sh``).
@@ -886,8 +905,9 @@ class TestStartSshKeypairGeneration:
            in any Dockerfile under ``src/templates/docker/``.
 
         If a new compose ``--file`` path is added to
-        ``_build_compose_files``, OR a new local-COPY source is added to
-        any Dockerfile, this list must be extended in lockstep.
+        ``core.dispatch._resolve_compose_state``, OR a new local-COPY
+        source is added to any Dockerfile, this list must be extended in
+        lockstep.
         """
         from cli.main import DAEMON_READ_DIRECT_FILES
 
@@ -1305,7 +1325,7 @@ class TestWarmCheckDirect:
     def test_warm_check_no_compose_file(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
 
-        assert _warm_check(str(tmp_path), "name", "sandbox") is False
+        assert _warm_check(str(tmp_path), "sandbox") is False
 
     def test_warm_check_returns_true_when_containers_present(self, tmp_path: Path) -> None:
         from cli.main import ContainerInfo, _warm_check
@@ -1321,7 +1341,7 @@ class TestWarmCheckDirect:
             patch("cli.main._load_config"),
             patch("cli.main._container_status", return_value=containers),
         ):
-            assert _warm_check(str(tmp_path), "name", "sandbox") is True
+            assert _warm_check(str(tmp_path), "sandbox") is True
 
     def test_warm_check_returns_false_when_empty(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
@@ -1334,7 +1354,7 @@ class TestWarmCheckDirect:
             patch("cli.main._load_config"),
             patch("cli.main._container_status", return_value=[]),
         ):
-            assert _warm_check(str(tmp_path), "name", "sandbox") is False
+            assert _warm_check(str(tmp_path), "sandbox") is False
 
     def test_warm_check_returns_false_on_container_status_error(self, tmp_path: Path) -> None:
         from cli.main import _warm_check
@@ -1348,7 +1368,7 @@ class TestWarmCheckDirect:
             patch("cli.main._load_config"),
             patch("cli.main._container_status", return_value=[]),
         ):
-            assert _warm_check(str(tmp_path), "name", "sandbox") is False
+            assert _warm_check(str(tmp_path), "sandbox") is False
 
 
 class TestLockingDirect:
@@ -1715,69 +1735,57 @@ class TestPhaseACLDirect:
                 assert call[0][0][0] == "setfacl"
 
 
-class TestBuildComposeFiles:
-    """Direct test for _build_compose_files."""
-
-    def test_base_only(self) -> None:
-        from cli.main import _build_compose_files
-        from core.hydration import InstanceConfig
-
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-                "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
-                "components_db_postgres": {"enabled": False},
-            }
-        )
-        files = _build_compose_files("/inst", config)
-        assert len(files) == 2  # -f, path
-
-    def test_with_extras(self) -> None:
-        from cli.main import _build_compose_files
-        from core.hydration import InstanceConfig
-
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-                "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
-                "components_db_postgres": {"enabled": True},
-            }
-        )
-        files = _build_compose_files("/inst", config)
-        assert len(files) == 6  # base + postgres + firecrawl
-
-
 class TestPhaseComposeUpDirect:
-    """Direct test for _phase_compose_up."""
+    """Direct test for _phase_compose_up (routes through core.dispatch.invoke)."""
 
-    def test_compose_up_calls_executor(self) -> None:
+    def test_compose_up_crosses_boundary_via_dispatch(
+        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+        import subprocess
+        from typing import cast
+
         from cli.main import _phase_compose_up
-        from core.hydration import InstanceConfig
+        from core.host_config import MachinectlAuth
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
+        inst_dir = isolated_sandbox_ai_home / "instances" / "t"
+        (inst_dir / "docker").mkdir(parents=True, exist_ok=True)
+        (inst_dir / "docker" / "compose.yml").write_text("services: {}\n")
+        (inst_dir / ".sandbox.env").write_text("")
+        (inst_dir / "sandbox.toml").write_text(
+            '[instance]\nname = "t"\nhost_uid = "1000"\n\n'
+            '[workspaces.main]\nbootstrap_mode = "empty"\n'
+            f'path = "{isolated_sandbox_ai_home}/workspaces/t/main"\n'
+            "\n[components.db_postgres]\nenabled = false\n"
+        )
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "instances.json").write_text(
+            _json.dumps({"t": {"instance_dir": str(inst_dir), "created_at": "2026-01-01T00:00:00Z"}})
         )
 
-        with patch("cli.main.Executor") as MockExec:
-            _phase_compose_up("/inst", "myproj", "sandbox", config)
-            MockExec.return_value.run.assert_called_once()
-            cmd_args = MockExec.return_value.run.call_args[0][0]
-            assert "machinectl" in cmd_args
-            assert "up -d --build --wait" in cmd_args[-1]
+        from core.host_config import HostConfig
+
+        class _FakeHostSettings:
+            docker_unprivileged_user = "sandbox"
+            machinectl_authentication = MachinectlAuth.SUDO
+
+        class _FakeHostConfig:
+            host = _FakeHostSettings()
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        _phase_compose_up("t", str(inst_dir), cast("HostConfig", _FakeHostConfig()))
+        cmd = cast("list[str]", captured["cmd"])
+        assert "machinectl" in cmd
+        assert cmd[-1].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up t")
 
 
 class TestBuildAttachArgv:
@@ -1864,46 +1872,62 @@ class TestBuildAttachArgv:
 
 
 class TestComposeDownDirect:
-    """Direct test for _compose_down."""
+    """Direct test for _compose_down — routes through core.dispatch.invoke.
+
+    `_compose_down` raised on failure before the dispatcher refactor (no
+    branch — `sentinel=True` Executor.run with no try/except); it still does,
+    so it uses `invoke()` (raise-on-failure), not `probe()`. The stop-vs-
+    destroy distinction is the optional literal `--volumes` typed arg.
+    """
+
+    def _config(self) -> InstanceConfig:
+        from core.hydration import InstanceConfig
+
+        return InstanceConfig.model_validate(
+            {
+                "instance": {
+                    "name": "t",
+                    "host_uid": "1000",
+                },
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
+            }
+        )
 
     def test_compose_down_plain(self) -> None:
         from cli.main import _compose_down
-        from core.hydration import InstanceConfig
+        from core.host_config import MachinectlAuth
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
-
-        with patch("cli.main.Executor") as MockExec:
-            _compose_down("/inst", "myproj", "sandbox", config, volumes=False)
-            cmd_str = MockExec.return_value.run.call_args[0][0][-1]
-            assert "down" in cmd_str
-            assert " -v" not in cmd_str
+        with patch("cli.main.dispatch.invoke") as mock_invoke:
+            _compose_down("sandbox", self._config(), volumes=False)
+            (op, args, host_config), kwargs = mock_invoke.call_args
+            assert op == "compose-down"
+            assert args == ["t"]
+            assert "--volumes" not in args
+            assert host_config.host.docker_unprivileged_user == "sandbox"
+            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_compose_down_volumes(self) -> None:
         from cli.main import _compose_down
-        from core.hydration import InstanceConfig
+        from core.host_config import MachinectlAuth
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
+        with patch("cli.main.dispatch.invoke") as mock_invoke:
+            _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.POLKIT)
+            (op, args, host_config), kwargs = mock_invoke.call_args
+            assert op == "compose-down"
+            assert args == ["t", "--volumes"]
+            assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
-        with patch("cli.main.Executor") as MockExec:
-            _compose_down("/inst", "myproj", "sandbox", config, volumes=True)
-            cmd_str = MockExec.return_value.run.call_args[0][0][-1]
-            assert "down -v" in cmd_str
+    def test_compose_down_raises_on_failure(self) -> None:
+        """`invoke()` (not `probe()`) — a non-zero exit propagates as
+        SandboxExecutionError exactly as the prior sentinel path did."""
+        from cli.main import _compose_down
+        from core.exceptions import SandboxExecutionError
+
+        with (
+            patch("cli.main.dispatch.invoke", side_effect=SandboxExecutionError("boom")),
+            pytest.raises(SandboxExecutionError),
+        ):
+            _compose_down("sandbox", self._config(), volumes=False)
 
 
 class TestRevokeACLsDirect:
@@ -1979,7 +2003,7 @@ class TestInitScaffoldDirect:
         with (
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs") as mock_dirs,
             patch("cli.main.write_sandbox_toml") as mock_toml,
             patch("cli.main._load_config", return_value=mock_config),
@@ -2034,7 +2058,7 @@ class TestInitScaffoldDirect:
         with (
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2136,7 +2160,7 @@ class TestInitFirecrawl:
         with (
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2352,7 +2376,7 @@ class TestInitHappyPath:
         with (
             patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2386,7 +2410,7 @@ class TestInitPerUserTreeCreation:
             patch("cli.main.run_check_subset", return_value=[]),
             patch(
                 "cli.main.subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, "ok\n", ""),
+                return_value=_crossed_ok(),
             ),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
@@ -2546,7 +2570,7 @@ class TestInitDoctorPreFlightFailure:
 
         failed_results = [CheckResult(status="fail", name="setfacl", detail="not found", remediation="install acl")]
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=failed_results),
             patch("cli.main.render_results"),
         ):
@@ -2566,7 +2590,7 @@ class TestInitDoctorPreFlightFailure:
             category="Privilege Boundary",
         )
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.check_compose_project_name_collision", return_value=collision),
             patch("cli.main.render_results"),
@@ -2586,7 +2610,7 @@ class TestInitDoctorPreFlightFailure:
             category="Privilege Boundary",
         )
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.check_compose_project_name_collision", return_value=ok),
         ):
@@ -2619,7 +2643,7 @@ class TestInitNonTTY:
         with (
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -2894,7 +2918,7 @@ class TestInitHostConfigResolution:
 
         with (
             patch("cli.main.HostConfig.from_toml", return_value=mock_project_config),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -2954,7 +2978,7 @@ class TestInitHostConfigResolution:
             ),
             patch("cli.main._stdin_is_tty", return_value=True),
             patch("cli.main.typer.prompt", side_effect=["sandbox-user", "sudo"]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -2999,7 +3023,7 @@ class TestInitHostConfigResolution:
             patch("cli.main._stdin_is_tty", return_value=True),
             # First prompt returns empty → re-prompt; second is non-empty user; third is auth.
             patch("cli.main.typer.prompt", side_effect=["", "sandbox", "polkit"]),
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -3066,7 +3090,7 @@ class TestInitHostConfigResolution:
                 wraps=_REAL_SEED_HOST_CONFIG,
             ),
             patch("cli.main.typer.prompt") as mock_prompt,
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")),
+            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
@@ -3086,11 +3110,30 @@ class TestInitHostConfigResolution:
 
 
 class TestInitAuthProbe:
-    """Task 3.10: init-time auth mode probe tests."""
+    """Init-time auth mode probe tests.
+
+    The probe is a *branch* callsite (reachable → continue; unreachable →
+    guidance + exit 1), so per Q8 it routes through ``core.dispatch.probe``
+    (the non-raising typed-outcome entry point), NOT ``invoke``. These tests
+    mock ``cli.main.dispatch.probe`` at the boundary and assert the typed
+    ``ProbeOutcome`` is mapped to the original control flow / messages 1:1.
+    """
+
+    def _ok(self) -> ProbeOutcome:
+        from core.dispatch import ProbeOutcome
+
+        return ProbeOutcome(ok=True, timed_out=False, stdout="ok\n", message="")
+
+    def _fail(self, *, timed_out: bool = False, message: str = "[FATAL] probe failed") -> ProbeOutcome:
+        from core.dispatch import ProbeOutcome
+
+        return ProbeOutcome(ok=False, timed_out=timed_out, stdout="", message=message)
 
     def test_probe_success_sudo(self, runner: CliRunner) -> None:
-        """Probe succeeds with sudo mode — init proceeds."""
+        """Probe succeeds with sudo mode — init proceeds; the probe's
+        host_config carries the resolved sudo auth + user."""
         from cli.main import app
+        from core.host_config import MachinectlAuth
         from core.hydration import InstanceConfig
 
         project_dir = "/home/user/probeproject"
@@ -3102,9 +3145,10 @@ class TestInitAuthProbe:
         )
 
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
+            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision") as mock_collision,
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3113,42 +3157,42 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
+            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 0
-            # Verify the probe was called with sudo prefix
-            probe_call = mock_run.call_args[0][0]
-            assert "sudo" in probe_call
-            assert "machinectl" in probe_call
+            (op, args, host_config), kwargs = mock_probe.call_args
+            assert op == "auth-probe"
+            assert args == []
+            assert kwargs["timeout"] == 5
+            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_probe_failure_exits_with_remediation(self, runner: CliRunner) -> None:
-        """Probe failure exits with error and remediation guidance."""
+        """Probe failure (not-ok, not-timeout) exits with error + remediation."""
         from cli.main import app
 
-        with (
-            patch(
-                "cli.main.subprocess.run",
-                return_value=subprocess.CompletedProcess([], 1, "", "permission denied"),
-            ),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail(message="boom: exit status 1")):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
             assert "probe failed" in result.output.lower()
             assert "remediation" in result.output.lower()
+            # Restored diagnostic fidelity: the real failure context from
+            # ProbeOutcome.message is surfaced (not the prior generic string).
+            assert "boom: exit status 1" in result.output
 
     def test_probe_timeout_exits_with_error(self, runner: CliRunner) -> None:
-        """Probe timeout exits with error."""
+        """Probe timeout (timed_out=True) exits with the exact original
+        'probe timed out after 5 seconds' message."""
         from cli.main import app
 
-        with (
-            patch("cli.main.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="test", timeout=5)),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail(timed_out=True)):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
-            assert "timed out" in result.output.lower()
+            assert "probe timed out after 5 seconds" in result.output.lower()
 
     def test_probe_polkit_mode_no_sudo(self, runner: CliRunner) -> None:
-        """Polkit mode probe does not include sudo in command."""
+        """Polkit mode probe — host_config carries POLKIT auth."""
         from cli.main import app
+        from core.host_config import MachinectlAuth
         from core.hydration import InstanceConfig
 
         project_dir = "/home/user/polkit"
@@ -3160,9 +3204,10 @@ class TestInitAuthProbe:
         )
 
         with (
-            patch("cli.main.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "ok\n", "")) as mock_run,
+            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision") as mock_collision,
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3171,22 +3216,18 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
+            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 0
-            probe_call = mock_run.call_args[0][0]
-            assert "sudo" not in probe_call
-            assert "machinectl" in probe_call
+            (op, args, host_config), kwargs = mock_probe.call_args
+            assert op == "auth-probe"
+            assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
     def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner) -> None:
         """Polkit probe failure shows polkit-specific remediation."""
         from cli.main import app
 
-        with (
-            patch(
-                "cli.main.subprocess.run",
-                return_value=subprocess.CompletedProcess([], 1, "", "auth failed"),
-            ),
-        ):
+        with patch("cli.main.dispatch.probe", return_value=self._fail()):
             result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 1
             assert "polkit" in result.output.lower()
@@ -3199,16 +3240,23 @@ class TestInitAuthProbe:
         assert result.exit_code == 1
         assert "invalid" in result.output.lower()
 
-    def test_probe_file_not_found_exits_with_error(self, runner: CliRunner) -> None:
-        """Probe FileNotFoundError (command not on PATH) exits with error."""
+    def test_probe_file_not_found_consolidated_into_failure_branch(self, runner: CliRunner) -> None:
+        """The prior FileNotFoundError ("command not found on PATH") case still
+        routes through the not-ok/not-timeout branch (Q8 narrowing —
+        ProbeOutcome carries no ENOENT discriminator). Diagnostic fidelity is
+        restored: ``Executor`` wraps the ``OSError`` into a distinct
+        ``SandboxExecutionError`` text that ``ProbeOutcome.message`` carries, so
+        the operator again sees the real ENOENT context; exit code is 1."""
         from cli.main import app
 
-        with (
-            patch("cli.main.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        enoent_msg = "[FATAL] ENOENT-machinectl-missing"
+        with patch("cli.main.dispatch.probe", return_value=self._fail(message=enoent_msg)):
             result = runner.invoke(app, ["init", "polkit"])
             assert result.exit_code == 1
-            assert "command not found" in result.output.lower()
+            # The distinct ENOENT SandboxExecutionError text reaches the
+            # operator via ProbeOutcome.message (restored fidelity).
+            assert "ENOENT-machinectl-missing" in result.output
+            assert "probe failed" in result.output.lower()
 
 
 class TestResolveHostConfig:
@@ -3436,16 +3484,18 @@ class TestCheckSecretsFirecrawl:
 
 
 class TestContainerStatus:
-    """Task 6.1: _container_status NDJSON parsing."""
+    """_container_status NDJSON parsing — routes through core.dispatch.probe.
 
-    def test_parses_ndjson_output(self, tmp_path: Path) -> None:
-        """Multiple NDJSON lines are parsed into ContainerInfo list."""
-        import subprocess as sp
+    `_container_status` *branched* on failure before the refactor (caught
+    SandboxExecutionError → returned []); per Q8 it now uses the non-raising
+    `probe()` and returns [] when `outcome.ok` is False — 1:1 preservation of
+    the empty-on-error contract. The op arg is the typed `[config.instance.name]`.
+    """
 
-        from cli.main import ContainerInfo, _container_status
+    def _config(self) -> InstanceConfig:
         from core.hydration import InstanceConfig
 
-        config = InstanceConfig.model_validate(
+        return InstanceConfig.model_validate(
             {
                 "instance": {
                     "name": "t",
@@ -3455,20 +3505,31 @@ class TestContainerStatus:
             }
         )
 
+    def _outcome(self, *, ok: bool, stdout: str = "") -> ProbeOutcome:
+        from core.dispatch import ProbeOutcome
+
+        return ProbeOutcome(ok=ok, timed_out=False, stdout=stdout, message="" if ok else "[FATAL] probe failed")
+
+    def test_parses_ndjson_output(self, tmp_path: Path) -> None:
+        """Multiple NDJSON lines are parsed into ContainerInfo list."""
+        from cli.main import ContainerInfo, _container_status
+
         ndjson = (
             '{"Name":"t-core-1","Service":"core","State":"running","Health":"healthy","Status":"Up 5s"}\n'
             '{"Name":"t-admin-1","Service":"admin","State":"running","Health":"","Status":"Up 5s"}\n'
         )
-
-        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout=ndjson, stderr="")
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.return_value = mock_result
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch(
+            "cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout=ndjson)
+        ) as mock_probe:
+            containers = _container_status(str(tmp_path), "s", self._config())
 
+        (op, args, _host_config), _kwargs = mock_probe.call_args
+        assert op == "compose-ps"
+        assert args == ["t"]
         assert len(containers) == 2
         assert containers[0].name == "t-core-1"
         assert containers[0].service == "core"
@@ -3477,56 +3538,29 @@ class TestContainerStatus:
         assert isinstance(containers[1], ContainerInfo)
 
     def test_empty_for_stopped_instance(self, tmp_path: Path) -> None:
-        """Stopped instance returns empty container list."""
-        import subprocess as sp
-
+        """Stopped instance (ok but empty stdout) returns empty list."""
         from cli.main import _container_status
-        from core.hydration import InstanceConfig
 
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
-
-        mock_result = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.return_value = mock_result
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout="")):
+            containers = _container_status(str(tmp_path), "s", self._config())
 
         assert containers == []
 
     def test_executor_error_returns_empty(self, tmp_path: Path) -> None:
-        """Executor error returns empty list instead of raising."""
+        """A failed probe (not-ok) returns empty list instead of raising —
+        1:1 with the prior `except SandboxExecutionError: return []`."""
         from cli.main import _container_status
-        from core.exceptions import SandboxExecutionError
-        from core.hydration import InstanceConfig
-
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-            }
-        )
 
         compose = tmp_path / "docker" / "compose.yml"
         compose.parent.mkdir(parents=True)
         compose.write_text("version: '3'")
 
-        with patch("cli.main.Executor") as MockExec:
-            MockExec.return_value.run.side_effect = SandboxExecutionError("fail")
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=False)):
+            containers = _container_status(str(tmp_path), "s", self._config())
 
         assert containers == []
 
@@ -5116,7 +5150,7 @@ class TestContainerStatusEdgeCases:
                 "components_db_postgres": {"enabled": False},
             }
         )
-        result = _container_status("/nonexistent/dir", "t", "s", config)
+        result = _container_status("/nonexistent/dir", "s", config)
         assert result == []
 
     def test_blank_and_malformed_ndjson_skipped(self, tmp_path: Path) -> None:
@@ -5144,12 +5178,14 @@ class TestContainerStatusEdgeCases:
 
         # Mix of blank, malformed, and valid NDJSON — blank between content lines survives strip()
         stdout = 'NOT-JSON\n   \n{"Name":"c1","Service":"svc","State":"running","Health":"","Status":"Up"}'
-        mock_result = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
 
-        from core.executor import Executor
+        from core.dispatch import ProbeOutcome
 
-        with patch.object(Executor, "run", return_value=mock_result):
-            containers = _container_status(str(tmp_path), "t", "s", config)
+        with patch(
+            "cli.main.dispatch.probe",
+            return_value=ProbeOutcome(ok=True, timed_out=False, stdout=stdout, message=""),
+        ):
+            containers = _container_status(str(tmp_path), "s", config)
             assert len(containers) == 1
             assert containers[0].name == "c1"
 
@@ -5469,7 +5505,7 @@ class TestCluster3TeardownSymmetry:
             patch("cli.main._revoke_acls", side_effect=_track_revoke),
         ):
             _phase_stop_teardown(
-                "/inst", "proj", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
+                "/inst", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
             )
         assert calls == ["compose_down", "unlink", "revoke"]
 
@@ -5960,7 +5996,6 @@ class TestPolkitEndToEnd:
 
         def fake_container_status(
             instance_dir: str,
-            name: str,
             host_user: str,
             config: object,
             auth: MachinectlAuth,

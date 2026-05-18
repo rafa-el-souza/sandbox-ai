@@ -36,11 +36,9 @@ from __future__ import annotations
 import os
 import pwd
 import shutil
-import subprocess
 import sys
-import tempfile
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -50,6 +48,8 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 try:
+    from core.exceptions import SandboxExecutionError
+    from core.executor import Executor
     from core.helper_container import helper_mkdir_chown_dirs
     from core.host_config import (
         MachinectlAuth,
@@ -66,6 +66,7 @@ finally:
 
 _TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
 _PROBE_TIMEOUT_S = 10
+_DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 # Cache/log leaf inventory subset that this test exercises end-to-end.
 # Stays in sync with ``orchestrator-volumes``'s "Cache/Log Leaf Inventory"
@@ -119,25 +120,24 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     if not parse_subgid_for_user(daemon_user):
         pytest.skip(f"skipped: /etc/subgid has no entry for {daemon_user!r}")
 
-    probe = [*machinectl_cmd(daemon_user, auth), "/bin/echo", "ok"]
+    # The helper ops under test cross via ``machinectl_cmd`` → the dispatcher
+    # binary, and ``machinectl shell`` does NOT propagate the inner
+    # ``/bin/bash -c`` exit (Finding-I / F-004 silent-footgun class). A
+    # precondition that branches on a crossed command's exit MUST recover the
+    # REAL inner exit — for a ``machinectl_cmd`` crossing that means the
+    # Executor sentinel mechanism (``sentinel=True`` recovers the in-container
+    # exit and raises ``SandboxExecutionError`` on non-zero/timeout), NEVER the
+    # raw masked ``subprocess.run().returncode``. A masked exit would make
+    # these guards (esp. the Finding-H ``test -x dispatch`` guard below) fail
+    # OPEN — absent infra read as present → the e2e tests run loud instead of
+    # skipping cleanly pre-C-002.
+    echo_probe = [*machinectl_cmd(daemon_user, auth), "/bin/bash", "-c", "echo ok"]
     try:
-        result = subprocess.run(
-            probe,
-            capture_output=True,
-            timeout=_PROBE_TIMEOUT_S,
-            text=True,
-        )
-    except FileNotFoundError:
-        pytest.skip("skipped: machinectl binary not on PATH")
-    except subprocess.TimeoutExpired:
+        Executor().run(echo_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
+    except SandboxExecutionError as exc:
         pytest.skip(
-            f"skipped: machinectl shell {daemon_user}@.host timed out after "
-            f"{_PROBE_TIMEOUT_S}s (sudo password not cached, or polkit rule missing)"
-        )
-    if result.returncode != 0:
-        pytest.skip(
-            f"skipped: machinectl shell {daemon_user}@.host exited "
-            f"{result.returncode} ({result.stderr.strip()!r})"
+            f"skipped: machinectl shell {daemon_user}@.host crossing not "
+            f"usable (sentinel-recovered failure: {exc})"
         )
 
     pin = IMAGE_REGISTRY["busybox_musl"].pinned
@@ -148,74 +148,41 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
         f"docker image inspect {pin} > /dev/null",
     ]
     try:
-        ins = subprocess.run(inspect, capture_output=True, timeout=_PROBE_TIMEOUT_S, text=True)
-    except subprocess.TimeoutExpired:
-        pytest.skip(f"skipped: docker image inspect {pin} timed out via machinectl")
-    if ins.returncode != 0:
+        Executor().run(inspect, sentinel=True, timeout=_PROBE_TIMEOUT_S)
+    except SandboxExecutionError as exc:
+        # Sentinel-recovered non-zero inner exit (image absent) or timeout —
+        # the REAL result, not the masked machinectl returncode.
         pytest.skip(
             f"skipped: busybox image {pin} not present in {daemon_user}'s docker "
-            f"(stderr: {ins.stderr.strip()!r}); pre-pull with "
+            f"(sentinel-recovered: {exc}); pre-pull with "
             f"`{' '.join(machinectl_cmd(daemon_user, auth))} -- docker pull {pin}`"
         )
 
-    return daemon_user, auth
-
-
-@pytest.fixture
-def cross_boundary_tmpdir() -> Iterator[Path]:
-    """Tmpdir visible to both ``dev`` and the daemon user.
-
-    Mirrors ``test_helper_container_userns.py``'s relocated fixture
-    (commit ``9a3b426``): pytest's ``tmp_path`` lands under the dev user's
-    per-user ``/tmp/pytest-of-dev/`` mount which the daemon's rootless
-    docker cannot see (PrivateTmp= split). Use ``<repo>/temp/integration-
-    test-tmp/`` instead — already established as project scratch
-    (gitignored), shared filesystem view, stragglers visible in
-    ``git status`` if cleanup ever fails.
-    """
-    base = REPO_ROOT / "temp" / "integration-test-tmp"
-    base.mkdir(parents=True, exist_ok=True)
-    d = Path(tempfile.mkdtemp(dir=str(base)))
+    # Post-C-001 the helper primitives cross the boundary as
+    # `dispatch helper-* …` and exec the root-owned dispatcher binary; it is
+    # installed by sister change C-002 (`sandbox setup`), not by this change.
+    # Probe it AS IT IS ACTUALLY INVOKED — via the machinectl crossing, where
+    # the binary runs as the daemon user — AND recover the real inner exit via
+    # the sentinel (Finding-H must be exit-aware: a masked exit reads an absent
+    # binary as present and fails OPEN, so the e2e tests run loud instead of a
+    # clean pre-C-002 skip).
+    dispatch_probe = [
+        *machinectl_cmd(daemon_user, auth),
+        "/bin/bash",
+        "-c",
+        f"test -x {_DISPATCH_BINARY}",
+    ]
     try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def _grant_parent_access(parent: Path, daemon_user: str) -> None:
-    """Apply effective + default ACLs on ``parent`` plus traverse on every
-    ancestor up to ``Path.home()`` so the daemon user can reach and modify
-    files under ``parent``.
-    """
-    if shutil.which("setfacl") is None:
-        pytest.skip("skipped: setfacl not on PATH (required to bridge the dev↔daemon-user fence)")
-    home = Path.home()
-    cursor = parent.parent
-    while True:
-        subprocess.run(
-            ["setfacl", "-m", f"u:{daemon_user}:--x", str(cursor)],
-            check=True,
-            capture_output=True,
+        Executor().run(dispatch_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
+    except SandboxExecutionError as exc:
+        pytest.skip(
+            f"skipped: dispatcher binary {_DISPATCH_BINARY} absent or non-executable "
+            f"for {daemon_user!r} (sentinel-recovered: {exc}; C-001 routes helper ops "
+            f"through it; it is installed by sister change C-002 — run "
+            f"`sudo sandbox setup` to install)"
         )
-        if cursor == home or cursor == cursor.parent:
-            break
-        cursor = cursor.parent
-    subprocess.run(
-        ["setfacl", "-m", f"u:{daemon_user}:rwx", str(parent)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "setfacl",
-            "-d",
-            "-m",
-            f"u::rwx,g::rwx,o::---,m::rwx,u:{daemon_user}:rwx",
-            str(parent),
-        ],
-        check=True,
-        capture_output=True,
-    )
+
+    return daemon_user, auth
 
 
 def test_post_init_leaves_absent(cross_boundary_tmpdir: Path) -> None:
@@ -243,7 +210,10 @@ def test_post_init_leaves_absent(cross_boundary_tmpdir: Path) -> None:
         assert parent.is_dir(), f"scaffold should have created parent {parent}"
 
 
-def test_post_helper_leaves_consumer_owned(cross_boundary_tmpdir: Path) -> None:
+def test_post_helper_leaves_consumer_owned(
+    cross_boundary_tmpdir: Path,
+    grant_parent_access: Callable[[Path], None],
+) -> None:
     """``helper_mkdir_chown_dirs`` creates each cache leaf and chowns to the consumer subuid."""
     daemon_user, auth = _check_preconditions()
     instance_dir = cross_boundary_tmpdir / "instances" / "regression-target"
@@ -254,7 +224,7 @@ def test_post_helper_leaves_consumer_owned(cross_boundary_tmpdir: Path) -> None:
 
     for parent_rel, leaf_name in HELPER_RECIPE_CACHE_LEAVES:
         parent = instance_dir / parent_rel
-        _grant_parent_access(parent, daemon_user)
+        grant_parent_access(parent)
         helper_mkdir_chown_dirs(
             daemon_user,
             str(parent),

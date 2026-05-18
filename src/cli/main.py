@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pydantic
 import typer
+from core import dispatch
 from core.actions import (
     ActionContext,
     ComposeUpAction,
@@ -50,7 +51,7 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
-    machinectl_cmd,
+    minimal_host_config,
     pipe_cmd,
     sandbox_ai_home,
     state_lock_path,
@@ -282,7 +283,6 @@ def _load_config(instance_dir: str) -> InstanceConfig:
 
 def _container_status(
     instance_dir: str,
-    project_name: str,
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
@@ -301,31 +301,21 @@ def _container_status(
     # Environment File Read ACL requirement. It survives `sandbox stop`, so
     # no idempotent re-grant is needed here before the compose-ps query.
 
-    compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(compose_files)
-
-    executor = Executor()
-    try:
-        result = executor.run(
-            [
-                *machinectl_cmd(host_user, auth),
-                "/bin/bash",
-                "-c",
-                (
-                    f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME={project_name} "
-                    f"docker compose {files_str} "
-                    f"--env-file {os.path.join(instance_dir, '.sandbox.env')} "
-                    f"--ansi never ps --format json"
-                ),
-            ],
-            sentinel=True,
-        )
-    except SandboxExecutionError:
+    # `compose-ps` is a *probe* callsite: a non-zero exit (stopped instance,
+    # boundary error) must yield an empty list, not an abort. Per Q8 the
+    # probe-style entry point is ``core.dispatch.probe`` — it returns a typed
+    # ``ProbeOutcome`` and never raises for op failure. The Q6 project name /
+    # ``--compose-file`` / ``--env-file`` operands are resolved internally by
+    # ``invoke``'s single operator-side resolver (``_resolve_compose_state``),
+    # so they are no longer constructed here.
+    host_config = minimal_host_config(host_user, auth)
+    outcome = dispatch.probe("compose-ps", [config.instance.name], host_config)
+    if not outcome.ok:
         return []
 
     containers: list[ContainerInfo] = []
-    if result.stdout:
-        for line in result.stdout.strip().splitlines():
+    if outcome.stdout:
+        for line in outcome.stdout.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -347,7 +337,6 @@ def _container_status(
 
 def _warm_check(
     instance_dir: str,
-    project_name: str,
     host_user: str,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> bool:
@@ -360,7 +349,7 @@ def _warm_check(
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, project_name, host_user, config, auth))
+    return bool(_container_status(instance_dir, host_user, config, auth))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -470,8 +459,9 @@ def _post_hydrate_daemon_read_targets(instance_dir: str) -> list[str]:
        NEVER transferred — the daemon reads them in place forever. The
        canonical case is ``docker compose -f <compose.yml>`` and its
        conditional extras (``db-postgres.yml``, ``mcp-firecrawl.yml``);
-       paths are derived from the same single-source-of-truth that
-       ``_build_compose_files`` uses.
+       paths are derived from the same single-source-of-truth the
+       compose-file list resolves from
+       (``core.dispatch._resolve_compose_state``).
 
     Both categories converge in one post-hydrate setfacl pass because
     ``core.hydration.write_restricted`` zeros ``mask::`` via
@@ -1181,9 +1171,11 @@ DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
     #
     # ── Compose YAML inputs ───────────────────────────────────────────
     # Consumed by ``docker compose -f <path> ...`` invocations whose
-    # canonical path-set is built by ``_build_compose_files`` and used by
-    # ``_phase_compose_up``, ``_compose_down``, and the ``docker compose
-    # ps`` callsites in ``_container_status`` / ``_render_status_detailed``.
+    # canonical path-set is resolved by
+    # ``core.dispatch._resolve_compose_state`` (the Q6 single source) and
+    # used by ``_phase_compose_up``, ``_compose_down``, and the ``docker
+    # compose ps`` callsites in ``_container_status`` /
+    # ``_render_status_detailed``.
     ("docker", ("compose.yml",)),
     # Conditional compose extras — present iff the instance enables the
     # component. Listed unconditionally; the post-hydrate phase skips
@@ -1561,60 +1553,52 @@ def _phase_acl_grant(
             raise
 
 
-def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]:
-    """Build the compose file list including component-conditional extras."""
-    files = ["-f", os.path.join(instance_dir, "docker", "compose.yml")]
-    if config.components_db_postgres.enabled:
-        extras = os.path.join(instance_dir, "docker", "extras", "db-postgres.yml")
-        files.extend(["-f", extras])
-    if config.components.mcp_firecrawl:
-        extras = os.path.join(instance_dir, "docker", "extras", "mcp-firecrawl.yml")
-        files.extend(["-f", extras])
-    return files
+def _compose_up_cmd_plan(inst: str) -> ComposeUpAction:
+    """Return the :class:`ComposeUpAction` carrying the typed instance intent.
 
-
-def _compose_up_cmd_plan(instance_dir: str, project_name: str, config: InstanceConfig) -> ComposeUpAction:
-    """Return the :class:`ComposeUpAction` carrying the inner ``bash -c`` command.
-
-    Sole producer of the ``TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain
-    COMPOSE_PROJECT_NAME=<project> docker compose <files> --ansi never
-    --env-file <env> up -d --build --wait`` string. The Action's single
-    ``inner_command`` field is consumed by :func:`_phase_compose_up`
-    (via ``.execute(ctx)``) and the dry-run preview (via ``.describe()``)
-    so the two paths cannot drift — same single-source-of-truth pattern as
-    :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
+    Sole producer of the compose-up Action. Per Q6/D2 the Action carries ONLY
+    the typed instance name; the ``--project`` / ``--env-file`` /
+    ``--compose-file`` operands and the env-prefix/verb are resolved internally
+    by ``core.dispatch.build_invocation`` (the single command-construction
+    seam ``core.dispatch.invoke`` also consumes). The Action is consumed by
+    :func:`_phase_compose_up` (via ``.execute(ctx)``) and the dry-run preview
+    (via ``.render_command(host_config)``); both derive from the one
+    ``build_invocation`` seam so they cannot drift — same single-source-of-truth
+    pattern as :func:`_acl_grant_plan`, :func:`_helper_mkdir_chown_plan`, and
     :func:`_helper_cp_chown_plan`.
     """
-    compose_files = _build_compose_files(instance_dir, config)
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    inner = (
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {' '.join(compose_files)} "
-        f"--ansi never --env-file {env_file} up -d --build --wait"
-    )
-    return ComposeUpAction(inner_command=inner)
+    return ComposeUpAction(instance_name=inst)
 
 
 def _phase_compose_up(
+    inst: str,
     instance_dir: str,
-    project_name: str,
-    host_user: str,
-    config: InstanceConfig,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
+    host_config: HostConfig,
 ) -> None:
-    """Phase 6: docker compose up -d --build --wait via machinectl.
+    """Phase 6: docker compose up via the typed ``compose-up`` dispatcher op.
 
-    - Source suppression env prefix: TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain (D2 Layer 1)
-    - --ansi never flag (D2 Layer 1)
-    - --env-file injection for .sandbox.env (D14)
-    - sentinel=True for exit code recovery (D1)
+    Routes through :class:`~core.actions.ComposeUpAction`, whose ``.execute``
+    calls ``core.dispatch.invoke("compose-up", [inst], host_config)``. The
+    env prefix / ``--ansi never`` / ``--env-file`` / verb (and the Q6
+    ``--project`` / ``--compose-file`` expansion) are all internal to the
+    ``core.dispatch.build_invocation`` seam — not constructed here. ``invoke``
+    raises :class:`~core.exceptions.SandboxExecutionError` on a non-zero exit,
+    preserving the abort behavior the prior ``sentinel=True`` path had.
     """
-    action = _compose_up_cmd_plan(instance_dir, project_name, config)
+    action = _compose_up_cmd_plan(inst)
+    # The full ActionContext is built deliberately: ActionContext is the uniform
+    # per-phase plumbing bundle every Action.execute receives, and its four
+    # non-host_config fields are required. ComposeUpAction.execute happens to
+    # consume only ctx.host_config, but the context contract is uniform across
+    # the Action hierarchy by design — not weakened to a per-Action shape (a
+    # narrower ctx would force type special-casing the phase loop, the very
+    # non-uniformity the render_command contract removed).
     ctx = ActionContext(
-        host_user=host_user,
-        auth=auth,
+        host_user=host_config.host.docker_unprivileged_user,
+        auth=host_config.host.machinectl_authentication,
         executor=Executor(),
         instance_dir=Path(instance_dir),
+        host_config=host_config,
     )
     action.execute(ctx)
 
@@ -1714,34 +1698,28 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
 
 
 def _compose_down(
-    instance_dir: str,
-    project_name: str,
     host_user: str,
     config: InstanceConfig,
     *,
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
-    """Run docker compose down via machinectl. Pass volumes=True for -v."""
-    compose_files = _build_compose_files(instance_dir, config)
-    files_str = " ".join(compose_files)
-    v_flag = " -v" if volumes else ""
-    env_file = os.path.join(instance_dir, ".sandbox.env")
-    cmd = (
-        f"TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain "
-        f"COMPOSE_PROJECT_NAME={project_name} docker compose {files_str} "
-        f"--ansi never --env-file {env_file} down{v_flag}"
-    )
-    executor = Executor()
-    executor.run(
-        [
-            *machinectl_cmd(host_user, auth),
-            "/bin/bash",
-            "-c",
-            cmd,
-        ],
-        sentinel=True,
-    )
+    """Run docker compose down via the typed ``compose-down`` dispatcher op.
+
+    Routes through ``core.dispatch.invoke("compose-down", [inst (+ "--volumes")],
+    host_config)``. ``invoke`` raises :class:`SandboxExecutionError` on a
+    non-zero exit, preserving the abort behavior the prior ``sentinel=True``
+    path had (this callsite never branched on failure — ``stop`` propagates and
+    ``destroy`` demotes it to a warning at *their* call sites, not here). The
+    stop-vs-destroy distinction is the optional literal ``--volumes`` typed arg
+    (``volumes=True`` for ``destroy``/``stop --clean``); the env prefix /
+    ``--ansi never`` / ``--env-file`` / verb and the Q6 ``--project`` /
+    ``--compose-file`` expansion are all internal to the single
+    ``core.dispatch`` seam — not constructed here.
+    """
+    host_config = minimal_host_config(host_user, auth)
+    args = [config.instance.name, "--volumes"] if volumes else [config.instance.name]
+    dispatch.invoke("compose-down", args, host_config)
 
 
 def _revoke_acls(
@@ -1775,7 +1753,6 @@ def _revoke_acls(
 
 def _phase_stop_teardown(
     instance_dir: str,
-    project_name: str,
     host_user: str,
     config: InstanceConfig,
     workspace_paths: list[str] | None,
@@ -1799,7 +1776,7 @@ def _phase_stop_teardown(
     compose-down (stop propagates, destroy demotes to a warning).
     """
     warnings: list[str] = []
-    _compose_down(instance_dir, project_name, host_user, config, volumes=volumes, auth=auth)
+    _compose_down(host_user, config, volumes=volumes, auth=auth)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
     warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
     return warnings
@@ -1821,7 +1798,6 @@ def _dry_run_pipeline(inst: str) -> None:
     config = _load_config(instance_dir)
     host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
-    auth = host_settings.machinectl_authentication
 
     project_name = compose_project_name(inst)
 
@@ -1876,6 +1852,13 @@ def _dry_run_pipeline(inst: str) -> None:
     dev_user = os.environ.get("USER")
     workspace_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
 
+    # Uniform Action contract: every plan item is rendered via
+    # ``.render_command(host_config)``. The base default delegates to
+    # ``.describe()`` (HostConfig-independent items ignore it); compose-up
+    # overrides it to emit the HostConfig-dependent wire form. Resolve the
+    # full HostConfig once here (compose-up is the only consumer that reads it).
+    preview_host_config = _resolve_full_host_config()
+
     # Workspace shared-group plan — runs BEFORE Phase-5 named-ACL grants per
     # the "Workspace Shared-Group Phase Ordering" requirement.
     try:
@@ -1884,13 +1867,13 @@ def _dry_run_pipeline(inst: str) -> None:
             for ws_action in _workspace_shared_group_plan(
                 ws_path, bridge_gid, os.environ.get("USER"), host_user
             ):
-                console.print(ws_action.describe(), style="dim")
+                console.print(ws_action.render_command(preview_host_config), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]workspace shared-group plan unavailable: {exc}[/red]")
 
     # ACL grants — consume _acl_grant_plan (D4 — single source of truth)
     for grant_action in _acl_grant_plan(instance_dir, host_user, workspace_paths, dev_user):
-        console.print(grant_action.describe(), style="dim")
+        console.print(grant_action.render_command(preview_host_config), style="dim")
 
     # Post-hydrate setfacl-as-owner pass — covers the write_restricted
     # fchmod-mask-reset bug. Per-file setfacl on each helper-cp source
@@ -1915,17 +1898,20 @@ def _dry_run_pipeline(inst: str) -> None:
     # Helper-mkdir+chown for cache/log — single source of truth via plan function
     try:
         for mkdir_action in _helper_mkdir_chown_plan(instance_dir, host_user):
-            console.print(mkdir_action.describe(), style="dim")
+            console.print(mkdir_action.render_command(preview_host_config), style="dim")
         for cp_action in _helper_cp_chown_plan(instance_dir, host_user):
-            console.print(cp_action.describe(), style="dim")
+            console.print(cp_action.render_command(preview_host_config), style="dim")
     except SandboxExecutionError as exc:
         console.print(f"    [red]helper-mkdir plan unavailable: {exc}[/red]")
 
-    # Compose up — derived from the same ComposeUpAction _phase_compose_up uses;
-    # both code paths read the .inner_command field (no parallel construction).
-    machinectl_prefix = " ".join(machinectl_cmd(host_user, auth))
-    compose_action = _compose_up_cmd_plan(instance_dir, project_name, config)
-    compose_cmd = f"{machinectl_prefix} /bin/bash -c '{compose_action.describe()}'"
+    # Compose up — rendered from the SAME core.dispatch.build_invocation seam
+    # _phase_compose_up's ComposeUpAction.execute consumes via invoke(), so the
+    # preview is byte-identical to the live invocation (no parallel
+    # construction). The Q6 wire expansion resolves compose state via the
+    # registry, but ``_lookup_instance_or_exit`` above already guaranteed the
+    # instance is registered, so no soft-fail guard is needed here.
+    compose_action = _compose_up_cmd_plan(inst)
+    compose_cmd = compose_action.render_command(preview_host_config)
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover — admin-reframe D1: tlog-rec → ssh → ProxyCommand → /fwd into core.
@@ -2183,26 +2169,26 @@ def init(
     else:
         resolved_auth = MachinectlAuth.SUDO
 
-    # Init-time auth mode probe (D5)
+    # Init-time auth mode probe (D5). This is a *probe* callsite: it must
+    # branch (reachable → continue; unreachable/timeout → guidance + exit 1),
+    # not crash. Per Q8 the probe-style entry point is ``core.dispatch.probe``,
+    # which collapses the boundary-crossing outcome into a typed
+    # ``ProbeOutcome`` (``ok`` / ``timed_out`` / ``message``). The timeout
+    # branch preserves the exact original message; the non-timeout failure
+    # branch surfaces ``ProbeOutcome.message`` — the prior non-zero (stderr)
+    # and ``FileNotFoundError`` ("command not found on PATH") cases reach it
+    # as distinct ``SandboxExecutionError`` texts (the sterile ``Executor``
+    # wraps both), so ``message`` naturally distinguishes them in the
+    # operator-facing detail.
     if not dry_run:
-        probe_cmd = machinectl_cmd(resolved_user, resolved_auth)
-        probe_cmd_full = [*probe_cmd, "/bin/bash", "-c", "echo ok"]
-        try:
-            result = subprocess.run(
-                probe_cmd_full,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode != 0:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, result.stderr)
-                raise typer.Exit(code=1)
-        except subprocess.TimeoutExpired:
-            _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
-            raise typer.Exit(code=1) from None
-        except FileNotFoundError:
-            _emit_auth_probe_failure(resolved_auth, resolved_user, "command not found on PATH")
-            raise typer.Exit(code=1) from None
+        probe_host_config = minimal_host_config(resolved_user, resolved_auth)
+        probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
+        if not probe_outcome.ok:
+            if probe_outcome.timed_out:
+                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
+            else:
+                _emit_auth_probe_failure(resolved_auth, resolved_user, probe_outcome.message)
+            raise typer.Exit(code=1)
 
     # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
     # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
@@ -2347,7 +2333,6 @@ def start(
     host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
-    project_name = compose_project_name(inst)
 
     # Operator-edited TOML guard: ``instance.name`` should match the registry
     # key (the typer arg). Divergence is harmless for compose-project-name
@@ -2382,7 +2367,7 @@ def start(
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, project_name, host_user, auth):
+    if _warm_check(instance_dir, host_user, auth):
         console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
@@ -2479,9 +2464,11 @@ def start(
         _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
         console.print("✓ Ownership — ro config files converged")
 
-        # Phase 6: Compose up (D-5 — spinner for long-running phase)
+        # Phase 6: Compose up (D-5 — spinner for long-running phase).
+        # ComposeUpAction routes through core.dispatch.invoke, which needs the
+        # full HostConfig for operator-side compose-state resolution (Q6).
         with console.status("⟳ Compose — starting containers…"):
-            _phase_compose_up(instance_dir, project_name, host_user, config, auth)
+            _phase_compose_up(inst, instance_dir, _resolve_full_host_config())
         console.print("✓ Compose — containers healthy")
 
     except (IPAMExhaustedError, SandboxExecutionError) as e:
@@ -2539,11 +2526,10 @@ def stop(
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
 
     # Warm check
-    if not _warm_check(instance_dir, project_name, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth):
         console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
@@ -2571,7 +2557,7 @@ def stop(
     # `_phase_stop_teardown` (cluster 3 — Teardown Sequence requirement).
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     for w in _phase_stop_teardown(
-        instance_dir, project_name, host_user, config, ws_paths, volumes=clean, auth=auth
+        instance_dir, host_user, config, ws_paths, volumes=clean, auth=auth
     ):
         console.print(f"⚠ {w}", style="yellow")
 
@@ -2602,7 +2588,6 @@ def attach(
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_config = _resolve_full_host_config()
     host_user = host_config.host.docker_unprivileged_user
     auth = host_config.host.machinectl_authentication
@@ -2627,7 +2612,7 @@ def attach(
         raise typer.Exit(code=1)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, project_name, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth):
         console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
@@ -2718,7 +2703,6 @@ def destroy(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
     available = set(config.workspaces.keys())
 
@@ -2771,7 +2755,7 @@ def destroy(
 
         # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(instance_dir, project_name, host_user, config, volumes=False, auth=auth)
+            _compose_down(host_user, config, volumes=False, auth=auth)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
@@ -2817,7 +2801,6 @@ def destroy(
             try:
                 teardown_warnings = _phase_stop_teardown(
                     instance_dir,
-                    project_name,
                     host_user,
                     config,
                     ws_paths,
@@ -3002,13 +2985,12 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     """Render the per-instance detailed panel + workspaces + containers."""
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    project_name = compose_project_name(inst)
     host_settings = _resolve_host_settings()
     host_user = host_settings.docker_unprivileged_user
     auth = host_settings.machinectl_authentication
 
     # Container status
-    containers = _container_status(instance_dir, project_name, host_user, config, auth)
+    containers = _container_status(instance_dir, host_user, config, auth)
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
@@ -3150,9 +3132,8 @@ def _require_instance_stopped(inst: str, instance_dir: str) -> None:
     Workspace mutations (add/remove/rename/restore) require the instance to
     be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
     """
-    project_name = compose_project_name(inst)
     host_user, auth = _resolve_host_config()
-    if _warm_check(instance_dir, project_name, host_user, auth):
+    if _warm_check(instance_dir, host_user, auth):
         console.print(
             f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
             style="red",

@@ -1,0 +1,192 @@
+[
+  {
+    "op": "auth-probe",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "echo ok"
+    ]
+  },
+  {
+    "op": "compose-ls",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker compose ls --format json --all"
+    ]
+  },
+  {
+    "op": "docker-version",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker version --format '{{.Server.Version}}'"
+    ]
+  },
+  {
+    "op": "docker-info",
+    "args": [
+      "security-options"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker info --format '{{.SecurityOptions}}'"
+    ]
+  },
+  {
+    "op": "docker-info",
+    "args": [
+      "runtimes"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker info --format '{{json .Runtimes}}'"
+    ]
+  },
+  {
+    "op": "docker-manifest-inspect",
+    "args": [
+      "busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker manifest inspect busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
+    ]
+  },
+  {
+    "op": "docker-manifest-inspect",
+    "args": [
+      "busybox:1.36.1-musl"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker manifest inspect busybox:1.36.1-musl"
+    ]
+  },
+  {
+    "op": "helper-chown-files",
+    "args": [
+      "/srv/cache",
+      "0644",
+      "1000",
+      "1000",
+      "a.log",
+      "b.log"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker run --rm --runtime=runc --network=none --read-only --tmpfs /tmp --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v /srv/cache:/p busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 sh -c 'set -e; for f in a.log b.log; do cp /p/\"$f\" /tmp/\"$f\" && unlink /p/\"$f\" && cp /tmp/\"$f\" /p/\"$f\" && chmod 0644 /p/\"$f\" && chown 1000:1000 /p/\"$f\"; done'"
+    ]
+  },
+  {
+    "op": "helper-mkdir-chown-dirs",
+    "args": [
+      "/srv/cache",
+      "1000",
+      "1000",
+      "logs",
+      "cache"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "docker run --rm --runtime=runc --network=none --read-only --tmpfs /tmp --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v /srv/cache:/p busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213 sh -c 'set -e; for d in logs cache; do mkdir -p /p/\"$d\" && chown 1000:1000 /p/\"$d\"; done'"
+    ]
+  },
+  {
+    "op": "compose-up",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env up -d --build --wait"
+    ]
+  },
+  {
+    "op": "compose-up",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/extras/db-postgres.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml -f /home/op/.sandbox-ai/instances/myinst/docker/extras/db-postgres.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env up -d --build --wait"
+    ]
+  },
+  {
+    "op": "compose-down",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env down"
+    ]
+  },
+  {
+    "op": "compose-down",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml",
+      "--volumes"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --ansi never --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env down -v"
+    ]
+  },
+  {
+    "op": "compose-ps",
+    "args": [
+      "myinst",
+      "--project",
+      "op-myinst",
+      "--env-file",
+      "/home/op/.sandbox-ai/instances/myinst/.sandbox.env",
+      "--compose-file",
+      "/home/op/.sandbox-ai/instances/myinst/docker/compose.yml"
+    ],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env --ansi never ps --format json"
+    ]
+  }
+]

@@ -93,7 +93,7 @@ Dry-run: sandbox start
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/secrets/{authorized_keys, ipc_host_key} → 101000:201000 600
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/docker/core/{entrypoint.sh} → 101000:201000 500
     helper-cp+chown <TMP>/.sandbox-ai/instances/fixture-inst/config/core/{.claude.json} → 101000:201000 660
-    $ sudo machinectl shell sandbox@.host /bin/bash -c 'TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=dev-fixture-inst docker compose -f <TMP>/.sandbox-ai/instances/fixture-inst/docker/compose.yml -f <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/db-postgres.yml --ansi never --env-file <TMP>/.sandbox-ai/instances/fixture-inst/.sandbox.env up -d --build --wait'
+    $ sudo machinectl shell sandbox@.host /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch compose-up fixture-inst --project dev-fixture-inst --env-file <TMP>/.sandbox-ai/instances/fixture-inst/.sandbox.env --compose-file <TMP>/.sandbox-ai/instances/fixture-inst/docker/compose.yml --compose-file <TMP>/.sandbox-ai/instances/fixture-inst/docker/extras/db-postgres.yml'
     $ tlog-rec --writer=file --file-path=<sessions>/dev-fixture-inst/<UTC>.log -- ssh -i <inst>/secrets/ipc_ssh_key -o UserKnownHostsFile=<inst>/secrets/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand='systemd-run -q --pipe --uid=sandbox /usr/bin/docker exec -i dev-fixture-inst-admin-1 /fwd '"'"'<core_ipc_ip>:9999'"'"'' -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'
 
   Dry-run complete — all validations passed

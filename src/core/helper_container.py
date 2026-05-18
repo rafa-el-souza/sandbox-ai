@@ -27,17 +27,14 @@ from __future__ import annotations
 import shlex
 from typing import TYPE_CHECKING
 
-from core.executor import Executor
-
 if TYPE_CHECKING:
     from collections.abc import Iterable
 from core.host_config import (
     MachinectlAuth,
     in_container_gid_for_host_gid,
     in_container_uid_for_host_uid,
-    machinectl_cmd,
+    minimal_host_config,
 )
-from core.hydration import IMAGE_REGISTRY
 
 DEFAULT_HELPER_TIMEOUT_S = 30
 
@@ -89,24 +86,26 @@ def helper_chown_files(
     file_list = list(files)
     if not file_list:
         return
+    # Deferred import: ``core.dispatch`` imports ``_hardened_docker_run`` from
+    # this module at its top level (it is the single source of the hardened
+    # ``docker run`` prefix the helper ops reuse), so a module-level import here
+    # would be a circular import. The import is cheap and runs only on the
+    # non-empty path.
+    from core import dispatch
+
     in_container_uid = in_container_uid_for_host_uid(owner_uid, host_user)
     in_container_gid = in_container_gid_for_host_gid(owner_gid, host_user)
-    image = IMAGE_REGISTRY["busybox_musl"].pinned
     mode_octal = format(mode, "04o")
-    quoted_names = " ".join(shlex.quote(f) for f in file_list)
-    inner = (
-        f"set -e; for f in {quoted_names}; do "
-        f'cp /p/"$f" /tmp/"$f" && '
-        f'unlink /p/"$f" && '
-        f'cp /tmp/"$f" /p/"$f" && '
-        f'chmod {mode_octal} /p/"$f" && '
-        f'chown {in_container_uid}:{in_container_gid} /p/"$f"; '
-        "done"
-    )
-    cmd = _hardened_docker_run(image, parent, inner)
-    Executor().run(
-        [*machinectl_cmd(host_user, machinectl_auth), "/bin/bash", "-c", cmd],
-        sentinel=True,
+    dispatch.invoke(
+        dispatch.Op.HELPER_CHOWN_FILES,
+        [
+            parent,
+            mode_octal,
+            str(in_container_uid),
+            str(in_container_gid),
+            *file_list,
+        ],
+        minimal_host_config(host_user, machinectl_auth),
         timeout=timeout,
     )
 
@@ -132,18 +131,19 @@ def helper_mkdir_chown_dirs(
     leaf_list = list(leaves)
     if not leaf_list:
         return
+    # Deferred import — see :func:`helper_chown_files` (circular-import note).
+    from core import dispatch
+
     in_container_uid = in_container_uid_for_host_uid(owner_uid, host_user)
     in_container_gid = in_container_gid_for_host_gid(owner_gid, host_user)
-    image = IMAGE_REGISTRY["busybox_musl"].pinned
-    quoted_leaves = " ".join(shlex.quote(leaf) for leaf in leaf_list)
-    inner = (
-        f'set -e; for d in {quoted_leaves}; do '
-        f'mkdir -p /p/"$d" && chown {in_container_uid}:{in_container_gid} /p/"$d"; '
-        "done"
-    )
-    cmd = _hardened_docker_run(image, parent, inner)
-    Executor().run(
-        [*machinectl_cmd(host_user, machinectl_auth), "/bin/bash", "-c", cmd],
-        sentinel=True,
+    dispatch.invoke(
+        dispatch.Op.HELPER_MKDIR_CHOWN_DIRS,
+        [
+            parent,
+            str(in_container_uid),
+            str(in_container_gid),
+            *leaf_list,
+        ],
+        minimal_host_config(host_user, machinectl_auth),
         timeout=timeout,
     )

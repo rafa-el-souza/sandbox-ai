@@ -55,7 +55,7 @@ def _docker_unprivileged_user_configured() -> bool:
     try:
         with open(real_toml, "rb") as f:
             raw = tomllib.load(f)
-    except FileNotFoundError, tomllib.TOMLDecodeError:
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
         return False
     user = raw.get("host", {}).get("docker_unprivileged_user")
     if not isinstance(user, str):
@@ -70,63 +70,48 @@ def _docker_unprivileged_user_configured() -> bool:
 # ─── Helper container hardening (always-on; no root or docker required) ─────
 
 
-def test_helper_container_hardening_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Argv-shape only: assert the hardening flag set + image pin appear in every helper payload.
+def test_helper_container_hardening_flags() -> None:
+    """Argv-shape only: assert the hardening flag set + image pin appear in the helper target argv.
 
-    End-to-end ownership semantics (the chown actually landing on the
-    host-absolute target after userns translation) are exercised in
-    ``tests/integration/test_helper_container_userns.py``; this test is
-    deliberately mock-bound so it can run on any host (no docker / subuid /
-    machinectl required).
+    C-001 (``runtime-dispatcher``) moved the hardened ``docker run`` line
+    construction OUT of the crossed bash payload and INTO the dispatcher: the
+    payload the orchestrator now crosses is ``dispatch helper-chown-files …``,
+    and the hardened invocation is assembled by
+    ``core.dispatch.build_target_argv("helper-chown-files", …)`` (its post-C-001
+    home — ``src/core/dispatch.py:build_target_argv``). This test therefore
+    pins the SAME security properties at that new construction site (no
+    weakening). End-to-end ownership semantics (the chown actually landing on
+    the host-absolute target after userns translation) remain exercised in
+    ``tests/integration/test_helper_container_userns.py``; this test is pure
+    construction and runs on any host (no docker / subuid / machinectl).
     """
-    from unittest.mock import patch
-
     sys.path.insert(0, str(REPO_ROOT / "src"))
     try:
-        from core.executor import Executor
-        from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
-        from core.host_config import MachinectlAuth
+        from core.dispatch import build_target_argv
+        from core.host_config import MachinectlAuth, minimal_host_config
     finally:
         sys.path.pop(0)
 
-    # Hermetic /etc/subuid + /etc/subgid fixture so the helpers' inverse
-    # resolvers translate without requiring real subid entries on the host.
-    subuid = tmp_path / "subuid"
-    subuid.write_text("claude-sandbox:100000:65536\n")
-    monkeypatch.setattr("core.host_config._SUBUID_PATH", subuid)
-    subgid = tmp_path / "subgid"
-    subgid.write_text("claude-sandbox:200000:65536\n")
-    monkeypatch.setattr("core.host_config._SUBGID_PATH", subgid)
+    host_config = minimal_host_config("claude-sandbox", MachinectlAuth.SUDO)
 
-    captured: list[str] = []
+    chown_argv = build_target_argv(
+        "helper-chown-files",
+        ["/inst/secrets", "600", "100999", "200999", "ipc_host_key"],
+        host_config,
+    )
+    mkdir_argv = build_target_argv(
+        "helper-mkdir-chown-dirs",
+        ["/inst/cache/core", "100999", "200999", ".claude"],
+        host_config,
+    )
 
-    def _capture(self: Executor, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append(cmd[-1])
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-    # argv-shape mock; ownership exercised in tests/integration/test_helper_container_userns.py
-    with patch.object(Executor, "run", autospec=True, side_effect=_capture):
-        helper_chown_files(
-            "claude-sandbox",
-            "/inst/secrets",
-            ["ipc_host_key"],
-            owner_uid=100999,
-            owner_gid=200999,
-            mode=0o600,
-            machinectl_auth=MachinectlAuth.SUDO,
-        )
-        helper_mkdir_chown_dirs(
-            "claude-sandbox",
-            "/inst/cache/core",
-            [".claude"],
-            owner_uid=100999,
-            owner_gid=200999,
-            machinectl_auth=MachinectlAuth.SUDO,
-        )
-
-    assert len(captured) == 2
-    for payload in captured:
+    # The hardened invocation lives in the `/bin/bash -c <string>` payload that
+    # build_target_argv emits (element [-1] of the argv list).
+    for argv, parent in ((chown_argv, "/inst/secrets"), (mkdir_argv, "/inst/cache/core")):
+        assert argv[:2] == ["/bin/bash", "-c"], f"expected a `bash -c` target argv, got {argv[:2]}"
+        payload = argv[-1]
         for flag in [
+            "docker run --rm",
             "--runtime=runc",
             "--network=none",
             "--read-only",
@@ -138,12 +123,19 @@ def test_helper_container_hardening_flags(monkeypatch: pytest.MonkeyPatch, tmp_p
             "--security-opt no-new-privileges:true",
         ]:
             assert flag in payload, f"missing {flag} in helper payload"
-        # --userns=host MUST NOT appear (D1: translation, not bypass).
+        # The parent dir is bind-mounted at /p (not --userns=host: D1
+        # translation, not bypass).
+        assert f"-v {parent}:/p " in payload, f"missing parent bind-mount in {payload}"
         assert "--userns=host" not in payload, "helper must inherit the daemon's userns map"
+        # busybox-musl image is digest-pinned.
         assert "@sha256:" in payload, "helper image must be digest-pinned"
-        # Translated in-container values, not host-absolute. owner_uid 100999
-        # → in-container 1000 (= 100999 - 100000 + 1); owner_gid 200999 → 1000.
-        assert "chown 1000:1000" in payload
+
+    # Host-absolute uid/gid pass through to the dispatcher's hardened argv
+    # verbatim; the userns translation (100999 -> in-container 1000) is the
+    # helper-side concern exercised in test_helper_container_userns.py, not a
+    # property of this construction site.
+    assert "chown 100999:200999" in chown_argv[-1]
+    assert "chown 100999:200999" in mkdir_argv[-1]
 
 
 # ─── End-to-end recipe verifications (require root + configured docker) ────

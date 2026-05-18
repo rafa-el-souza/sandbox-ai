@@ -114,6 +114,15 @@ class HostConfig(BaseModel):
         return cls.model_validate(raw)
 
 
+def minimal_host_config(user: str, auth: MachinectlAuth) -> HostConfig:
+    """Build a HostConfig carrying only the two fields the dispatch boundary reads.
+
+    The two fields are ``docker_unprivileged_user`` and
+    ``machinectl_authentication``.
+    """
+    return HostConfig(host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth))
+
+
 def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
     """Build the machinectl shell prefix for the given user and auth mode.
 

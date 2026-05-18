@@ -46,15 +46,7 @@ _SUPPRESSION_CHECK_EXEMPT: frozenset[str] = frozenset(
 # Each entry is a tech-debt anchor: it documents what is allowed today and
 # is meant to be deleted once the underlying structural issue is fixed.
 # Add a corresponding entry in `openspec/deferred.md` when adding here.
-_GRANDFATHERED_SUPPRESSIONS: frozenset[tuple[str, int]] = frozenset(
-    {
-        # Late `import cli.main` deliberately captures `_seed_host_config_if_absent`
-        # before an autouse patch replaces it. Removing the late import requires
-        # redesigning the capture mechanism — non-trivial. Tracked in
-        # openspec/deferred.md.
-        ("tests/unit/cli/test_cli.py", 86),
-    }
-)
+_GRANDFATHERED_SUPPRESSIONS: frozenset[tuple[str, int]] = frozenset()
 
 
 def _python_files(root: Path) -> Iterator[Path]:
@@ -279,6 +271,167 @@ def test_no_raw_systemd_run_outside_pipe_cmd() -> None:
             "documented in exactly one place; ad-hoc 'systemd-run' invocations "
             "bypass that contract."
         )
+
+
+# ── 4. machinectl_cmd callers restricted to the dispatch allowlist ──────────
+
+
+# The `host-config` capability documents exactly three allowlist categories for
+# direct `machinectl_cmd` usage (runtime-dispatcher design D5):
+#   1. src/core/host_config.py — defines the symbol.
+#   2. src/core/dispatch.py    — the sanctioned orchestration module.
+#   3. src/core/setup/*.py     — the setup-phase package (forward reference;
+#      sister change `sandbox-setup`). Setup phases cross the boundary as root
+#      before the dispatcher is installed, so cannot route through
+#      `core.dispatch`. Enumerated AT TEST TIME via a bounded glob — NOT a free
+#      `src/**` allow. The dir does not exist until `sandbox-setup` lands, so
+#      the glob legitimately matches nothing today; that is correct, not a bug.
+# Broadening beyond these three is a spec change, not a silent edit.
+_MACHINECTL_CMD_LITERAL_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "src/core/host_config.py",
+        "src/core/dispatch.py",
+    }
+)
+_MACHINECTL_CMD_SETUP_GLOB_DIR = _SRC_ROOT / "core" / "setup"
+
+
+def _machinectl_cmd_allowlist() -> frozenset[str]:
+    """Return the repo-relative POSIX paths permitted to import/reference
+    ``machinectl_cmd`` directly: the two literal modules plus whatever the
+    bounded ``src/core/setup/*.py`` glob enumerates at test time (possibly
+    empty — that is tolerated, not an error)."""
+    glob_matches = {
+        p.relative_to(_REPO_ROOT).as_posix()
+        for p in _MACHINECTL_CMD_SETUP_GLOB_DIR.glob("*.py")
+    }
+    return _MACHINECTL_CMD_LITERAL_ALLOWLIST | frozenset(glob_matches)
+
+
+def _machinectl_cmd_references(tree: ast.AST) -> list[int]:
+    """Return the line numbers at which ``machinectl_cmd`` is imported or
+    referenced as a name/attribute in ``tree``.
+
+    AST-only by construction: only ``ast.ImportFrom`` (``from … import
+    machinectl_cmd``), ``ast.Import`` (``import … machinectl_cmd`` / dotted),
+    and ``ast.Name``/``ast.Attribute`` with the matching identifier are
+    inspected. String literals, comments and docstrings are never AST name
+    nodes, so deliberate documentation mentions (e.g.
+    ``src/core/doctor/registry.py``'s docstring and
+    ``src/core/doctor/checks/supply_chain.py``'s comments) are NOT flagged — a
+    grep-based check would wrongly fail on those and is unacceptable here.
+    """
+    linenos: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "machinectl_cmd":
+                    linenos.add(node.lineno)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                # `import a.b.machinectl_cmd` — last dotted component match.
+                if alias.name.split(".")[-1] == "machinectl_cmd":
+                    linenos.add(node.lineno)
+        elif (isinstance(node, ast.Name) and node.id == "machinectl_cmd") or (
+            isinstance(node, ast.Attribute) and node.attr == "machinectl_cmd"
+        ):
+            linenos.add(node.lineno)
+    return sorted(linenos)
+
+
+def _machinectl_cmd_violations(
+    files: Iterator[Path], allowlist: frozenset[str]
+) -> list[tuple[Path, list[int]]]:
+    """Scan ``files``; return ``(path, linenos)`` for every file that imports
+    or references ``machinectl_cmd`` while NOT being in ``allowlist``.
+
+    Reusable detector seam (anti-hack rule 5): the file iterable and allowlist
+    are parameters, not module state, so the deliberate-violation regression
+    (:func:`test_machinectl_cmd_deliberate_violation_is_detected`) can drive the
+    exact same logic against an arbitrary out-of-allowlist file without
+    duplicating the AST predicate.
+    """
+    offenders: list[tuple[Path, list[int]]] = []
+    for src in files:
+        # A file outside the repo root can never be in the (repo-relative)
+        # allowlist; treat its absolute path as the key so the deliberate-
+        # violation regression (a tmp_path file) is correctly flagged.
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        if rel in allowlist:
+            continue
+        tree = ast.parse(src.read_text(), filename=str(src))
+        linenos = _machinectl_cmd_references(tree)
+        if linenos:
+            offenders.append((src, linenos))
+    return offenders
+
+
+def test_machinectl_cmd_callers_restricted() -> None:
+    """Direct ``machinectl_cmd`` usage is forbidden outside the dispatch
+    allowlist (runtime-dispatcher design D5).
+
+    Every orchestrator-to-sandbox crossing must route through
+    :mod:`core.dispatch`; a hand-rolled ``machinectl_cmd(...)`` would silently
+    bypass the dispatcher's typed narrowing. The allowlist is exactly the three
+    `host-config`-documented categories (two literal modules + the bounded
+    ``src/core/setup/*.py`` glob); broadening it is a spec change, not a silent
+    edit. ``sandbox-setup`` does NOT amend this list — its modules simply match
+    the pre-existing setup glob.
+    """
+    allowlist = _machinectl_cmd_allowlist()
+    offenders = _machinectl_cmd_violations(_python_files(_SRC_ROOT), allowlist)
+
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)}: line(s) {linenos}"
+            for p, linenos in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} file(s) import/reference machinectl_cmd outside "
+            f"the dispatch allowlist.\n{details}\n\n"
+            f"Allowlist: {sorted(allowlist)}\n"
+            "Fix: route the crossing through core.dispatch (add an op to the "
+            "typed Op surface). Do NOT broaden the allowlist — that is a spec "
+            "change (runtime-dispatcher design D5), not a silent edit."
+        )
+
+
+def test_machinectl_cmd_deliberate_violation_is_detected(
+    tmp_path: Path,
+) -> None:
+    """A file that imports ``machinectl_cmd`` from OUTSIDE the allowlist must
+    be reported by the shared detector, with its path in the failure surface.
+
+    Drives the SAME :func:`_machinectl_cmd_violations` detector used by
+    :func:`test_machinectl_cmd_callers_restricted` (no duplicated AST logic) so
+    the convention check is provably catching the bug class, not merely the
+    absence of the symptom.
+    """
+    rogue = tmp_path / "rogue_caller.py"
+    rogue.write_text("from core.host_config import machinectl_cmd\n")
+
+    # The temp file is well outside src/; an allowlist of just the two literal
+    # modules is sufficient — the detector keys off repo-relative path
+    # membership, and tmp_path is never in it.
+    offenders = _machinectl_cmd_violations(
+        iter([rogue]), _MACHINECTL_CMD_LITERAL_ALLOWLIST
+    )
+
+    assert offenders, "deliberate machinectl_cmd violation was not detected"
+    offending_paths = {p for p, _ in offenders}
+    assert rogue in offending_paths, (
+        f"detector did not report the rogue file {rogue} "
+        f"(reported: {sorted(str(p) for p in offending_paths)})"
+    )
+    # The path is in the surfaced failure detail the gate would print.
+    detail = "\n".join(
+        f"  {p}: line(s) {linenos}" for p, linenos in offenders
+    )
+    assert str(rogue) in detail
 
 
 def test_every_custom_marker_is_registered() -> None:

@@ -10,8 +10,9 @@ import json
 import shutil
 import subprocess
 
+from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import MachinectlAuth, machinectl_cmd
+from core.host_config import MachinectlAuth, minimal_host_config
 
 
 def check_sudo(user: str, distro: str | None) -> CheckResult:
@@ -105,16 +106,8 @@ def check_machinectl_reachable(
     Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang)
     in sudo mode, or polkit dialog/timeout in polkit mode.
     """
-    cmd = [*machinectl_cmd(user, auth_mode), "/bin/bash", "-c", "echo ok"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+    outcome = dispatch.probe("auth-probe", [], minimal_host_config(user, auth_mode), timeout=10)
+    if outcome.timed_out:
         if auth_mode == MachinectlAuth.SUDO:
             timeout_remediation = (
                 "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
@@ -131,18 +124,18 @@ def check_machinectl_reachable(
             detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
             remediation=timeout_remediation,
         )
-
-    if result.returncode == 0:
+    if not outcome.ok:
         return CheckResult(
-            status="pass",
+            status="fail",
             name="machinectl reachable",
-            detail=f"Shell probe succeeded for {user}@.host",
+            detail=f"Shell probe failed: {outcome.message}",
+            remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
         )
+
     return CheckResult(
-        status="fail",
+        status="pass",
         name="machinectl reachable",
-        detail=f"Shell probe failed (exit {result.returncode}): {result.stderr.strip()}",
-        remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
+        detail=f"Shell probe succeeded for {user}@.host",
     )
 
 
@@ -150,23 +143,12 @@ def check_docker_available(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker version --format '{{.Server.Version}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode == 0 and result.stdout.strip():
+    outcome = dispatch.probe("docker-version", [], minimal_host_config(user, auth_mode), timeout=15)
+    if outcome.ok and outcome.stdout.strip():
         return CheckResult(
             status="pass",
             name="Docker available",
-            detail=f"Docker {result.stdout.strip()}",
+            detail=f"Docker {outcome.stdout.strip()}",
         )
     return CheckResult(
         status="fail",
@@ -181,19 +163,8 @@ def check_docker_rootless(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that Docker is running in rootless mode."""
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{.SecurityOptions}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode == 0 and "rootless" in result.stdout:
+    outcome = dispatch.probe("docker-info", ["security-options"], minimal_host_config(user, auth_mode), timeout=15)
+    if outcome.ok and "rootless" in outcome.stdout:
         return CheckResult(
             status="pass",
             name="Docker rootless",
@@ -214,21 +185,10 @@ def check_runsc_registered(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{json .Runtimes}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode == 0:
+    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
+    if outcome.ok:
         try:
-            runtimes = json.loads(result.stdout.strip())
+            runtimes = json.loads(outcome.stdout.strip())
             if "runsc" in runtimes:
                 return CheckResult(
                     status="pass",
@@ -255,19 +215,8 @@ def check_runsc_runtimeargs(
     Validates defense-in-depth configuration for the gVisor runtime.
     Returns warn (not fail) when args are missing — this is an advisory check.
     """
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{json .Runtimes}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode != 0:
+    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
+    if not outcome.ok:
         return CheckResult(
             status="warn",
             name="runsc runtimeArgs",
@@ -276,7 +225,7 @@ def check_runsc_runtimeargs(
         )
 
     try:
-        runtimes = json.loads(result.stdout.strip())
+        runtimes = json.loads(outcome.stdout.strip())
     except json.JSONDecodeError:
         return CheckResult(
             status="warn",
@@ -318,19 +267,8 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
     The default (--host-uds=none) is the correct security posture.
     Returns PASS if --host-uds=all is absent, WARN if present.
     """
-    result = subprocess.run(
-        [
-            *machinectl_cmd(user, auth_mode),
-            "/bin/bash",
-            "-c",
-            "docker info --format '{{json .Runtimes}}'",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode != 0:
+    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
+    if not outcome.ok:
         return CheckResult(
             status="warn",
             name="--host-uds=none",
@@ -339,7 +277,7 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
         )
 
     try:
-        runtimes = json.loads(result.stdout.strip())
+        runtimes = json.loads(outcome.stdout.strip())
     except json.JSONDecodeError:
         return CheckResult(
             status="warn",
@@ -394,25 +332,23 @@ def check_compose_project_name_collision(
         )
     expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
 
-    cmd = [*machinectl_cmd(host_user, auth_mode), "/bin/bash", "-c", "docker compose ls --format json --all"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
-    except subprocess.TimeoutExpired:
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, auth_mode), timeout=15)
+    if outcome.timed_out:
         return CheckResult(
             status="skip",
             name="compose project name collision",
             detail="docker compose ls timed out",
             category="Privilege Boundary",
         )
-    if result.returncode != 0:
+    if not outcome.ok:
         return CheckResult(
             status="skip",
             name="compose project name collision",
-            detail=f"docker compose ls failed: {result.stderr.strip()}",
+            detail=f"docker compose ls failed: {outcome.message}",
             category="Privilege Boundary",
         )
     try:
-        projects = json.loads(result.stdout or "[]")
+        projects = json.loads(outcome.stdout or "[]")
     except json.JSONDecodeError:
         return CheckResult(
             status="skip",

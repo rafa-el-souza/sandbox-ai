@@ -10,10 +10,17 @@ Bundles state that is uniform across a phase invocation:
   way to shell out from an Action's ``.execute()``.
 - ``instance_dir`` — the per-instance directory the action is operating
   on (already absolute by the time a plan is built).
+- ``host_config`` — the resolved per-host :class:`~core.host_config.HostConfig`,
+  OPTIONAL (default ``None``). Only the compose-up construction site
+  (``_phase_compose_up``) supplies it: :class:`~core.actions.ComposeUpAction`
+  routes through ``core.dispatch.invoke``/``build_invocation``, which need the
+  full ``HostConfig`` (operator-side compose-state resolution). Every other
+  ``ActionContext`` construction site leaves it unset, so adding this field
+  ripples nowhere beyond compose-up.
 
 Frozen so an ``ActionContext`` can be shared safely across the Actions
 of a phase without risk of mutation. Field count is intentionally
-≤5 — per-Action state lives on the Action.
+small — per-Action state lives on the Action.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from core.executor import Executor
-    from core.host_config import MachinectlAuth
+    from core.host_config import HostConfig, MachinectlAuth
 
 
 @dataclass(frozen=True)
@@ -36,3 +43,4 @@ class ActionContext:
     auth: MachinectlAuth
     executor: Executor
     instance_dir: Path
+    host_config: HostConfig | None = None
