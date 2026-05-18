@@ -7,9 +7,12 @@ from pathlib import Path
 import pytest
 from core.hydration import (
     _JINJA_RENDERED_CONFIG,
+    BINARY_REGISTRY,
     IMAGE_REGISTRY,
+    BinaryPin,
     CoreConfig,
     DbPostgresConfig,
+    FetchMethod,
     ImagePin,
     InstanceConfig,
     ProxyWhitelistConfig,
@@ -2672,6 +2675,53 @@ class TestImagePin:
         source = Path(__file__).resolve().parents[3] / "src" / "core" / "hydration.py"
         content = source.read_text()
         assert "IMAGE_DIGESTS =" not in content
+
+
+class TestBinaryPin:
+    """C-002 Group 1: BinaryPin Pydantic model and BINARY_REGISTRY validation."""
+
+    def test_registry_has_exactly_one_runsc_entry(self) -> None:
+        """BINARY_REGISTRY is a dict with exactly the single key 'runsc'."""
+        assert isinstance(BINARY_REGISTRY, dict)
+        assert len(BINARY_REGISTRY) == 1
+        assert set(BINARY_REGISTRY.keys()) == {"runsc"}
+
+    def test_runsc_entry_is_binarypin_with_expected_fields(self) -> None:
+        """runsc value is a BinaryPin with the verified version/sha512/method."""
+        pin = BINARY_REGISTRY["runsc"]
+        assert isinstance(pin, BinaryPin)
+        assert pin.version == "20260511"
+        assert pin.sha512 == (
+            "e227a71c95e794119f6648a44083df945392c6cd457f36abbc49c2b6e0b87c7f"
+            "01b94e6bf4632f4cb22ee34fbec7a2c34ca03d30efa9c689db76a6215a6e44e1"
+        )
+        assert pin.fetch_method is FetchMethod.GVISOR_TARBALL
+
+    def test_binarypin_is_frozen(self) -> None:
+        """Mutating a BinaryPin field raises pydantic.ValidationError."""
+        import pydantic
+
+        pin = BINARY_REGISTRY["runsc"]
+        attr = "version"
+        with pytest.raises(pydantic.ValidationError):
+            setattr(pin, attr, "x")
+
+    def test_url_template_contains_arch_placeholder_and_pinned_version(self) -> None:
+        """url_template carries the literal $(arch) placeholder and pinned version, no $(version)."""
+        pin = BINARY_REGISTRY["runsc"]
+        assert "$(arch)" in pin.url_template
+        assert "20260511" in pin.url_template
+        assert "$(version)" not in pin.url_template
+
+    def test_sha512_is_lowercase_128_hex(self) -> None:
+        """sha512 is a lowercase 128-character hex string."""
+        pin = BINARY_REGISTRY["runsc"]
+        assert re.fullmatch(r"[0-9a-f]{128}", pin.sha512) is not None
+
+    def test_fetch_method_has_single_variant(self) -> None:
+        """FetchMethod defines exactly one variant: GVISOR_TARBALL."""
+        assert [m.name for m in FetchMethod] == ["GVISOR_TARBALL"]
+        assert FetchMethod.GVISOR_TARBALL.value == "gvisor_tarball"
 
 
 class TestDownstreamConsumerMigration:

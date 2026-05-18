@@ -16,7 +16,7 @@ from importlib.resources import files as _resource_files
 from typing import Any
 
 import jinja2
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.host_config import HostSettings, in_container_gid_for_host_gid, workspace_bridge_gid
 from core.ipam import derive_static_ips, derive_subnets
@@ -95,6 +95,42 @@ IMAGE_REGISTRY: dict[str, ImagePin] = {
         ref="golang",
         tag="1.23-alpine",
         digest="sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f",
+    ),
+}
+
+# ─── Binary Pin Registry ────────────────────────────────────────────────────
+#
+# Centralized binary pin registry. Each entry carries a URL template (with
+# only the literal `$(arch)` placeholder substituted at install time), the
+# pinned upstream version, the expected sha512, and the fetch method.
+#
+
+
+class FetchMethod(StrEnum):
+    """How a pinned binary is fetched and verified at install time."""
+
+    GVISOR_TARBALL = "gvisor_tarball"
+
+
+class BinaryPin(BaseModel):
+    """Immutable structured binary pin (URL template, version, sha512, method)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    url_template: str
+    version: str
+    sha512: str
+    fetch_method: FetchMethod
+
+
+BINARY_REGISTRY: dict[str, BinaryPin] = {
+    "runsc": BinaryPin(
+        # runsc pin: gVisor release 20260511, x86_64 (operator-verified 2026-05-18); sha512 from
+        # https://storage.googleapis.com/gvisor/releases/release/20260511/x86_64/runsc.sha512
+        url_template="https://storage.googleapis.com/gvisor/releases/release/20260511/$(arch)/runsc",
+        version="20260511",
+        sha512="e227a71c95e794119f6648a44083df945392c6cd457f36abbc49c2b6e0b87c7f01b94e6bf4632f4cb22ee34fbec7a2c34ca03d30efa9c689db76a6215a6e44e1",
+        fetch_method=FetchMethod.GVISOR_TARBALL,
     ),
 }
 
