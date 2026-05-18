@@ -12,9 +12,12 @@ output paths against identical source + the same digest-pinned
 (design D3 reproducibility; spec "Offline Reproducible Compile Recipe"
 scenario "Reproducible build across two invocations"). ``compile_dispatcher``
 takes no build dir — it embeds the source in the crossed payload, builds in
-an ephemeral per-call ``mktemp -d`` under claude-sandbox's
-``$XDG_RUNTIME_DIR`` (tmpfs, ZERO operator-tree ACLs, self-cleaning via
-``trap … EXIT``), and returns the binary over captured stdout — so this test
+an ephemeral per-call ``mktemp -d`` under the lingering daemon user's
+per-user runtime dir ``/run/user/$(id -u)`` — reachable under the
+PAM-skipping ``pipe_cmd`` crossing where ``$XDG_RUNTIME_DIR`` is unset
+(tmpfs, daemon-user-owned, ZERO operator-tree ACLs, self-cleaning via
+``trap … EXIT``; linger is an architectural prerequisite — sister-change
+``sandbox-setup`` L5), and returns the binary over captured stdout — so this test
 has no cross-boundary build dir / ACL grant to tear down (reproducibility is
 location-neutral: the container always mounts at a fixed path + ``-trimpath``).
 
@@ -182,10 +185,12 @@ def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
 
     # No build dirs: ``compile_dispatcher`` embeds the source in the crossed
     # payload and the binary returns over captured stdout. The actual build
-    # dir is an ephemeral per-call ``mktemp -d`` under claude-sandbox's
-    # ``$XDG_RUNTIME_DIR`` (tmpfs, claude-sandbox-owned, ZERO operator-tree
-    # ACLs) that self-cleans via ``trap … EXIT`` on success AND failure — so
-    # this test has NO ACL to revoke and no cross-boundary dir to tear down.
+    # dir is an ephemeral per-call ``mktemp -d`` under the lingering daemon
+    # user's per-user runtime dir ``/run/user/$(id -u)`` — reachable under the
+    # PAM-skipping ``pipe_cmd`` crossing where ``$XDG_RUNTIME_DIR`` is unset
+    # (tmpfs, daemon-user-owned, ZERO operator-tree ACLs) that self-cleans via
+    # ``trap … EXIT`` on success AND failure — so this test has NO ACL to
+    # revoke and no cross-boundary dir to tear down.
     # ``tmp_path`` holds only the two output binaries (pytest auto-cleans it).
     out_a = tmp_path / "dispatch-a"
     out_b = tmp_path / "dispatch-b"
