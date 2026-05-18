@@ -459,8 +459,9 @@ def _post_hydrate_daemon_read_targets(instance_dir: str) -> list[str]:
        NEVER transferred — the daemon reads them in place forever. The
        canonical case is ``docker compose -f <compose.yml>`` and its
        conditional extras (``db-postgres.yml``, ``mcp-firecrawl.yml``);
-       paths are derived from the same single-source-of-truth that
-       ``_build_compose_files`` uses.
+       paths are derived from the same single-source-of-truth the
+       compose-file list resolves from
+       (``core.dispatch._resolve_compose_state``).
 
     Both categories converge in one post-hydrate setfacl pass because
     ``core.hydration.write_restricted`` zeros ``mask::`` via
@@ -1170,9 +1171,11 @@ DAEMON_READ_DIRECT_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
     #
     # ── Compose YAML inputs ───────────────────────────────────────────
     # Consumed by ``docker compose -f <path> ...`` invocations whose
-    # canonical path-set is built by ``_build_compose_files`` and used by
-    # ``_phase_compose_up``, ``_compose_down``, and the ``docker compose
-    # ps`` callsites in ``_container_status`` / ``_render_status_detailed``.
+    # canonical path-set is resolved by
+    # ``core.dispatch._resolve_compose_state`` (the Q6 single source) and
+    # used by ``_phase_compose_up``, ``_compose_down``, and the ``docker
+    # compose ps`` callsites in ``_container_status`` /
+    # ``_render_status_detailed``.
     ("docker", ("compose.yml",)),
     # Conditional compose extras — present iff the instance enables the
     # component. Listed unconditionally; the post-hydrate phase skips
@@ -1548,18 +1551,6 @@ def _phase_acl_grant(
             if diag:
                 raise SandboxExecutionError(f"{exc}\n{diag}") from exc
             raise
-
-
-def _build_compose_files(instance_dir: str, config: InstanceConfig) -> list[str]:
-    """Build the compose file list including component-conditional extras."""
-    files = ["-f", os.path.join(instance_dir, "docker", "compose.yml")]
-    if config.components_db_postgres.enabled:
-        extras = os.path.join(instance_dir, "docker", "extras", "db-postgres.yml")
-        files.extend(["-f", extras])
-    if config.components.mcp_firecrawl:
-        extras = os.path.join(instance_dir, "docker", "extras", "mcp-firecrawl.yml")
-        files.extend(["-f", extras])
-    return files
 
 
 def _compose_up_cmd_plan(inst: str) -> ComposeUpAction:

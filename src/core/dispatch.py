@@ -370,13 +370,13 @@ def _validate_helper_mkdir_chown_dirs(args: Sequence[str]) -> None:
 
 # ─── Compose hydration resolution ───────────────────────────────────────────
 #
-# Mirrors the source resolution path: registry lookup -> instance_dir ->
+# Resolution path: registry lookup -> instance_dir ->
 # InstanceConfig.from_toml(sandbox.toml) -> compose-file list +
-# compose_project_name + .sandbox.env. This is the same chain
-# ``cli.main._lookup_instance_or_exit`` / ``_load_config`` /
-# ``_build_compose_files`` walk; ``core`` must not import ``cli`` so the
-# compose-file list construction (byte-faithful to ``_build_compose_files``)
-# is mirrored here.
+# compose_project_name + .sandbox.env. The same chain
+# ``cli.main._lookup_instance_or_exit`` / ``_load_config`` walk for the
+# instance_dir + config; ``_resolve_compose_state`` below is the single
+# source for the compose-file list (the Q6 resolver — no parallel
+# compose-file-list builder exists, anti-hack rule 4).
 
 
 def _resolve_compose_state(inst: str) -> tuple[str, list[str], str]:

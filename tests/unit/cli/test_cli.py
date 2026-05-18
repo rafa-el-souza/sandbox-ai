@@ -895,9 +895,9 @@ class TestStartSshKeypairGeneration:
         place (no helper-cp ownership transfer). Spans two sub-categories:
 
         1. **Compose YAML inputs** consumed via ``docker compose -f``.
-           Must match ``_build_compose_files``'s output: ``compose.yml``
-           unconditionally + conditional ``db-postgres.yml`` /
-           ``mcp-firecrawl.yml`` extras.
+           Must match ``core.dispatch._resolve_compose_state``'s
+           compose-file list: ``compose.yml`` unconditionally +
+           conditional ``db-postgres.yml`` / ``mcp-firecrawl.yml`` extras.
         2. **Build context** consumed by buildkit during
            ``docker compose up --build``: rendered/copied Dockerfiles
            + their local-COPY sources (e.g. ``admin/entrypoint.sh``).
@@ -905,8 +905,9 @@ class TestStartSshKeypairGeneration:
            in any Dockerfile under ``src/templates/docker/``.
 
         If a new compose ``--file`` path is added to
-        ``_build_compose_files``, OR a new local-COPY source is added to
-        any Dockerfile, this list must be extended in lockstep.
+        ``core.dispatch._resolve_compose_state``, OR a new local-COPY
+        source is added to any Dockerfile, this list must be extended in
+        lockstep.
         """
         from cli.main import DAEMON_READ_DIRECT_FILES
 
@@ -1732,46 +1733,6 @@ class TestPhaseACLDirect:
             # Verify setfacl is called in every invocation
             for call in mock_run.call_args_list:
                 assert call[0][0][0] == "setfacl"
-
-
-class TestBuildComposeFiles:
-    """Direct test for _build_compose_files."""
-
-    def test_base_only(self) -> None:
-        from cli.main import _build_compose_files
-        from core.hydration import InstanceConfig
-
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-                "components": {"mcp_firecrawl": False, "mcp_puppeteer": False},
-                "components_db_postgres": {"enabled": False},
-            }
-        )
-        files = _build_compose_files("/inst", config)
-        assert len(files) == 2  # -f, path
-
-    def test_with_extras(self) -> None:
-        from cli.main import _build_compose_files
-        from core.hydration import InstanceConfig
-
-        config = InstanceConfig.model_validate(
-            {
-                "instance": {
-                    "name": "t",
-                    "host_uid": "1000",
-                },
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
-                "components": {"mcp_firecrawl": True, "mcp_puppeteer": False},
-                "components_db_postgres": {"enabled": True},
-            }
-        )
-        files = _build_compose_files("/inst", config)
-        assert len(files) == 6  # base + postgres + firecrawl
 
 
 class TestPhaseComposeUpDirect:
