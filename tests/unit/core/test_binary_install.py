@@ -16,7 +16,6 @@ from core import binary_install
 from core.binary_install import (
     BinarySha512MismatchError,
     DriftResult,
-    VerifyResult,
     detect_drift,
     install_pinned,
     verify_only,
@@ -144,14 +143,14 @@ def test_verify_only_is_readonly_and_typed(reserved: Path, hc: HostConfig, monke
     target = reserved / _NAME
     target.write_bytes(b"stale-content")
     result = verify_only(_NAME, hc)
-    assert isinstance(result, VerifyResult)
+    assert isinstance(result, DriftResult)
     assert result.status == "drift"
     assert result.installed_sha == _sha512(b"stale-content")
     assert result.pinned_sha == _pinned_sha()
 
 
 def test_verify_only_absent(reserved: Path, hc: HostConfig) -> None:
-    assert verify_only(_NAME, hc) == VerifyResult(status="absent", installed_sha=None, pinned_sha=_pinned_sha())
+    assert verify_only(_NAME, hc) == DriftResult(status="absent", installed_sha=None, pinned_sha=_pinned_sha())
 
 
 # ─── install_pinned ──────────────────────────────────────────────────────────

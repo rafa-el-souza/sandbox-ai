@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from core.binary_install import VerifyResult
+from core.binary_install import DriftResult
 
 
 def _verify(
     status: Literal["absent", "match", "drift"], installed: str | None, pinned: str
-) -> VerifyResult:
-    return VerifyResult(status=status, installed_sha=installed, pinned_sha=pinned)
+) -> DriftResult:
+    return DriftResult(status=status, installed_sha=installed, pinned_sha=pinned)
 
 
 def test_module_exposes_single_check() -> None:
@@ -89,7 +89,7 @@ class TestCheckRunscPinnedMatch:
 
         captured: dict[str, Any] = {}
 
-        def capture(name: str, hc: Any) -> VerifyResult:
+        def capture(name: str, hc: Any) -> DriftResult:
             captured["hc"] = hc
             return _verify("match", "a" * 128, "a" * 128)
 

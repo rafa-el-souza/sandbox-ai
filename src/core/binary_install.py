@@ -49,18 +49,13 @@ class BinarySha512MismatchError(SandboxExecutionError):
 
 @dataclass(frozen=True)
 class DriftResult:
-    """Outcome of a read-only on-disk drift probe (``detect_drift``)."""
+    """Outcome of a read-only on-disk drift probe.
 
-    status: _DriftStatus
-    installed_sha: str | None
-    pinned_sha: str
-
-
-@dataclass(frozen=True)
-class VerifyResult:
-    """Outcome of a read-only, no-network verification (``verify_only``).
-
-    Doctor calls this; it MUST NOT touch the network.
+    Returned by both ``detect_drift`` (setup's L6a install phase) and
+    ``verify_only`` (doctor's read-only, no-network check). The two callers
+    share one result type because the observation is byte-identical; a
+    second structurally-identical class gave no real nominal safety (the
+    fields and status domain are the same) and only invited a field-copy.
     """
 
     status: _DriftStatus
@@ -125,15 +120,14 @@ def detect_drift(name: str, host_config: HostConfig) -> DriftResult:
     return DriftResult(status=_classify(installed, pinned), installed_sha=installed, pinned_sha=pinned)
 
 
-def verify_only(name: str, host_config: HostConfig) -> VerifyResult:
+def verify_only(name: str, host_config: HostConfig) -> DriftResult:
     """Read-only, no-network verification for doctor.
 
-    Identical observation to ``detect_drift`` but a distinct result type so the
-    doctor check and the setup phase cannot accidentally cross-wire. No network
-    access — doctor must never reach upstream.
+    Returns the same :class:`DriftResult` as ``detect_drift`` (the observation
+    is identical and read-only). No network access — doctor must never reach
+    upstream.
     """
-    drift = detect_drift(name, host_config)
-    return VerifyResult(status=drift.status, installed_sha=drift.installed_sha, pinned_sha=drift.pinned_sha)
+    return detect_drift(name, host_config)
 
 
 def _download_and_verify(name: str, dest: Path) -> None:
@@ -169,14 +163,17 @@ def _chown_root(path: Path) -> None:
 def install_pinned(name: str, host_config: HostConfig, *, force: bool = False) -> None:
     """Download, sha512-verify, and atomically install a pinned binary.
 
-    Stages to ``.<name>.staging`` (same filesystem), ``chmod 0755`` +
-    ``chown root:root``, then ``os.rename`` to the reserved target (atomic).
-    The new target is sealed with ``chattr +i``.
+    This function ALWAYS downloads, sha512-verifies, and replaces the target:
+    it stages to ``.<name>.staging`` (same filesystem), ``chmod 0755`` +
+    ``chown root:root``, then ``os.rename`` to the reserved target (atomic) and
+    seals the new target with ``chattr +i``. It has no notion of a drift policy
+    — the no-overwrite-on-drift decision lives entirely in the L6a phase, which
+    only calls this function when it has already decided to (re)install.
 
-    With ``force=True`` an existing immutable target is unsealed (``chattr -i``)
-    before the rename; without it, an existing target is left in place by the
-    caller's drift policy — this function still performs the replace when
-    invoked (the L6a drift-skip lives in the phase, not here).
+    ``force`` does ONE additional thing: when ``True`` and the target already
+    exists, it ``chattr -i`` unseals the existing immutable target before the
+    rename (so the replace can proceed on an already-sealed binary). It does
+    NOT change whether the replace happens — the replace always happens.
 
     Raises ``BinarySha512MismatchError`` if the download fails verification.
     """

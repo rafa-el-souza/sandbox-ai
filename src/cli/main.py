@@ -2125,6 +2125,9 @@ def _run_setup_update_runsc(ctx: SetupContext) -> int:
     plan = run_plan_pass(phases, ctx)
     for line in cli_flow.render_plan(phases, plan):
         console.print(line, markup=False)
+    console.print(
+        cli_flow.plan_summary_line(cli_flow.tally_plan(plan)), markup=False
+    )
     apply_outcomes = run_apply_pass(phases, ctx)
     for line in cli_flow.summarize_apply(phases, apply_outcomes):
         console.print(line, markup=False)
@@ -2243,12 +2246,12 @@ def _setup_body(
     tally = cli_flow.tally_plan(plan)
     console.print(cli_flow.plan_summary_line(tally), markup=False)
 
+    if dry_run:
+        return 0
+
     decision = cli_flow.decide_gate(
         plan, is_tty=_stdin_is_tty(), assume_yes=yes
     )
-
-    if dry_run:
-        return 0
 
     if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
         console.print("Nothing to apply. Setup is complete.", markup=False)

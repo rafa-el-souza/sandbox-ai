@@ -281,6 +281,25 @@ def test_dry_run_runs_plan_only(runner: CliRunner) -> None:
     apply_mock.assert_not_called()
 
 
+def test_dry_run_with_conflict_plan_still_exits_0(runner: CliRunner) -> None:
+    # --dry-run is preview-only: it returns 0 after the plan pass even when
+    # the plan contains a CONFLICT (the gate decision is not computed on the
+    # dry-run path; the apply pass never runs).
+    phases = [_phase("l4")]
+    plan = [_plan("l4", PhaseResult.CONFLICT)]
+    with (
+        _root_ctx(),
+        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
+        patch("cli.main.run_plan_pass", return_value=plan),
+        patch("cli.main._stdin_is_tty", return_value=True),
+        patch("cli.main.run_apply_pass") as apply_mock,
+    ):
+        result = runner.invoke(app, ["setup", "--dry-run"])
+    assert result.exit_code == 0
+    assert "Proceed with apply?" not in result.output
+    apply_mock.assert_not_called()
+
+
 # ── --update-runsc: ONLY the l6a phase, force=True ───────────────────────────
 
 
@@ -305,6 +324,12 @@ def test_update_runsc_runs_only_l6a_with_force(runner: CliRunner) -> None:
         result = runner.invoke(app, ["setup", "--update-runsc"])
     assert result.exit_code == 0
     force_mock.assert_called_once_with(True)
+    # The --update-runsc fast path emits the same spec-exact Summary: line
+    # every other invocation emits (P5).
+    assert (
+        "Summary: 0 already correct, 1 will mutate, 0 blocked, 0 refused"
+        in result.output
+    )
     # The distro gate is NOT consulted on the --update-runsc fast path.
     gate_mock.assert_not_called()
     # Only the l6a phase is passed to the passes.

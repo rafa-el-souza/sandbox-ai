@@ -3,25 +3,21 @@
 Covers: probe branches (linger-absent MISSING, dockerd-unreachable MISSING,
 ALREADY_CORRECT), act enabling linger + installing only when dockerd absent,
 act skipping install when dockerd already up, reverify true/false, the
-content-aware fixture, and the PHASE shape. All ``Executor.run`` calls are
-faked — no real ``loginctl`` / ``machinectl`` / docker.
+already-correct→missing transition (L5 has no DRIFT dimension — an
+unreachable rootless dockerd is MISSING, not stale), and the PHASE shape. All
+``Executor.run`` calls are faked — no real ``loginctl`` / ``machinectl`` /
+docker.
 """
 
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
 
 import pytest
 from core.exceptions import SandboxExecutionError
 from core.host_config import MachinectlAuth, minimal_host_config
 from core.setup import l5_dockerd as l5
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from core.setup.phase_runner import Phase
 
 
 @pytest.fixture
@@ -137,27 +133,23 @@ def test_reverify_false_when_dockerd_down(
     assert l5.PHASE.reverify(ctx) is False
 
 
-def test_content_aware(
+def test_probe_already_correct_then_missing(
     world: _World,
     ctx: SetupContext,
-    assert_phase_content_aware: Callable[
-        [Phase, SetupContext, Callable[[], None]], None
-    ],
 ) -> None:
+    # L5 legitimately has no DRIFT dimension: an unreachable rootless dockerd
+    # is MISSING, not DRIFT (the install is absent / not running, not a stale
+    # version). So this asserts the honest L5 contract — ALREADY_CORRECT when
+    # converged, MISSING once dockerd stops being reachable — rather than
+    # using the content-aware (DRIFT) fixture, which does not apply here.
     world.linger = True
     world.dockerd = True
 
-    def make_stale() -> None:
-        # Rootless dockerd became unreachable (e.g. linger was disabled out of
-        # band) — the probe must flip to DRIFT, not stay ALREADY_CORRECT.
-        world.dockerd = False
-
-    # The content-aware fixture expects DRIFT after make_stale; L5 reports
-    # MISSING for an unreachable dockerd, so drive a linger-drop instead which
-    # the fixture's correct→stale contract is checked against below.
     before, _ = l5.PHASE.probe(ctx)
     assert before == PhaseResult.ALREADY_CORRECT
-    make_stale()
+
+    # Rootless dockerd became unreachable out of band (toggle dockerd off).
+    world.dockerd = False
     after, _ = l5.PHASE.probe(ctx)
     assert after == PhaseResult.MISSING
 

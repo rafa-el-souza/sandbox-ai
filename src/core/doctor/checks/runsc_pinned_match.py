@@ -3,8 +3,7 @@
 Read-only verification that ``/usr/local/libexec/sandbox-ai/runsc`` matches
 ``BINARY_REGISTRY["runsc"].sha512``. Routes through
 ``core.binary_install.verify_only`` (read-only; no network) so the doctor check
-and setup's L6a install phase share the single drift-classification logic and
-cannot cross-wire.
+and setup's L6a install phase share the single drift-classification logic.
 
 Verdicts (spec):
 

@@ -1,17 +1,17 @@
-"""Unit tests for :mod:`core.setup.extras` — registry + sticky-opt-in predicate.
+"""Unit tests for :mod:`core.setup.extras.registry` — registry + sticky-opt-in.
 
 These tests isolate the registry shape, the lazy loader, and the sticky-opt-in
 predicate (design D11) from the concrete ``fapolicyd``/``aide`` modules by using
-a STUB :class:`ExtraSpec`/``Phase`` — the contract Milestone F's G8b modules
-satisfy. Those modules now exist; these tests stay deliberately decoupled from
-them (the loader's absent-module behavior is keyed at a synthetic missing
-module, not at a real extra).
+a STUB :class:`ExtraSpec`/``Phase`` — the contract those extra modules satisfy.
+The modules ship in-tree; these tests stay deliberately decoupled from them
+(the loader's absent-module behavior is keyed at a synthetic missing module,
+not at a real extra).
 """
 
 from __future__ import annotations
 
 import pytest
-from core.setup.extras import EXTRAS, ExtraSpec, selected_extras
+from core.setup.extras.registry import EXTRAS, ExtraSpec, selected_extras
 
 
 def test_registry_has_both_extras_with_spec_exact_paths() -> None:

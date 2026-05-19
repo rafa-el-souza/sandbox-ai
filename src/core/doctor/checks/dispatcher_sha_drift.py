@@ -35,14 +35,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.dispatch import _DISPATCH_BINARY
 from core.doctor.types import CheckResult
 
 # Reuse — never re-implement — setup L6.5's single-source manifest helpers
 # (orchestrator decision 1 / F-011: a divergent file set here = false WARN).
 from core.setup.l65_dispatcher import _file_sha512, _manifest_path, _read_manifest, _source_bundle_sha512
-
-# The reserved, root-owned dispatcher install target (design D4/D6).
-_DISPATCH_BINARY = Path("/usr/local/libexec/sandbox-ai/dispatch")
 
 # Truncation length for sha512 values shown in operator-facing detail strings.
 _SHA_PREFIX = 16
@@ -66,7 +64,7 @@ def check_dispatcher_sha_drift(user: str, distro: str | None) -> CheckResult:
             remediation="run 'sudo sandbox setup' to install the dispatcher",
         )
 
-    binary_sha = _file_sha512(_DISPATCH_BINARY)
+    binary_sha = _file_sha512(Path(_DISPATCH_BINARY))
     if binary_sha is None:
         return CheckResult(
             status="skip",
