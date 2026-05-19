@@ -238,6 +238,41 @@ def test_reverify_false_on_corrupt_toml(home: Path, ctx: SetupContext) -> None:
     assert l4.PHASE.reverify(ctx) is False
 
 
+def test_probe_conflict_on_corrupt_toml_does_not_raise(
+    home: Path, ctx: SetupContext
+) -> None:
+    # A syntactically-corrupt operator toml must NOT crash the plan pass
+    # (which calls probe outside any try/except). The probe converts the
+    # parse failure into a clean CONFLICT refusal — the spec's "refuse with
+    # diagnostic, do NOT overwrite operator data".
+    _make_dirs(home)
+    _write_toml(home, "this is not = valid = toml ===\n[[[")
+    result, detail = l4.PHASE.probe(ctx)
+    assert result == PhaseResult.CONFLICT
+    assert "not valid TOML" in detail
+    assert "refusing to overwrite operator data" in detail
+    assert "sandbox-ai.toml" in detail
+
+
+def test_act_corrupt_toml_toctou_raises_typed_not_raw_parseerror(
+    home: Path, ctx: SetupContext
+) -> None:
+    # CONFLICT skips act, so a parse failure only reaches _act via a TOCTOU
+    # (file corrupted between probe and act). _act must raise the typed
+    # TomlParseError (runner-classifiable as FAIL), never a bare tomlkit
+    # ParseError, so operator data is never overwritten.
+    import tomlkit.exceptions
+
+    _make_dirs(home)
+    _write_toml(home, "broken = = =\n[[[")
+    with pytest.raises(l4.TomlParseError) as excinfo:
+        l4.PHASE.act(ctx)
+    assert isinstance(
+        excinfo.value.__cause__, tomlkit.exceptions.ParseError
+    )
+    assert not isinstance(excinfo.value, tomlkit.exceptions.ParseError)
+
+
 def test_content_aware(
     home: Path,
     ctx: SetupContext,

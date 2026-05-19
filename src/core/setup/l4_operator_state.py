@@ -69,13 +69,35 @@ def _toml_path() -> Path:
     return sandbox_ai_home() / "config" / "sandbox-ai.toml"
 
 
+class TomlParseError(RuntimeError):
+    """The operator's ``sandbox-ai.toml`` exists but is not valid TOML.
+
+    Single-sourced refusal type for the three ``_read_toml`` callers
+    (``_probe`` / ``_act`` / ``_reverify``) so the "do NOT overwrite operator
+    data on a parse failure" guard lives in one place (anti-hack rule 4).
+    Carries the path + the underlying ``tomlkit`` error as ``__cause__``.
+    """
+
+
 def _read_toml(path: Path) -> TOMLDocument | None:
-    """Parse the toml at ``path`` with tomlkit; ``None`` if it does not exist."""
+    """Parse the toml at ``path`` with tomlkit; ``None`` if it does not exist.
+
+    Raises :class:`TomlParseError` (chaining the underlying
+    ``tomlkit.exceptions.ParseError``) when the file exists but does not parse
+    — the single place a corrupt operator toml is converted to a typed,
+    operator-actionable refusal.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    return tomlkit.parse(text)
+    try:
+        return tomlkit.parse(text)
+    except tomlkit.exceptions.ParseError as exc:
+        raise TomlParseError(
+            f"{path} is not valid TOML ({exc}); refusing to overwrite "
+            f"operator data — fix or remove it and re-run"
+        ) from exc
 
 
 def _host_table(doc: TOMLDocument) -> dict[str, object]:
@@ -117,7 +139,10 @@ def _dirs_present() -> bool:
 def _probe(_ctx: SetupContext) -> tuple[PhaseResult, str]:
     """Content-aware probe over the per-user dirs + the toml ``[host]`` block."""
     path = _toml_path()
-    doc = _read_toml(path)
+    try:
+        doc = _read_toml(path)
+    except TomlParseError as exc:
+        return PhaseResult.CONFLICT, str(exc)
     if doc is None:
         return PhaseResult.MISSING, f"{path} absent; will seed [host] block"
 
@@ -149,6 +174,13 @@ def _act(_ctx: SetupContext) -> str:
     probe, so a present-but-invalid value is never reached here — this only
     seeds (absent) or merges-in missing required keys (drift), preserving every
     other operator key and tomlkit-tracked comment.
+
+    A corrupt-toml ``CONFLICT`` is caught by ``_probe`` and skips ``act``; the
+    only way a parse failure reaches the ``_read_toml`` call below is a TOCTOU
+    (the file was corrupted between probe and act). ``_read_toml`` raises the
+    typed :class:`TomlParseError` (never a bare ``tomlkit`` ``ParseError``),
+    which the phase-runner classifies as ``FAIL`` — operator data is never
+    overwritten.
     """
     home = sandbox_ai_home()
     for sub in _STATE_SUBDIRS:
@@ -180,7 +212,7 @@ def _reverify(_ctx: SetupContext) -> bool:
         return False
     try:
         doc = _read_toml(_toml_path())
-    except tomlkit.exceptions.ParseError:
+    except TomlParseError:
         return False
     if doc is None:
         return False
