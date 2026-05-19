@@ -316,6 +316,34 @@ def test_parse_sudo_version_subprocess_error(
 # ── machinectl path resolution + uniqueness (the three branches) ─────────────
 
 
+class _Stat:
+    """Minimal ``os.stat_result`` stand-in carrying only the identity keys."""
+
+    def __init__(self, st_dev: int, st_ino: int) -> None:
+        self.st_dev = st_dev
+        self.st_ino = st_ino
+
+
+def _stub_stat(
+    monkeypatch: pytest.MonkeyPatch, ident: dict[str, tuple[int, int]]
+) -> None:
+    """Stub ``os.stat`` to return per-path ``(st_dev, st_ino)`` identities.
+
+    A path absent from ``ident`` raises ``OSError`` (mirrors a real
+    unstattable path → ``_file_identity`` returns ``None`` → keyed on the
+    path string).
+    """
+
+    def _stat(path: str, *_a: object, **_k: object) -> _Stat:
+        try:
+            dev, ino = ident[path]
+        except KeyError as exc:
+            raise OSError(f"no such stub stat for {path!r}") from exc
+        return _Stat(dev, ino)
+
+    monkeypatch.setattr("os.stat", _stat)
+
+
 def test_resolve_machinectl_exactly_one_canonical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -323,6 +351,7 @@ def test_resolve_machinectl_exactly_one_canonical(
     monkeypatch.setattr(
         "os.access", lambda p, m: p == "/usr/bin/machinectl"
     )
+    _stub_stat(monkeypatch, {"/usr/bin/machinectl": (1, 100)})
     assert (
         resolve_machinectl_path(_ctx().host_config) == "/usr/bin/machinectl"
     )
@@ -335,23 +364,115 @@ def test_resolve_machinectl_zero(monkeypatch: pytest.MonkeyPatch) -> None:
         resolve_machinectl_path(_ctx().host_config)
 
 
-def test_resolve_machinectl_more_than_one(
+def test_resolve_machinectl_more_than_one_distinct_inode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Two GENUINELY DISTINCT binaries (different inodes) → still refused.
+
+    This is the F-005/V9e anti-shadow property: an attacker shadow at a
+    non-canonical dir is a different ``(st_dev, st_ino)`` and MUST keep
+    triggering the uniqueness refusal even after the usrmerge dedupe lands.
+    """
     _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
     monkeypatch.setattr("os.access", lambda p, m: True)
-    with pytest.raises(MachinectlResolutionError, match="single canonical"):
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/local/bin/machinectl": (1, 4242),  # attacker shadow inode
+            "/usr/bin/machinectl": (1, 100),  # the genuine systemd binary
+        },
+    )
+    with pytest.raises(
+        MachinectlResolutionError,
+        match="genuinely distinct binaries",
+    ):
+        resolve_machinectl_path(_ctx().host_config)
+
+
+def test_resolve_machinectl_usrmerge_same_inode_no_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """usrmerged host: 4 secure_path aliases of ONE inode → canonical, no raise.
+
+    ``/usr/sbin`` / ``/usr/bin`` / ``/sbin`` / ``/bin`` are symlinks to one
+    dir, so all four ``machinectl`` paths ``os.stat`` to the SAME
+    ``(st_dev, st_ino)``. The dedupe collapses them to a single binary and
+    resolves to the canonical ``/usr/bin/machinectl`` the L3 renderer expects.
+    """
+    _stub_secure_path(
+        monkeypatch, ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+    )
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    one_inode = (66, 94592)
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/sbin/machinectl": one_inode,
+            "/usr/bin/machinectl": one_inode,
+            "/sbin/machinectl": one_inode,
+            "/bin/machinectl": one_inode,
+        },
+    )
+    assert (
+        resolve_machinectl_path(_ctx().host_config) == "/usr/bin/machinectl"
+    )
+
+
+def test_resolve_machinectl_usrmerge_canonical_only_sbin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-inode aliases where the only canonical alias is ``/usr/sbin``.
+
+    No ``/usr/bin`` alias on secure_path → fall back deterministically to the
+    sole canonical alias (``/usr/sbin/machinectl``), still no refusal.
+    """
+    _stub_secure_path(monkeypatch, ["/usr/sbin", "/sbin"])
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    one_inode = (66, 94592)
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/sbin/machinectl": one_inode,
+            "/sbin/machinectl": one_inode,
+        },
+    )
+    assert (
+        resolve_machinectl_path(_ctx().host_config)
+        == "/usr/sbin/machinectl"
+    )
+
+
+def test_resolve_machinectl_unstattable_paths_keyed_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two paths that both fail ``os.stat`` key on their own strings.
+
+    A path whose ``os.stat`` raises is NEVER silently merged into another
+    binary's identity group — it keys on its own path string, so two
+    unstattable copies are still two distinct binaries → refused.
+    """
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    _stub_stat(monkeypatch, {})  # every os.stat raises OSError
+    with pytest.raises(
+        MachinectlResolutionError,
+        match="genuinely distinct binaries",
+    ):
         resolve_machinectl_path(_ctx().host_config)
 
 
 def test_resolve_machinectl_sole_non_canonical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/sbin"])
     monkeypatch.setattr(
         "os.access", lambda p, m: p == "/usr/local/bin/machinectl"
     )
-    with pytest.raises(MachinectlResolutionError, match="single canonical"):
+    _stub_stat(monkeypatch, {"/usr/local/bin/machinectl": (1, 100)})
+    with pytest.raises(
+        MachinectlResolutionError,
+        match="only outside a canonical",
+    ):
         resolve_machinectl_path(_ctx().host_config)
 
 

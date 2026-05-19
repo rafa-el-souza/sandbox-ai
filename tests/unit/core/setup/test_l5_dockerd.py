@@ -11,6 +11,7 @@ docker.
 
 from __future__ import annotations
 
+import pwd
 import subprocess
 
 import pytest
@@ -18,6 +19,18 @@ from core.exceptions import SandboxExecutionError
 from core.host_config import MachinectlAuth, minimal_host_config
 from core.setup import l5_dockerd as l5
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
+
+
+def _present_pw() -> pwd.struct_passwd:
+    """A real ``pwd.struct_passwd`` for the sandbox user.
+
+    ``probe_sandbox_pw_or_missing`` discriminates the positive case with
+    ``isinstance(result, pwd.struct_passwd)``, so the fake must be a genuine
+    ``pwd.struct_passwd`` — built from the canonical 7-tuple.
+    """
+    return pwd.struct_passwd(
+        ("sandboxuser", "x", 4242, 4242, "", "/home/sandboxuser", "/bin/sh")
+    )
 
 
 @pytest.fixture
@@ -65,6 +78,9 @@ def world(monkeypatch: pytest.MonkeyPatch) -> _World:
         raise AssertionError(f"unexpected command: {joined}")
 
     monkeypatch.setattr("core.executor.Executor.run", fake_run)
+    # The sandbox user EXISTS for the converged-host probe/act/reverify tests
+    # (post-L2). The not-yet-created case has its own dedicated tests below.
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _present_pw())
     return w
 
 
@@ -90,6 +106,54 @@ def test_probe_already_correct(world: _World, ctx: SetupContext) -> None:
     world.dockerd = True
     result, _ = l5.PHASE.probe(ctx)
     assert result == PhaseResult.ALREADY_CORRECT
+
+
+def test_probe_missing_when_sandbox_user_absent(
+    world: _World, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh-host first run: L2 has not created the user yet.
+
+    The plan pass runs all probes before any act, so ``pwd.getpwnam`` raises
+    ``KeyError``. L5 must return MISSING (NOT raise, NOT run
+    ``loginctl``/``docker info``) with the not-yet-created wording, mirroring
+    l1/l2a/l4/l6.
+    """
+
+    def _no_user(_n: str) -> pwd.struct_passwd:
+        raise KeyError(_n)
+
+    monkeypatch.setattr("pwd.getpwnam", _no_user)
+    result, detail = l5.PHASE.probe(ctx)
+    assert result == PhaseResult.MISSING
+    assert "does not exist yet" in detail
+    assert "created by L2" in detail
+    assert "dockerd will be installed" in detail
+    # The guard short-circuits BEFORE any loginctl / docker info crosses.
+    assert not any("show-user" in c for c in world.calls)
+    assert not any("docker info" in c for c in world.calls)
+
+
+def test_probe_non_user_error_still_propagates(
+    world: _World, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real L5 fault with the user PRESENT must NOT be masked as MISSING.
+
+    The guard only handles the not-yet-created user. With the user present,
+    an unexpected ``loginctl`` fault (e.g. logind down) propagates so the
+    systemic phase-runner guard classifies the phase FAIL — it is not
+    silently swallowed into a MISSING.
+    """
+
+    def _boom_run(
+        _self: object, cmd: list[str], *_a: object, **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "show-user" in cmd:
+            raise RuntimeError("logind is down")
+        raise AssertionError(f"unexpected command: {' '.join(cmd)}")
+
+    monkeypatch.setattr("core.executor.Executor.run", _boom_run)
+    with pytest.raises(RuntimeError, match="logind is down"):
+        l5.PHASE.probe(ctx)
 
 
 def test_act_enables_linger_and_installs_dockerd(

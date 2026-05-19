@@ -32,12 +32,18 @@ tool is itself idempotent but skipping it keeps a converged re-run fast).
 
 from __future__ import annotations
 
+import pwd
 from typing import TYPE_CHECKING
 
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import machinectl_cmd
-from core.setup.phase_runner import Identity, Phase, PhaseResult
+from core.setup.phase_runner import (
+    Identity,
+    Phase,
+    PhaseResult,
+    probe_sandbox_pw_or_missing,
+)
 
 if TYPE_CHECKING:
     from core.host_config import HostConfig
@@ -76,7 +82,27 @@ def _dockerd_reachable(host_config: HostConfig) -> bool:
 
 
 def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
-    """Content-aware probe: linger enabled AND rootless dockerd reachable."""
+    """Content-aware probe: linger enabled AND rootless dockerd reachable.
+
+    The plan pass runs every probe before any phase's ``act``, so on the
+    canonical fresh-host first run the sandbox user does not exist yet (L2
+    creates it). ``loginctl show-user`` / ``docker info`` against an absent
+    user would raise (a *different* failure mode than the ``pwd.getpwnam``
+    one — ``loginctl``'s "No such process") — so check the sandbox user via
+    the shared guard FIRST and return ``MISSING`` before any ``loginctl`` /
+    ``docker info`` runs. ``act``/``reverify`` are unguarded — by act-time
+    ``depends_on=("l4",)`` plus L2 having acted, the user exists. Other L5
+    errors with the user present still propagate (systemic guard → FAIL).
+    """
+    pw = probe_sandbox_pw_or_missing(ctx.host_config)
+    if not isinstance(pw, pwd.struct_passwd):
+        result, detail = pw
+        return (
+            result,
+            f"sandbox user {ctx.host_config.host.docker_unprivileged_user!r} "
+            f"does not exist yet (created by L2); dockerd will be installed "
+            f"({detail})",
+        )
     host_config = ctx.host_config
     user = _sandbox_user(host_config)
     if not _linger_enabled(user):

@@ -340,19 +340,48 @@ def sudo_floor_warning() -> str | None:
 # ── machinectl-path resolution + uniqueness (B-3, F-005; orchestrator dec. 1) ─
 
 
+def _file_identity(path: str) -> tuple[int, int] | None:
+    """Return ``(st_dev, st_ino)`` for ``path``, or ``None`` if unstattable.
+
+    The real-file identity key used to dedupe usrmerge symlink aliases:
+    ``/usr/bin``↔``/usr/sbin``↔``/sbin``↔``/bin`` on a usrmerged host all
+    point at the same inode, so multiple secure_path entries that resolve to
+    the *same file* are ONE binary — not the F-005 attacker-shadow case (a
+    shadow at a non-canonical dir is a *different* inode).
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def resolve_machinectl_path(host_config: HostConfig) -> str:
     """Resolve the single canonical ``machinectl`` on the secure_path basis.
 
     Pure / re-derivable (no caching, no module state). Enumerates every
-    ``secure_path`` directory containing an executable ``machinectl``:
+    ``secure_path`` directory containing an executable ``machinectl``, then
+    **dedupes by real file identity** (``os.stat`` ``(st_dev, st_ino)``) so a
+    usrmerged host — where ``/usr/bin``/``/usr/sbin``/``/sbin``/``/bin`` are
+    symlink aliases of one directory — counts the four aliased paths as the
+    ONE underlying binary rather than a false ">1" refusal:
 
-    - exactly one, in a canonical systemd location (``/usr/bin`` or
-      ``/usr/sbin``) → return that absolute path;
+    - the secure_path entries resolve (by inode) to exactly one file, and at
+      least one of its paths is in a canonical systemd location (``/usr/bin``
+      or ``/usr/sbin``) → return that canonical path;
     - zero → :class:`MachinectlResolutionError` (the orchestrator's relative
       ``sudo machinectl …`` could never be granted by any rule);
-    - more than one, OR the sole one in a non-canonical location →
-      :class:`MachinectlResolutionError` with a diagnostic listing every found
-      path and instructing removal of the unexpected copy.
+    - ≥2 *genuinely distinct* files (different ``(st_dev, st_ino)``) → the
+      F-005 attacker-shadow refusal: :class:`MachinectlResolutionError` with a
+      diagnostic listing every found path and instructing removal of the
+      unexpected copy;
+    - a sole binary whose only path is in a non-canonical location →
+      :class:`MachinectlResolutionError` (unchanged).
+
+    The inode dedupe PRESERVES the F-005/V9e anti-shadow property: a shadow
+    binary at e.g. ``/usr/local/bin/machinectl`` is a *different* inode, so it
+    still triggers the genuinely-distinct refusal; only the usrmerge symlink
+    dup (same inode) is collapsed.
 
     ``host_config`` is accepted for signature stability (Group 7's ``l3``
     codes against this exact signature); resolution itself is host-global.
@@ -371,14 +400,39 @@ def resolve_machinectl_path(host_config: HostConfig) -> str:
             "the systemd-container package."
         )
 
-    canonical = [p for p in found if os.path.dirname(p) in _CANONICAL_MACHINECTL_DIRS]
-    if len(found) == 1 and len(canonical) == 1:
-        return canonical[0]
+    # Dedupe by real file identity: group every found path by its
+    # ``(st_dev, st_ino)`` so usrmerge symlink aliases of one binary collapse
+    # to a single distinct file. A path that fails ``os.stat`` keys on its own
+    # string so it is never silently merged into a genuine binary's group.
+    distinct: dict[tuple[int, int] | str, list[str]] = {}
+    for path in found:
+        key: tuple[int, int] | str = _file_identity(path) or path
+        distinct.setdefault(key, []).append(path)
+
+    if len(distinct) > 1:
+        raise MachinectlResolutionError(
+            "machinectl does not resolve to a single canonical secure_path "
+            f"entry; found {len(distinct)} genuinely distinct binaries: "
+            f"{found}. Remove the unexpected copy; the orchestrator expects "
+            "the single systemd /usr/bin/machinectl."
+        )
+
+    aliases = next(iter(distinct.values()))
+    canonical = [
+        p for p in aliases if os.path.dirname(p) in _CANONICAL_MACHINECTL_DIRS
+    ]
+    if canonical:
+        # Prefer ``/usr/bin/machinectl`` (the form the L3 renderer + operator
+        # texts name); fall back to any other canonical alias deterministically.
+        for preferred in sorted(canonical):
+            if os.path.dirname(preferred) == "/usr/bin":
+                return preferred
+        return sorted(canonical)[0]
 
     raise MachinectlResolutionError(
-        "machinectl does not resolve to a single canonical secure_path entry; "
-        f"found: {found}. Remove the unexpected copy; the orchestrator expects "
-        "the single systemd /usr/bin/machinectl."
+        "machinectl resolves to a single binary but only outside a canonical "
+        f"systemd location; found: {found}. The orchestrator expects the "
+        "single systemd /usr/bin/machinectl."
     )
 
 
