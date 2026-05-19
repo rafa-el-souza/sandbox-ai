@@ -13,6 +13,7 @@ mechanism, never imported).
 
 from __future__ import annotations
 
+import pwd
 import sys
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -27,10 +28,13 @@ from core.setup.phase_runner import (
     PhaseDiscoveryError,
     PhasePlanOutcome,
     PhaseResult,
+    SandboxUserNotYetCreated,
     SetupContext,
     _is_phase_module_name,
     discover_phases,
     order_phases,
+    probe_sandbox_pw_or_missing,
+    resolve_sandbox_pw,
     route,
     run_apply_pass,
     run_plan_pass,
@@ -216,17 +220,21 @@ def test_discover_phases_PHASE_wrong_type_raises(
 
 def test_discover_phases_default_is_real_core_setup() -> None:
     # Production default: the real core.setup package, now populated with the
-    # twelve wired phase modules. This is the cross-module integration check —
-    # it fails if any phase module drifts its id/depends_on out of the
-    # canonical graph, or a module stops exporting a valid PHASE.
+    # thirteen wired phase modules (l2a split out of l1 — the uid-scoped
+    # Delegate drop-in needs L2 to have created the sandbox user first). This
+    # is the cross-module integration check — it fails if any phase module
+    # drifts its id/depends_on out of the canonical graph, or a module stops
+    # exporting a valid PHASE.
     discovered = discover_phases()
     assert sorted(p.id for p in discovered) == sorted(
-        ["l0", "l1", "l2", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"]
+        ["l0", "l1", "l2", "l2a", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"]
     )
-    # The depends_on edges across all twelve modules must topologically
-    # resolve to the single canonical setup chain.
+    # The depends_on edges across all thirteen modules must topologically
+    # resolve to the single canonical setup chain — l2a sits between l2 and
+    # l4 (after the user exists, before rootless dockerd needs cgroup
+    # delegation).
     assert [p.id for p in order_phases(discovered)] == [
-        "l0", "l1", "l2", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"
+        "l0", "l1", "l2", "l2a", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"
     ]
 
 
@@ -317,6 +325,45 @@ def test_plan_pass_probes_only_no_mutation() -> None:
     assert out[1].result == PhaseResult.MISSING
     assert out[2].result == PhaseResult.DRIFT
     assert "probed" in out[0].detail
+
+
+def _raising_probe_phase(
+    pid: str, *, depends_on: tuple[str, ...] = ()
+) -> Phase:
+    """A phase whose probe raises (the unwrapped-probe B1 class)."""
+
+    def _probe(_c: SetupContext) -> tuple[PhaseResult, str]:
+        raise KeyError("getpwnam(): name not found: 'sandbox'")
+
+    return Phase(
+        id=pid,
+        name=f"phase {pid}",
+        identity=Identity.ROOT,
+        probe=_probe,
+        act=lambda _c: f"{pid} acted",
+        reverify=lambda _c: True,
+        depends_on=depends_on,
+    )
+
+
+def test_plan_pass_probe_raises_is_fail_not_propagated() -> None:
+    """A raising probe must NOT crash run_plan_pass; record FAIL, continue.
+
+    Regression for the B1 class (an unguarded ``pwd.getpwnam`` KeyError in a
+    probe crashing ``sandbox setup --dry-run``).
+    """
+    phases = [
+        _raising_probe_phase("a"),
+        _phase("b", probe_result=PhaseResult.MISSING, depends_on=("a",)),
+    ]
+    out = run_plan_pass(phases, _ctx())
+    assert [o.phase_id for o in out] == ["a", "b"]
+    assert out[0].result == PhaseResult.FAIL
+    assert "probe raised" in out[0].detail
+    assert "name not found" in out[0].detail
+    # The plan pass does not block dependents (it is probe-only); b still
+    # probes normally — the point is the pass did not crash.
+    assert out[1].result == PhaseResult.MISSING
 
 
 # ── run_apply_pass ───────────────────────────────────────────────────────────
@@ -529,6 +576,119 @@ def test_apply_pass_conflict_does_not_fire_rollback() -> None:
     assert rolled == []  # a clean refusal mutated nothing; nothing to roll back
     assert out[0].result == PhaseResult.CONFLICT
     assert out[0].reverified is False
+
+
+def test_apply_pass_probe_raises_is_fail_and_blocks_dependents() -> None:
+    """A raising probe in the apply pass is a FAIL; dependents BLOCKED_BY.
+
+    Regression for the B1 class: a raising ``phase.probe`` must not crash
+    ``sandbox setup`` (apply); the runner records FAIL, the transitive
+    dependents are BLOCKED_BY, and an independent phase still runs.
+    """
+    a = _raising_probe_phase("a")
+    b = _phase("b", probe_result=PhaseResult.MISSING, depends_on=("a",))
+    c = _phase("c", probe_result=PhaseResult.MISSING, depends_on=("b",))
+    independent = _phase("z", probe_result=PhaseResult.MISSING)
+
+    out = {
+        o.phase_id: o
+        for o in run_apply_pass([a, b, c, independent], _ctx())
+    }
+    assert out["a"].result == PhaseResult.FAIL
+    assert "probe raised" in out["a"].detail
+    assert "name not found" in out["a"].detail
+    assert out["a"].reverified is False
+    assert out["b"].result == PhaseResult.BLOCKED_BY
+    assert "blocked by failed phase 'a'" in out["b"].detail
+    assert out["c"].result == PhaseResult.BLOCKED_BY
+    assert "blocked by failed phase 'b'" in out["c"].detail
+    # Independent phase still runs despite a's probe raising.
+    assert out["z"].result == PhaseResult.ALREADY_CORRECT
+    assert out["z"].reverified is True
+
+
+def test_apply_pass_probe_raises_does_not_fire_rollback() -> None:
+    rolled: list[str] = []
+
+    def _probe(_c: SetupContext) -> tuple[PhaseResult, str]:
+        raise RuntimeError("probe blew up")
+
+    def _rollback(_c: SetupContext) -> None:
+        rolled.append("rolled")
+
+    phase = Phase(
+        id="l3a",
+        name="phase l3a",
+        identity=Identity.ROOT,
+        probe=_probe,
+        act=lambda _c: "acted",
+        reverify=lambda _c: True,
+        rollback=_rollback,
+    )
+    out = run_apply_pass([phase], _ctx())
+    assert rolled == []  # a probe mutated nothing; nothing to roll back
+    assert out[0].result == PhaseResult.FAIL
+    assert "probe raised: probe blew up" in out[0].detail
+
+
+# ── shared sandbox-user getpwnam guard (design D10 / B1-class) ───────────────
+
+
+def _fake_pw(uid: int, home: str) -> pwd.struct_passwd:
+    # A real struct_passwd so isinstance(..., pwd.struct_passwd) discrimination
+    # (the documented call-site contract) is exercised faithfully.
+    return pwd.struct_passwd(
+        ("sandboxuser", "x", uid, uid, "", home, "/bin/bash")
+    )
+
+
+def test_resolve_sandbox_pw_returns_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _fake_pw(4242, "/home/sb"))
+    pw = resolve_sandbox_pw(_ctx().host_config)
+    assert pw.pw_uid == 4242
+    assert pw.pw_dir == "/home/sb"
+
+
+def test_resolve_sandbox_pw_raises_typed_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(_n: str) -> object:
+        raise KeyError("getpwnam(): name not found: 'sandboxuser'")
+
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+    with pytest.raises(SandboxUserNotYetCreated, match="does not exist yet"):
+        resolve_sandbox_pw(_ctx().host_config)
+
+
+def test_probe_sandbox_pw_or_missing_returns_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _fake_pw(7, "/home/x"))
+    result = probe_sandbox_pw_or_missing(_ctx().host_config)
+    assert isinstance(result, pwd.struct_passwd)
+    assert result.pw_uid == 7
+
+
+def test_probe_sandbox_pw_or_missing_returns_missing_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(_n: str) -> object:
+        raise KeyError("name not found")
+
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+    result = probe_sandbox_pw_or_missing(_ctx().host_config)
+    assert not isinstance(result, pwd.struct_passwd)
+    res, detail = result
+    assert res == PhaseResult.MISSING
+    assert "does not exist yet" in detail
+
+
+def test_sandbox_user_not_yet_created_is_a_keyerror() -> None:
+    # It must remain a KeyError subclass so an unguarded `except KeyError`
+    # at a call site still catches it (defense in depth).
+    assert issubclass(SandboxUserNotYetCreated, KeyError)
 
 
 # ── assert_phase_content_aware conftest fixture (consumed, not imported) ──────

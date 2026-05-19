@@ -293,5 +293,5 @@ def test_content_aware(
 
 def test_phase_shape() -> None:
     assert l4.PHASE.id == "l4"
-    assert l4.PHASE.depends_on == ("l2",)
+    assert l4.PHASE.depends_on == ("l2a",)
     assert l4.PHASE.identity == Identity.OPERATOR

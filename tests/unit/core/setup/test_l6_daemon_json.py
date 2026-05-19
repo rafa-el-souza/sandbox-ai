@@ -10,6 +10,7 @@ PHASE shape. ``pwd`` + ``Executor.run`` are faked — no real user / docker.
 from __future__ import annotations
 
 import json
+import pwd
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -34,10 +35,23 @@ def ctx() -> SetupContext:
     )
 
 
+def _fake_pw(home: str) -> pwd.struct_passwd:
+    return pwd.struct_passwd(
+        ("sandboxuser", "x", 4242, 4242, "", home, "/bin/bash")
+    )
+
+
 @pytest.fixture
 def daemon_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the daemon.json path to a tmp file (pwd home faked)."""
+    """Redirect the daemon.json path to a tmp file (pwd home faked).
+
+    The probe resolves the path from ``pwd.getpwnam(...).pw_dir`` via the
+    shared sandbox-user guard, so fake ``pwd.getpwnam`` to return ``tmp_path``
+    as the sandbox user's home; ``_daemon_json_path`` (still used by act /
+    reverify) is patched to the same tmp file.
+    """
     path = tmp_path / ".config" / "docker" / "daemon.json"
+    monkeypatch.setattr("pwd.getpwnam", lambda _u: _fake_pw(str(tmp_path)))
     monkeypatch.setattr(l6, "_daemon_json_path", lambda _hc: path)
     return path
 
@@ -112,6 +126,25 @@ def test_probe_refuses_non_object_json(
     _write(daemon_json, [1, 2, 3])
     with pytest.raises(SandboxExecutionError):
         l6.PHASE.probe(ctx)
+
+
+def test_probe_missing_when_sandbox_user_not_yet_created(
+    ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1-class guard: a not-yet-created sandbox user is MISSING, not a crash.
+
+    The probe resolves ``~<sandbox-user>`` via the shared guard; on a fresh
+    host (user created by an earlier phase) ``pwd.getpwnam`` raises KeyError —
+    the probe must return MISSING, never let the KeyError escape.
+    """
+
+    def _boom(_u: str) -> object:
+        raise KeyError("getpwnam(): name not found: 'sandboxuser'")
+
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+    result, detail = l6.PHASE.probe(ctx)
+    assert result == PhaseResult.MISSING
+    assert "does not exist yet" in detail
 
 
 def test_act_creates_and_merges_preserving_operator_runtimes(

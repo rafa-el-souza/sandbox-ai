@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+import pwd
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -356,6 +357,60 @@ def route(identity: Identity, ctx: SetupContext) -> list[str]:
     )
 
 
+class SandboxUserNotYetCreated(KeyError):
+    """The sandbox OS user does not exist *yet* during a probe.
+
+    The single-sourced guard type for the content-aware-probe contract: a
+    phase whose probe resolves the sandbox user / uid / home before L2 has
+    created it (the canonical fresh-host first run) must treat the absent user
+    as the ``MISSING`` signal — a later phase (L2) creates it — NOT as a crash.
+    :func:`resolve_sandbox_pw` raises this; :func:`probe_sandbox_pw_or_missing`
+    converts it to a ``(MISSING, detail)`` probe outcome so the runner's plan
+    and apply passes never see an escaping ``KeyError``.
+    """
+
+
+def resolve_sandbox_pw(host_config: HostConfig) -> pwd.struct_passwd:
+    """Resolve the sandbox user's passwd entry, raising the typed guard.
+
+    Wraps :func:`pwd.getpwnam` for the configured
+    ``[host].docker_unprivileged_user`` and re-raises a bare ``KeyError`` as
+    :class:`SandboxUserNotYetCreated` so probe call-sites can branch on the
+    not-yet-created case via :func:`probe_sandbox_pw_or_missing`.
+    """
+    user = host_config.host.docker_unprivileged_user
+    try:
+        return pwd.getpwnam(user)
+    except KeyError as exc:
+        raise SandboxUserNotYetCreated(
+            f"sandbox user {user!r} does not exist yet (created by an earlier "
+            f"phase L2); treat as MISSING"
+        ) from exc
+
+
+def probe_sandbox_pw_or_missing(
+    host_config: HostConfig,
+) -> pwd.struct_passwd | tuple[PhaseResult, str]:
+    """Return the sandbox passwd entry, or a ``(MISSING, detail)`` probe pair.
+
+    The shared content-aware-probe guard (design D10): every setup probe that
+    needs the sandbox user / uid / home calls this and, when it does NOT get a
+    :class:`pwd.struct_passwd` back, returns the ``(MISSING, detail)`` pair
+    verbatim as its probe outcome. The not-yet-created user IS the ``MISSING``
+    signal (a later phase creates it) — never a crash escaping through the
+    unwrapped plan/apply passes.
+
+    Call-sites discriminate with ``isinstance(result, pwd.struct_passwd)``
+    (the positive case) — NOT ``isinstance(result, tuple)``: ``struct_passwd``
+    is itself a ``tuple`` subclass, so a bare-``tuple`` check would
+    mis-classify a real passwd entry.
+    """
+    try:
+        return resolve_sandbox_pw(host_config)
+    except SandboxUserNotYetCreated as exc:
+        return PhaseResult.MISSING, str(exc)
+
+
 # ``PhaseResult`` values that mean "the phase converged / nothing to do" — a
 # phase in one of these is NOT a mutation and does NOT block dependents.
 _NON_MUTATING_RESULTS: frozenset[PhaseResult] = frozenset(
@@ -377,7 +432,18 @@ def run_plan_pass(
     ordered = order_phases(phases)
     outcomes: list[PhasePlanOutcome] = []
     for phase in ordered:
-        result, detail = phase.probe(ctx)
+        try:
+            result, detail = phase.probe(ctx)
+        except Exception as exc:
+            # A raising probe must NOT crash the plan pass (the unwrapped-probe
+            # B1 class). The runner is the boundary that turns it into a typed
+            # FAIL outcome; the pass continues to the next phase.
+            outcomes.append(
+                PhasePlanOutcome(
+                    phase.id, PhaseResult.FAIL, f"probe raised: {exc}"
+                )
+            )
+            continue
         outcomes.append(PhasePlanOutcome(phase.id, result, detail))
     return outcomes
 
@@ -434,7 +500,24 @@ def run_apply_pass(
             )
             continue
 
-        result, detail = phase.probe(ctx)
+        try:
+            result, detail = phase.probe(ctx)
+        except Exception as exc:
+            # A raising probe is a FAIL (the unwrapped-probe B1 class), mirrored
+            # on _apply_one's act/reverify handling: record FAIL, mark the
+            # phase failed so its transitive dependents are BLOCKED_BY, and
+            # continue the pass. ``rollback`` is NOT fired — a probe mutates
+            # nothing, so there is nothing to undo (same as the CONFLICT path).
+            failed_ids.add(phase.id)
+            outcomes.append(
+                PhaseApplyOutcome(
+                    phase.id,
+                    PhaseResult.FAIL,
+                    f"probe raised: {exc}",
+                    reverified=False,
+                )
+            )
+            continue
         if result in _NON_MUTATING_RESULTS:
             outcomes.append(
                 PhaseApplyOutcome(phase.id, result, detail, reverified=False)
@@ -517,9 +600,12 @@ __all__ = [
     "ProbeFn",
     "ReverifyFn",
     "RollbackFn",
+    "SandboxUserNotYetCreated",
     "SetupContext",
     "discover_phases",
     "order_phases",
+    "probe_sandbox_pw_or_missing",
+    "resolve_sandbox_pw",
     "route",
     "run_apply_pass",
     "run_plan_pass",

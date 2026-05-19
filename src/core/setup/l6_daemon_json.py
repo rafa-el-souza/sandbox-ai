@@ -32,7 +32,12 @@ from typing import TYPE_CHECKING
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import machinectl_cmd
-from core.setup.phase_runner import Identity, Phase, PhaseResult
+from core.setup.phase_runner import (
+    Identity,
+    Phase,
+    PhaseResult,
+    probe_sandbox_pw_or_missing,
+)
 
 if TYPE_CHECKING:
     from core.host_config import HostConfig
@@ -88,8 +93,17 @@ def _observed_runtime(doc: dict[str, object]) -> object | None:
 
 
 def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
-    """Content-aware deep-equal probe over the reserved runtime key."""
-    path = _daemon_json_path(ctx.host_config)
+    """Content-aware deep-equal probe over the reserved runtime key.
+
+    Uses the shared sandbox-user guard: although ``depends_on=("l5",)`` (after
+    L2 created the user), the not-yet-created user is the ``MISSING`` signal
+    rather than a crash escaping the plan/apply passes (content-aware-probe
+    contract / B1 class).
+    """
+    pw = probe_sandbox_pw_or_missing(ctx.host_config)
+    if not isinstance(pw, pwd.struct_passwd):
+        return pw
+    path = Path(pw.pw_dir) / ".config" / "docker" / "daemon.json"
     doc = _read_doc(path)
     if doc is None:
         return PhaseResult.MISSING, f"{path} absent; will create with reserved key"

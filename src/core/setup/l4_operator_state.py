@@ -230,5 +230,5 @@ PHASE = Phase(
     probe=_probe,
     act=_act,
     reverify=_reverify,
-    depends_on=("l2",),
+    depends_on=("l2a",),
 )
