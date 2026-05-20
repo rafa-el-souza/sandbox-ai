@@ -47,6 +47,10 @@ class _World:
     def __init__(self) -> None:
         self.linger = False
         self.dockerd = False
+        # ``user@<uid>.service`` readiness for the post-linger gate (FIX-B-i).
+        # Default ready — existing converged-host tests do not exercise the
+        # not-yet-ready window; dedicated tests below toggle this off.
+        self.user_manager_ready = True
         self.calls: list[str] = []
 
 
@@ -68,6 +72,16 @@ def world(monkeypatch: pytest.MonkeyPatch) -> _World:
         if "enable-linger" in cmd:
             w.linger = True
             return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "systemctl is-active user@" in joined:
+            # Post-linger readiness poll — the inner bash loop succeeds iff
+            # the manager is "ready", otherwise the loop exits 1 and Executor
+            # raises SandboxExecutionError (matches real-world behavior).
+            if w.user_manager_ready:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            raise SandboxExecutionError(
+                "[FATAL] Sandbox Execution Fault: Command failed with exit status 1.\n"
+                "Error Trace:\nuser@4242.service did not become active"
+            )
         if "docker info" in joined:
             if not w.dockerd:
                 raise SandboxExecutionError("docker info failed")
@@ -222,3 +236,129 @@ def test_phase_shape() -> None:
     assert l5.PHASE.id == "l5"
     assert l5.PHASE.depends_on == ("l4",)
     assert l5.PHASE.identity == Identity.SANDBOX
+
+
+# ── FIX-A regression: loginctl show-user errors on freshly-created user ──────
+
+
+def test_probe_missing_when_loginctl_show_user_raises(
+    ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``loginctl show-user`` raising must be tolerated as MISSING.
+
+    Round-3 smoke (fedora 12.1b, arch 12.1b) failed identically: a freshly
+    created sandbox user (post-L2, never logged in) is unknown to
+    ``systemd-logind`` — ``loginctl show-user … --property=Linger`` returns
+    exit 1 with "User ID N is not logged in or lingering". The previous
+    implementation called ``Executor().run([...])`` (default ``check=True``)
+    so the ``CalledProcessError`` wrapped to ``SandboxExecutionError``
+    propagated through ``_probe`` and the phase classified FAIL. F-014
+    same-class recurrence of the round-3 L5 fix.
+
+    Post-fix expectation: ``_linger_enabled`` catches the
+    ``SandboxExecutionError`` and returns ``False``, so ``_probe`` reaches
+    the ``not linger_enabled`` branch and returns ``MISSING`` (apply pass
+    proceeds to ``enable-linger``).
+    """
+    # User present (post-L2), but loginctl errors as in the smoke evidence.
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _present_pw())
+
+    def _loginctl_errors(
+        _self: object, cmd: list[str], *_a: object, **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "show-user" in cmd:
+            raise SandboxExecutionError(
+                "[FATAL] Sandbox Execution Fault: Command "
+                "'loginctl show-user sandbox --property=Linger' failed with "
+                "exit status 1.\nError Trace:\nFailed to get user: User ID "
+                "4242 is not logged in or lingering"
+            )
+        raise AssertionError(f"unexpected command: {' '.join(cmd)}")
+
+    monkeypatch.setattr("core.executor.Executor.run", _loginctl_errors)
+
+    result, detail = l5.PHASE.probe(ctx)
+    assert result == PhaseResult.MISSING
+    assert "linger not enabled" in detail
+
+
+# ── FIX-B-i regression: post-linger user-manager readiness poll ──────────────
+
+
+def test_act_polls_user_manager_before_install(
+    world: _World, ctx: SetupContext
+) -> None:
+    """The readiness poll must happen between ``enable-linger`` and install.
+
+    A freshly-lingered user's ``user@<uid>.service`` takes a moment to come
+    up; crossing via ``machinectl shell`` against an unready manager returns
+    empty stdout (sentinel-not-found fail-closed, observed on fedora 12.2).
+    The poll uses ``systemctl is-active user@<uid>.service`` root-side (no
+    crossing) in a bounded shell-retry loop, exactly between the
+    ``enable-linger`` mutation and the rootless-install crossing.
+    """
+    detail = l5.PHASE.act(ctx)
+    assert "installed" in detail
+
+    # Locate the three load-bearing commands in call order.
+    enable_idx = next(
+        i for i, c in enumerate(world.calls) if "enable-linger" in c
+    )
+    poll_idx = next(
+        i for i, c in enumerate(world.calls)
+        if "systemctl is-active user@" in c
+    )
+    install_idx = next(
+        i for i, c in enumerate(world.calls)
+        if "dockerd-rootless-setuptool.sh install" in c
+    )
+    # Enforce ordering: enable-linger → readiness poll → install crossing.
+    assert enable_idx < poll_idx < install_idx
+    # The poll targets the sandbox user's uid (4242 from _present_pw).
+    poll_cmd = world.calls[poll_idx]
+    assert "user@4242.service" in poll_cmd
+    # The poll is a bounded retry loop (not a one-shot).
+    assert "seq 1 30" in poll_cmd
+
+
+def test_act_polls_user_manager_when_dockerd_already_up(
+    world: _World, ctx: SetupContext
+) -> None:
+    """The poll must also gate the dockerd-already-up shortcut path.
+
+    The shortcut path crosses via ``_dockerd_reachable`` (``docker info``);
+    that crossing also needs a ready user manager.
+    """
+    world.dockerd = True
+    l5.PHASE.act(ctx)
+    enable_idx = next(
+        i for i, c in enumerate(world.calls) if "enable-linger" in c
+    )
+    poll_idx = next(
+        i for i, c in enumerate(world.calls)
+        if "systemctl is-active user@" in c
+    )
+    info_idx = next(
+        i for i, c in enumerate(world.calls) if "docker info" in c
+    )
+    assert enable_idx < poll_idx < info_idx
+
+
+def test_act_raises_when_user_manager_never_ready(
+    world: _World, ctx: SetupContext
+) -> None:
+    """If the per-user manager never becomes active, act surfaces the failure.
+
+    The bounded shell-retry loop's ``exit 1`` raises a
+    ``SandboxExecutionError`` from ``Executor().run`` (which the phase_runner
+    catches and classifies FAIL with a diagnostic). The diagnostic mentions
+    the user-manager unit explicitly.
+    """
+    world.user_manager_ready = False
+    with pytest.raises(SandboxExecutionError) as exc:
+        l5.PHASE.act(ctx)
+    assert "user@4242.service" in str(exc.value)
+    # No install crossing must occur after a failed readiness gate.
+    assert not any(
+        "dockerd-rootless-setuptool.sh install" in c for c in world.calls
+    )

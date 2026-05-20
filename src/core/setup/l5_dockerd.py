@@ -28,6 +28,21 @@ linger; ``docker info`` (crossed as the sandbox user) reports dockerd. Both
 true → ``ALREADY_CORRECT``; otherwise ``MISSING`` (the act enables linger then
 runs the rootless install only when dockerd is not already up — the install
 tool is itself idempotent but skipping it keeps a converged re-run fast).
+
+**Post-linger user-manager readiness gate (F-014 same-class).** A freshly
+created sandbox user is unknown to ``systemd-machined`` / ``loginctl`` until
+linger is enabled AND the per-user manager (``user@<uid>.service``) has come
+up. Two consequences:
+
+- ``_linger_enabled`` tolerates ANY ``loginctl show-user`` failure as
+  "linger absent" (the early-state observation that triggered the round-3
+  recurrence). Linger-absent is MISSING, so we fail-safe to the MISSING
+  branch instead of raising into the systemic phase-runner guard.
+- After ``enable-linger`` in ``_act``, we bounded-poll ``user@<uid>.service``
+  for ``active`` BEFORE the rootless-install crossing. ``machinectl shell``
+  against a manager that is not yet ready returns an empty stdout and the
+  sentinel-not-found fail-closed fires — diagnostically opaque and a real
+  observed failure mode on Fedora.
 """
 
 from __future__ import annotations
@@ -56,10 +71,22 @@ def _sandbox_user(host_config: HostConfig) -> str:
 
 
 def _linger_enabled(user: str) -> bool:
-    """``True`` iff ``loginctl`` reports ``Linger=yes`` for ``user``."""
-    result = Executor().run(
-        ["loginctl", "show-user", user, "--property=Linger"]
-    )
+    """``True`` iff ``loginctl`` reports ``Linger=yes`` for ``user``.
+
+    Tolerates any ``SandboxExecutionError`` from ``loginctl show-user`` as
+    "linger absent". A freshly-created, never-logged-in user is unknown to
+    ``systemd-logind`` ("User ID N is not logged in or lingering", exit 1)
+    until linger is enabled. Treating that as MISSING lets the apply pass
+    proceed to ``enable-linger`` instead of crashing into the systemic
+    phase-runner FAIL guard (F-014 same-class fix; mirrors the symmetric
+    ``_dockerd_reachable`` catch).
+    """
+    try:
+        result = Executor().run(
+            ["loginctl", "show-user", user, "--property=Linger"]
+        )
+    except SandboxExecutionError:
+        return False
     return "Linger=yes" in (result.stdout or "")
 
 
@@ -131,6 +158,25 @@ def _act(ctx: SetupContext) -> str:
     host_config = ctx.host_config
     user = _sandbox_user(host_config)
     Executor().run(["loginctl", "enable-linger", user])
+
+    # Post-linger readiness gate: the per-user systemd manager
+    # (``user@<uid>.service``) takes a moment to come up on a freshly-lingered,
+    # never-logged-in user. Crossing via ``machinectl shell`` before the
+    # manager is ready returns empty stdout (sentinel-not-found fail-closed).
+    # Bounded shell-retry root-side (no boundary crossing — ``systemctl
+    # is-active user@<uid>.service`` is a root-readable query for the target
+    # user's manager unit).
+    uid = pwd.getpwnam(user).pw_uid
+    Executor().run(
+        [
+            "/bin/bash",
+            "-c",
+            f"for i in $(seq 1 30); do "
+            f"systemctl is-active user@{uid}.service >/dev/null 2>&1 "
+            f"&& exit 0; sleep 1; done; "
+            f"echo 'user@{uid}.service did not become active' >&2; exit 1",
+        ],
+    )
 
     if _dockerd_reachable(host_config):
         return f"linger enabled for {user!r}; rootless dockerd already up"

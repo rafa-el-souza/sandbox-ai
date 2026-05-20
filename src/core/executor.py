@@ -110,11 +110,21 @@ class Executor:
             if not matches:
                 # Fail-closed: sentinel not found
                 sanitized = self._sanitize_pty_output(stdout)
-                raise SandboxExecutionError(
+                error_msg = (
                     f"[FATAL] Exit sentinel not found in command output. "
                     f"The command may have crashed or produced corrupted output.\n"
                     f"Output:\n{sanitized}"
                 )
+                # Diagnostic: include stderr (sanitized for consistency) when
+                # present, mirroring the ``CalledProcessError`` branch above.
+                # Empty-output sentinel-not-found failures (machinectl shell
+                # against a not-yet-ready user manager, sudo refusal, etc.)
+                # carry the actual cause on stderr; dropping it silently masks
+                # the root cause.
+                if result.stderr:
+                    sanitized_stderr = self._sanitize_pty_output(result.stderr)
+                    error_msg += f"\nError Trace:\n{sanitized_stderr}"
+                raise SandboxExecutionError(error_msg)
 
             last_match = matches[-1]
             exit_code = int(last_match.group(2))

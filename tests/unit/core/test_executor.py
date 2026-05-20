@@ -253,6 +253,89 @@ class TestSentinelFailClosed:
                     sentinel=True,
                 )
 
+    def test_sentinel_not_found_surfaces_stderr_diagnostic(self) -> None:
+        """WHEN sentinel-not-found with stderr present, THEN stderr is in the error.
+
+        Round-3 smoke (fedora 12.2 L6, fedora 12.4 L3a) hit the
+        sentinel-not-found fail-closed with EMPTY stdout — the operator
+        could not tell if the inner bash crashed, was killed by sudo, or
+        had some other failure. Prior to FIX-B-diag, ``result.stderr`` was
+        silently dropped from the error message. Post-fix, the diagnostic
+        mirrors the ``CalledProcessError`` branch and includes the
+        sanitized stderr under an ``Error Trace:`` block when non-empty.
+        """
+        executor = Executor()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr="sudo: a password is required\n"
+            )
+            with (
+                patch("core.executor.secrets.token_hex", return_value="abcdef0123456789"),
+                pytest.raises(SandboxExecutionError) as exc_info,
+            ):
+                executor.run(
+                    ["sudo", "machinectl", "shell", "user@.host", "/bin/bash", "-c", "true"],
+                    sentinel=True,
+                )
+            msg = str(exc_info.value)
+            assert "sentinel not found" in msg.lower()
+            assert "Error Trace:" in msg
+            assert "sudo: a password is required" in msg
+
+    def test_sentinel_not_found_omits_trace_when_stderr_empty(self) -> None:
+        """WHEN sentinel-not-found with empty stderr, THEN no Error Trace block.
+
+        Guard symmetric with the ``CalledProcessError`` branch: the
+        ``Error Trace:`` block is conditional on stderr being non-empty so
+        successful-but-quiet failures don't get a spurious empty trace.
+        """
+        executor = Executor()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            )
+            with (
+                patch("core.executor.secrets.token_hex", return_value="abcdef0123456789"),
+                pytest.raises(SandboxExecutionError) as exc_info,
+            ):
+                executor.run(
+                    ["sudo", "machinectl", "shell", "user@.host", "/bin/bash", "-c", "true"],
+                    sentinel=True,
+                )
+            assert "Error Trace:" not in str(exc_info.value)
+
+    def test_sentinel_not_found_stderr_sanitized(self) -> None:
+        """WHEN sentinel-not-found stderr has PTY artifacts, THEN sanitized.
+
+        Consistency with the rest of the executor's diagnostic shape — the
+        stderr block runs through ``_sanitize_pty_output`` (ANSI strip + CR
+        removal + blank-line collapse) like the stdout block above it.
+        """
+        executor = Executor()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="",
+                stderr="\x1b[31mfatal\x1b[0m\r\nexit 1\r\n",
+            )
+            with (
+                patch("core.executor.secrets.token_hex", return_value="abcdef0123456789"),
+                pytest.raises(SandboxExecutionError) as exc_info,
+            ):
+                executor.run(
+                    ["sudo", "machinectl", "shell", "user@.host", "/bin/bash", "-c", "true"],
+                    sentinel=True,
+                )
+            msg = str(exc_info.value)
+            assert "\x1b" not in msg
+            assert "\r" not in msg
+            assert "fatal" in msg
+            assert "exit 1" in msg
+
 
 # ── PTY Sanitizer tests (Task 1.8) ──────────────────────────────────────────
 
