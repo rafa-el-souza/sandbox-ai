@@ -88,6 +88,16 @@ _BINARY_PACKAGE: dict[str, str] = {
 # helper hint on Arch-family.
 _TLOG_ARCH_INSTALL = "paru -S tlog"
 
+# ``tlog`` is packaged on Ubuntu and Debian <=12 but NOT on Debian 13+ (trixie),
+# where it must be built from source — ``get_install_cmd`` would wrongly suggest
+# a bare ``sudo apt install tlog`` that fails on trixie. ``detect_distro``
+# normalizes Ubuntu and Debian to the same ``debian`` family, so the hint covers
+# both paths rather than version-gating (round-5 Debian-trixie finding).
+_TLOG_DEBIAN_INSTALL = (
+    "sudo apt install tlog (Ubuntu / Debian <=12); on Debian 13+ (trixie) tlog "
+    "is not packaged — build from source: https://github.com/Scribery/tlog"
+)
+
 # The sudoers compiled-default ``secure_path`` (spec "Phase Execution Order"
 # L0). Used as the fallback when ``Defaults secure_path`` is not parseable.
 _DEFAULT_SECURE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -288,8 +298,11 @@ def _secure_path_dirs() -> list[str]:
 
 def _binary_install_cmd(binary: str, distro_family: str | None) -> str:
     """Per-distro copy-pasteable install command for a missing binary."""
-    if binary == "tlog-rec" and distro_family == "arch":
-        return _TLOG_ARCH_INSTALL
+    if binary == "tlog-rec":
+        if distro_family == "arch":
+            return _TLOG_ARCH_INSTALL
+        if distro_family == "debian":
+            return _TLOG_DEBIAN_INSTALL
     package = _BINARY_PACKAGE.get(binary, binary)
     return get_install_cmd(distro_family, package)
 
@@ -458,8 +471,17 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
         cmds = "; ".join(
             _binary_install_cmd(b, distro_family) for b in missing
         )
+        # A missing operator-installed prerequisite is an unconvergeable
+        # REFUSAL (CONFLICT), NOT a convergeable DRIFT: L0 cannot install
+        # distro packages, so the plan must show ``✗ refuse`` and the apply
+        # must refuse (CONFLICT → runner never calls act), consistent with the
+        # other L0 refusals (unrecognized distro, unresolvable machinectl). The
+        # earlier DRIFT mis-marked it as ``⊙ will mutate`` in the plan while the
+        # apply hard-FAILed via act-raise — a plan/apply contradiction (round-5
+        # Debian: tlog-rec). Pattern A: detect early, refuse with an actionable
+        # per-distro install hint.
         return (
-            PhaseResult.DRIFT,
+            PhaseResult.CONFLICT,
             f"required binaries missing: {', '.join(missing)} — install: {cmds}",
         )
 
@@ -478,10 +500,14 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
 
 
 def _act(ctx: SetupContext) -> str:
-    """L0's only convergeable drift is a missing required binary.
+    """L0 mutates nothing — it is verify-in-probe (refusals are CONFLICT).
 
-    L0 cannot install distro packages itself; the act emits the per-distro
-    copy-pasteable command and raises so the operator installs it and re-runs.
+    A missing required binary is surfaced by :func:`_probe` as ``CONFLICT``, so
+    the runner refuses without ever calling this act. The missing-binary raise
+    here is therefore **defensive depth** — it keeps the invariant ("L0 cannot
+    proceed with a missing prerequisite; L0 never installs packages") true even
+    if some path were to call ``act`` without the probe gate. The normal path is
+    ``ALREADY_CORRECT`` → no act.
     """
     distro_family = detect_distro()
     missing = missing_binaries()

@@ -9,8 +9,6 @@ content-aware-probe contract via the conftest fixture.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import pytest
 from core.host_config import MachinectlAuth, minimal_host_config
 from core.setup import l0_identity
@@ -27,15 +25,6 @@ from core.setup.l0_identity import (
     untested_distro_warning,
 )
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from core.setup.phase_runner import Phase
-
-    ContentAwareAssertion = Callable[
-        [Phase, SetupContext, Callable[[], None]], None
-    ]
 
 
 def _ctx(operator: str = "alice") -> SetupContext:
@@ -261,6 +250,20 @@ def test_missing_binaries_some_absent(
 
 def test_binary_install_cmd_arch_tlog_aur() -> None:
     assert l0_identity._binary_install_cmd("tlog-rec", "arch") == "paru -S tlog"
+
+
+def test_binary_install_cmd_debian_tlog_source_build() -> None:
+    """tlog on debian-family: NOT a bare ``apt install tlog`` (wrong on trixie).
+
+    Round-5 Debian-trixie: ``sudo apt install tlog`` fails (not packaged on
+    13+). The hint must surface the source build for trixie while still naming
+    the apt path for Ubuntu / Debian <=12 (one ``debian`` family covers both).
+    """
+    cmd = l0_identity._binary_install_cmd("tlog-rec", "debian")
+    assert "github.com/Scribery/tlog" in cmd
+    assert "trixie" in cmd
+    # The other debian binaries still get the plain apt hint.
+    assert l0_identity._binary_install_cmd("rsync", "debian") == "sudo apt install rsync"
 
 
 def test_binary_install_cmd_acl_package() -> None:
@@ -596,15 +599,22 @@ def test_probe_conflict_unrecognized_distro(
     assert "Unsupported distro" in detail
 
 
-def test_probe_drift_missing_binary(
+def test_probe_conflict_missing_binary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A missing required binary is a CONFLICT (refuse), not a DRIFT.
+
+    Round-5 Debian: missing tlog-rec showed ⊙ (DRIFT "will mutate") in the plan
+    but the apply hard-FAILed via act-raise — a plan/apply contradiction. L0
+    cannot install packages, so a missing prereq is an unconvergeable refusal:
+    CONFLICT in BOTH passes (Pattern A — refuse early with an actionable hint).
+    """
     monkeypatch.setattr("pwd.getpwnam", lambda n: _Pw(n, 1000))
     _fake_os_release(monkeypatch, "ID=ubuntu\n")
     _stub_secure_path(monkeypatch, ["/usr/bin"])
     monkeypatch.setattr("os.access", lambda p, m: not p.endswith("rsync"))
     result, detail = PHASE.probe(_ctx())
-    assert result == PhaseResult.DRIFT
+    assert result == PhaseResult.CONFLICT
     assert "rsync" in detail
 
 
@@ -663,24 +673,8 @@ def test_reverify_false_machinectl_unresolvable(
 # ── content-aware probe contract (conftest fixture) ──────────────────────────
 
 
-def test_content_aware(
-    monkeypatch: pytest.MonkeyPatch,
-    assert_phase_content_aware: ContentAwareAssertion,
-) -> None:
-    monkeypatch.setattr("pwd.getpwnam", lambda n: _Pw(n, 1000))
-    _fake_os_release(monkeypatch, "ID=ubuntu\n")
-    _stub_secure_path(monkeypatch, ["/usr/bin"])
-    monkeypatch.setattr(
-        "core.setup.l0_identity.parse_sudo_version", lambda: (1, 9, 17, 2)
-    )
-    state = {"rsync_present": True}
-
-    def _access(p: str, _m: int) -> bool:
-        if p.endswith("rsync"):
-            return state["rsync_present"]
-        return True
-
-    monkeypatch.setattr("os.access", _access)
-    assert_phase_content_aware(
-        PHASE, _ctx(), lambda: state.__setitem__("rsync_present", False)
-    )
+# NOTE: L0 has NO content-aware-DRIFT test (design D10 is for phases that own
+# mutable state and re-converge drift). L0 mutates nothing — it is a
+# verify/refuse phase: a missing prerequisite is a CONFLICT (see
+# test_probe_conflict_missing_binary), never a convergeable DRIFT. So the
+# assert_phase_content_aware fixture (which asserts stale→DRIFT) does not apply.

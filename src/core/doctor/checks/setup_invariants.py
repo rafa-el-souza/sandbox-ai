@@ -15,7 +15,7 @@ re-implemented here; a second copy would diverge and produce spurious WARNs):
 - ``core.setup.l0_identity.parse_sudo_version`` / ``_SUDO_FLOOR`` — the
   V9c-validated sudo floor;
 - ``core.setup.l0_identity.resolve_operator`` — operator resolution precedence;
-- ``core.setup.l3_sudoers_polkit.render_sudoers_rule`` / ``_cmnd_spec`` /
+- ``core.setup.l3_sudoers_polkit.render_sudoers_rule`` / ``_cmnd_specs`` /
   ``_OP_NAME_RE`` / ``_sudoers_path`` — the canonical rule renderer (the
   rule-body content audit re-renders via this exact code path);
 - ``core.setup.l2_host_prereqs`` subuid/subgid + group-membership helpers.

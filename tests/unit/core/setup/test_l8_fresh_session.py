@@ -99,6 +99,30 @@ def test_verify_passes_when_group_and_machinectl_ok(
     assert fake.sentinel_flags[1] is True
 
 
+def test_group_check_uses_pipe_cmd_machinectl_uses_sudo_u(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G1/F-016: the two checks use different operator-drop primitives.
+
+    The ``id -G`` group check is a plain binary → ``pipe_cmd`` (systemd-run
+    --uid) is correct. The machinectl-reachability check runs setuid ``sudo``,
+    which a systemd-run --uid transient unit cannot exec (EXIT_EXEC 203 — the
+    same F-016 defect fixed in L3a), so it MUST drop via ``sudo_as_operator``
+    (``sudo -u``). Round-5 fedora 12.4 hit the empty-sentinel here. The argv
+    captured is the real L8 output (only the boundary call is faked).
+    """
+    fake = _install(monkeypatch, _FakeExecutor())
+    l8._act(_ctx())
+    # calls[0] = id -G via pipe_cmd (systemd-run --uid); calls[1] = machinectl
+    # via sudo_as_operator.
+    group_argv, machinectl_argv = fake.calls[0], fake.calls[1]
+    assert group_argv[0] == "systemd-run"
+    assert "id" in group_argv and "-G" in group_argv
+    assert machinectl_argv[:3] == ["sudo", "-u", "alice"]
+    assert "systemd-run" not in machinectl_argv
+    assert not any(a.startswith("--uid=") for a in machinectl_argv)
+
+
 def test_reverify_true_when_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, _FakeExecutor())
     assert l8._reverify(_ctx()) is True

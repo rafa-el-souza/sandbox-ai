@@ -100,18 +100,29 @@ def _hostname() -> str:
     return socket.gethostname()
 
 
-def _cmnd_spec(machinectl_path: str, sandbox_user: str, op: Op) -> str:
-    """Render one ``Cmnd_Spec`` line for ``op`` in the V9-validated shape.
+def _cmnd_specs(machinectl_path: str, sandbox_user: str, op: Op) -> list[str]:
+    """Render the ``Cmnd_Spec`` line(s) for ``op`` in the V9-validated shape.
 
     Shape (full invocation prefix; backslash-escaped embedded whitespace; NO
     double-quotes — F-004):
 
-        ``<MACHINECTL_PATH> shell <user>@.host /bin/bash -c <dispatch>\\ <op>[\\ *]``
+        ``<MACHINECTL_PATH> shell <user>@.host /bin/bash -c <dispatch>\\ <op>[…]``
 
-    No-arg ops (``auth-probe``, ``compose-ls``, ``docker-version``) omit the
-    trailing ``\\ *`` so sudo denies arg-smuggling at the sudoers layer (V9 B7).
-    All other ops carry ``\\ *`` to match that op's args (validated internally
-    by the dispatcher).
+    Returns a list because no-arg ops need TWO exact specs:
+
+    - **arg ops** → one spec ``…<dispatch>\\ <op>\\ *`` — the trailing ``\\ *``
+      matches the op's runtime args AND the ``--check`` probe arg.
+    - **no-arg ops** (``auth-probe``, ``compose-ls``, ``docker-version``) → two
+      EXACT specs (no ``\\ *`` wildcard, so arg-smuggling stays denied — V9 B7):
+      ``…<dispatch>\\ <op>`` (the operator's runtime invocation) AND
+      ``…<dispatch>\\ <op>\\ --check`` (L3a's per-op probe target — every op
+      accepts ``--check`` as its no-op-success probe shape, so the rule must
+      grant it; without this exact second spec the probe's ``<op> --check``
+      can't match the bare ``<op>`` grant and L3a false-negatives — G2/F-016
+      sibling, round-5 fedora: a password-operator's L3a got "password
+      required" on ``auth-probe`` because the rule omitted the ``--check``
+      shape). Granting the literal ``--check`` (no wildcard) is harmless: it is
+      a no-op-success the orchestrator never emits at runtime.
     """
     op_name = op.value
     if _OP_NAME_RE.match(op_name) is None:
@@ -119,10 +130,11 @@ def _cmnd_spec(machinectl_path: str, sandbox_user: str, op: Op) -> str:
             f"op name {op_name!r} is not [a-z0-9-]+; refusing to render "
             f"(visudo -cf is a syntactic gate only — spec op-name rule)"
         )
-    cmd = f"{_DISPATCH_BINARY}\\ {op_name}"
+    prefix = f"{machinectl_path} shell {sandbox_user}@.host /bin/bash -c"
+    base = f"{_DISPATCH_BINARY}\\ {op_name}"
     if op_name not in _NO_ARG_OP_NAMES:
-        cmd = f"{cmd}\\ *"
-    return f"{machinectl_path} shell {sandbox_user}@.host /bin/bash -c {cmd}"
+        return [f"{prefix} {base}\\ *"]
+    return [f"{prefix} {base}", f"{prefix} {base}\\ --check"]
 
 
 def render_sudoers_rule(
@@ -135,7 +147,9 @@ def render_sudoers_rule(
     invoked. Raises :class:`RuleRenderError` on any violation.
     """
     specs = [
-        _cmnd_spec(machinectl_path, sandbox_user, op) for op in Op
+        spec
+        for op in Op
+        for spec in _cmnd_specs(machinectl_path, sandbox_user, op)
     ]
     for spec in specs:
         if '"' in spec:

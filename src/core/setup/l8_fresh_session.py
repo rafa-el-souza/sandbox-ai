@@ -7,21 +7,24 @@ before the end-to-end re-probe is meaningful); ``identity`` is OPERATOR (it
 verifies the *operator's* fresh-session state). ``rollback`` is ``None`` —
 verification mutates nothing, so there is nothing to undo.
 
-Two checks, both crossed via ``pipe_cmd(<operator>)`` (the byte-pipe primitive
-spins up a fresh transient unit whose ``--uid`` re-runs ``initgroups``, so it
-reflects the operator's post-``usermod`` group set — empirically validated
-V0/V3, the whole reason this re-probe is a *fresh* session):
+Two checks, each with the operator-drop primitive matched to its command:
 
-1. ``id -G`` — the operator's group set MUST include the
+1. ``pipe_cmd(<operator>) → id -G`` — the operator's group set MUST include the
    ``[host].workspace_bridge_group`` gid (the post-``usermod -aG sb-ws`` group
-   is visible in a fresh unit even though the operator's login session predates
-   the ``usermod``);
-2. ``sudo -n machinectl shell <user>@.host /bin/bash -c '<dispatch>
-   auth-probe'`` — relative ``machinectl`` (B-3, byte-identical to
-   ``core.host_config.machinectl_cmd()``'s runtime output) — confirms
-   machinectl is reachable end-to-end through the just-installed rule. The
-   inner exit is recovered via the sentinel mechanism (so a masked dispatcher
-   reject is not read as success — same Finding-J class as L3a).
+   is visible in a fresh ``--uid`` transient unit, whose ``initgroups`` reflects
+   the post-``usermod`` set even though the operator's login session predates
+   the ``usermod`` — empirically validated V0/V3, the whole reason this re-probe
+   is a *fresh* session). ``id`` is a plain binary, so ``pipe_cmd`` is correct.
+2. ``sudo_as_operator(<operator>) → sudo -n machinectl shell <user>@.host
+   /bin/bash -c '<dispatch> auth-probe'`` — relative ``machinectl`` (B-3, byte-
+   identical to ``core.host_config.machinectl_cmd()``'s runtime output) —
+   confirms machinectl is reachable end-to-end through the just-installed rule.
+   The operator-side command is the setuid binary ``sudo``, so it MUST drop via
+   ``sudo_as_operator`` (a normal-process ``sudo -u``), NOT ``pipe_cmd``:
+   ``pipe_cmd``'s ``--uid`` transient unit EXIT_EXECs (203) on setuid
+   ``sudo`` (F-016, the same defect fixed in L3a). The inner exit is recovered
+   via the sentinel mechanism (so a masked dispatcher reject is not read as
+   success — same Finding-J class as L3a).
 
 Like L3a, L8's *work* is verification: :func:`_probe` always returns
 ``MISSING`` (the re-probe has no cheap idempotent skip) and :func:`_act`
@@ -38,7 +41,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import pipe_cmd
+from core.host_config import pipe_cmd, sudo_as_operator
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -104,7 +107,7 @@ def _check_machinectl_reachable(
     sandbox_user = host_config.host.docker_unprivileged_user
     inner = f"{_DISPATCH_BINARY} {Op.AUTH_PROBE.value}"
     argv = [
-        *pipe_cmd(operator),
+        *sudo_as_operator(operator),
         "sudo",
         "-n",
         "machinectl",

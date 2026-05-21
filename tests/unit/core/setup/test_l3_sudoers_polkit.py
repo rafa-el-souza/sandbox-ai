@@ -93,8 +93,31 @@ def test_no_arg_ops_omit_trailing_glob() -> None:
         "/usr/bin/machinectl", "alice", "testhost", "sandbox"
     )
     assert "dispatch\\ auth-probe," in rendered
+    # No wildcard for no-arg ops (V9 B7 anti-arg-smuggling preserved).
     assert "dispatch\\ auth-probe\\ *" not in rendered
     assert "dispatch\\ compose-up\\ *," in rendered
+
+
+def test_no_arg_ops_also_grant_exact_check_probe_shape() -> None:
+    """G2/F-016 sibling: no-arg ops grant BOTH ``<op>`` and ``<op>\\ --check``.
+
+    L3a probes every op with a trailing ``--check``; for no-arg ops (no
+    ``\\ *`` wildcard) the rule must grant the exact ``--check`` shape too, or
+    the probe can't match the bare ``<op>`` grant (round-5 fedora: a
+    password-operator's L3a got "sudo: a password is required" on
+    ``auth-probe``). The ``--check`` grant is exact (no wildcard) so
+    arg-smuggling stays denied.
+    """
+    rendered = render_sudoers_rule(
+        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+    )
+    for no_arg in ("auth-probe", "compose-ls", "docker-version"):
+        assert f"dispatch\\ {no_arg}," in rendered  # exact runtime shape
+        assert f"dispatch\\ {no_arg}\\ --check" in rendered  # exact probe shape
+        assert f"dispatch\\ {no_arg}\\ *" not in rendered  # never a wildcard
+    # Arg-ops' ``\\ *`` already covers ``--check``, so they get NO separate
+    # ``--check`` entry.
+    assert "dispatch\\ compose-up\\ --check" not in rendered
 
 
 # ── F-004 render-time refusal ────────────────────────────────────────────────
@@ -106,8 +129,8 @@ def test_render_refuses_quote_in_cmnd_spec(
     """A ``"`` reaching a Cmnd_Spec body MUST raise BEFORE visudo."""
     monkeypatch.setattr(
         l3,
-        "_cmnd_spec",
-        lambda _m, _u, _op: 'machinectl shell s@.host /bin/bash -c "x"',
+        "_cmnd_specs",
+        lambda _m, _u, _op: ['machinectl shell s@.host /bin/bash -c "x"'],
     )
     with pytest.raises(RuleRenderError, match="F-004"):
         render_sudoers_rule(
