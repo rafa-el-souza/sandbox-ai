@@ -1043,11 +1043,13 @@ class TestBuildInvocation:
     def test_invoke_consumes_build_invocation_seam(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # invoke() == Executor().run(build_invocation(...), sentinel=True,
+        # invoke() == Executor().run(build_invocation(...), framed=True,
         # timeout=...): the argv handed to Executor is byte-identical to
-        # build_invocation's return, sentinel=True recovers the in-container
-        # exit through machinectl shell (which does not propagate it), and
-        # timeout is forwarded verbatim.
+        # build_invocation's return, framed=True recovers the in-container exit
+        # from the dispatcher's begin/exit nonce framing (machinectl shell does
+        # not propagate it, and the sentinel is NOT injected into the crossed
+        # payload so the per-op rule still matches — F-018), and timeout is
+        # forwarded verbatim.
         import subprocess
 
         captured: dict[str, object] = {}
@@ -1064,7 +1066,7 @@ class TestBuildInvocation:
         invoke("docker-info", ["runtimes"], hc, timeout=15)
         assert captured["cmd"] == build_invocation("docker-info", ["runtimes"], hc)
         assert cast("dict[str, object]", captured["kwargs"]) == {
-            "sentinel": True,
+            "framed": True,
             "timeout": 15,
         }
 

@@ -9,10 +9,13 @@ rollback (which removes the L3 drop-in), and the PHASE wiring.
 
 The control signal is the **recovered inner exit**, surfaced as a raised
 :class:`SandboxExecutionError` by :class:`core.executor.Executor` run with
-``sentinel=True``. The tests mock ``Executor`` and exercise the branch logic on
-that recovered signal — NOT on a raw outer exit — while the captured argv is the
-real ``_probe_argv`` output (so the operator-drop shape is asserted for real;
-see ``test_probe_argv_drops_via_sudo_u_not_systemd_run``, F-016).
+``framed=True`` (the dispatcher emits its own begin/exit framing; the crossed
+payload stays the bare ``<dispatch> <op> --check`` the per-op rule matches —
+F-018, NOT the pre-fix ``sentinel=True`` wrap). The tests mock ``Executor`` and
+exercise the branch logic on that recovered signal — NOT on a raw outer exit —
+while the captured argv is the real ``_probe_argv`` output (so the operator-drop
+shape is asserted for real; see ``test_probe_argv_drops_via_sudo_u_not_systemd_run``,
+F-016).
 """
 
 from __future__ import annotations
@@ -65,9 +68,12 @@ class _FakeExecutor:
     def run(
         self, cmd: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
-        assert kwargs.get("sentinel") is True, (
-            "L3a MUST recover the inner exit via the sentinel mechanism, "
-            "not branch on the raw outer (sudo/machinectl) exit"
+        assert kwargs.get("framed") is True, (
+            "L3a MUST recover the inner exit via the dispatcher's begin/exit "
+            "framing (framed=True), NOT inject a sentinel into the crossed "
+            "payload (sentinel=True would make the authorized command "
+            "unmatchable by the per-op Cmnd_Spec — F-018), and NOT branch on "
+            "the raw outer (sudo/machinectl) exit"
         )
         self.calls.append(cmd)
         # The op wire-name is the token after `dispatch ` in the bash payload.

@@ -39,13 +39,17 @@ absolute ``/usr/bin/machinectl`` would spuriously MATCH on a host where the real
 relative-form orchestrator call fails, the exact footgun this probe defeats).
 ``machinectl shell`` **masks the inner ``/bin/bash -c`` exit**, so a dispatcher
 reject (unknown/absent/mis-pathed op → inner exit 2) would be masked as a
-sudoers MATCH. L3a therefore recovers the **inner** exit via the sentinel
-mechanism (:class:`core.executor.Executor` ``run(..., sentinel=True)`` — the
-same masked-inner-exit recovery ``core.dispatch.probe()`` performs, though that
-path crosses as the operator's own runtime process, not via a drop) and
-branches on the **recovered inner exit**, NEVER the raw outer exit. The
-dispatcher's journald ``check=1`` record is audit-only and is NEVER the control
-signal.
+sudoers MATCH. L3a therefore recovers the **inner** exit via the dispatcher's
+own begin/exit framing (:class:`core.executor.Executor` ``run(..., framed=True)``
+— the same masked-inner-exit recovery ``core.dispatch.probe()`` performs). This
+is ``framed=True``, NOT the pre-F-018 ``sentinel=True``: the latter WRAPPED the
+crossed payload (``{ <dispatch> <op> --check; }; echo __SANDBOX_EXIT_<tok>_$?``),
+which no per-op ``Cmnd_Spec`` could match — silently breaking the probe (and the
+runtime grant) for every SUDO-mode password-operator. With ``framed=True`` the
+crossed payload is the bare ``<dispatch> <op> --check`` the rule matches, and the
+dispatcher emits the nonce-bound framing. L3a branches on the **recovered inner
+exit**, NEVER the raw outer exit. The dispatcher's journald ``check=1`` record
+is audit-only and is NEVER the control signal.
 
 Decision matrix on the recovered inner exit, per op:
 
@@ -123,15 +127,22 @@ def _classify(host_config: HostConfig, operator: str, op: Op) -> None:
     """Probe one op; raise :class:`PerOpProbeError` on any non-MATCH.
 
     The recovered inner exit is the control signal. :class:`Executor` with
-    ``sentinel=True`` injects ``…; echo __SANDBOX_EXIT_<tok>_$?`` into the
-    ``/bin/bash -c`` payload and raises :class:`SandboxExecutionError` on a
-    non-zero *inner* exit (mirroring ``core.dispatch.probe()``). A clean run
-    (recovered inner exit 0) is MATCH; the raised error carries the recovered
-    inner exit + stderr, which we re-classify into the decision matrix.
+    ``framed=True`` does NOT wrap the crossed payload — the bare
+    ``<dispatch> <op> --check`` is what sudo authorizes, so it MATCHES the
+    per-op ``Cmnd_Spec`` (a wrapping ``sentinel=True`` injected
+    ``…; echo __SANDBOX_EXIT_<tok>_$?`` and made the authorized command
+    unmatchable — F-018, the round-7 fix). The dispatcher itself emits the
+    ``__SANDBOX_BEGIN_<nonce>`` / ``__SANDBOX_EXIT_<nonce>_$?`` framing (the
+    ``--check`` short-circuit emits ``_0``), and the Executor raises
+    :class:`SandboxExecutionError` on a non-zero *recovered* inner exit. A clean
+    run (recovered inner exit 0) is MATCH; a sudo refusal never runs the
+    dispatcher → no framing → the Executor fail-closes with the
+    ``password is required`` stderr, which we re-classify into the decision
+    matrix below.
     """
     argv = _probe_argv(host_config, operator, op)
     try:
-        Executor().run(argv, sentinel=True)
+        Executor().run(argv, framed=True)
     except SandboxExecutionError as exc:
         message = str(exc)
         resolved = resolve_machinectl_path(host_config)

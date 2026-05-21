@@ -22,9 +22,11 @@ Two checks, each with the operator-drop primitive matched to its command:
    The operator-side command is the setuid binary ``sudo``, so it MUST drop via
    ``sudo_as_operator`` (a normal-process ``sudo -u``), NOT ``pipe_cmd``:
    ``pipe_cmd``'s ``--uid`` transient unit EXIT_EXECs (203) on setuid
-   ``sudo`` (F-016, the same defect fixed in L3a). The inner exit is recovered
-   via the sentinel mechanism (so a masked dispatcher reject is not read as
-   success — same Finding-J class as L3a).
+   ``sudo`` (F-016, the same defect fixed in L3a). The crossed payload is the
+   bare ``<dispatch> auth-probe`` (so it MATCHES the per-op ``Cmnd_Spec`` — a
+   wrapping ``sentinel=True`` would not, F-018), and the inner exit is recovered
+   via the dispatcher's begin/exit framing (``framed=True``) so a masked
+   dispatcher reject is not read as success (same Finding-J class as L3a).
 
 Like L3a, L8's *work* is verification: :func:`_probe` always returns
 ``MISSING`` (the re-probe has no cheap idempotent skip) and :func:`_act`
@@ -100,9 +102,14 @@ def _check_machinectl_reachable(
 ) -> None:
     """Verify machinectl is reachable end-to-end through the new rule.
 
-    The inner ``/bin/bash -c '<dispatch> auth-probe'`` exit is recovered via
-    the sentinel mechanism (``Executor().run(..., sentinel=True)``) — a masked
-    dispatcher reject must not be read as a healthy grant (Finding-J class).
+    The inner ``/bin/bash -c '<dispatch> auth-probe'`` exit is recovered via the
+    dispatcher's begin/exit framing (``Executor().run(..., framed=True)``) — a
+    masked dispatcher reject must not be read as a healthy grant (Finding-J
+    class). ``framed=True`` (NOT the pre-F-018 ``sentinel=True``) is load-
+    bearing here: the crossed payload must stay the bare ``<dispatch>
+    auth-probe`` so it MATCHES the per-op ``Cmnd_Spec`` — a wrapping
+    ``sentinel=True`` made the authorized command unmatchable and silently
+    failed this check for every SUDO-mode password-operator (F-018).
     """
     sandbox_user = host_config.host.docker_unprivileged_user
     inner = f"{_DISPATCH_BINARY} {Op.AUTH_PROBE.value}"
@@ -118,7 +125,7 @@ def _check_machinectl_reachable(
         inner,
     ]
     try:
-        Executor().run(argv, sentinel=True)
+        Executor().run(argv, framed=True)
     except SandboxExecutionError as exc:
         raise FreshSessionError(
             f"machinectl is NOT reachable end-to-end through the new rule "

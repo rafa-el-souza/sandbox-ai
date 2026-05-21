@@ -39,20 +39,23 @@ HOST_USER = "sandbox"
 
 
 def _crossed_ok(stdout: str = "ok\n") -> subprocess.CompletedProcess[str]:
-    """A ``CompletedProcess`` simulating a SUCCESSFUL ``sentinel=True`` crossing.
+    """A ``CompletedProcess`` simulating a SUCCESSFUL ``framed=True`` crossing.
 
     ``dispatch.invoke`` (hence ``dispatch.probe``) crosses ``machinectl shell``
-    with the sterile ``Executor``'s ``sentinel=True`` mechanism, because
-    ``machinectl shell`` does not propagate the inner payload's exit code. A
-    real successful crossing therefore emits the inner command's stdout
-    followed by the injected ``__SANDBOX_EXIT_<token>_<code>`` echo line; the
-    Executor parses that line (any hex token, last-match) to recover the true
-    inner exit. A fake crossing stdout that omits it represents the *broken
-    pre-sentinel* contract, so simulate the line the way a recorded real
-    crossing would (exit 0). The token value is arbitrary — the Executor's
-    ``_SENTINEL_RE`` accepts any hex token.
+    with the sterile ``Executor``'s ``framed=True`` mechanism (F-018), because
+    ``machinectl shell`` does not propagate the inner payload's exit code and
+    the sentinel must NOT be injected into the crossed (rule-matched) payload.
+    A real successful crossing therefore emits the dispatcher's
+    ``__SANDBOX_BEGIN_<nonce>`` line, then the inner command's stdout, then a
+    ``__SANDBOX_EXIT_<nonce>_<code>`` trailer bound to the SAME nonce; the
+    Executor reads the begin nonce and accepts only an exit carrying it. A fake
+    crossing stdout that omits this framing represents a broken contract, so
+    simulate it the way a recorded real crossing would (exit 0, matching nonce).
     """
-    return subprocess.CompletedProcess([], 0, f"{stdout}__SANDBOX_EXIT_0123456789abcdef_0\n", "")
+    nonce = "0123456789abcdef"
+    return subprocess.CompletedProcess(
+        [], 0, f"__SANDBOX_BEGIN_{nonce}\n{stdout}__SANDBOX_EXIT_{nonce}_0\n", ""
+    )
 
 
 VALID_TOML_CONTENT = b"""

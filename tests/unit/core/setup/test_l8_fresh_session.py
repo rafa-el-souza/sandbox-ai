@@ -2,9 +2,9 @@
 
 Covers: the always-MISSING verification probe; the ``id -G`` bridge-gid
 membership check (present -> pass; absent -> FAIL); the end-to-end
-machinectl-reachable check recovering the inner exit via the sentinel
-mechanism; the bridge-group-missing refusal; PHASE wiring (no rollback —
-verification mutates nothing).
+machinectl-reachable check recovering the inner exit via the dispatcher's
+begin/exit framing (``framed=True``); the bridge-group-missing refusal; PHASE
+wiring (no rollback — verification mutates nothing).
 """
 
 from __future__ import annotations
@@ -51,17 +51,19 @@ class _FakeExecutor:
         self._id_gids = id_gids
         self._machinectl_error = machinectl_error
         self.calls: list[list[str]] = []
-        self.sentinel_flags: list[bool] = []
+        self.framed_flags: list[bool] = []
 
     def run(
         self, cmd: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
-        self.sentinel_flags.append(bool(kwargs.get("sentinel")))
+        self.framed_flags.append(bool(kwargs.get("framed")))
         if "id" in cmd and "-G" in cmd:
             return subprocess.CompletedProcess(cmd, 0, self._id_gids, "")
-        # The machinectl auth-probe path runs with sentinel=True.
-        assert kwargs.get("sentinel") is True
+        # The machinectl auth-probe path runs with framed=True (the dispatcher
+        # emits the begin/exit framing; the crossed payload stays bare so the
+        # per-op rule matches — F-018, NOT a sentinel=True wrap).
+        assert kwargs.get("framed") is True
         if self._machinectl_error is not None:
             raise self._machinectl_error
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
@@ -92,11 +94,11 @@ def test_verify_passes_when_group_and_machinectl_ok(
     fake = _install(monkeypatch, _FakeExecutor())
     detail = l8._act(_ctx())
     assert "fresh-session verified" in detail
-    # First call is `id -G` (no sentinel); second is the sentinel-recovered
-    # machinectl auth-probe.
+    # First call is `id -G` via pipe_cmd (not framed); second is the
+    # framed-recovered machinectl auth-probe (the dispatcher emits the framing).
     assert "id" in fake.calls[0]
-    assert fake.sentinel_flags[0] is False
-    assert fake.sentinel_flags[1] is True
+    assert fake.framed_flags[0] is False
+    assert fake.framed_flags[1] is True
 
 
 def test_group_check_uses_pipe_cmd_machinectl_uses_sudo_u(

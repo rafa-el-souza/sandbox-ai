@@ -33,8 +33,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -86,13 +89,64 @@ func isValidOp(op string) bool {
 }
 
 func main() {
-	os.Exit(run(os.Args, os.Stderr))
+	os.Exit(dispatch(os.Args, os.Stdout, os.Stderr))
+}
+
+// genNonce returns a per-invocation 64-bit hex nonce. It is generated HERE —
+// inside the trusted, root-owned dispatcher, AFTER sudo/polkit has authorized
+// the bare `dispatch <op>` crossing — and NEVER passed in the authorized argv,
+// so the rendered per-op Cmnd_Spec matches the bare command and never needs a
+// wildcard to carry an exit sentinel (F-018). crypto/rand keeps the nonce
+// unguessable by untrusted op output (a malicious image, the registry JSON a
+// docker-manifest-inspect echoes, compose logs): that output cannot forge the
+// trailer because it cannot read the dispatcher's prior stdout to learn the
+// nonce (stdout is write-only for it; the agent's subuid is a separate
+// pid/userns). A full sandbox-UID compromise is out of reach of any in-band
+// scheme and is bounded by OS isolation + the immutable root-owned binary.
+func genNonce() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// wrapSentinel rewrites a `/bin/bash -c` inner so the inner's exit code is
+// recovered past machinectl shell's exit-masking: it groups the inner and
+// echoes the nonce-bound trailer carrying the group's `$?`. This is the same
+// recovery the orchestrator's Executor used to inject into the CROSSED payload
+// — relocated here, post-authorization, so the sentinel never appears in the
+// sudo/polkit-authorized command (F-018).
+func wrapSentinel(inner, nonce string) string {
+	return fmt.Sprintf("{ %s; }; echo __SANDBOX_EXIT_%s_$?", inner, nonce)
+}
+
+// dispatch is main's testable core. It generates the nonce, announces it on
+// stdout (BEGIN line, before the op runs), then runs the op. On every path
+// where run() RETURNS — usage/op-name/validation errors, the symlink-guard
+// reject, --check, or an exec failure — it emits the nonce-bound EXIT trailer
+// itself. On the success path run() replaces the process image with the
+// sentinel-wrapped bash (and never returns), so that bash emits the trailer
+// instead. Either way the trailer is emitted exactly once, bound to the BEGIN
+// nonce the orchestrator captured. A crypto/rand failure emits NO BEGIN line,
+// so the orchestrator fails closed (treats the crossing as failed) rather than
+// trusting an unframed exit.
+func dispatch(argv []string, out, errOut io.Writer) int {
+	nonce, err := genNonce()
+	if err != nil {
+		fmt.Fprintf(errOut, "dispatch: cannot generate exit nonce: %v\n", err)
+		return 70
+	}
+	fmt.Fprintf(out, "__SANDBOX_BEGIN_%s\n", nonce)
+	code := run(argv, errOut, nonce)
+	fmt.Fprintf(out, "__SANDBOX_EXIT_%s_%d\n", nonce, code)
+	return code
 }
 
 // run is main's testable core. It returns the process exit code and writes
 // diagnostics to errOut. On the success path it does not return — it replaces
 // the process image via syscall.Exec.
-func run(argv []string, errOut *os.File) int {
+func run(argv []string, errOut io.Writer, nonce string) int {
 	if len(argv) < 2 {
 		fmt.Fprintln(errOut, "usage: dispatch <op> [args...]")
 		return 2
@@ -149,6 +203,13 @@ func run(argv []string, errOut *os.File) int {
 
 	journalLog(op, rest, targetArgv, instance, false)
 
+	// Relocate the exit sentinel into the dispatcher (post-authorization): the
+	// command sudo/polkit authorized was the bare `dispatch <op>` (matching the
+	// per-op Cmnd_Spec), so we wrap the bash -c inner HERE rather than letting
+	// the orchestrator wrap the CROSSED payload (which no enumerated Cmnd_Spec
+	// could match — F-018). Every buildTargetArgv arm returns bashC(...), so
+	// targetArgv is [/bin/bash, -c, <inner>] and targetArgv[2] is the inner.
+	targetArgv[2] = wrapSentinel(targetArgv[2], nonce)
 	return execTarget(targetArgv, errOut)
 }
 
@@ -687,7 +748,7 @@ func translateExecError(err error, target string) (int, string) {
 // syscall.Exec (Linux). On EACCES / EIO / ENOENT it returns the spec-pinned
 // exit code and writes the spec-asserted hint substrings to errOut. On any
 // other error it returns 1.
-func execTarget(targetArgv []string, errOut *os.File) int {
+func execTarget(targetArgv []string, errOut io.Writer) int {
 	target := targetArgv[0]
 	err := syscall.Exec(target, targetArgv, os.Environ())
 	// syscall.Exec only returns on failure.

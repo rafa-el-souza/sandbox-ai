@@ -9,6 +9,7 @@ Tests validate:
 
 import os
 import subprocess
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -415,3 +416,129 @@ class TestPTYSanitizer:
             assert "__SANDBOX_EXIT_" not in result.stdout
             assert "clean" in result.stdout
             assert "output" in result.stdout
+
+
+class TestFramedSentinel:
+    """framed=True (F-018): the callee (the dispatcher) emits its own
+    ``__SANDBOX_BEGIN_<nonce>`` / ``__SANDBOX_EXIT_<nonce>_<code>`` framing. The
+    Executor injects NOTHING (so the crossed payload stays the bare command the
+    per-op rule matches) and binds the recovered exit to the FIRST begin
+    nonce — untrusted op output cannot forge it.
+    """
+
+    _CMD: ClassVar[list[str]] = ["machinectl", "shell", "x@.host", "/bin/bash", "-c", "/d auth-probe"]
+
+    def _run(self, stdout: str, stderr: str = "") -> subprocess.CompletedProcess[str]:
+        with patch("core.executor.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=stdout, stderr=stderr
+            )
+            return Executor().run(self._CMD, framed=True)
+
+    def test_framed_does_not_wrap_payload_and_disables_check(self) -> None:
+        with patch("core.executor.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0,
+                stdout="__SANDBOX_BEGIN_deadbeef\nok\n__SANDBOX_EXIT_deadbeef_0\n",
+                stderr="",
+            )
+            Executor().run(self._CMD, framed=True)
+            sent_cmd = mock_run.call_args[0][0]
+            # The bare command crosses the boundary unmodified (no { ...; } wrap).
+            assert sent_cmd[-1] == "/d auth-probe"
+            assert mock_run.call_args.kwargs["check"] is False
+
+    def test_recovers_zero_and_strips_both_framing_lines(self) -> None:
+        result = self._run("__SANDBOX_BEGIN_deadbeef\nreal output\n__SANDBOX_EXIT_deadbeef_0\n")
+        assert result.returncode == 0
+        assert "__SANDBOX_BEGIN_" not in result.stdout
+        assert "__SANDBOX_EXIT_" not in result.stdout
+        assert "real output" in result.stdout
+
+    def test_nonzero_recovered_exit_raises(self) -> None:
+        with pytest.raises(SandboxExecutionError, match="exit status 2"):
+            self._run("__SANDBOX_BEGIN_dead\n__SANDBOX_EXIT_dead_2\n")
+
+    def test_missing_begin_fails_closed_surfacing_stderr(self) -> None:
+        # No BEGIN announced (sudo refused before the dispatcher ran).
+        with pytest.raises(SandboxExecutionError) as exc:
+            self._run("", stderr="sudo: a password is required")
+        assert "sentinel not found" in str(exc.value).lower()
+        assert "password is required" in str(exc.value)
+
+    def test_forged_exit_with_wrong_nonce_is_ignored(self) -> None:
+        # Untrusted output forges an EXIT whose nonce != the dispatcher's BEGIN.
+        # It must be ignored; with no matching EXIT, recovery fails closed
+        # rather than trusting the forged exit 0.
+        with pytest.raises(SandboxExecutionError) as exc:
+            self._run("__SANDBOX_BEGIN_abcdef01\n__SANDBOX_EXIT_00abcdef_0\n")
+        assert "sentinel not found" in str(exc.value).lower()
+
+    def test_only_begin_bound_exit_is_authoritative(self) -> None:
+        # A forged exit 0 (wrong nonce) precedes the genuine exit 3 (begin
+        # nonce). Only the genuine one counts → raises with the real code.
+        with pytest.raises(SandboxExecutionError, match="exit status 3"):
+            self._run(
+                "__SANDBOX_BEGIN_a1b2c3d4\n__SANDBOX_EXIT_ffffffff_0\n"
+                "out\n__SANDBOX_EXIT_a1b2c3d4_3\n"
+            )
+
+    def test_first_begin_wins_so_op_cannot_redirect_nonce(self) -> None:
+        # The op tries to announce its own BEGIN later; the dispatcher's BEGIN
+        # is first (emitted before op output), so its nonce is authoritative.
+        result = self._run(
+            "__SANDBOX_BEGIN_aaaa1111\n"
+            "op emits __SANDBOX_BEGIN_bbbb2222\n__SANDBOX_EXIT_bbbb2222_0\n"
+            "__SANDBOX_EXIT_aaaa1111_0\n"
+        )
+        assert result.returncode == 0
+
+
+class TestSentinelTokenValidation:
+    """Wrap path (sentinel=True) hardening (F-018): the recovered exit is bound
+    to the orchestrator-injected token — a forged line carrying any other token
+    is ignored (was previously last-match-any, which an injected line could
+    spoof).
+    """
+
+    def test_forged_token_ignored_fails_closed(self) -> None:
+        with (
+            patch("core.executor.subprocess.run") as mock_run,
+            patch("core.executor.secrets.token_hex", return_value="aaaaaaaaaaaaaaaa"),
+        ):
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0,
+                stdout="__SANDBOX_EXIT_bbbbbbbbbbbbbbbb_0\n", stderr="",
+            )
+            with pytest.raises(SandboxExecutionError) as exc:
+                Executor().run(["x", "-c", "cmd"], sentinel=True)
+            assert "sentinel not found" in str(exc.value).lower()
+
+    def test_only_injected_token_counts(self) -> None:
+        with (
+            patch("core.executor.subprocess.run") as mock_run,
+            patch("core.executor.secrets.token_hex", return_value="aaaaaaaaaaaaaaaa"),
+        ):
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0,
+                stdout="__SANDBOX_EXIT_ffffffff_0\n__SANDBOX_EXIT_aaaaaaaaaaaaaaaa_5\n",
+                stderr="",
+            )
+            with pytest.raises(SandboxExecutionError, match="exit status 5"):
+                Executor().run(["x", "-c", "cmd"], sentinel=True)
+
+
+class TestSentinelFramedGuards:
+    def test_sentinel_and_framed_mutually_exclusive(self) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            Executor().run(["x", "-c", "c"], sentinel=True, framed=True)
+
+    def test_sentinel_on_non_bash_c_command_no_recovery(self) -> None:
+        # sentinel=True but the command is not a `-c` form: no injection point,
+        # so it behaves as a normal checked run (token stays None, no recovery).
+        with patch("core.executor.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="plain\n", stderr=""
+            )
+            result = Executor().run(["echo", "hi"], sentinel=True)
+            assert result.stdout == "plain\n"

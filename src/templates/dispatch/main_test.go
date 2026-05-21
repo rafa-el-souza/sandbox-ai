@@ -14,15 +14,35 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+// testNonce is a fixed stand-in for the per-invocation crypto/rand nonce. The
+// run() / execTarget early-exit tests below don't go through dispatch() (which
+// is where the nonce is generated + the BEGIN/EXIT framing is emitted), so they
+// pass this literal; the framing is exercised by the dispatch* tests.
+const testNonce = "0badf00d0badf00d"
+
+// TestMain doubles as a re-exec helper: with GO_DISPATCH_HELPER=1 the test
+// binary BECOMES the dispatcher (running dispatch() on its own argv), so a
+// subprocess test can drive the real success exec path — which replaces the
+// process image — without killing the parent test process.
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_DISPATCH_HELPER") == "1" {
+		os.Exit(dispatch(os.Args, os.Stdout, os.Stderr))
+	}
+	os.Exit(m.Run())
+}
 
 type fixtureCase struct {
 	Op                 string   `json:"op"`
@@ -84,7 +104,7 @@ func TestUnknownOpRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code := run([]string{"dispatch", "hypothetical-not-a-real-op"}, tmp)
+	code := run([]string{"dispatch", "hypothetical-not-a-real-op"}, tmp, testNonce)
 	if code != 2 {
 		t.Fatalf("expected exit 2 for unknown op, got %d", code)
 	}
@@ -105,7 +125,7 @@ func TestUnknownOpPlusCheckStillRejected(t *testing.T) {
 	// Spec scenario "Unknown op + --check is rejected": op-name validation
 	// fires BEFORE the --check predicate. --check does not whitewash.
 	tmp, _ := os.CreateTemp(t.TempDir(), "stderr")
-	code := run([]string{"dispatch", "bogus-op", "--check"}, tmp)
+	code := run([]string{"dispatch", "bogus-op", "--check"}, tmp, testNonce)
 	if code != 2 {
 		t.Fatalf("expected exit 2, got %d", code)
 	}
@@ -357,7 +377,7 @@ func TestRunWiresSymlinkGuardBeforeExec(t *testing.T) {
 	}
 	argv := append([]string{"dispatch", "compose-up"},
 		composeSymlinkWire("myinst", composeFile, envFile)...)
-	code := run(argv, tmp)
+	code := run(argv, tmp, testNonce)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit (guard must reject before exec), got %d", code)
 	}
@@ -430,7 +450,7 @@ func TestCheckLoneArgShortCircuits(t *testing.T) {
 	// effect" (canonical predicate: op + lone --check). journald is likely
 	// unavailable in the test container; the silent fallback keeps exit 0.
 	tmp, _ := os.CreateTemp(t.TempDir(), "stderr")
-	code := run([]string{"dispatch", "compose-up", "--check"}, tmp)
+	code := run([]string{"dispatch", "compose-up", "--check"}, tmp, testNonce)
 	if code != 0 {
 		t.Fatalf("expected exit 0 for lone --check, got %d", code)
 	}
@@ -585,4 +605,96 @@ func TestEncodeJournalFieldsNewlineBranch(t *testing.T) {
 			t.Fatalf("multiline value must not use the KEY=value form: %q", string(got))
 		}
 	})
+}
+
+// ─── Exit-sentinel framing (F-018: dispatcher-emitted, nonce-bound) ─────────
+
+func TestWrapSentinel(t *testing.T) {
+	got := wrapSentinel("echo ok", "deadbeef")
+	want := "{ echo ok; }; echo __SANDBOX_EXIT_deadbeef_$?"
+	if got != want {
+		t.Fatalf("wrapSentinel = %q, want %q", got, want)
+	}
+}
+
+func TestGenNonceFormat(t *testing.T) {
+	n1, err := genNonce()
+	if err != nil {
+		t.Fatalf("genNonce: %v", err)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(n1) {
+		t.Fatalf("nonce %q is not 16 lowercase hex chars (must match the orchestrator _SENTINEL_RE charset)", n1)
+	}
+	n2, _ := genNonce()
+	if n1 == n2 {
+		t.Fatalf("two genNonce calls returned the same value %q (not per-invocation random)", n1)
+	}
+}
+
+// TestDispatchFramesEarlyReturnPaths: on every path where run() RETURNS (does
+// not exec), dispatch() must announce BEGIN<nonce> first and emit a matching
+// EXIT<nonce>_<code> carrying run()'s exit code. Covers an op-name reject
+// (code 2) and the --check short-circuit (code 0).
+func TestDispatchFramesEarlyReturnPaths(t *testing.T) {
+	beginRe := regexp.MustCompile(`^__SANDBOX_BEGIN_([0-9a-f]{16})$`)
+	cases := []struct {
+		name     string
+		argv     []string
+		wantCode int
+	}{
+		{"unknown op", []string{"dispatch", "hypothetical-not-a-real-op"}, 2},
+		{"lone --check", []string{"dispatch", "compose-up", "--check"}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := dispatch(c.argv, &out, &errOut)
+			if code != c.wantCode {
+				t.Fatalf("dispatch code = %d, want %d", code, c.wantCode)
+			}
+			lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+			m := beginRe.FindStringSubmatch(lines[0])
+			if m == nil {
+				t.Fatalf("first stdout line is not a BEGIN nonce: %q", out.String())
+			}
+			nonce := m[1]
+			wantExit := "__SANDBOX_EXIT_" + nonce + "_" + map[bool]string{true: "0", false: "2"}[c.wantCode == 0]
+			if lines[len(lines)-1] != wantExit {
+				t.Fatalf("last stdout line = %q, want %q (nonce-bound to BEGIN)", lines[len(lines)-1], wantExit)
+			}
+		})
+	}
+}
+
+// TestDispatchSuccessFramesViaSubprocess drives the REAL success exec path
+// end-to-end: the test binary re-execs itself as the dispatcher (TestMain
+// helper) for `auth-probe`, which replaces the image with the wrapped
+// `/bin/bash -c '{ echo ok; }; echo __SANDBOX_EXIT_<nonce>_$?'`. Stdout must
+// carry a BEGIN nonce, the op's own output, and an EXIT trailer bound to that
+// SAME nonce with code 0. Skipped where /bin/bash is absent (e.g. the
+// golang:1.23-alpine compile container) — the pure wrapSentinel + early-return
+// framing tests above cover the logic there; this is the dev-host belt-and-
+// suspenders proof of the full wrap+exec round trip.
+func TestDispatchSuccessFramesViaSubprocess(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash absent; success exec path not exercisable here")
+	}
+	cmd := exec.Command(os.Args[0], "auth-probe")
+	cmd.Env = append(os.Environ(), "GO_DISPATCH_HELPER=1")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("dispatcher subprocess failed: %v (stdout=%q)", err, string(out))
+	}
+	s := string(out)
+	m := regexp.MustCompile(`__SANDBOX_BEGIN_([0-9a-f]{16})`).FindStringSubmatch(s)
+	if m == nil {
+		t.Fatalf("no BEGIN nonce in stdout: %q", s)
+	}
+	nonce := m[1]
+	if !strings.Contains(s, "__SANDBOX_EXIT_"+nonce+"_0") {
+		t.Fatalf("no EXIT trailer bound to BEGIN nonce %s with code 0: %q", nonce, s)
+	}
+	if !strings.Contains(s, "ok") {
+		t.Fatalf("auth-probe output 'ok' missing (op did not run before the trailer): %q", s)
+	}
 }
