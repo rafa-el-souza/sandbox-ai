@@ -337,6 +337,12 @@ def test_update_runsc_runs_only_l6a_with_force(runner: CliRunner) -> None:
     assert [p.id for p in phases_arg] == ["l6a"]
     apply_phases_arg = apply_mock.call_args[0][0]
     assert [p.id for p in apply_phases_arg] == ["l6a"]
+    # Both passes MUST be told to allow external deps — the single-phase l6a
+    # subset has a dangling ``l6`` edge that order_phases' strict mode rejects
+    # (the round-5 fedora 12.3 PhaseDependencyError crash). See the real-phase
+    # tie-in in test_l6a_runsc.py.
+    assert plan_mock.call_args.kwargs["allow_external_deps"] is True
+    assert apply_mock.call_args.kwargs["allow_external_deps"] is True
 
 
 def test_update_runsc_nonzero_on_apply_failure(runner: CliRunner) -> None:

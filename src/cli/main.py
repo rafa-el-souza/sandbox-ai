@@ -2122,13 +2122,17 @@ def _run_setup_update_runsc(ctx: SetupContext) -> int:
     """
     set_force_update(True)
     phases = [p for p in cli_flow.build_phase_list(()) if p.id == "l6a"]
-    plan = run_plan_pass(phases, ctx)
+    # Subset run: l6a's ``l6`` dependency is not in this single-phase list but
+    # is known-satisfied on the converged host --update-runsc runs against, so
+    # order the subset with external deps assumed satisfied (else order_phases'
+    # strict guard raises PhaseDependencyError on the dangling ``l6`` edge).
+    plan = run_plan_pass(phases, ctx, allow_external_deps=True)
     for line in cli_flow.render_plan(phases, plan):
         console.print(line, markup=False)
     console.print(
         cli_flow.plan_summary_line(cli_flow.tally_plan(plan)), markup=False
     )
-    apply_outcomes = run_apply_pass(phases, ctx)
+    apply_outcomes = run_apply_pass(phases, ctx, allow_external_deps=True)
     for line in cli_flow.summarize_apply(phases, apply_outcomes):
         console.print(line, markup=False)
     return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0

@@ -163,6 +163,27 @@ def test_act_creates_and_merges_preserving_operator_runtimes(
     assert any("restart docker" in r for r in restarts)
 
 
+def test_act_settle_gate_runs_before_restart_crossing(
+    daemon_json: Path, ctx: SetupContext, restarts: list[str]
+) -> None:
+    """The user-manager settle gate must precede the restart crossing (E2a).
+
+    Round-5 fedora: L6's first crossing landed while L5's dockerd
+    enable/restart was still churning ``user@<uid>.service`` → empty stdout →
+    sentinel-not-found. The gate (``systemctl is-active user@<uid>.service``,
+    root-side) must run BEFORE the ``systemctl --user restart docker`` crossing.
+    """
+    _write(daemon_json, {})
+    l6.PHASE.act(ctx)
+    gate_idx = next(
+        i for i, r in enumerate(restarts) if "is-active user@4242.service" in r
+    )
+    restart_idx = next(
+        i for i, r in enumerate(restarts) if "restart docker" in r
+    )
+    assert gate_idx < restart_idx
+
+
 def test_act_fresh_file_when_absent(
     daemon_json: Path, ctx: SetupContext, restarts: list[str]
 ) -> None:

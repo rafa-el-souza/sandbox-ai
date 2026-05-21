@@ -58,6 +58,7 @@ from core.setup.phase_runner import (
     Phase,
     PhaseResult,
     probe_sandbox_pw_or_missing,
+    wait_user_manager_ready,
 )
 
 if TYPE_CHECKING:
@@ -161,22 +162,11 @@ def _act(ctx: SetupContext) -> str:
 
     # Post-linger readiness gate: the per-user systemd manager
     # (``user@<uid>.service``) takes a moment to come up on a freshly-lingered,
-    # never-logged-in user. Crossing via ``machinectl shell`` before the
-    # manager is ready returns empty stdout (sentinel-not-found fail-closed).
-    # Bounded shell-retry root-side (no boundary crossing — ``systemctl
-    # is-active user@<uid>.service`` is a root-readable query for the target
-    # user's manager unit).
-    uid = pwd.getpwnam(user).pw_uid
-    Executor().run(
-        [
-            "/bin/bash",
-            "-c",
-            f"for i in $(seq 1 30); do "
-            f"systemctl is-active user@{uid}.service >/dev/null 2>&1 "
-            f"&& exit 0; sleep 1; done; "
-            f"echo 'user@{uid}.service did not become active' >&2; exit 1",
-        ],
-    )
+    # never-logged-in user. Crossing via ``machinectl shell`` before the manager
+    # is ready returns empty stdout (sentinel-not-found fail-closed). The gate is
+    # shared with L6 (which needs it post-dockerd-restart) — see
+    # ``phase_runner.wait_user_manager_ready``.
+    wait_user_manager_ready(user)
 
     if _dockerd_reachable(host_config):
         return f"linger enabled for {user!r}; rootless dockerd already up"

@@ -162,3 +162,22 @@ def test_phase_shape() -> None:
     assert l6a.PHASE.id == "l6a"
     assert l6a.PHASE.depends_on == ("l6",)
     assert l6a.PHASE.identity == Identity.ROOT
+
+
+def test_update_runsc_subset_ordering_needs_external_deps_flag() -> None:
+    """The REAL l6a phase, filtered alone, must order only with the flag.
+
+    Regression for the round-5 fedora 12.3 crash (F-016 sibling E1):
+    ``--update-runsc`` filters the phase list to just ``l6a``, whose real
+    ``depends_on=("l6",)`` is then a dangling edge. Strict ``order_phases``
+    raises ``PhaseDependencyError``; the subset path must pass
+    ``allow_external_deps=True``. Asserting against ``l6a.PHASE`` (not a
+    synthetic stand-in) ties the fix to the actual phase that crashed.
+    """
+    from core.setup.phase_runner import PhaseDependencyError, order_phases
+
+    with pytest.raises(PhaseDependencyError, match="unknown phase 'l6'"):
+        order_phases([l6a.PHASE])
+
+    ordered = order_phases([l6a.PHASE], allow_external_deps=True)
+    assert [p.id for p in ordered] == ["l6a"]

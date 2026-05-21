@@ -64,6 +64,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import core.setup as _setup_package
+from core.executor import Executor
 from core.host_config import machinectl_cmd, pipe_cmd
 
 if TYPE_CHECKING:
@@ -301,26 +302,43 @@ def discover_phases(package: ModuleType = _setup_package) -> list[Phase]:
     return phases
 
 
-def order_phases(phases: list[Phase]) -> list[Phase]:
+def order_phases(
+    phases: list[Phase], *, allow_external_deps: bool = False
+) -> list[Phase]:
     """Topologically sort ``phases`` by their ``depends_on`` edges.
 
     Deterministic: ties are broken by phase ``id`` so the operator-facing
     ordering is stable across runs. Raises :class:`PhaseDependencyError` on an
     unknown dependency id or a dependency cycle.
+
+    ``allow_external_deps=True`` is for a deliberate subset run — a
+    ``depends_on`` id that is not itself in ``phases`` is then treated as
+    already-satisfied rather than an error. This is what ``--update-runsc``
+    needs: it re-runs ONLY ``l6a``, whose ``l6`` dependency is known-satisfied
+    on the converged host it runs against. The default is strict (an unknown
+    dep is a :class:`PhaseDependencyError`) so the full-ceremony path keeps its
+    misconfiguration guard.
     """
     by_id: dict[str, Phase] = {p.id: p for p in phases}
-    for phase in phases:
-        for dep in phase.depends_on:
-            if dep not in by_id:
-                raise PhaseDependencyError(
-                    f"phase {phase.id!r} depends on unknown phase {dep!r}"
-                )
+    if not allow_external_deps:
+        for phase in phases:
+            for dep in phase.depends_on:
+                if dep not in by_id:
+                    raise PhaseDependencyError(
+                        f"phase {phase.id!r} depends on unknown phase {dep!r}"
+                    )
     ordered: list[Phase] = []
     placed: set[str] = set()
-    # Kahn-style with deterministic id-sorted selection.
+    # Kahn-style with deterministic id-sorted selection. A dep absent from
+    # ``by_id`` is an external (assumed-satisfied) dep — only reachable when
+    # ``allow_external_deps`` is set, since the strict path rejected it above.
     remaining = sorted(by_id.values(), key=lambda p: p.id)
     while remaining:
-        ready = [p for p in remaining if all(d in placed for d in p.depends_on)]
+        ready = [
+            p
+            for p in remaining
+            if all(d in placed or d not in by_id for d in p.depends_on)
+        ]
         if not ready:
             cycle = sorted(p.id for p in remaining)
             raise PhaseDependencyError(
@@ -411,6 +429,37 @@ def probe_sandbox_pw_or_missing(
         return PhaseResult.MISSING, str(exc)
 
 
+def wait_user_manager_ready(user: str, *, attempts: int = 30) -> None:
+    """Bounded root-side poll until ``user@<uid>.service`` is active.
+
+    The per-user systemd manager (``user@<uid>.service``) is not instantly
+    available after linger is enabled (L5) NOR after a rootless-docker
+    enable/restart churns it (L6). A ``machinectl shell`` crossing into the user
+    against a not-yet-ready manager connects and terminates with **empty
+    stdout** — the executor's sentinel-not-found fail-closed then fires,
+    diagnostically opaque. Observed at both L5 (post-enable-linger) and L6
+    (post-dockerd-restart) on real hosts; mocks cannot reproduce it (F-014).
+
+    This gate is a root-readable query (``systemctl is-active
+    user@<uid>.service``) — NO boundary crossing — in a bounded shell-retry
+    loop, so it must run BEFORE the phase's sandbox-user crossing. Raises
+    :class:`~core.exceptions.SandboxExecutionError` (the ``Executor`` default
+    ``check=True``) if the manager never becomes active within ``attempts``
+    seconds. Single source for the gate the L5 and L6 acts both need.
+    """
+    uid = pwd.getpwnam(user).pw_uid
+    Executor().run(
+        [
+            "/bin/bash",
+            "-c",
+            f"for i in $(seq 1 {attempts}); do "
+            f"systemctl is-active user@{uid}.service >/dev/null 2>&1 "
+            f"&& exit 0; sleep 1; done; "
+            f"echo 'user@{uid}.service did not become active' >&2; exit 1",
+        ],
+    )
+
+
 # ``PhaseResult`` values that mean "the phase converged / nothing to do" — a
 # phase in one of these is NOT a mutation and does NOT block dependents.
 _NON_MUTATING_RESULTS: frozenset[PhaseResult] = frozenset(
@@ -419,7 +468,7 @@ _NON_MUTATING_RESULTS: frozenset[PhaseResult] = frozenset(
 
 
 def run_plan_pass(
-    phases: list[Phase], ctx: SetupContext
+    phases: list[Phase], ctx: SetupContext, *, allow_external_deps: bool = False
 ) -> list[PhasePlanOutcome]:
     """Run every phase's probe in dependency order. NO mutations.
 
@@ -427,9 +476,12 @@ def run_plan_pass(
     the apply pass is that ``act`` is never invoked. The probe is content-aware
     (design D10) so the plan reflects state-vs-source, not mere file presence.
 
+    ``allow_external_deps`` is forwarded to :func:`order_phases` for a subset
+    run (``--update-runsc``); see that function's docstring.
+
     Returns one :class:`PhasePlanOutcome` per phase in dependency order.
     """
-    ordered = order_phases(phases)
+    ordered = order_phases(phases, allow_external_deps=allow_external_deps)
     outcomes: list[PhasePlanOutcome] = []
     for phase in ordered:
         try:
@@ -449,7 +501,7 @@ def run_plan_pass(
 
 
 def run_apply_pass(
-    phases: list[Phase], ctx: SetupContext
+    phases: list[Phase], ctx: SetupContext, *, allow_external_deps: bool = False
 ) -> list[PhaseApplyOutcome]:
     """Re-probe each phase; act + reverify the mutable ones (design D5).
 
@@ -478,9 +530,14 @@ def run_apply_pass(
     are never rolled back. A failed phase marks its transitive dependents
     ``BLOCKED_BY``.
 
+    ``allow_external_deps`` is forwarded to :func:`order_phases` for a subset
+    run (``--update-runsc``); see that function's docstring. External deps are
+    never in ``failed_ids``, so they correctly never mark a subset phase
+    ``BLOCKED_BY``.
+
     Returns one :class:`PhaseApplyOutcome` per phase in dependency order.
     """
-    ordered = order_phases(phases)
+    ordered = order_phases(phases, allow_external_deps=allow_external_deps)
     outcomes: list[PhaseApplyOutcome] = []
     failed_ids: set[str] = set()
 
@@ -609,4 +666,5 @@ __all__ = [
     "route",
     "run_apply_pass",
     "run_plan_pass",
+    "wait_user_manager_ready",
 ]

@@ -37,6 +37,7 @@ from core.setup.phase_runner import (
     Phase,
     PhaseResult,
     probe_sandbox_pw_or_missing,
+    wait_user_manager_ready,
 )
 
 if TYPE_CHECKING:
@@ -139,6 +140,14 @@ def _write_inode_stable(path: Path, text: str) -> None:
 def _restart_and_poll(host_config: HostConfig) -> None:
     """Restart rootless docker (crossed) and poll ``docker info`` readiness."""
     user = _sandbox_user(host_config)
+    # Settle gate: L6's first crossing lands right after L5 enabled linger and
+    # installed/started rootless dockerd, which churns the sandbox user's
+    # ``user@<uid>.service`` manager. Crossing via ``machinectl shell`` while
+    # that manager is mid-restart connects then terminates with empty stdout →
+    # sentinel-not-found (observed on real-host first-apply; F-014). Wait for
+    # the manager to be active again before the restart crossing (root-side
+    # query, no boundary crossing — shared with L5's post-linger gate).
+    wait_user_manager_ready(user)
     prefix = machinectl_cmd(user, host_config.host.machinectl_authentication)
     Executor().run(
         [

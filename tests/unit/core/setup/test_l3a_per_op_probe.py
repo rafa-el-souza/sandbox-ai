@@ -9,9 +9,10 @@ rollback (which removes the L3 drop-in), and the PHASE wiring.
 
 The control signal is the **recovered inner exit**, surfaced as a raised
 :class:`SandboxExecutionError` by :class:`core.executor.Executor` run with
-``sentinel=True`` (mirroring ``core.dispatch.probe()``). The tests therefore
-mock ``Executor`` and exercise the branch logic on that recovered signal — NOT
-on a raw ``pipe_cmd`` exit.
+``sentinel=True``. The tests mock ``Executor`` and exercise the branch logic on
+that recovered signal — NOT on a raw outer exit — while the captured argv is the
+real ``_probe_argv`` output (so the operator-drop shape is asserted for real;
+see ``test_probe_argv_drops_via_sudo_u_not_systemd_run``, F-016).
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ class _FakeExecutor:
     ) -> subprocess.CompletedProcess[str]:
         assert kwargs.get("sentinel") is True, (
             "L3a MUST recover the inner exit via the sentinel mechanism, "
-            "not branch on the raw pipe_cmd exit"
+            "not branch on the raw outer (sudo/machinectl) exit"
         )
         self.calls.append(cmd)
         # The op wire-name is the token after `dispatch ` in the bash payload.
@@ -116,12 +117,34 @@ def test_probe_argv_is_relative_machinectl(
     fake = _install_executor(monkeypatch, {})
     l3a._act(_ctx())
     argv = fake.calls[0]
-    # pipe_cmd prefix, then `sudo -n machinectl` (relative, B-3) — NOT an
-    # absolute /usr/bin/machinectl.
-    assert "systemd-run" in argv[0] or argv[0] == "systemd-run"
-    assert argv[argv.index("sudo") + 1] == "-n"
-    assert argv[argv.index("sudo") + 2] == "machinectl"
+    # `sudo -n machinectl` (relative, B-3) — NOT an absolute /usr/bin/machinectl.
+    # The inner sudo is the one after the operator-drop prefix.
+    inner_sudo = argv.index("sudo", argv.index("alice"))
+    assert argv[inner_sudo + 1] == "-n"
+    assert argv[inner_sudo + 2] == "machinectl"
     assert "/usr/bin/machinectl" not in argv
+
+
+def test_probe_argv_drops_via_sudo_u_not_systemd_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator drop MUST be ``sudo -u <operator>``, never systemd-run.
+
+    F-016 regression: the original ``pipe_cmd`` (``systemd-run --uid``) drop
+    cannot exec the setuid ``sudo`` that follows — it EXIT_EXECs (203) on a real
+    host, so the probe got empty output → "sentinel not found" → FAIL → rolled
+    back a correct rule. Mock-hidden for the whole change. The argv built here
+    is the real ``_probe_argv`` output (only the boundary call is faked), so
+    this asserts the construction that actually broke.
+    """
+    fake = _install_executor(monkeypatch, {})
+    l3a._act(_ctx())
+    argv = fake.calls[0]
+    # Normal-process operator drop, byte-for-byte.
+    assert argv[:3] == ["sudo", "-u", "alice"]
+    # The transient-unit primitive must be entirely absent.
+    assert "systemd-run" not in argv
+    assert not any(a.startswith("--uid=") for a in argv)
 
 
 # ── password-required branch (F-004 / MACHINECTL_PATH drift) ─────────────────

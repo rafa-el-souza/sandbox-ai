@@ -14,11 +14,13 @@ mechanism, never imported).
 from __future__ import annotations
 
 import pwd
+import subprocess
 import sys
 from types import ModuleType
 from typing import TYPE_CHECKING
 
 import pytest
+from core.exceptions import SandboxExecutionError
 from core.host_config import MachinectlAuth, machinectl_cmd, minimal_host_config, pipe_cmd
 from core.setup.phase_runner import (
     Identity,
@@ -38,6 +40,7 @@ from core.setup.phase_runner import (
     route,
     run_apply_pass,
     run_plan_pass,
+    wait_user_manager_ready,
 )
 
 if TYPE_CHECKING:
@@ -265,6 +268,46 @@ def test_order_phases_cycle() -> None:
     b = _phase("b", depends_on=("a",))
     with pytest.raises(PhaseDependencyError, match="dependency cycle"):
         order_phases([a, b])
+
+
+def test_order_phases_external_dep_strict_raises_by_default() -> None:
+    """A single-phase subset with an out-of-list dep raises under the default.
+
+    This is the --update-runsc crash shape (round-5 fedora 12.3): filtering the
+    phase list to just ``l6a`` (which ``depends_on=("l6",)``) and ordering it
+    strictly raises ``PhaseDependencyError: ... unknown phase 'l6'``.
+    """
+    l6a = _phase("l6a", depends_on=("l6",))
+    with pytest.raises(PhaseDependencyError, match="unknown phase 'l6'"):
+        order_phases([l6a])
+
+
+def test_order_phases_external_dep_allowed_treated_as_satisfied() -> None:
+    """``allow_external_deps=True`` treats an out-of-list dep as satisfied.
+
+    The subset-run path (--update-runsc): the external ``l6`` edge is dangling
+    in the filtered list but known-satisfied on the converged host, so ordering
+    must succeed and place the single phase.
+    """
+    l6a = _phase("l6a", depends_on=("l6",))
+    ordered = order_phases([l6a], allow_external_deps=True)
+    assert [p.id for p in ordered] == ["l6a"]
+
+
+def test_order_phases_external_dep_allowed_still_orders_internal_edges() -> None:
+    """External deps are satisfied, but in-list edges still order correctly."""
+    a = _phase("a", depends_on=("ext",))
+    b = _phase("b", depends_on=("a",))
+    ordered = [p.id for p in order_phases([b, a], allow_external_deps=True)]
+    assert ordered == ["a", "b"]
+
+
+def test_order_phases_external_dep_allowed_still_detects_cycle() -> None:
+    """Allowing external deps must NOT mask a genuine in-list cycle."""
+    a = _phase("a", depends_on=("b", "ext"))
+    b = _phase("b", depends_on=("a",))
+    with pytest.raises(PhaseDependencyError, match="dependency cycle"):
+        order_phases([a, b], allow_external_deps=True)
 
 
 # ── route ────────────────────────────────────────────────────────────────────
@@ -689,6 +732,72 @@ def test_sandbox_user_not_yet_created_is_a_keyerror() -> None:
     # It must remain a KeyError subclass so an unguarded `except KeyError`
     # at a call site still catches it (defense in depth).
     assert issubclass(SandboxUserNotYetCreated, KeyError)
+
+
+# ── wait_user_manager_ready (shared L5/L6 settle gate, F-014/E2a) ─────────────
+
+
+def test_wait_user_manager_ready_polls_target_uid_root_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate queries ``user@<uid>.service`` root-side (no boundary cross)."""
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _fake_pw(4242, "/home/sb"))
+    calls: list[list[str]] = []
+
+    def _run(
+        _self: object, cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", _run)
+    wait_user_manager_ready("sandboxuser")
+    assert len(calls) == 1
+    inner = calls[0][-1]
+    # Targets the resolved uid's manager unit, in a bounded retry loop, and is
+    # a plain root-side systemctl query — NOT a machinectl/systemd-run crossing.
+    assert "systemctl is-active user@4242.service" in inner
+    assert "seq 1 30" in inner
+    assert "machinectl" not in " ".join(calls[0])
+    assert "systemd-run" not in " ".join(calls[0])
+
+
+def test_wait_user_manager_ready_raises_when_never_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager that never becomes active surfaces as a raised error.
+
+    The Executor's default ``check=True`` raises on the loop's ``exit 1``; the
+    gate must let that propagate (→ phase-runner FAIL) rather than swallow it.
+    """
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _fake_pw(4242, "/home/sb"))
+
+    def _boom(
+        _self: object, _cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise SandboxExecutionError("user@4242.service did not become active")
+
+    monkeypatch.setattr("core.executor.Executor.run", _boom)
+    with pytest.raises(SandboxExecutionError, match="did not become active"):
+        wait_user_manager_ready("sandboxuser")
+
+
+def test_wait_user_manager_ready_attempts_is_parametrized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``attempts`` is a parameter (a test seam), not a hardcoded constant."""
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _fake_pw(7, "/home/x"))
+    captured: list[str] = []
+
+    def _run(
+        _self: object, cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        captured.append(cmd[-1])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", _run)
+    wait_user_manager_ready("x", attempts=5)
+    assert "seq 1 5" in captured[0]
 
 
 # ── assert_phase_content_aware conftest fixture (consumed, not imported) ──────

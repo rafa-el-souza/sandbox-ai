@@ -172,6 +172,30 @@ def pipe_cmd(user: str) -> list[str]:
     return ["systemd-run", "-q", "--pipe", f"--uid={user}"]
 
 
+def sudo_as_operator(operator: str) -> list[str]:
+    """Build a NORMAL-PROCESS drop into ``operator`` (not a transient unit).
+
+    Returns ``["sudo", "-u", operator]``. Unlike :func:`pipe_cmd` (which drops
+    via a ``--uid`` transient *service* unit), this drops the current (root)
+    process to ``operator`` in an ordinary child process.
+
+    Use this — NOT ``pipe_cmd`` — whenever the command run as the operator is
+    itself a **setuid** binary (``sudo``, …). Execing a setuid-root binary from
+    inside :func:`pipe_cmd`'s ``--uid`` transient-unit context fails with systemd
+    ``EXIT_EXEC`` (203) on a real host (observed: systemd 259 + SELinux), so the
+    operator-side ``sudo machinectl …`` verification that L3a performs cannot go
+    through ``pipe_cmd``. A normal-process ``sudo -u`` drop execs setuid ``sudo``
+    fine, re-runs ``initgroups`` (so a post-``usermod`` group set is reflected,
+    the property ``pipe_cmd``'s ``--uid`` was chosen for), and is faithful to how
+    the operator invokes the boundary at runtime (their own login process runs
+    ``sudo machinectl``, never a transient unit). See finding F-016.
+
+    ``pipe_cmd`` remains correct for plain-binary operator crossings (L4) and is
+    *required* for the SSH binary-frame path; this is the setuid-only sibling.
+    """
+    return ["sudo", "-u", operator]
+
+
 # ─── Subuid / subgid resolvers ──────────────────────────────────────────────
 
 

@@ -18,21 +18,34 @@ phase whose **work is verification**: there is no cheap idempotent skip for
 probed); ``identity`` is OPERATOR (the probe runs as the operator — it verifies
 the operator's *own* sudo grant works).
 
+**Operator drop (F-016 — load-bearing, do NOT revert to ``pipe_cmd``).** The
+probe must run as the operator so it verifies the *operator's own* sudoers
+grant, and its command is the setuid binary ``sudo``. The operator drop is
+therefore ``sudo_as_operator(<operator>)`` — a NORMAL-PROCESS ``sudo -u
+<operator>`` drop — NOT ``pipe_cmd``. Execing setuid ``sudo`` from inside the
+``--uid`` transient unit ``pipe_cmd`` builds fails with
+``EXIT_EXEC`` (203) on a real host → empty output → "sentinel not found" →
+this phase FAILs and rolls back a *correct* rule. That defect was mock-hidden
+for the whole change (every unit test stubs ``Executor.run``); see F-016. A
+``sudo -u`` drop is also faithful to runtime: the operator's real login process
+runs ``sudo machinectl …``, never a transient unit.
+
 **Inner-exit recovery (C-001 Finding-J / F-004 — load-bearing, do NOT
 simplify).** Each op is probed via
-``pipe_cmd(<operator>) → sudo -n machinectl shell <user>@.host /bin/bash -c
-'<dispatch> <op> --check'`` with **relative** ``machinectl`` (byte-identical to
-``core.host_config.machinectl_cmd()``'s runtime output — an absolute
-``/usr/bin/machinectl`` would spuriously MATCH on a host where the real
+``sudo_as_operator(<operator>) → sudo -n machinectl shell <user>@.host
+/bin/bash -c '<dispatch> <op> --check'`` with **relative** ``machinectl``
+(byte-identical to ``core.host_config.machinectl_cmd()``'s runtime output — an
+absolute ``/usr/bin/machinectl`` would spuriously MATCH on a host where the real
 relative-form orchestrator call fails, the exact footgun this probe defeats).
-``pipe_cmd`` propagates only sudo/machinectl's exit; ``machinectl shell``
-**masks the inner ``/bin/bash -c`` exit**, so a dispatcher reject
-(unknown/absent/mis-pathed op → inner exit 2) would be masked as a sudoers
-MATCH. L3a therefore recovers the **inner** exit via the sentinel mechanism
-(:class:`core.executor.Executor` ``run(..., sentinel=True)`` — mirroring how
-``core.dispatch.probe()`` recovers a masked inner exit) and branches on the
-**recovered inner exit**, NEVER the raw ``pipe_cmd`` exit. The dispatcher's
-journald ``check=1`` record is audit-only and is NEVER the control signal.
+``machinectl shell`` **masks the inner ``/bin/bash -c`` exit**, so a dispatcher
+reject (unknown/absent/mis-pathed op → inner exit 2) would be masked as a
+sudoers MATCH. L3a therefore recovers the **inner** exit via the sentinel
+mechanism (:class:`core.executor.Executor` ``run(..., sentinel=True)`` — the
+same masked-inner-exit recovery ``core.dispatch.probe()`` performs, though that
+path crosses as the operator's own runtime process, not via a drop) and
+branches on the **recovered inner exit**, NEVER the raw outer exit. The
+dispatcher's journald ``check=1`` record is audit-only and is NEVER the control
+signal.
 
 Decision matrix on the recovered inner exit, per op:
 
@@ -56,7 +69,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import pipe_cmd
+from core.host_config import sudo_as_operator
 from core.setup.l0_identity import resolve_machinectl_path
 from core.setup.l3_sudoers_polkit import _drop_in_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
@@ -81,17 +94,20 @@ class PerOpProbeError(SandboxExecutionError):
 def _probe_argv(host_config: HostConfig, operator: str, op: Op) -> list[str]:
     """Build the per-op probe argv (relative ``machinectl``, B-3).
 
-    ``pipe_cmd(<operator>) + ["sudo", "-n", "machinectl", "shell",
-    "<user>@.host", "/bin/bash", "-c", "<dispatch> <op> --check"]`` — byte-
-    identical to what the orchestrator emits at runtime except for the
-    ``sudo -n`` (non-interactive: a missing grant fails fast with the
-    ``password is required`` marker instead of prompting) and the ``--check``
-    no-op-success op shape.
+    ``sudo_as_operator(<operator>) + ["sudo", "-n", "machinectl", "shell",
+    "<user>@.host", "/bin/bash", "-c", "<dispatch> <op> --check"]`` — the
+    ``sudo … machinectl shell …`` tail is byte-identical to what the operator
+    emits at runtime except for the ``sudo -n`` (non-interactive: a missing
+    grant fails fast with the ``password is required`` marker instead of
+    prompting) and the ``--check`` no-op-success op shape. The
+    ``sudo_as_operator`` (``sudo -u <operator>``) prefix drops root to the
+    operator in a normal process so the setuid ``sudo`` that follows can exec
+    (F-016 — a ``pipe_cmd`` ``--uid`` transient-unit drop EXIT_EXECs on setuid).
     """
     sandbox_user = host_config.host.docker_unprivileged_user
     inner = f"{_DISPATCH_BINARY} {op.value} --check"
     return [
-        *pipe_cmd(operator),
+        *sudo_as_operator(operator),
         "sudo",
         "-n",
         "machinectl",
