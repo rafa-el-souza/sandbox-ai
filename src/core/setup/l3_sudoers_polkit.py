@@ -17,8 +17,8 @@ L3). The rendered bytes are byte-compared against the on-disk drop-in:
 
 - absent drop-in → ``MISSING`` (act stages + ``visudo -cf`` + installs);
 - present but byte-different (e.g. the Op enum grew on a wheel upgrade so the
-  drop-in's ``Cmnd_Alias`` enumeration is stale) → ``DRIFT`` (act re-renders +
-  re-installs);
+  drop-in's inlined ``Cmnd_Spec`` enumeration is stale) → ``DRIFT`` (act
+  re-renders + re-installs);
 - present and byte-identical → ``ALREADY_CORRECT``.
 
 Two load-bearing F-004 / B-3 invariants:
@@ -158,14 +158,21 @@ def render_sudoers_rule(
                 f"silent-footgun shape; backslash-escape is required, never "
                 f"shell-quoting): {spec!r}"
             )
-    alias_body = ", \\\n    ".join(specs)
+    # Inline the Cmnd specs directly into the operator's user-spec — do NOT
+    # define a shared ``Cmnd_Alias``. Cmnd_Alias names share a single GLOBAL
+    # namespace across all of ``/etc/sudoers.d/``, so a per-operator drop-in
+    # that declared ``Cmnd_Alias SANDBOX_OPS`` collided with every other
+    # operator's drop-in ("duplicate Cmnd_Alias" — F-020), breaking the
+    # multi-operator-by-accumulation property and polluting every operator's
+    # ``sudo`` stderr. Inlining is collision-proof: each operator's user-spec is
+    # wholly independent. (Repeated ``Defaults fast_glob`` across drop-ins is
+    # harmless — duplicate ``Defaults`` is not an error, unlike ``Cmnd_Alias``.)
+    cmnd_list = ", \\\n    ".join(specs)
     return (
         f"{_SUDOERS_HEADER}\n"
         f"Defaults fast_glob\n"
-        f"Cmnd_Alias SANDBOX_OPS = \\\n"
-        f"    {alias_body}\n"
-        f"\n"
-        f"{operator} {hostname}=(root) NOPASSWD: NOSETENV: SANDBOX_OPS\n"
+        f"{operator} {hostname}=(root) NOPASSWD: NOSETENV: \\\n"
+        f"    {cmnd_list}\n"
     )
 
 

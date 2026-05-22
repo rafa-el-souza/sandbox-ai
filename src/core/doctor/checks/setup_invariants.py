@@ -180,7 +180,7 @@ def _audit_machinectl_stability(
 def _audit_rule_body(
     host_config: HostConfig, operator: str, drop_in_text: str, violations: list[str]
 ) -> None:
-    """Re-render the expected SANDBOX_OPS body and audit the installed drop-in.
+    """Re-render the expected operator rule body and audit the installed drop-in.
 
     (a) op set == ``core.dispatch.Op``; (b) zero ``"`` in any Cmnd_Spec body;
     (c) op-name segment shape (the L3 renderer raises ``RuleRenderError`` on a

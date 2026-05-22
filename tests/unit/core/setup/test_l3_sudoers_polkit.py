@@ -12,6 +12,7 @@ already-resolved operator off the :class:`SetupContext`.)
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -72,10 +73,10 @@ def test_render_has_zero_double_quotes_in_every_cmnd_spec() -> None:
     rendered = render_sudoers_rule(
         "/usr/bin/machinectl", "alice", "testhost", "sandbox"
     )
-    # Every Cmnd_Spec line lives between the Cmnd_Alias header and the blank
-    # line before the user clause; assert NONE contains a ``"``.
-    body = rendered.split("Cmnd_Alias SANDBOX_OPS = \\\n", 1)[1]
-    cmnd_block = body.split("\n\n", 1)[0]
+    # The Cmnd_Spec lines are inlined into the operator's user-spec (no
+    # Cmnd_Alias — F-020); they run from the ``NOPASSWD: NOSETENV: \`` header to
+    # the end. Assert NONE contains a ``"``.
+    cmnd_block = rendered.split("NOPASSWD: NOSETENV: \\\n", 1)[1]
     for line in cmnd_block.splitlines():
         assert '"' not in line, f"Cmnd_Spec contains a quote: {line!r}"
 
@@ -118,6 +119,52 @@ def test_no_arg_ops_also_grant_exact_check_probe_shape() -> None:
     # Arg-ops' ``\\ *`` already covers ``--check``, so they get NO separate
     # ``--check`` entry.
     assert "dispatch\\ compose-up\\ --check" not in rendered
+
+
+# ── F-020 multi-operator: no shared Cmnd_Alias namespace ─────────────────────
+
+
+def test_render_defines_no_cmnd_alias() -> None:
+    """F-020: the rule MUST NOT declare a ``Cmnd_Alias`` (a global-namespace
+    identifier that collides when a second operator's drop-in coexists). The
+    specs are inlined into the operator's user-spec instead.
+    """
+    rendered = render_sudoers_rule(
+        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+    )
+    assert "Cmnd_Alias" not in rendered
+    # The grant is the operator's own user-spec carrying the inlined cmnd list.
+    assert "alice testhost=(root) NOPASSWD: NOSETENV: \\\n" in rendered
+
+
+def test_two_operators_pass_visudo_without_duplicate_alias(
+    tmp_path: Path,
+) -> None:
+    """F-020 regression: two operators' drop-ins, loaded together, MUST parse
+    cleanly — no ``duplicate Cmnd_Alias``. Pre-fix (each drop-in declared
+    ``Cmnd_Alias SANDBOX_OPS``) ``visudo -cf`` on the combined file failed with
+    exactly that error.
+    """
+    visudo = shutil.which("visudo")
+    if visudo is None:
+        pytest.skip("visudo not available on this host")
+    alice = render_sudoers_rule("/usr/bin/machinectl", "alice", "testhost", "sandbox")
+    bob = render_sudoers_rule("/usr/bin/machinectl", "bob", "testhost", "sandbox")
+    # sudo loads every /etc/sudoers.d/* file into ONE policy; concatenation
+    # reproduces that (a duplicate Cmnd_Alias across files is the real failure).
+    combined = tmp_path / "combined"
+    combined.write_text(alice + bob)
+    result = subprocess.run(
+        [visudo, "-cf", str(combined)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"visudo -cf rejected two coexisting operator drop-ins: "
+        f"{result.stdout}{result.stderr}"
+    )
+    assert "duplicate Cmnd_Alias" not in (result.stdout + result.stderr)
 
 
 # ── F-004 render-time refusal ────────────────────────────────────────────────
