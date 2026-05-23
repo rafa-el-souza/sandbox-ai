@@ -32,13 +32,25 @@ Two C-001 reconciliations this phase honors (do NOT regress):
    deterministic sorted relative-path order.
 
 Content-aware probe with source-bundle awareness (design D10): the manifest at
-``<sandbox_ai_home()>/state/dispatcher.manifest.json`` records
+``/usr/local/libexec/sandbox-ai/dispatcher.manifest.json`` records
 ``{compiled_sha512, source_bundle_sha512, compile_timestamp}``. SKIP
 (``ALREADY_CORRECT``) **only** when the manifest's ``compiled_sha512`` equals
 the on-disk binary's sha512 AND the manifest's ``source_bundle_sha512`` equals
 a freshly-computed source-bundle sha512. Either mismatch (or absent
 manifest/binary) → recompile + install + rewrite manifest. This handles wheel
 upgrades correctly without recompiling on every no-drift re-run.
+
+Manifest home — host plane, not per-operator (F-021). The dispatcher binary is
+**convergent shared host state** (identical for every operator), so its manifest
+is host-level too: it lives **alongside the binary** under
+``/usr/local/libexec/sandbox-ai/`` (root-owned, mode ``0644``), NOT under
+``<sandbox_ai_home()>/state/``. Resolving ``sandbox_ai_home()`` in this
+root-running phase would target ``/root/.sandbox-ai`` (``$HOME=/root`` under
+sudo), where the operator's ``sandbox doctor`` could never read it — the
+manifest is the one artifact only setup can produce, so it MUST land on a
+host path every operator can see. ``dispatcher_sha_drift`` imports
+``_manifest_path`` from this module (single source); the move is therefore a
+one-line change here.
 """
 
 from __future__ import annotations
@@ -55,7 +67,6 @@ from typing import TYPE_CHECKING
 
 from core.dispatch import _DISPATCH_SOURCE_ENTRIES, compile_dispatcher
 from core.exceptions import SandboxExecutionError
-from core.host_config import sandbox_ai_home
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -69,8 +80,13 @@ _STAGING = Path("/usr/local/libexec/sandbox-ai/.dispatch.staging")
 
 
 def _manifest_path() -> Path:
-    """Resolve ``<sandbox_ai_home()>/state/dispatcher.manifest.json``."""
-    return sandbox_ai_home() / "state" / "dispatcher.manifest.json"
+    """Resolve the host-plane manifest path (alongside the binary, F-021).
+
+    Derived from ``_TARGET.parent`` so the manifest is always the binary's
+    sibling — ``/usr/local/libexec/sandbox-ai/dispatcher.manifest.json`` — and
+    so the test seam that redirects ``_TARGET`` redirects the manifest with it.
+    """
+    return _TARGET.parent / "dispatcher.manifest.json"
 
 
 def _collect_files(node: Traversable, rel: str, into: dict[str, bytes]) -> None:
@@ -161,7 +177,13 @@ def _probe(_ctx: SetupContext) -> tuple[PhaseResult, str]:
 
 
 def _write_manifest(compiled_sha: str, source_sha: str) -> None:
-    """Write the manifest (mode 0600, operator-owned) — three keys exactly."""
+    """Write the manifest (mode 0644, root:root) — three keys exactly.
+
+    Host-plane artifact (F-021): world-readable so every operator's
+    ``sandbox doctor`` can read it, root-owned so only setup writes it. An
+    explicit ``chown`` keeps it root-owned even on a re-run that truncates a
+    pre-existing file.
+    """
     path = _manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {
@@ -169,11 +191,13 @@ def _write_manifest(compiled_sha: str, source_sha: str) -> None:
         "source_bundle_sha512": source_sha,
         "compile_timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
     }
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
         os.write(fd, (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode())
     finally:
         os.close(fd)
+    os.chmod(path, 0o644)
+    os.chown(path, 0, 0)
 
 
 def _install_compiled(staging: Path) -> None:

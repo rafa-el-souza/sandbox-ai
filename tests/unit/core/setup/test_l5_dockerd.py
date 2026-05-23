@@ -130,7 +130,7 @@ def test_probe_missing_when_sandbox_user_absent(
     The plan pass runs all probes before any act, so ``pwd.getpwnam`` raises
     ``KeyError``. L5 must return MISSING (NOT raise, NOT run
     ``loginctl``/``docker info``) with the not-yet-created wording, mirroring
-    l1/l2a/l4/l6.
+    l1/l2a/l6.
     """
 
     def _no_user(_n: str) -> pwd.struct_passwd:
@@ -234,7 +234,9 @@ def test_probe_already_correct_then_missing(
 
 def test_phase_shape() -> None:
     assert l5.PHASE.id == "l5"
-    assert l5.PHASE.depends_on == ("l4",)
+    # L4 was deleted (round-9/F-021); L5 now depends on L2a, which transitively
+    # depends on L2 (the sandbox user's creator).
+    assert l5.PHASE.depends_on == ("l2a",)
     assert l5.PHASE.identity == Identity.SANDBOX
 
 

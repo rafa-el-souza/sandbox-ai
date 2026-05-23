@@ -244,7 +244,8 @@ def test_act_compiles_installs_and_writes_manifest(
     # chattr +i applied (and -i not needed on a fresh target).
     assert any("chattr +i" in c for c in env.chattr)
     assert "manifest recorded" in detail
-    assert (l65._manifest_path().stat().st_mode & 0o777) == 0o600
+    # Host-plane manifest is world-readable root:root 0644 (F-021), not 0600.
+    assert (l65._manifest_path().stat().st_mode & 0o777) == 0o644
 
 
 def test_act_unseals_existing_immutable_target(
@@ -341,6 +342,26 @@ def test_content_aware(
         source_sha["value"] = "SOURCE-B-AFTER-WHEEL-UPGRADE"
 
     assert_phase_content_aware(l65.PHASE, ctx, make_stale)
+
+
+def test_manifest_path_is_binary_sibling_not_under_home(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-021 regression: the manifest lands beside the binary, NOT under
+    ``sandbox_ai_home()`` — so a root-running setup ($HOME=/root) cannot hide it
+    in ``/root/.sandbox-ai`` where the operator's doctor can never read it.
+
+    The ``env`` fixture sets ``SANDBOX_AI_HOME`` to a tmp home AND redirects
+    ``_TARGET`` to a separate tmp libexec dir; the manifest path must follow
+    ``_TARGET.parent`` and be wholly independent of the home.
+    """
+    manifest = l65._manifest_path()
+    assert manifest == l65._TARGET.parent / "dispatcher.manifest.json"
+    # Pre-fix tree resolved this under SANDBOX_AI_HOME/state — assert it does not.
+    import os
+
+    home = os.environ["SANDBOX_AI_HOME"]
+    assert home not in str(manifest)
 
 
 def test_phase_shape() -> None:

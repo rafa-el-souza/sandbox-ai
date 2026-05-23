@@ -223,21 +223,21 @@ def test_discover_phases_PHASE_wrong_type_raises(
 
 def test_discover_phases_default_is_real_core_setup() -> None:
     # Production default: the real core.setup package, now populated with the
-    # thirteen wired phase modules (l2a split out of l1 — the uid-scoped
-    # Delegate drop-in needs L2 to have created the sandbox user first). This
-    # is the cross-module integration check — it fails if any phase module
-    # drifts its id/depends_on out of the canonical graph, or a module stops
-    # exporting a valid PHASE.
+    # twelve wired phase modules (l2a split out of l1 — the uid-scoped Delegate
+    # drop-in needs L2 to have created the sandbox user first; L4 was deleted in
+    # round-9/F-021 — the per-operator tree is `init`'s artifact, created as the
+    # operator, never by root-running setup). This is the cross-module
+    # integration check — it fails if any phase module drifts its id/depends_on
+    # out of the canonical graph, or a module stops exporting a valid PHASE.
     discovered = discover_phases()
     assert sorted(p.id for p in discovered) == sorted(
-        ["l0", "l1", "l2", "l2a", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"]
+        ["l0", "l1", "l2", "l2a", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"]
     )
-    # The depends_on edges across all thirteen modules must topologically
-    # resolve to the single canonical setup chain — l2a sits between l2 and
-    # l4 (after the user exists, before rootless dockerd needs cgroup
-    # delegation).
+    # The depends_on edges across all twelve modules must topologically resolve
+    # to the single canonical setup chain — l2a sits between l2 and l5 (after
+    # the user exists, before rootless dockerd needs cgroup delegation).
     assert [p.id for p in order_phases(discovered)] == [
-        "l0", "l1", "l2", "l2a", "l4", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"
+        "l0", "l1", "l2", "l2a", "l5", "l6", "l6a", "l65", "l7", "l3", "l3a", "l8"
     ]
 
 

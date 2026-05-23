@@ -1,9 +1,11 @@
 """Dispatcher sha-drift doctor check (spec "Dispatcher Sha Drift Check").
 
 Compares the on-disk dispatcher binary against the manifest written by setup's
-L6.5 phase at ``<sandbox_ai_home()>/state/dispatcher.manifest.json`` (schema:
-``compiled_sha512`` / ``source_bundle_sha512`` / ``compile_timestamp`` —
-"Dispatcher Manifest Schema" requirement).
+L6.5 phase at ``/usr/local/libexec/sandbox-ai/dispatcher.manifest.json`` (the
+host-plane path alongside the binary, F-021; schema: ``compiled_sha512`` /
+``source_bundle_sha512`` / ``compile_timestamp`` — "Dispatcher Manifest Schema"
+requirement). The path is imported (``_manifest_path``) from L6.5 — single
+source — so this check and the setup phase can never disagree on its location.
 
 Two independent integrity dimensions:
 

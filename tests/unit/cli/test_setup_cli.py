@@ -143,8 +143,8 @@ def test_refusal_no_prompt_exit_nonzero(runner: CliRunner) -> None:
 
 
 def test_non_tty_without_yes_refuses(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -166,9 +166,9 @@ def test_non_tty_without_yes_refuses(runner: CliRunner) -> None:
 
 @pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES"])
 def test_tty_prompt_affirmative_proceeds(runner: CliRunner, answer: str) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
-    apply_outcomes = [_apply("l4", PhaseResult.ALREADY_CORRECT, reverified=True)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
+    apply_outcomes = [_apply("l5", PhaseResult.ALREADY_CORRECT, reverified=True)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -186,8 +186,8 @@ def test_tty_prompt_affirmative_proceeds(runner: CliRunner, answer: str) -> None
 def test_tty_prompt_negative_aborts_exit_0(
     runner: CliRunner, answer: str
 ) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -205,9 +205,9 @@ def test_tty_prompt_negative_aborts_exit_0(
 
 
 def test_yes_skips_prompt_and_proceeds(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
-    apply_outcomes = [_apply("l4", PhaseResult.ALREADY_CORRECT, reverified=True)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
+    apply_outcomes = [_apply("l5", PhaseResult.ALREADY_CORRECT, reverified=True)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -221,9 +221,9 @@ def test_yes_skips_prompt_and_proceeds(runner: CliRunner) -> None:
 
 
 def test_yes_passes_assume_yes_to_distro_gate(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
-    apply_outcomes = [_apply("l4", PhaseResult.ALREADY_CORRECT)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
+    apply_outcomes = [_apply("l5", PhaseResult.ALREADY_CORRECT)]
     with (
         patch("cli.main.os.geteuid", return_value=0),
         patch("cli.main.resolve_operator", return_value="dev"),
@@ -246,9 +246,9 @@ def test_yes_passes_assume_yes_to_distro_gate(runner: CliRunner) -> None:
 
 
 def test_apply_failure_exits_nonzero(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
-    apply_outcomes = [_apply("l4", PhaseResult.FAIL, reverified=False)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
+    apply_outcomes = [_apply("l5", PhaseResult.FAIL, reverified=False)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -265,8 +265,8 @@ def test_apply_failure_exits_nonzero(runner: CliRunner) -> None:
 
 
 def test_dry_run_runs_plan_only(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.MISSING)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -285,8 +285,8 @@ def test_dry_run_with_conflict_plan_still_exits_0(runner: CliRunner) -> None:
     # --dry-run is preview-only: it returns 0 after the plan pass even when
     # the plan contains a CONFLICT (the gate decision is not computed on the
     # dry-run path; the apply pass never runs).
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.CONFLICT)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.CONFLICT)]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -365,7 +365,7 @@ def test_update_runsc_nonzero_on_apply_failure(runner: CliRunner) -> None:
 
 
 def test_sigint_during_ceremony_exits_130(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
+    phases = [_phase("l5")]
     with (
         _root_ctx(),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
@@ -379,8 +379,8 @@ def test_sigint_during_ceremony_exits_130(runner: CliRunner) -> None:
 
 
 def test_sigint_handler_installed_then_restored(runner: CliRunner) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.ALREADY_CORRECT)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.ALREADY_CORRECT)]
     captured: dict[str, object] = {}
 
     def _capture_plan(_phases: object, _ctx: object) -> list[PhasePlanOutcome]:
@@ -410,8 +410,8 @@ def test_sigint_handler_installed_then_restored(runner: CliRunner) -> None:
 def test_sigint_handler_callback_raises_setup_aborted(
     runner: CliRunner,
 ) -> None:
-    phases = [_phase("l4")]
-    plan = [_plan("l4", PhaseResult.ALREADY_CORRECT)]
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.ALREADY_CORRECT)]
     holder: dict[str, object] = {}
 
     def _grab(_phases: object, _ctx: object) -> list[PhasePlanOutcome]:
@@ -464,7 +464,8 @@ def test_fresh_host_uses_minimal_host_config(runner: CliRunner) -> None:
         result = runner.invoke(app, ["setup"])
     assert result.exit_code == 0
     ctx = captured[0]
-    # Defaults-based config: same defaults L4's _SEED_DEFAULTS writes.
+    # Defaults-based config when the toml is absent: docker_unprivileged_user
+    # defaults to "sandbox" (the same value `sandbox init` later seeds).
     assert ctx.host_config.host.docker_unprivileged_user == "sandbox"
     assert ctx.operator == "dev"
 

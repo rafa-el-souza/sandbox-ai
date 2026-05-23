@@ -119,8 +119,9 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     one — ``loginctl``'s "No such process") — so check the sandbox user via
     the shared guard FIRST and return ``MISSING`` before any ``loginctl`` /
     ``docker info`` runs. ``act``/``reverify`` are unguarded — by act-time
-    ``depends_on=("l4",)`` plus L2 having acted, the user exists. Other L5
-    errors with the user present still propagate (systemic guard → FAIL).
+    ``depends_on=("l2a",)`` (which transitively depends on L2, the user's
+    creator) means the user exists. Other L5 errors with the user present
+    still propagate (systemic guard → FAIL).
     """
     pw = probe_sandbox_pw_or_missing(ctx.host_config)
     if not isinstance(pw, pwd.struct_passwd):
@@ -196,5 +197,5 @@ PHASE = Phase(
     probe=_probe,
     act=_act,
     reverify=_reverify,
-    depends_on=("l4",),
+    depends_on=("l2a",),
 )

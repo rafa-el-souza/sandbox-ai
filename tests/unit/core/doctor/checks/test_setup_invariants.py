@@ -56,7 +56,6 @@ def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
     """Stub every audit helper to its all-invariants-hold outcome."""
     monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: operator)
     monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
-    monkeypatch.setattr(f"{_MOD}._audit_per_user_tree", lambda op, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
@@ -174,52 +173,6 @@ class TestAuditReservedDir:
         v: list[str] = []
         m._audit_reserved_dir(v)
         assert v == []
-
-
-class TestAuditPerUserTree:
-    def test_missing_leaf(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-
-        monkeypatch.setattr(f"{_MOD}.pwd.getpwnam", lambda n: type("P", (), {"pw_uid": 1000})())
-        monkeypatch.setattr("pathlib.Path.is_dir", lambda self: False)
-        v: list[str] = []
-        m._audit_per_user_tree("alice", v)
-        assert len(v) == 4
-        assert all("missing" in x for x in v)
-
-    def test_wrong_mode_and_uid(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-
-        monkeypatch.setattr(f"{_MOD}.pwd.getpwnam", lambda n: type("P", (), {"pw_uid": 1000})())
-        monkeypatch.setattr("pathlib.Path.is_dir", lambda self: True)
-
-        class FakeStat:
-            st_mode = 0o040755
-            st_uid = 0
-
-        monkeypatch.setattr("pathlib.Path.stat", lambda self: FakeStat())
-        v: list[str] = []
-        m._audit_per_user_tree("alice", v)
-        assert any("0o700" in x for x in v)
-        assert any("uid 0" in x for x in v)
-
-    def test_unknown_operator_uid_skips_uid_check(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-
-        def boom(n: str) -> Any:
-            raise KeyError(n)
-
-        monkeypatch.setattr(f"{_MOD}.pwd.getpwnam", boom)
-        monkeypatch.setattr("pathlib.Path.is_dir", lambda self: True)
-
-        class FakeStat:
-            st_mode = 0o040700
-            st_uid = 999
-
-        monkeypatch.setattr("pathlib.Path.stat", lambda self: FakeStat())
-        v: list[str] = []
-        m._audit_per_user_tree("ghost", v)
-        assert v == []  # mode 0700 ok, uid check skipped (operator uid unknown)
 
 
 class TestAuditSubidAndGroup:
@@ -457,8 +410,7 @@ class TestWarnAggregation:
 
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: v.append("A bad"))
-        monkeypatch.setattr(f"{_MOD}._audit_per_user_tree", lambda op, v: v.append("B bad"))
-        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: v.append("B bad"))
         monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)

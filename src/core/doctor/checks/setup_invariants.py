@@ -30,7 +30,6 @@ matches ``[a-z0-9-]+`` (re-rendering via the L3 renderer raises
 from __future__ import annotations
 
 import grp
-import pwd
 import re
 import socket
 import stat
@@ -43,7 +42,6 @@ from core.host_config import (
     MachinectlAuth,
     minimal_host_config,
     parse_subgid_for_user,
-    sandbox_ai_home,
 )
 
 # NOTE — the ``core.setup.*`` modules are imported LAZILY inside the functions
@@ -88,29 +86,6 @@ def _audit_reserved_dir(violations: list[str]) -> None:
         violations.append(
             f"{_RESERVED_DIR} owned {st.st_uid}:{st.st_gid} != 0:0 (root:root)"
         )
-
-
-def _audit_per_user_tree(operator: str, violations: list[str]) -> None:
-    """``<sandbox_ai_home()>/{config,state,instances,workspaces}`` 0700 operator-owned."""
-    try:
-        operator_uid: int | None = pwd.getpwnam(operator).pw_uid
-    except KeyError:
-        operator_uid = None
-    home = sandbox_ai_home()
-    for leaf in ("config", "state", "instances", "workspaces"):
-        path = home / leaf
-        if not path.is_dir():
-            violations.append(f"{path} missing")
-            continue
-        st = path.stat()
-        if stat.S_IMODE(st.st_mode) != 0o700:
-            violations.append(
-                f"{path} mode {oct(stat.S_IMODE(st.st_mode))} != 0o700"
-            )
-        if operator_uid is not None and st.st_uid != operator_uid:
-            violations.append(
-                f"{path} uid {st.st_uid} != operator {operator!r} uid {operator_uid}"
-            )
 
 
 def _audit_subid_and_group(
@@ -297,7 +272,6 @@ def check_setup_invariants(
         )
 
     _audit_reserved_dir(violations)
-    _audit_per_user_tree(operator, violations)
     _audit_subid_and_group(user, operator, bridge_group, violations)
 
     drop_in_path = l3._drop_in_path(host_config, operator)

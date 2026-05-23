@@ -12,8 +12,8 @@ on-disk file, narrow-scoped to the sandbox user's per-user systemd manager:
 L2).** The drop-in path is uid-scoped: it embeds the sandbox user's host uid,
 which only exists once L2's ``useradd`` has created the user. This phase's
 ``depends_on=("l2",)`` guarantees the user exists before the probe resolves
-its uid; ``l4`` depends on this phase so the single linear chain
-``l0→l1→l2→l2a→l4→l5→…`` is preserved (L2a is guaranteed after L2 — the user
+its uid; ``l5`` depends on this phase so the single linear chain
+``l0→l1→l2→l2a→l5→…`` is preserved (L2a is guaranteed after L2 — the user
 exists — and before L5 — rootless dockerd needs cgroup delegation). The probe
 *additionally* uses the shared :func:`probe_sandbox_pw_or_missing` guard so a
 not-yet-created user is the ``MISSING`` signal rather than a crash escaping
