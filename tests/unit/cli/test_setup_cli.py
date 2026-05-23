@@ -470,6 +470,118 @@ def test_fresh_host_uses_minimal_host_config(runner: CliRunner) -> None:
     assert ctx.operator == "dev"
 
 
+# ── F-022: --machinectl-auth input + POLKIT fence (D2) ───────────────────────
+
+
+@pytest.mark.no_host_config_mock
+def test_machinectl_auth_sudo_flag_accepted(runner: CliRunner) -> None:
+    """`--machinectl-auth sudo` is the explicit SUDO selection; setup proceeds."""
+    from core.host_config import MachinectlAuth
+
+    phases = [_phase("l0")]
+    plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
+    captured: list[SetupContext] = []
+
+    def _capture(_phs: object, ctx: SetupContext) -> list[PhasePlanOutcome]:
+        captured.append(ctx)
+        return plan
+
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.selected_extras", return_value=[]),
+        patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError("no toml")),
+        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
+        patch("cli.main.run_plan_pass", side_effect=_capture),
+        patch("cli.main._stdin_is_tty", return_value=True),
+    ):
+        result = runner.invoke(app, ["setup", "--machinectl-auth", "sudo"])
+    assert result.exit_code == 0
+    assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
+
+
+@pytest.mark.no_host_config_mock
+def test_machinectl_auth_polkit_flag_refused(runner: CliRunner) -> None:
+    """`--machinectl-auth polkit` is fenced (D2): refuse, exit 1, no plan pass."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError("no toml")),
+        patch("cli.main.run_plan_pass") as plan_mock,
+    ):
+        result = runner.invoke(app, ["setup", "--machinectl-auth", "polkit"])
+    assert result.exit_code == 1
+    assert "POLKIT auth mode is not yet supported" in result.output
+    plan_mock.assert_not_called()
+
+
+@pytest.mark.no_host_config_mock
+def test_polkit_toml_without_flag_refused(runner: CliRunner) -> None:
+    """A present operator toml requesting polkit is refused (no silent downgrade)."""
+    from core.host_config import MachinectlAuth, minimal_host_config
+
+    polkit_cfg = minimal_host_config("sandbox", MachinectlAuth.POLKIT)
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
+        patch("cli.main.run_plan_pass") as plan_mock,
+    ):
+        result = runner.invoke(app, ["setup"])
+    assert result.exit_code == 1
+    assert "POLKIT auth mode is not yet supported" in result.output
+    plan_mock.assert_not_called()
+
+
+@pytest.mark.no_host_config_mock
+def test_sudo_flag_overrides_polkit_toml(runner: CliRunner) -> None:
+    """Explicit `--machinectl-auth sudo` overrides a stale polkit toml and proceeds."""
+    from core.host_config import MachinectlAuth, minimal_host_config
+
+    polkit_cfg = minimal_host_config("claude-sandbox", MachinectlAuth.POLKIT)
+    phases = [_phase("l0")]
+    plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
+    captured: list[SetupContext] = []
+
+    def _capture(_phs: object, ctx: SetupContext) -> list[PhasePlanOutcome]:
+        captured.append(ctx)
+        return plan
+
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.selected_extras", return_value=[]),
+        patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
+        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
+        patch("cli.main.run_plan_pass", side_effect=_capture),
+        patch("cli.main._stdin_is_tty", return_value=True),
+    ):
+        result = runner.invoke(app, ["setup", "--machinectl-auth", "sudo"])
+    assert result.exit_code == 0
+    # Config carries the resolved SUDO mode (so L3 renders the sudoers rule the
+    # verification phases can check), even though the toml said polkit; the
+    # other [host] fields from the toml are preserved.
+    assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
+    assert captured[0].host_config.host.docker_unprivileged_user == "claude-sandbox"
+
+
+@pytest.mark.no_host_config_mock
+def test_machinectl_auth_invalid_value_refused(runner: CliRunner) -> None:
+    """An out-of-domain `--machinectl-auth` value is refused with a clear message."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError("no toml")),
+        patch("cli.main.run_plan_pass") as plan_mock,
+    ):
+        result = runner.invoke(app, ["setup", "--machinectl-auth", "bogus"])
+    assert result.exit_code == 1
+    assert "Invalid --machinectl-auth value" in result.output
+    plan_mock.assert_not_called()
+
+
 # ── sticky-opt-in extras inclusion is wired into the phase list ──────────────
 
 

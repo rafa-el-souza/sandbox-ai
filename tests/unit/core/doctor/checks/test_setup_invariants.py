@@ -57,6 +57,7 @@ def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
     monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: operator)
     monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
     monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
+    monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
@@ -402,6 +403,48 @@ class TestExtractOps:
 
         body = render_sudoers_rule("/usr/bin/machinectl", "alice", "h", "sandbox")
         assert _extract_ops(body) == {op.value for op in Op}
+
+
+class TestAuditRuleShapeAgreement:
+    """F-022: WARN when the OTHER auth mode's drop-in is also installed."""
+
+    def test_sudo_with_stray_polkit_rule_warns(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+        from core.setup import l3_sudoers_polkit as l3
+
+        # Only the polkit rule "exists" on disk; toml selects SUDO.
+        monkeypatch.setattr(
+            "pathlib.Path.exists", lambda self: str(self) == str(l3._POLKIT_RULE_PATH)
+        )
+        v: list[str] = []
+        m._audit_rule_shape_agreement(True, "alice", v)
+        assert any("POLKIT rule is also installed" in x for x in v)
+
+    def test_sudo_without_stray_polkit_rule_clean(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+        v: list[str] = []
+        m._audit_rule_shape_agreement(True, "alice", v)
+        assert v == []
+
+    def test_polkit_with_stray_sudoers_drop_in_warns(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+        from core.setup import l3_sudoers_polkit as l3
+
+        sudoers = l3._sudoers_path("alice")
+        monkeypatch.setattr("pathlib.Path.exists", lambda self: str(self) == str(sudoers))
+        v: list[str] = []
+        m._audit_rule_shape_agreement(False, "alice", v)
+        assert any("SUDO sudoers drop-in is also" in x for x in v)
+
+    def test_polkit_without_stray_sudoers_clean(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+        v: list[str] = []
+        m._audit_rule_shape_agreement(False, "alice", v)
+        assert v == []
 
 
 class TestWarnAggregation:

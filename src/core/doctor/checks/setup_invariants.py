@@ -241,6 +241,42 @@ def _audit_sudo_floor(violations: list[str]) -> None:
     )
 
 
+def _audit_rule_shape_agreement(is_sudo: bool, operator: str, violations: list[str]) -> None:
+    """WARN when the drop-in for the OTHER auth mode is also present (F-022).
+
+    The operator toml's ``machinectl_authentication`` determines which
+    privilege-boundary rule SHOULD be installed. If the opposite-mode rule is
+    *also* on disk, the toml and the installed rule shape disagree (Defect B):
+    the operator likely flipped ``machinectl_authentication`` after a setup run,
+    or ran setup under one mode while configuring the toml for the other — so
+    the operator's runtime commands cross the boundary one way while the rule
+    grants the other. WARN (never FAIL — it is operator-resolvable).
+
+    Reuses L3's path helpers (lazy import — see the module-top NOTE on the
+    import-time cycle).
+    """
+    from core.setup import l3_sudoers_polkit as l3
+
+    if is_sudo:
+        other = l3._POLKIT_RULE_PATH
+        if other.exists():
+            violations.append(
+                f"toml selects SUDO auth but a POLKIT rule is also installed at "
+                f"{other}; the installed rule shape disagrees with "
+                f"machinectl_authentication. Remove the stale rule, or reconcile "
+                f"the toml's auth mode with the rule you intend."
+            )
+    else:
+        other = l3._sudoers_path(operator)
+        if other.exists():
+            violations.append(
+                f"toml selects POLKIT auth but a SUDO sudoers drop-in is also "
+                f"installed at {other}; the installed rule shape disagrees with "
+                f"machinectl_authentication. Remove the stale drop-in, or "
+                f"reconcile the toml's auth mode with the rule you intend."
+            )
+
+
 def check_setup_invariants(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
@@ -286,6 +322,8 @@ def check_setup_invariants(
             f"{kind} drop-in {drop_in_path} missing. Run 'sudo sandbox "
             f"setup' to restore."
         )
+
+    _audit_rule_shape_agreement(is_sudo, operator, violations)
 
     if is_sudo:
         _audit_machinectl_stability(host_config, drop_in_text, violations)

@@ -2112,6 +2112,29 @@ class _SetupAborted(Exception):
     """Operator pressed Ctrl-C during the setup ceremony (exit 130)."""
 
 
+class _SetupAuthRefused(Exception):
+    """Setup refuses the requested auth mode before any mutation (F-022 / D2).
+
+    Raised by :func:`_resolve_setup_auth` when POLKIT is selected (via the
+    ``--machinectl-auth`` flag OR an operator toml already requesting it).
+    Carries the operator-facing refusal text; the entry point prints it and
+    exits non-zero WITHOUT entering the plan or apply pass — no host state is
+    touched (the "no permissive window" property extends to "no half-wired
+    polkit rule either").
+    """
+
+
+_POLKIT_FENCE_MESSAGE = (
+    "POLKIT auth mode is not yet supported by `sandbox setup` (tracked: the "
+    "POLKIT auth-mode follow-on change + validation track V9d-polkit-e2e). "
+    "Setup's per-op verification phases (L3a/L8) probe SUDO-only, so a "
+    "polkit rule it installed could not be verified and would be rolled back. "
+    "Re-run with `--machinectl-auth sudo`, or configure the polkit rule "
+    "manually per docs/setup-guide.md (the SUDO-vs-POLKIT security models "
+    "differ — see that guide before choosing polkit)."
+)
+
+
 def _run_setup_update_runsc(ctx: SetupContext) -> int:
     """``--update-runsc``: run ONLY the L6a phase with ``force=True``.
 
@@ -2156,6 +2179,11 @@ def setup(
     enable_aide_integration: bool = typer.Option(
         False, "--enable-aide-integration", help="Opt in to the AIDE config drop-in phase"
     ),
+    machinectl_auth: str | None = typer.Option(
+        None,
+        "--machinectl-auth",
+        help="machinectl auth mode: 'sudo' (default; only supported mode) or 'polkit' (refused — see docs)",
+    ),
 ) -> None:
     """Provision the host: privileged plan/apply two-pass ceremony (run as root)."""
     if os.geteuid() != 0:
@@ -2167,8 +2195,11 @@ def setup(
         raise typer.Exit(code=1)
 
     try:
-        ctx = _build_setup_context_with_operator(operator)
+        ctx = _build_setup_context_with_operator(operator, machinectl_auth)
     except OperatorResolutionError as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+    except _SetupAuthRefused as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
 
@@ -2201,23 +2232,64 @@ def setup(
     raise typer.Exit(code=exit_code)
 
 
-def _build_setup_context_with_operator(operator_flag: str | None) -> SetupContext:
+def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | None) -> MachinectlAuth:
+    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2).
+
+    Precedence: the ``--machinectl-auth`` flag (explicit operator intent) wins;
+    else the operator toml's value if a toml is present; else the SUDO default.
+    POLKIT through *any* of those channels is refused — raising
+    :class:`_SetupAuthRefused` BEFORE any phase runs — because setup's L3a/L8
+    verification probes are SUDO-only, so a polkit rule it wrote could not be
+    verified (and would be rolled back). An explicit ``--machinectl-auth sudo``
+    is the affirmative SUDO selection even if a stale toml says polkit (the
+    `setup_invariants` doctor cross-check then WARNs on the toml/rule
+    disagreement so the operator fixes the toml).
+    """
+    if machinectl_auth_flag is not None:
+        try:
+            effective = MachinectlAuth(machinectl_auth_flag)
+        except ValueError:
+            raise _SetupAuthRefused(
+                f"Invalid --machinectl-auth value: '{machinectl_auth_flag}'. Must be 'sudo' or 'polkit'."
+            ) from None
+    elif toml is not None:
+        effective = toml.host.machinectl_authentication
+    else:
+        effective = MachinectlAuth.SUDO
+    if effective == MachinectlAuth.POLKIT:
+        raise _SetupAuthRefused(_POLKIT_FENCE_MESSAGE)
+    return effective
+
+
+def _build_setup_context_with_operator(
+    operator_flag: str | None, machinectl_auth_flag: str | None = None
+) -> SetupContext:
     """Build the per-run :class:`SetupContext` for ``sandbox setup``.
 
     On a fresh host ``<sandbox_ai_home()>/config/sandbox-ai.toml`` does not
-    exist yet — phase L4 is what seeds it — but the CLI needs a
-    :class:`HostConfig` to construct the context *before* any phase runs. The
-    spec is silent on the absent-toml CLI bootstrap; per the brief we take the
-    simplest spec-consistent option: when the toml is absent, use a
-    defaults-based config (``minimal_host_config`` with the same defaults L4's
-    ``_SEED_DEFAULTS`` writes — ``docker_unprivileged_user="sandbox"``, SUDO
-    auth). When the toml is present, the real loaded config is used. Operator
-    is resolved once via the canonical L0 resolver, threading ``--operator``.
+    exist — and setup does NOT create it (the per-operator tree + toml are
+    ``sandbox init``'s artifact, created as the operator; F-021). The CLI still
+    needs a :class:`HostConfig` to construct the context *before* any phase
+    runs, so: load the toml when present, else fall back to defaults
+    (``docker_unprivileged_user="sandbox"``). The auth mode is an **explicit
+    input** via ``--machinectl-auth`` (F-022) — resolved + POLKIT-fenced by
+    :func:`_resolve_setup_auth` — NOT inferred from an absent toml. The
+    constructed config always carries the resolved (always-SUDO past the fence)
+    auth mode, even if a present toml said otherwise, so L3 renders the sudoers
+    rule the verification phases can actually check. Operator is resolved once
+    via the canonical L0 resolver, threading ``--operator``.
     """
     try:
-        host_config = HostConfig.from_toml()
+        toml: HostConfig | None = HostConfig.from_toml()
     except FileNotFoundError:
-        host_config = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        toml = None
+    auth = _resolve_setup_auth(machinectl_auth_flag, toml)
+    if toml is None:
+        host_config = minimal_host_config("sandbox", auth)
+    else:
+        host_config = toml.model_copy(
+            update={"host": toml.host.model_copy(update={"machinectl_authentication": auth})}
+        )
     return SetupContext(
         host_config=host_config, operator=resolve_operator(operator_flag)
     )

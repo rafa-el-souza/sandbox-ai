@@ -33,6 +33,5 @@ __pycache__/
 coverage.xml
 htmlcov/
 
-docs/
 dist/
 scripts/integration-probe.sh
