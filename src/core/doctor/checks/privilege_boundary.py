@@ -14,6 +14,12 @@ from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import MachinectlAuth, minimal_host_config
 
+# Single-source the reserved runtime key from the phase that registers it (L6)
+# rather than hardcoding the name (F-024 — the doctor previously looked up the
+# wrong literal "runsc" and reported the runtime unregistered on every host).
+# Precedent: dispatcher_sha_drift reusing l65_dispatcher's single-source helpers.
+from core.setup.l6_daemon_json import _RESERVED_RUNTIME_KEY
+
 
 def check_sudo(user: str, distro: str | None) -> CheckResult:
     """Check that sudo is present on PATH."""
@@ -189,11 +195,11 @@ def check_runsc_registered(
     if outcome.ok:
         try:
             runtimes = json.loads(outcome.stdout.strip())
-            if "runsc" in runtimes:
+            if _RESERVED_RUNTIME_KEY in runtimes:
                 return CheckResult(
                     status="pass",
                     name="gVisor runsc",
-                    detail="runsc runtime registered in Docker",
+                    detail=f"{_RESERVED_RUNTIME_KEY} runtime registered in Docker",
                 )
         except json.JSONDecodeError:
             pass
@@ -234,7 +240,7 @@ def check_runsc_runtimeargs(
             remediation=f"Check ~{user}/.config/docker/daemon.json",
         )
 
-    runsc_entry = runtimes.get("runsc", {})
+    runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
     runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
 
     has_seccomp = any(arg == "--oci-seccomp" for arg in runtime_args)
@@ -286,7 +292,7 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
             remediation=f"Check ~{user}/.config/docker/daemon.json",
         )
 
-    runsc_entry = runtimes.get("runsc", {})
+    runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
     runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
 
     has_host_uds_all = any(arg == "--host-uds=all" for arg in runtime_args)
