@@ -15,10 +15,15 @@ surprised by a rename.
 Content-aware probe (design D10): a deep-equal comparison of the *observed*
 ``runtimes["sandbox-ai-runsc"]`` value against the *expected* one
 (``{"path": "/usr/local/libexec/sandbox-ai/runsc", "runtimeArgs":
-["--oci-seccomp"]}``). Present + deep-equal → ``ALREADY_CORRECT``; present +
-differing → ``DRIFT``; key (or file) absent → ``MISSING``. A naive
-file-exists probe would miss a wheel upgrade that changed the expected runtime
-args.
+["--oci-seccomp"]}``). key (or file) absent → ``MISSING``; present + differing
+→ ``DRIFT``; present + deep-equal **but the daemon has not loaded the runtime**
+→ ``DRIFT`` (will restart); present + deep-equal **and loaded** →
+``ALREADY_CORRECT``. The probe/reverify are **runtime-aware** (F-023): they
+confirm docker's *loaded* runtimes via ``docker info``, not just the
+``daemon.json`` file — a file-only check reported ``ALREADY_CORRECT`` over a
+write-success/restart-fail end state where the runtime was never registered.
+The restart itself is StartLimit-safe (``reset-failed`` first) and uses
+``--no-block`` + a runtime-aware readiness poll — see ``_restart_and_poll``.
 """
 
 from __future__ import annotations
@@ -114,11 +119,24 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
             PhaseResult.MISSING,
             f"{path} present but reserved runtime key absent; will merge",
         )
-    if observed == _EXPECTED_RUNTIME:
-        return PhaseResult.ALREADY_CORRECT, "reserved runtime key matches expected"
+    if observed != _EXPECTED_RUNTIME:
+        return (
+            PhaseResult.DRIFT,
+            f"{path} reserved runtime key differs from expected; will converge",
+        )
+    # File carries the correct key — but has docker actually LOADED it? A
+    # write-success/restart-fail leaves the file correct and the runtime
+    # unregistered (F-023); a file-only probe would report ALREADY_CORRECT over
+    # a broken end state. Confirm the loaded runtime before skipping.
+    if not _runtime_registered(ctx.host_config):
+        return (
+            PhaseResult.DRIFT,
+            f"{path} has the reserved runtime key but docker has not loaded it; "
+            f"will restart + verify registration",
+        )
     return (
-        PhaseResult.DRIFT,
-        f"{path} reserved runtime key differs from expected; will converge",
+        PhaseResult.ALREADY_CORRECT,
+        "reserved runtime key present and loaded by docker",
     )
 
 
@@ -137,16 +155,52 @@ def _write_inode_stable(path: Path, text: str) -> None:
         os.close(fd)
 
 
+def _runtime_registered(host_config: HostConfig) -> bool:
+    """``True`` iff docker's *loaded* runtimes include the reserved key (crossed).
+
+    Queries the sandbox user's rootless daemon via ``docker info`` — the runtime
+    docker has actually **loaded**, NOT the ``daemon.json`` file. This is the
+    distinction F-023 turned on: a write-success/restart-fail leaves the file
+    correct while the daemon never reloaded, so a file-only probe reports
+    ``ALREADY_CORRECT`` over an unregistered runtime. A failed crossing (docker
+    down, sentinel absent) is treated as not-registered, so the probe/reverify
+    fail toward DRIFT and ``act`` re-restarts (idempotent, fail-closed).
+    """
+    prefix = machinectl_cmd(
+        _sandbox_user(host_config), host_config.host.machinectl_authentication
+    )
+    try:
+        result = Executor().run(
+            [*prefix, "/bin/bash", "-c", "docker info --format '{{json .Runtimes}}'"],
+            sentinel=True,
+        )
+    except SandboxExecutionError:
+        return False
+    return _RESERVED_RUNTIME_KEY in (result.stdout or "")
+
+
 def _restart_and_poll(host_config: HostConfig) -> None:
-    """Restart rootless docker (crossed) and poll ``docker info`` readiness."""
+    """Restart rootless docker StartLimit-safely; poll until the runtime loads.
+
+    Three F-023-driven properties (battery-confirmed on a real host):
+
+    - ``reset-failed`` before the restart clears any prior failed state AND the
+      systemd ``StartLimit`` counter, so the restart cannot trip "start of the
+      service was attempted too often" and leave docker down (battery B5/B6). A
+      blind restart-retry is the wrong fix precisely because it trips this.
+    - ``restart --no-block`` returns immediately instead of synchronously
+      waiting on the job, so a ``machinectl shell`` session teardown *during*
+      the restart cannot swallow the injected exit sentinel (the first-apply
+      empty-sentinel, original G3). Success/failure is observed by the poll.
+    - the readiness poll waits until docker is up **and the reserved runtime is
+      loaded** (``docker info`` runtimes contains the key), not merely until the
+      daemon answers — the daemon needs a moment after restart before the
+      runtime appears (battery B4a needed a settle). Bounded + fail-closed.
+
+    The ``wait_user_manager_ready`` gate (F-014) is retained: it is a root-side
+    query, cheap, and still the right precondition before crossing.
+    """
     user = _sandbox_user(host_config)
-    # Settle gate: L6's first crossing lands right after L5 enabled linger and
-    # installed/started rootless dockerd, which churns the sandbox user's
-    # ``user@<uid>.service`` manager. Crossing via ``machinectl shell`` while
-    # that manager is mid-restart connects then terminates with empty stdout →
-    # sentinel-not-found (observed on real-host first-apply; F-014). Wait for
-    # the manager to be active again before the restart crossing (root-side
-    # query, no boundary crossing — shared with L5's post-linger gate).
     wait_user_manager_ready(user)
     prefix = machinectl_cmd(user, host_config.host.machinectl_authentication)
     Executor().run(
@@ -154,31 +208,30 @@ def _restart_and_poll(host_config: HostConfig) -> None:
             *prefix,
             "/bin/bash",
             "-c",
-            "systemctl --user restart docker",
+            "systemctl --user reset-failed docker.service; "
+            "systemctl --user restart --no-block docker",
         ],
         sentinel=True,
     )
-    # Readiness poll: a short bounded shell retry loop on ``docker info``;
-    # the inner exit is recovered via the sentinel so a never-ready daemon
-    # surfaces as a failure rather than a masked success.
-    Executor().run(
-        [
-            *prefix,
-            "/bin/bash",
-            "-c",
-            "for i in $(seq 1 30); do docker info >/dev/null 2>&1 && exit 0; "
-            "sleep 1; done; exit 1",
-        ],
-        sentinel=True,
+    poll = (
+        "for i in $(seq 1 30); do "
+        "docker info --format '{{json .Runtimes}}' 2>/dev/null "
+        "| grep -qF " + _RESERVED_RUNTIME_KEY + " && exit 0; sleep 1; done; exit 1"
     )
+    Executor().run([*prefix, "/bin/bash", "-c", poll], sentinel=True)
 
 
 def _act(ctx: SetupContext) -> str:
-    """Merge the reserved runtime key (preserving other keys), restart if dirty.
+    """Ensure the reserved runtime key (preserving other keys), then restart.
 
     Never called on a ``CONFLICT`` (there is none for this phase) — only on
-    ``MISSING`` / ``DRIFT``. A merge that is byte-identical to the existing
-    file does not restart docker; any real change triggers the restart cliff.
+    ``MISSING`` / ``DRIFT``. The act ALWAYS restarts (F-023): with a
+    runtime-aware probe, ``DRIFT`` can mean "the file is correct but docker has
+    not loaded the runtime", so the old byte-identical-file short-circuit would
+    wrongly skip the restart that registers it. The restart is StartLimit-safe
+    and idempotent, and the readiness poll fails closed if the runtime never
+    loads — so a no-op-merge with an already-loaded runtime is screened out at
+    *probe* time (ALREADY_CORRECT → act not called), not here.
     """
     host_config = ctx.host_config
     path = _daemon_json_path(host_config)
@@ -194,21 +247,26 @@ def _act(ctx: SetupContext) -> str:
         old_text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         old_text = ""
-    if new_text == old_text:
-        return "reserved runtime key already byte-identical; no restart"
-
-    _write_inode_stable(path, new_text)
+    if new_text != old_text:
+        _write_inode_stable(path, new_text)
     _restart_and_poll(host_config)
-    return "reserved runtime key merged; rootless docker restarted"
+    return "reserved runtime key ensured; rootless docker restarted + runtime loaded"
 
 
 def _reverify(ctx: SetupContext) -> bool:
-    """Confirm the reserved runtime key is present and deep-equal to expected."""
+    """Confirm the key is in the file AND docker has loaded the runtime (F-023).
+
+    File-deep-equal alone is insufficient — that was the masking gap. Reverify
+    the *end state* the phase exists to produce: the runtime is registered in
+    the running daemon.
+    """
     path = _daemon_json_path(ctx.host_config)
     doc = _read_doc(path)
     if doc is None:
         return False
-    return _observed_runtime(doc) == _EXPECTED_RUNTIME
+    if _observed_runtime(doc) != _EXPECTED_RUNTIME:
+        return False
+    return _runtime_registered(ctx.host_config)
 
 
 PHASE = Phase(
