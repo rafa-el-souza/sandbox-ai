@@ -40,6 +40,7 @@ from core.setup.phase_runner import (
     route,
     run_apply_pass,
     run_plan_pass,
+    wait_user_crossing_ready,
     wait_user_manager_ready,
 )
 
@@ -798,6 +799,106 @@ def test_wait_user_manager_ready_attempts_is_parametrized(
     monkeypatch.setattr("core.executor.Executor.run", _run)
     wait_user_manager_ready("x", attempts=5)
     assert "seq 1 5" in captured[0]
+
+
+# ── wait_user_crossing_ready (F-023: gate on a working crossing) ─────────────
+
+
+def test_wait_user_crossing_ready_returns_when_crossing_delivers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crossing that delivers its marker satisfies the gate (no raise)."""
+    from core.host_config import MachinectlAuth
+
+    def _run(
+        _self: object, cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__\n", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", _run)
+    wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
+
+
+def test_wait_user_crossing_ready_crosses_via_machinectl_with_echo_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe is a machinectl crossing of a trivial echo — NOT a mutation."""
+    from core.host_config import MachinectlAuth
+
+    captured: list[list[str]] = []
+
+    def _run(
+        _self: object, cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", _run)
+    wait_user_crossing_ready("sbx", MachinectlAuth.SUDO, attempts=3)
+    assert "machinectl" in " ".join(captured[0])
+    assert captured[0][-1] == "echo __crossing_ready__"
+
+
+def test_wait_user_crossing_ready_retries_empty_then_delivers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty (sentinel-not-found) crossing is retried until one delivers."""
+    from core.host_config import MachinectlAuth
+
+    monkeypatch.setattr("core.setup.phase_runner.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def _run(
+        _self: object, cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SandboxExecutionError("Exit sentinel not found")
+        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", _run)
+    wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
+    assert calls["n"] == 2
+
+
+def test_wait_user_crossing_ready_retries_when_marker_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crossing that returns but lacks the marker is also retried."""
+    from core.host_config import MachinectlAuth
+
+    monkeypatch.setattr("core.setup.phase_runner.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def _run(
+        _self: object, cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", _run)
+    wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
+    assert calls["n"] == 2
+
+
+def test_wait_user_crossing_ready_raises_after_exhausting_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No crossing ever delivers → fail-closed with a diagnostic (not opaque)."""
+    from core.host_config import MachinectlAuth
+
+    monkeypatch.setattr("core.setup.phase_runner.time.sleep", lambda _s: None)
+
+    def _boom(
+        _self: object, _cmd: list[str], **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise SandboxExecutionError("Exit sentinel not found")
+
+    monkeypatch.setattr("core.executor.Executor.run", _boom)
+    with pytest.raises(SandboxExecutionError, match="did not deliver output after 3 attempts"):
+        wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
 
 
 # ── assert_phase_content_aware conftest fixture (consumed, not imported) ──────

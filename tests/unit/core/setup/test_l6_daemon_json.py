@@ -70,8 +70,13 @@ def restarts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         *_a: object,
         **_kw: object,
     ) -> subprocess.CompletedProcess[str]:
-        seen.append(cmd[-1])
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+        inner = cmd[-1]
+        seen.append(inner)
+        # The F-023 working-crossing gate (wait_user_crossing_ready) polls a
+        # trivial echo until it delivers its marker — make it deliver on the
+        # first probe so act tests don't spin the bounded retry loop.
+        stdout = "__crossing_ready__" if "__crossing_ready__" in inner else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
     monkeypatch.setattr("core.executor.Executor.run", fake_run)
     return seen
@@ -208,10 +213,14 @@ def test_act_settle_gate_runs_before_restart_crossing(
     gate_idx = next(
         i for i, r in enumerate(restarts) if "is-active user@4242.service" in r
     )
+    crossing_idx = next(
+        i for i, r in enumerate(restarts) if "__crossing_ready__" in r
+    )
     restart_idx = next(
         i for i, r in enumerate(restarts) if "restart --no-block docker" in r
     )
-    assert gate_idx < restart_idx
+    # Both readiness gates (is-active, then working-crossing) precede the restart.
+    assert gate_idx < crossing_idx < restart_idx
 
 
 def test_act_fresh_file_when_absent(

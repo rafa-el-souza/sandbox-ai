@@ -42,6 +42,7 @@ from core.setup.phase_runner import (
     Phase,
     PhaseResult,
     probe_sandbox_pw_or_missing,
+    wait_user_crossing_ready,
     wait_user_manager_ready,
 )
 
@@ -198,11 +199,23 @@ def _restart_and_poll(host_config: HostConfig) -> None:
       runtime appears (battery B4a needed a settle). Bounded + fail-closed.
 
     The ``wait_user_manager_ready`` gate (F-014) is retained: it is a root-side
-    query, cheap, and still the right precondition before crossing.
+    query, cheap, and still the right precondition before crossing. It is now
+    followed by ``wait_user_crossing_ready`` (F-023): ``is-active`` is necessary
+    but not sufficient — on a truly-first-ever session the first crossing after
+    L5's dockerd-install churn returns empty stdout even though the manager
+    reports active, so we gate on a crossing that actually *delivers* (a no-op
+    echo probe, StartLimit-safe) before issuing the mutating restart.
     """
     user = _sandbox_user(host_config)
+    auth = host_config.host.machinectl_authentication
     wait_user_manager_ready(user)
-    prefix = machinectl_cmd(user, host_config.host.machinectl_authentication)
+    # is-active is necessary but not sufficient: on a truly-first-ever session
+    # the first crossing after L5's dockerd-install churn returns empty stdout
+    # (F-023 fresh-VM capture). Gate on a crossing that actually DELIVERS before
+    # the mutating restart, so the restart's sentinel is not lost to that
+    # transient. NOT a restart retry (StartLimit-safe); a no-op echo probe.
+    wait_user_crossing_ready(user, auth)
+    prefix = machinectl_cmd(user, auth)
     Executor().run(
         [
             *prefix,
