@@ -109,9 +109,28 @@ class TestSentinelInjection:
                 )
 
             actual_cmd = mock_run.call_args[0][0]
-            assert actual_cmd[-1] == "{ docker compose up; }; echo __SANDBOX_EXIT_deadbeef01234567_$?"
+            # Subshell ``( … )``, not a brace group: an inner ``exit`` stays
+            # contained so the trailing sentinel echo still runs (F-023 fix).
+            assert actual_cmd[-1] == "( docker compose up ); echo __SANDBOX_EXIT_deadbeef01234567_$?"
             # check=False when sentinel is active
             assert mock_run.call_args[1]["check"] is False
+
+    def test_sentinel_wrap_is_a_subshell_so_inner_exit_keeps_the_sentinel(self) -> None:
+        """An inner command ending in ``exit`` must NOT swallow the sentinel.
+
+        The brace-group wrap (pre-fix) ran the inner in the current shell, so an
+        inner ``exit`` terminated the shell before the sentinel echo — recovery
+        then fail-closed with "sentinel not found" on every attempt regardless
+        of outcome (the F-023 root cause: L6's poll inner ends in ``exit 0`` /
+        ``exit 1``). The subshell wrap contains the ``exit`` and preserves both
+        the inner stdout and the recovered exit code.
+        """
+        wrapped = f"( {'echo loaded; exit 0'} ); echo __SANDBOX_EXIT_tok_$?"
+        completed = subprocess.run(
+            ["/bin/bash", "-c", wrapped], capture_output=True, text=True, check=False
+        )
+        assert "loaded" in completed.stdout
+        assert "__SANDBOX_EXIT_tok_0" in completed.stdout
 
     def test_sentinel_disabled_by_default(self) -> None:
         """WHEN sentinel not passed, THEN no wrapping occurs."""

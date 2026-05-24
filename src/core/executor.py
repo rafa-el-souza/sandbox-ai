@@ -94,10 +94,19 @@ class Executor:
         if sentinel and not interactive:
             token = secrets.token_hex(8)
             sentinel_echo = f"__SANDBOX_EXIT_{token}_$?"
-            # The last argument is the bash -c payload; wrap it
+            # The last argument is the bash -c payload; wrap it. A SUBSHELL
+            # ``( … )`` — NOT a brace group ``{ … }`` — so an ``exit`` inside the
+            # inner command terminates only the subshell, and the trailing
+            # sentinel echo still runs in the parent with the inner's exit in
+            # ``$?``. A brace group runs in the current shell, so an inner
+            # ``exit`` swallowed the sentinel entirely (recovery then fail-closed
+            # with "sentinel not found" on every attempt regardless of outcome —
+            # the F-023 root cause). The dispatcher's Go-side op framing builds
+            # the analogous wrap; its op inners never ``exit`` so it is not
+            # currently bitten (backlog: align it to a subshell for parity).
             if len(cmd) >= 3 and cmd[-2] == "-c":
                 inner_cmd = cmd[-1]
-                wrapped = f"{{ {inner_cmd}; }}; echo {sentinel_echo}"
+                wrapped = f"( {inner_cmd} ); echo {sentinel_echo}"
                 cmd = [*cmd[:-1], wrapped]
                 # Disable check=True — we parse exit code from sentinel
                 kwargs["check"] = False

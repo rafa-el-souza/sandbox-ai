@@ -611,9 +611,23 @@ func TestEncodeJournalFieldsNewlineBranch(t *testing.T) {
 
 func TestWrapSentinel(t *testing.T) {
 	got := wrapSentinel("echo ok", "deadbeef")
-	want := "{ echo ok; }; echo __SANDBOX_EXIT_deadbeef_$?"
+	want := "( echo ok ); echo __SANDBOX_EXIT_deadbeef_$?"
 	if got != want {
 		t.Fatalf("wrapSentinel = %q, want %q", got, want)
+	}
+}
+
+// TestWrapSentinelSurvivesInnerExit guards the F-023 root cause: an inner that
+// ends in `exit` must NOT swallow the nonce-bound trailer. The subshell wrap
+// contains the exit; a brace group would have terminated the shell first.
+func TestWrapSentinelSurvivesInnerExit(t *testing.T) {
+	wrapped := wrapSentinel("echo loaded; exit 0", "deadbeef")
+	out, err := exec.Command("/bin/bash", "-c", wrapped).Output()
+	if err != nil {
+		t.Fatalf("bash -c %q: %v", wrapped, err)
+	}
+	if !strings.Contains(string(out), "__SANDBOX_EXIT_deadbeef_0") {
+		t.Fatalf("inner exit swallowed the trailer; stdout=%q", out)
 	}
 }
 
@@ -669,7 +683,7 @@ func TestDispatchFramesEarlyReturnPaths(t *testing.T) {
 // TestDispatchSuccessFramesViaSubprocess drives the REAL success exec path
 // end-to-end: the test binary re-execs itself as the dispatcher (TestMain
 // helper) for `auth-probe`, which replaces the image with the wrapped
-// `/bin/bash -c '{ echo ok; }; echo __SANDBOX_EXIT_<nonce>_$?'`. Stdout must
+// `/bin/bash -c '( echo ok ); echo __SANDBOX_EXIT_<nonce>_$?'`. Stdout must
 // carry a BEGIN nonce, the op's own output, and an EXIT trailer bound to that
 // SAME nonce with code 0. Skipped where /bin/bash is absent (e.g. the
 // golang:1.23-alpine compile container) — the pure wrapSentinel + early-return

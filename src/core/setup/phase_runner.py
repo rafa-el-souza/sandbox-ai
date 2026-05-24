@@ -58,22 +58,19 @@ import importlib
 import pkgutil
 import pwd
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import core.setup as _setup_package
-from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import machinectl_cmd, pipe_cmd
 
 if TYPE_CHECKING:
-    import subprocess
     from types import ModuleType
 
-    from core.host_config import HostConfig, MachinectlAuth
+    from core.host_config import HostConfig
 
 
 @dataclass(frozen=True)
@@ -463,80 +460,6 @@ def wait_user_manager_ready(user: str, *, attempts: int = 30) -> None:
     )
 
 
-@dataclass(frozen=True)
-class CrossingDelivery:
-    """A delivered sandbox-user crossing + the attempt it delivered on.
-
-    ``attempt`` is 1-based: ``1`` means the first fresh session delivered
-    cleanly; ``>1`` means the per-session lost-sentinel transient was hit and
-    retried through. Threading it into a phase's operator-facing detail makes
-    the transient observable from a *passing* run's output (the F-023c capture
-    hook), so the fresh-VM smoke confirms the mechanism instead of just going
-    green silently. See :func:`run_crossing_until_delivered`.
-    """
-
-    completed: subprocess.CompletedProcess[str]
-    attempt: int
-
-
-def run_crossing_until_delivered(
-    user: str,
-    auth: MachinectlAuth,
-    inner: str,
-    *,
-    what: str,
-    attempts: int = 30,
-) -> CrossingDelivery:
-    """Run a sandbox-user crossing, retrying on the lost-sentinel transient.
-
-    :func:`wait_user_manager_ready` polls ``is-active user@<uid>.service`` — a
-    root-side proxy that is necessary but NOT sufficient. Right after L5's
-    ``dockerd-rootless-setuptool.sh install`` churns the manager (daemon-reload
-    + service start), a ``machinectl shell`` crossing into the freshly
-    created + lingered user connects and terminates with **empty stdout** even
-    though the manager already reports ``active`` — the injected exit sentinel
-    is lost and :class:`~core.executor.Executor` fail-closes. The F-023 fresh-VM
-    capture proved this is a brief **transient** AND that the inner command runs
-    regardless (the restart it triggered actually succeeded; only the sentinel
-    was lost).
-
-    Crucially the transient is **per-session**: each crossing is a fresh PTY,
-    so one delivered crossing does NOT prove the next one delivers. The
-    round-9 ``wait_user_crossing_ready`` gate proved a throwaway ``echo``
-    session delivered, then issued the restart through a *separate* session that
-    independently dropped its sentinel — which is exactly why a pre-gate cannot
-    fix this and the crossing that MATTERS must retry itself.
-
-    Contract for ``inner``: it MUST exit 0 and encode its real outcome in
-    **stdout** (a marker the caller inspects). Then a lost sentinel — the only
-    thing that makes :meth:`Executor.run` raise here — is unambiguously the
-    transient and is retried, never conflated with a non-zero inner exit. The
-    restart is StartLimit-safe to re-issue (its ``reset-failed`` precedes it)
-    and the poll is a pure read, so retrying either crossing is safe. Returns a
-    :class:`CrossingDelivery` (the delivered process + the 1-based attempt it
-    delivered on, so the caller can surface the transient in its detail);
-    raises a diagnostic naming ``what`` (vs the opaque "Exit sentinel not
-    found") if no crossing delivers within ``attempts``. Run it AFTER
-    :func:`wait_user_manager_ready`.
-    """
-    cmd = [*machinectl_cmd(user, auth), "/bin/bash", "-c", inner]
-    for attempt in range(1, attempts + 1):
-        try:
-            return CrossingDelivery(Executor().run(cmd, sentinel=True), attempt)
-        except SandboxExecutionError:
-            # Lost-sentinel (empty stdout) crossing — the fresh session did not
-            # service this crossing; wait and retry. The inner exits 0, so a
-            # raise here is the transient, not a real inner failure.
-            time.sleep(1)
-    raise SandboxExecutionError(
-        f"[FATAL] Sandbox Execution Fault: the {what} crossing into {user!r} "
-        f"never delivered output after {attempts} attempts. The per-user "
-        f"manager reported active but each fresh machinectl-shell session "
-        f"terminated with empty stdout (the post-dockerd-install churn window "
-        f"did not clear)."
-    )
-
-
 # ``PhaseResult`` values that mean "the phase converged / nothing to do" — a
 # phase in one of these is NOT a mutation and does NOT block dependents.
 _NON_MUTATING_RESULTS: frozenset[PhaseResult] = frozenset(
@@ -724,7 +647,6 @@ def _failed(
 
 __all__ = [
     "ActFn",
-    "CrossingDelivery",
     "Identity",
     "Phase",
     "PhaseApplyOutcome",
@@ -743,7 +665,6 @@ __all__ = [
     "resolve_sandbox_pw",
     "route",
     "run_apply_pass",
-    "run_crossing_until_delivered",
     "run_plan_pass",
     "wait_user_manager_ready",
 ]

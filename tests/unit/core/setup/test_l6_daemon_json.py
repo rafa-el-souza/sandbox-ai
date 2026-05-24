@@ -70,18 +70,11 @@ def restarts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         *_a: object,
         **_kw: object,
     ) -> subprocess.CompletedProcess[str]:
-        inner = cmd[-1]
-        seen.append(inner)
-        # The readiness-poll crossing reports the runtime LOADED (its inner
-        # echoes the loaded marker on success); the is-active gate and the
-        # restart crossing carry no marker. Returning a delivered result (no
-        # raise) keeps act tests off the lost-sentinel retry loop.
-        stdout = (
-            l6._RUNTIME_LOADED_MARKER
-            if l6._RUNTIME_LOADED_MARKER in inner
-            else ""
-        )
-        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+        seen.append(cmd[-1])
+        # Every crossing "delivers" exit 0 — the readiness poll's ``exit 0``
+        # (runtime loaded) path. The sentinel-wrap recovery is mocked out here
+        # (Executor.run is replaced), so a returncode-0 result is success.
+        return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("core.executor.Executor.run", fake_run)
     return seen
@@ -200,10 +193,6 @@ def test_act_creates_and_merges_preserving_operator_runtimes(
     assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
     assert doc["debug"] is True
     assert "ensured" in detail
-    # F-023c capture hook: the act detail surfaces the per-crossing attempt
-    # counts so a passing run still shows whether the transient was hit.
-    assert "delivered on attempt 1" in detail
-    assert "runtime-readiness poll on attempt 1" in detail
     assert any("restart --no-block docker" in r for r in restarts)
 
 
@@ -227,7 +216,7 @@ def test_act_settle_gate_runs_before_restart_crossing(
         i for i, r in enumerate(restarts) if "restart --no-block docker" in r
     )
     poll_idx = next(
-        i for i, r in enumerate(restarts) if l6._RUNTIME_LOADED_MARKER in r
+        i for i, r in enumerate(restarts) if "docker info" in r and "exit 0" in r
     )
     assert gate_idx < restart_idx < poll_idx
 
@@ -268,13 +257,14 @@ def test_act_always_restarts_even_when_byte_identical(
 def test_act_raises_when_runtime_never_loads(
     daemon_json: Path, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Poll delivers but docker never loaded the runtime → act raises (F-023).
+    """Poll exhausts without the runtime loading → act raises (F-023).
 
-    The readiness-poll crossing ran its full loop and emitted the ABSENT marker
-    (``docker info`` never listed the reserved runtime). That is a genuine
-    convergence failure — distinct from a lost sentinel (which raises inside the
-    crossing and is retried) — so act must surface a diagnostic naming the
-    unloaded runtime, never silently report success.
+    When ``docker info`` never lists the reserved runtime, the poll loop falls
+    through to ``exit 1``; the sentinel crossing recovers that non-zero inner
+    exit as a :class:`SandboxExecutionError`, which propagates out of act as the
+    phase FAIL (the executor's subshell wrap is what lets the inner ``exit``
+    reach recovery at all — the F-023 root cause). Here Executor.run is mocked,
+    so the poll crossing is made to raise exactly as the real recovery would.
     """
     _write(daemon_json, {})
 
@@ -282,17 +272,17 @@ def test_act_raises_when_runtime_never_loads(
         _self: object, cmd: list[str], *_a: object, **_kw: object
     ) -> subprocess.CompletedProcess[str]:
         inner = cmd[-1]
-        # is-active gate + restart deliver empty; the poll delivers the ABSENT
-        # marker. Every crossing delivers (no lost-sentinel raise).
-        stdout = (
-            l6._RUNTIME_ABSENT_MARKER
-            if l6._RUNTIME_ABSENT_MARKER in inner
-            else ""
-        )
-        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+        # The poll crossing (the docker-info loop) hits its ``exit 1`` path →
+        # the real executor would raise on the recovered non-zero exit; the
+        # is-active gate and the restart crossing deliver exit 0.
+        if "docker info" in inner:
+            raise SandboxExecutionError(
+                "[FATAL] Sandbox Execution Fault: Inner command failed with exit status 1."
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("core.executor.Executor.run", fake_run)
-    with pytest.raises(SandboxExecutionError, match="was not loaded within"):
+    with pytest.raises(SandboxExecutionError, match="exit status 1"):
         l6.PHASE.act(ctx)
 
 

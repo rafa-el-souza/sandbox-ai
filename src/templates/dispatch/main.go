@@ -112,13 +112,17 @@ func genNonce() (string, error) {
 }
 
 // wrapSentinel rewrites a `/bin/bash -c` inner so the inner's exit code is
-// recovered past machinectl shell's exit-masking: it groups the inner and
-// echoes the nonce-bound trailer carrying the group's `$?`. This is the same
-// recovery the orchestrator's Executor used to inject into the CROSSED payload
-// — relocated here, post-authorization, so the sentinel never appears in the
-// sudo/polkit-authorized command (F-018).
+// recovered past machinectl shell's exit-masking: it runs the inner in a
+// SUBSHELL `( … )` and echoes the nonce-bound trailer carrying the subshell's
+// `$?`. The subshell (not a brace group `{ … }`) is load-bearing: an `exit`
+// inside the inner terminates only the subshell, so the trailer still runs —
+// a brace group runs in the current shell and an inner `exit` would swallow the
+// trailer entirely (the F-023 root cause that bit the orchestrator's Executor;
+// the two wraps are kept in parity). This is the same recovery the Executor
+// used to inject into the CROSSED payload — relocated here, post-authorization,
+// so the sentinel never appears in the sudo/polkit-authorized command (F-018).
 func wrapSentinel(inner, nonce string) string {
-	return fmt.Sprintf("{ %s; }; echo __SANDBOX_EXIT_%s_$?", inner, nonce)
+	return fmt.Sprintf("( %s ); echo __SANDBOX_EXIT_%s_$?", inner, nonce)
 }
 
 // dispatch is main's testable core. It generates the nonce, announces it on
