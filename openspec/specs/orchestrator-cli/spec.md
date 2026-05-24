@@ -109,3 +109,54 @@ The codebase SHALL include a regression test (e.g., `tests/unit/cli/test_markup_
 - **WHEN** `console.print` calls use Rich style markup like `[red]`, `[bold]`, `[/red]`, `[green bold]`
 - **THEN** the markup-safety test passes for these calls because the bracketed tokens are in the enumerated allowlist; no `markup=False` is required for genuine style usage
 
+### Requirement: `sandbox setup` CLI Subcommand
+
+The CLI SHALL expose a `setup` subcommand invoked as `sudo sandbox setup`. The subcommand SHALL be implemented in `src/cli/main.py` (alongside the existing `init`, `start`, `stop`, `attach`, `destroy`, `status`, `doctor`, `workspace ...` subcommands). The subcommand SHALL require root (`os.geteuid() == 0`); if invoked without root, exit with `sandbox setup must be run as root. Re-invoke as: sudo sandbox setup`.
+
+The full flag surface:
+
+| Flag | Behavior |
+|---|---|
+| `--operator <name>` | escape hatch for non-`sudo` privilege escalation paths; takes precedence over `$SUDO_USER` / `$PKEXEC_UID` |
+| `--dry-run` | run plan pass only; no mutations; exit code 0 regardless of plan content |
+| `--yes` / `-y` | non-interactive apply (skip the TTY confirm prompt) |
+| `--update-runsc` | run ONLY L6a phase against the current pinned registry, ignoring "already installed" skip |
+| `--enable-fapolicyd-integration` | install fapolicyd (via distro package manager; verify-only refuses if absent) + register sandbox-ai binaries in its trust DB |
+| `--enable-aide-integration` | drop `/etc/aide/aide.conf.d/sandbox-ai.conf` listing sandbox-ai binaries; run `aide --init` if needed |
+
+The subcommand SHALL emit doctor-style output to stdout (plan pass + apply pass + finalization summary), per the `sandbox-setup` capability's plan/apply UX requirements. The subcommand SHALL exit 0 on full success; non-zero on any phase failure or rollback.
+
+#### Scenario: Setup subcommand exists in CLI
+- **WHEN** the operator runs `sandbox --help`
+- **THEN** the output enumerates `setup` as an available subcommand alongside `init`, `start`, `stop`, `attach`, `destroy`, `status`, `doctor`, `workspace`
+
+#### Scenario: Setup requires sudo
+- **WHEN** a non-root user runs `sandbox setup`
+- **THEN** the command exits non-zero with the message naming `sudo sandbox setup` as the canonical invocation
+
+#### Scenario: --dry-run produces plan output without mutation
+- **WHEN** the operator runs `sudo sandbox setup --dry-run` on a host requiring mutations
+- **THEN** stdout contains the doctor-style plan output showing every phase's probe verdict; no files are written; no operator/sandbox state changes; exit code 0
+
+#### Scenario: --update-runsc runs only L6a
+- **WHEN** the operator runs `sudo sandbox setup --update-runsc` on a host where every other phase is `already correct` and only L6a shows drift
+- **THEN** stdout shows L6a apply (download + verify + install) and finalization summary; phases L0..L8 other than L6a show `skip (already correct)` or `skip (only L6a in this mode)`; exit 0
+
+#### Scenario: --enable-fapolicyd-integration adds to base setup flow
+- **WHEN** the operator runs `sudo sandbox setup --enable-fapolicyd-integration` on a fresh host
+- **THEN** the base setup phases L0..L8 execute as normal, AND a subsequent fapolicyd-integration phase installs fapolicyd (via apt/dnf/pacman recommendation; verify-only if package not present) and registers `/usr/local/libexec/sandbox-ai/dispatch`, `/usr/local/libexec/sandbox-ai/runsc`, plus the operator's distro binaries the dispatcher invokes in fapolicyd's trust DB
+
+### Requirement: Setup Bypasses Runtime Sudoers Rule
+
+Setup SHALL invoke machinectl via `[*machinectl_cmd(...), "/bin/bash", "-c", "<cmd>"]` directly (no dispatcher routing, no sudoers/polkit rule required), because setup runs as root and root MUST cross the privilege boundary into the sandbox user's session without prior authentication setup (per V8 empirical validation). The orchestrator's runtime sudoers/polkit rule (installed by setup's L3 phase) SHALL apply only to the operator's NON-root invocations of `sandbox start`, `sandbox doctor`, etc., AFTER setup completes.
+
+The convention meta-test from the sibling capability (`runtime-dispatcher`) SHALL NOT reject setup's phase implementations: setup's modules under `src/core/setup/*.py` MAY import `machinectl_cmd` directly. This change SHALL NOT amend or edit the meta-test. `runtime-dispatcher`'s `host-config` capability already defines `src/core/setup/*.py` as one of the three documented allowlist categories (a forward reference it ships deliberately, since it lands first per the integration order). Setup modules pass the convention check by matching that pre-existing bounded glob — single source of truth (the meta-test, owned by `runtime-dispatcher`); this change adds modules the already-installed rule permits, not an allowlist edit. (Phase-3 review B-4: an earlier draft here said the allowlist "SHALL be amended", contradicting `runtime-dispatcher`'s then-"two-entry, no globs" wording; reconciled by `runtime-dispatcher` owning the complete three-category allowlist up front.)
+
+#### Scenario: Setup phase modules call machinectl_cmd directly
+- **WHEN** a setup phase module (e.g., `src/core/setup/l5_dockerd.py`) needs to invoke `dockerd-rootless-setuptool.sh install` via machinectl
+- **THEN** the module imports `machinectl_cmd` from `core.host_config` and constructs the argv directly (no `core.dispatch` routing); the meta-test does not flag it because its path matches the `src/core/setup/*.py` allowlist category already defined by `runtime-dispatcher`
+
+#### Scenario: This change makes no edit to the convention meta-test
+- **WHEN** this change's diff is reviewed
+- **THEN** it contains NO modification to `tests/unit/test_conventions.py::test_machinectl_cmd_callers_restricted`; setup modules pass solely by matching the pre-existing `src/core/setup/*.py` allowlist category. The effective allowlist at runtime is `{"src/core/host_config.py", "src/core/dispatch.py"} ∪ {paths matching "src/core/setup/*.py"}`, but that union is defined entirely by `runtime-dispatcher` — this change neither widens nor restates it.
+

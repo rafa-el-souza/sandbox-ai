@@ -96,42 +96,40 @@ The system SHALL verify that Docker is running in rootless mode under the unpriv
 - **THEN** the check reports FAIL, explaining that rootless Docker is a non-negotiable security boundary, with a link to Docker rootless setup documentation
 
 ### Requirement: gVisor Runtime Registration
-The system SHALL verify that the `runsc` runtime is registered in Docker.
+
+The system SHALL verify that the gVisor runtime is registered in Docker **under the reserved runtime key `sandbox-ai-runsc`** — the name `sandbox setup`'s L6 phase registers in the sandbox user's `daemon.json` (`core.setup.l6_daemon_json._RESERVED_RUNTIME_KEY`), NOT a runtime literally named `runsc`. The check (and the dependent `runsc runtimeArgs` / `--host-uds=none` checks) SHALL look up this reserved key, single-sourced from the registering phase rather than a hardcoded literal (F-024: the prior code keyed on `"runsc"`, producing a permanent false-negative — `runsc runtime not registered` — on every host even when the runtime was correctly registered, because `docker info` lists it as `sandbox-ai-runsc`).
 
 **Dependencies:** Docker Availability
 
 #### Scenario: runsc registered
-- **WHEN** `docker info` (via machinectl) lists `runsc` in its available runtimes
+- **WHEN** `docker info` (via the `docker-info` dispatch op) lists `sandbox-ai-runsc` in its available runtimes
 - **THEN** the check reports PASS
 
 #### Scenario: runsc not registered
-- **WHEN** `runsc` is absent from the Docker runtime list
+- **WHEN** `sandbox-ai-runsc` is absent from the Docker runtime list (a bare runtime named `runsc` does NOT satisfy the check — the reserved key is required)
 - **THEN** the check reports FAIL with a link to gVisor installation documentation
 
 ### Requirement: runsc RuntimeArgs Validation
-The system SHALL verify that the sandbox user's rootless Docker daemon has `--oci-seccomp` and `--debug-log` configured in the `runsc` runtime's `runtimeArgs`, and does NOT have `--host-uds=all`. This check SHALL use `warn` severity — it is a defense-in-depth advisory, not a hard prerequisite.
+
+The system SHALL verify that the reserved `sandbox-ai-runsc` runtime's `runtimeArgs` contain **exactly the args setup's L6 phase configures, single-sourced from `core.setup.l6_daemon_json._EXPECTED_RUNTIME["runtimeArgs"]`** — NOT a hardcoded list. This makes the doctor expectation and the setup configuration one source so they cannot drift: whatever L6 configures is exactly what doctor expects (the F-024 pattern, extended from the reserved-key to the runtimeArgs). The check SHALL use `warn` severity — it is a defense-in-depth advisory.
+
+The current `_EXPECTED_RUNTIME["runtimeArgs"]` is `["--oci-seccomp"]`. `--debug-log` is NOT in the default expectation — gVisor syscall-level debug logging is a deferred **opt-in** (poor always-on default: perf overhead + unbounded disk), so doctor MUST NOT WARN about its absence by default. If a future opt-in adds `--debug-log=<path>` to `_EXPECTED_RUNTIME`, this check follows automatically with no further change. (The `--host-uds=all` prohibition is a separate check, unchanged.)
+
+A value-bearing expected arg (e.g. a future `--debug-log=<path>`) is matched on its flag token, so any configured value satisfies it; a flag-only arg (`--oci-seccomp`) matches exactly.
 
 **Dependencies:** gVisor Runtime Registration (`runsc` check)
 
-#### Scenario: Both runtimeArgs present
-- **WHEN** `docker info --format '{{json .Runtimes}}'` (via machinectl) returns a `runsc` entry with `runtimeArgs` containing both `--oci-seccomp` and an arg prefixed with `--debug-log`
-- **THEN** the check reports PASS
+#### Scenario: All expected args present
+- **WHEN** the `sandbox-ai-runsc` runtime's `runtimeArgs` contains every arg in `_EXPECTED_RUNTIME["runtimeArgs"]` (extra args, e.g. an operator-added `--debug-log`, are permitted)
+- **THEN** the check reports PASS listing the configured expected args
 
-#### Scenario: Missing --oci-seccomp
-- **WHEN** the `runsc` runtime's `runtimeArgs` does not contain `--oci-seccomp`
-- **THEN** the check reports WARN with remediation referencing `~<user>/.config/docker/daemon.json`
+#### Scenario: --oci-seccomp only — passes (no false --debug-log WARN)
+- **WHEN** the `runtimeArgs` is exactly `["--oci-seccomp"]` (the default L6 configuration)
+- **THEN** the check reports PASS — `--debug-log` is a deferred opt-in, NOT expected by default
 
-#### Scenario: Missing --debug-log
-- **WHEN** the `runsc` runtime's `runtimeArgs` does not contain an arg prefixed with `--debug-log`
-- **THEN** the check reports WARN with remediation referencing `~<user>/.config/docker/daemon.json`
-
-#### Scenario: Both runtimeArgs missing
-- **WHEN** the `runsc` runtime's `runtimeArgs` is empty or missing both args
-- **THEN** the check reports WARN listing both missing args
-
-#### Scenario: runsc dependency failed — check skipped
-- **WHEN** the `runsc` check has failed or been skipped
-- **THEN** the runtimeArgs check is skipped with annotation `requires: runsc`
+#### Scenario: A required arg is missing
+- **WHEN** the `runtimeArgs` does not contain an arg in `_EXPECTED_RUNTIME["runtimeArgs"]` (e.g. `--oci-seccomp` absent)
+- **THEN** the check reports WARN naming the missing arg(s) with remediation referencing `~<user>/.config/docker/daemon.json`
 
 ### Requirement: Host UDS Runtime Validation
 The system SHALL verify that the `runsc` runtime does NOT have `--host-uds=all` configured. This check SHALL use `warn` severity — it is a defense-in-depth advisory confirming that the default `--host-uds=none` is in effect.
@@ -223,14 +221,21 @@ The system SHALL verify that the filesystem under SANDBOX_AI_HOME supports POSIX
 - **THEN** the check reports FAIL with guidance on filesystem mount options
 
 ### Requirement: Ancestor Traverse Verification
+
 The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) that verifies the sandbox user can traverse ancestor directories from `SANDBOX_AI_HOME` to `/`. The check SHALL depend on the `acl_support` check.
+
+The ancestor-traverse ACL on the operator's home (`u:<sandbox-user>:--x`) is granted at the **first `sandbox start`** (lifecycle: granted-once/persistent), NOT by `sudo sandbox setup` or `sandbox init`. So a non-traversable ancestor on a freshly-set-up host with no sandbox started yet is **expected, not a defect**. When a blocked ancestor is found the check distinguishes by whether any sandbox is currently running (queried via the `compose-ls` dispatch op): **no sandbox running → SKIP** (the grant is a not-yet-applicable first-`start` artifact); **a sandbox running but the ancestor still blocked → FAIL** (that sandbox cannot reach its workspace). The running-state query is **fail-safe**: if the daemon cannot be queried (docker down / probe failure / unparseable output), the check reports the real traverse gap (FAIL) rather than hiding it behind a SKIP. (This corrects a prior permanent FAIL on every setup-then-`init`-but-not-yet-`start` host.)
 
 #### Scenario: All ancestors traversable
 - **WHEN** the sandbox user has `--x` permission (via mode bits or ACLs) on every user-owned ancestor directory from `SANDBOX_AI_HOME` up to the ownership boundary
 - **THEN** the check reports PASS
 
-#### Scenario: Ancestor lacks traverse permission
-- **WHEN** a user-owned ancestor directory (e.g., `/home/user/`) has mode 0700 and no ACL entry granting `--x` to the sandbox user
+#### Scenario: Ancestor blocked, no sandbox running → SKIP
+- **WHEN** a user-owned ancestor (e.g. `/home/<operator>/`) lacks `--x` for the sandbox user AND `compose-ls` reports zero running sandbox projects
+- **THEN** the check reports SKIP with detail that the ancestor-traverse ACL is granted at the first `sandbox start` (and a manual `setfacl -m u:<user>:--x <dir>` remediation), NOT FAIL
+
+#### Scenario: Ancestor blocked while a sandbox is running → FAIL
+- **WHEN** a user-owned ancestor lacks `--x` for the sandbox user AND at least one sandbox is running (or the running-state cannot be determined — fail-safe)
 - **THEN** the check reports FAIL with the specific directory, its current mode, and a fix command: `setfacl -m u:<user>:--x <dir>`
 
 #### Scenario: Symlink detected in ancestor path
@@ -240,10 +245,6 @@ The system SHALL provide an `ancestor_traverse` check in Chain 2 (Filesystem) th
 #### Scenario: acl_support dependency failed — check skipped
 - **WHEN** the `acl_support` check has failed or been skipped
 - **THEN** the `ancestor_traverse` check is skipped with annotation `requires: acl_support`
-
-#### Scenario: Check executes without user_exists dependency
-- **WHEN** the `ancestor_traverse` check is invoked and the `user_exists` check has not been explicitly evaluated in this chain
-- **THEN** the check still executes successfully using the provided user parameter (no cross-chain `depends_on` required)
 
 ### Requirement: Tooling Plane Integrity
 The system SHALL verify that the unconditional template and static files exist in `templates/docker/` and `templates/config/`. The unconditional file count SHALL be 17 (16 original + `templates/docker/coredns/Dockerfile.coredns`).
@@ -446,18 +447,6 @@ The doctor SHALL include a check `subuid_resolver_works` that verifies `host_id_
 - **WHEN** the doctor runs and `host_id_for_in_container(1000, ...)` raises `NoSubuidRangeError`
 - **THEN** the check fails with the error's message and a hint pointing at `/etc/subuid` and rootless docker setup documentation
 
-### Requirement: Helper Image Locally-Cached Check
-
-The doctor SHALL include a warn-only check `helper_image_pulled` that runs `docker image inspect <pinned-busybox-ref>` and reports whether the image is locally cached. The check SHALL NOT trigger a pull (diagnostic commands have no side effects).
-
-#### Scenario: Image cached passes
-- **WHEN** the doctor runs and `docker image inspect <pinned-busybox-ref>` exits 0
-- **THEN** the check passes
-
-#### Scenario: Image not cached warns
-- **WHEN** the doctor runs and `docker image inspect <pinned-busybox-ref>` exits non-zero
-- **THEN** the check emits a warning: `"WARN: helper image <pinned-ref> is not locally cached; will be pulled on first 'sandbox start' (~1MB)."`. The doctor proceeds with subsequent checks; this is not a fatal error.
-
 ### Requirement: Secrets Hydrated Restrictively Check
 
 The doctor SHALL include a warn-only check `secrets_hydrated_restrictively` that scans `secrets/` and `config/` files in registered instance directories for any file with `other::r--` (mode bits revealing world-readable). Such files indicate a hydration regression where Decision 6's restrictive-mode-at-write-time contract was violated.
@@ -548,19 +537,15 @@ The doctor SHALL include a warn-only check `backups_partial_dirs_present` that r
 
 ### Requirement: Dev Umask Workspace-Friendly Check
 
-The doctor SHALL include a warn-only check `dev_umask_workspace_friendly` that warns when (a) at least one workspace is registered AND (b) the dev process's umask is `0o022` or worse. Recommendation: `umask 002` in shell rc files so dev-edited files in workspaces land mode `0664` group sb-ws (allowing the agent to read).
+The doctor SHALL include a warn-only check `dev_umask_workspace_friendly` (the check ID is unchanged; its operator-facing **display name is `operator umask workspace-friendly`** — `operator` is the preferred term, replacing the legacy `dev` display string) that warns when (a) at least one workspace is registered AND (b) the operator process's umask masks group-write (`0o022` or worse). Recommendation: **`umask 007`** in shell rc files so operator-edited files in workspaces land mode **`0660`** — group `sb-ws` read/write, NO access for others (least privilege). The prior `umask 002` / `0664` recommendation granted world-read for no benefit (the workspace tree is already `chmod 2770`, so others cannot traverse to the files regardless).
 
 #### Scenario: Umask 022 with workspaces warns
 - **WHEN** `sandbox doctor` runs and at least one workspace is registered AND `os.umask(0); os.umask(saved)` returns `0o022`
-- **THEN** `dev_umask_workspace_friendly` emits a warning recommending `umask 002`
+- **THEN** the check emits a warning recommending `umask 007` (mode `0660`)
 
-#### Scenario: Umask 002 passes
-- **WHEN** `sandbox doctor` runs and the dev umask is `0o002` or stricter
-- **THEN** `dev_umask_workspace_friendly` passes silently
-
-#### Scenario: No workspaces yet skips check
-- **WHEN** `sandbox doctor` runs and no instances/workspaces are registered
-- **THEN** `dev_umask_workspace_friendly` is skipped (no false-positive warning before the first init)
+#### Scenario: Group-write-preserving umask passes
+- **WHEN** `sandbox doctor` runs and the operator umask allows group-write while blocking others-write (e.g. `0o002` or `0o007`)
+- **THEN** the check passes silently
 
 ### Requirement: Compose Project Name Collision Check
 
@@ -662,4 +647,138 @@ The semantic content of each affected doctor check (what it verifies, what PASS/
 #### Scenario: Doctor check semantics preserved across the refactor
 - **WHEN** the refactored doctor runs against an unchanged host
 - **THEN** every check's PASS/WARN/FAIL verdict matches its pre-refactor behavior; the rendered output (column names, severity rendering, dependency cascading) is byte-identical to the pre-refactor doctor output (verified by a golden-file test or equivalent)
+
+### Requirement: runsc Pinned Match Check
+
+The doctor SHALL include a check `runsc_pinned_match` that verifies the sha512 of `/usr/local/libexec/sandbox-ai/runsc` matches `BINARY_REGISTRY["runsc"].sha512`. The check SHALL invoke `core.binary_install.verify_only("runsc", host_config)` (read-only; no network calls). On match → PASS. On absence (file not present) → SKIP with remediation `run 'sudo sandbox setup' to install runsc`. On drift (sha differs from pinned) → WARN with both shas and remediation `run 'sudo sandbox setup --update-runsc' to apply the pinned version`.
+
+**Dependencies:** none beyond filesystem readability (the check reads a root-owned file; doctor MUST be invoked with sufficient permissions to read `/usr/local/libexec/sandbox-ai/runsc`).
+
+#### Scenario: runsc matches pinned sha
+- **WHEN** `/usr/local/libexec/sandbox-ai/runsc` exists and its sha512 matches `BINARY_REGISTRY["runsc"].sha512`
+- **THEN** the check reports PASS with the installed sha (truncated)
+
+#### Scenario: runsc absent
+- **WHEN** `/usr/local/libexec/sandbox-ai/runsc` does not exist
+- **THEN** the check reports SKIP with detail `runsc not installed; run 'sudo sandbox setup' to install`
+
+#### Scenario: runsc drift detected
+- **WHEN** `/usr/local/libexec/sandbox-ai/runsc` exists and its sha512 differs from `BINARY_REGISTRY["runsc"].sha512`
+- **THEN** the check reports WARN with detail `runsc drift: installed sha <X>, pinned sha <Y>. Run 'sudo sandbox setup --update-runsc' to apply.`
+
+### Requirement: Dispatcher Sha Drift Check
+
+The doctor SHALL include a check `dispatcher_sha_drift` that compares the on-disk dispatcher binary against the manifest written by setup's L6.5 phase. The manifest at `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` (the host-plane path alongside the binary — see the `sandbox-setup` capability's "Dispatcher Manifest Schema" requirement) is a JSON document with `compiled_sha512`, `source_bundle_sha512`, and `compile_timestamp` fields. The check imports the manifest path from setup's L6.5 phase (single source) so the two cannot disagree on its location.
+
+The check SHALL verify:
+
+1. **Binary integrity**: sha512 of `/usr/local/libexec/sandbox-ai/dispatch` matches the manifest's `compiled_sha512`.
+2. **Source freshness**: the current source bundle's sha512 (computed by hashing `src/templates/dispatch/{main.go, go.mod, go.sum, vendor/**}` per the schema requirement) matches the manifest's `source_bundle_sha512`.
+
+Verdicts:
+- Both match → PASS with detail showing the truncated shas + compile timestamp.
+- Binary absent OR manifest absent → SKIP with remediation `run 'sudo sandbox setup' to install the dispatcher`.
+- Binary sha differs from manifest's `compiled_sha512` → WARN with detail `dispatcher binary differs from setup's recorded sha. Re-run 'sudo sandbox setup' to refresh, or investigate tampering.` (Tamper or hand-replacement scenario.)
+- Source bundle sha differs from manifest's `source_bundle_sha512` → WARN with detail `dispatcher binary was compiled from an older source bundle (wheel upgrade since last setup). Re-run 'sudo sandbox setup' to recompile against current source.` (Wheel-upgrade scenario.)
+
+**Dependencies:** filesystem readability for the dispatcher binary, the manifest, and the dispatcher source bundle.
+
+#### Scenario: Both binary and source-bundle shas match manifest
+- **WHEN** `/usr/local/libexec/sandbox-ai/dispatch`, `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json`, and the dispatcher source bundle are all present; the binary's sha matches `manifest.compiled_sha512`; the current source bundle's sha matches `manifest.source_bundle_sha512`
+- **THEN** the check reports PASS
+
+#### Scenario: Manifest absent
+- **WHEN** `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` does not exist
+- **THEN** the check reports SKIP with the install-setup hint
+
+#### Scenario: Binary tampered (sha mismatch on compiled_sha512)
+- **WHEN** `/usr/local/libexec/sandbox-ai/dispatch` sha differs from `manifest.compiled_sha512` but the current source bundle sha still matches `manifest.source_bundle_sha512`
+- **THEN** the check reports WARN with the tamper-hint variant naming the manifest's recorded compiled sha and the binary's current sha
+
+#### Scenario: Wheel upgraded since last setup (sha mismatch on source_bundle_sha512)
+- **WHEN** the source bundle's sha differs from `manifest.source_bundle_sha512` but the on-disk binary's sha still matches `manifest.compiled_sha512`
+- **THEN** the check reports WARN with the wheel-upgrade-hint variant prompting the operator to re-run setup to recompile
+
+### Requirement: Binary Integrity Posture Check
+
+The doctor SHALL include a check `binary_integrity_posture` that probes the host for the presence and enforcement state of binary-integrity mechanisms:
+
+- **dm-verity**: probe `/proc/cmdline` for `dm-verity` markers AND check `dmsetup status` output for an active verity device on the partition hosting `/usr/local/libexec/sandbox-ai/`. Report ACTIVE / INACTIVE.
+- **IMA-appraise**: probe `/sys/kernel/security/ima/policy` for `appraise` directives. Report APPRAISING / NOT-APPRAISING.
+- **fapolicyd**: probe `systemctl is-active fapolicyd` AND `fapolicyd-cli --check-status` for enforcing mode. Report ENFORCING / PERMISSIVE / NOT-RUNNING.
+- **AIDE**: probe `which aide` AND check for `/var/lib/aide/aide.db` existence. Report INSTALLED-DB-PRESENT / INSTALLED-DB-MISSING / NOT-INSTALLED.
+
+The check SHALL report PASS (informational) regardless of the findings — the check exists to report posture, not to gate. The check's `detail` field SHALL enumerate the four mechanisms' states in a structured format. The check's remediation field SHALL recommend configuration in production-sensitive contexts but SHALL NOT bootstrap any of these tools.
+
+**Dependencies:** filesystem readability for `/proc/cmdline` and `/sys/kernel/security/ima/policy`; presence of `dmsetup`, `systemctl`, `fapolicyd-cli`, `aide` binaries (each probe gracefully reports `NOT-INSTALLED` if the binary is absent).
+
+#### Scenario: All four tools detected and enforcing
+- **WHEN** dm-verity is active, IMA is appraising, fapolicyd is enforcing, AIDE is installed with a present DB
+- **THEN** the check reports PASS with detail showing all four states; the remediation field is empty (or `posture is fully hardened`)
+
+#### Scenario: None of the four tools active
+- **WHEN** none of dm-verity / IMA / fapolicyd / AIDE are active on this host
+- **THEN** the check reports PASS (informational) with detail showing all NOT-ENFORCING / NOT-INSTALLED states; remediation suggests `for production hosts, consider configuring dm-verity, IMA-appraise, fapolicyd, or AIDE; sandbox-ai's manifest detects accidental drift but does not provide attack-resistant integrity`
+
+### Requirement: Setup Invariants Check
+
+The doctor SHALL include a check `setup_invariants` that performs a read-only audit of setup's owned-namespace artifacts:
+
+- Each enumerated owned drop-in path is present, owned by root, with the correct mode.
+- `/etc/subuid` and `/etc/subgid` entries for the sandbox user exist with adequate range size.
+- The `sb-ws` group exists at a gid in the sandbox user's subgid range.
+- The operator is a member of `sb-ws` (per `/etc/group`, NOT per running-process supplementary groups — the latter is a different check `dev_in_workspace_bridge_group` and may show stale state pre-relogin).
+- `/usr/local/libexec/sandbox-ai/` directory exists with mode 0755 root:root.
+- **rule-shape agreement** (F-022): the privilege-boundary drop-in installed on disk matches the auth mode the operator toml selects. When the toml selects SUDO, no `/etc/polkit-1/rules.d/49-sandbox-ai-machinectl.rules` SHALL also be present; when it selects POLKIT, no `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` SHALL also be present. If the opposite-mode rule *is* present, the toml and the installed rule shape disagree (the operator likely flipped `machinectl_authentication` after a setup run, or ran setup under one mode while the toml requests the other) → WARN naming the stray rule, since the operator's runtime crossings would use one mechanism while the rule grants the other. (The per-operator state tree `<sandbox_ai_home()>/{config,state,instances,workspaces}` is NOT audited here — it is `sandbox init`'s artifact, covered by the separate per-user-tree checks; round-9/F-021.)
+- **machinectl-path stability**: `machinectl` resolved on the sudoers `secure_path` basis still equals the absolute path pinned in the installed sudoers drop-in's `Cmnd_Spec` entries. Detects post-setup drift (e.g. an operator installed a shadowing `machinectl` earlier on secure_path) that would silently break the orchestrator's `sudo machinectl …` grant even though the drop-in is present and well-formed. This is the steady-state counterpart of L3a's setup-time relative-form probe (B-3 defense).
+- **sudoers rule-body content audit** (the F-004 `sudoers_rule_shape` audit, folded here rather than a standalone check — same data source, same WARN policy): re-render the expected `SANDBOX_OPS` body from the current `core.dispatch.Op` enum + operator + hostname + resolved `MACHINECTL_PATH`, and compare against the installed `/etc/sudoers.d/sandbox-ai-machinectl-<operator>`. Specifically assert: (a) the enumerated op set exactly equals `core.dispatch.Op` (neither under- nor over-enumerated — catches a wheel upgrade that added/removed an op without a setup re-run); (b) ZERO `"` (double-quote) characters appear in any `Cmnd_Spec` body (the F-004 silent-footgun shape — a drop-in that passes `visudo -cf` but matches nothing at runtime); (c) every op-name segment matches `[a-z0-9-]+` and embedded whitespace is backslash-escaped (not quoted). On any mismatch: WARN `sudoers drop-in content drifted from canonical (F-004 / op-enum drift): <specifics>. Run 'sudo sandbox setup' to regenerate.`
+- **sudo-version floor**: parse `sudo --version`; the rule shape is empirically validated on sudo **1.9.5p2 → 1.9.17p2** (V9c/V9e/V9e-2, 11 distro images incl. the RHEL 8.10 / Rocky 8.9 floor). If the host's sudo is **older than 1.9.5p2** (only EOL distros — RHEL 7 = 1.8.23, Debian 10 = 1.8.27), WARN: `sudo <version> predates the validated floor 1.9.5p2; the V9 sudoers rule shape is unverified on this version and 'Defaults fast_glob' may be load-bearing-and-unconfirmed here. Supported enterprise distros ship ≥1.9.5p2.` This is the steady-state surface of the same check L0 performs at setup time; it WARNs (does not FAIL) consistent with this check's policy and because sub-floor sudo only occurs on out-of-support EOL distros.
+
+The check SHALL report PASS if all invariants hold. For any missing/wrong invariant, the check SHALL report WARN (not FAIL — drift may be operator-intentional) with detail naming the specific invariant violated and remediation `run 'sudo sandbox setup' to restore canonical setup state`.
+
+**Operator resolution under `sandbox doctor`.** The audit needs the operator identity to locate the per-operator drop-in and check `sb-ws` membership. It first tries setup's strict `resolve_operator()` (precedence `$SUDO_USER` → `$PKEXEC_UID` → `--operator` → refuse). Under a **plain `sandbox doctor`** — run by the operator AS THEMSELVES, not via `sudo` — that precedence has no context and raises; the check MUST then fall back to the **current real user** (`pwd.getpwuid(os.getuid())`), which IS the operator in that invocation, and run the full audit. It MUST NOT short-circuit with an "operator unresolvable" WARN (that left the audit dead in doctor's normal, non-sudo invocation). `resolve_operator()` itself stays strict for `setup` (which MUST refuse without explicit context — no current-user heuristic).
+
+**Root-only drop-in under a non-root invocation.** The per-operator sudoers drop-in is `0440 root:root` inside a `0750` `/etc/sudoers.d/`, so a plain `sandbox doctor` (running as the operator) cannot read it. Reading it MUST raise no uncaught exception (a `PermissionError` MUST NOT crash the doctor run): the check treats an unreadable-but-present drop-in as **NOT missing** (no "missing" violation) and **skips** the rule-body + machinectl-stability audits that need its content, returning the operator-readable invariants' verdict with a note that the rule is validated at install time by setup's L3a per-op probe. (`sudo sandbox doctor` is NOT a fuller path — post round-9/F-021 it resolves root's home, not the operator's, and exits without a config.) The operator-readable invariants (reserved-dir mode/ownership, subuid/subgid ranges, `sb-ws` group membership, sudo-version floor) are still audited.
+
+**Dependencies:** filesystem readability; presence of `getent`, `stat`, `sudo` (for `sudo --version`); importability of `core.dispatch.Op` (for the rule-body op-enum comparison).
+
+#### Scenario: Fresh post-setup host
+- **WHEN** the operator runs `sandbox doctor` immediately after `sudo sandbox setup` completes
+- **THEN** the check reports PASS; every enumerated invariant holds
+
+#### Scenario: Plain `sandbox doctor` resolves the operator as the current user
+- **WHEN** the operator runs `sandbox doctor` directly (not via `sudo`), so `resolve_operator()`'s setup precedence has no context and raises `OperatorResolutionError`
+- **THEN** the check falls back to the current real user (`pwd.getpwuid(os.getuid())`) as the operator and runs the full audit — it does NOT short-circuit with an "operator unresolvable" WARN
+
+#### Scenario: Root-only sudoers drop-in under a plain (operator) `sandbox doctor`
+- **WHEN** a plain `sandbox doctor` (operator, not root) audits invariants and reading the `0440 root:root` per-operator sudoers drop-in raises `PermissionError`
+- **THEN** the check does NOT crash and does NOT report the drop-in "missing"; it skips the rule-body + machinectl-stability audits and reports PASS (assuming the operator-readable invariants hold) with a note that the rule is validated at install time by setup's L3a per-op probe
+
+#### Scenario: Drop-in file removed by operator
+- **WHEN** an operator manually `rm`s `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` and runs `sandbox doctor`
+- **THEN** the check reports WARN with detail `sudoers drop-in /etc/sudoers.d/sandbox-ai-machinectl-<operator> missing. Run 'sudo sandbox setup' to restore.`
+
+#### Scenario: Second machinectl appears on secure_path post-setup
+- **WHEN** post-setup a second executable `machinectl` appears on secure_path (e.g. `/usr/local/bin/machinectl`, earlier than the L0-resolved path the drop-in pinned) and the operator runs `sandbox doctor`
+- **THEN** the check reports WARN naming the machinectl-path-stability invariant, with version-accurate detail: a second `machinectl` (`<found-path>`) now exists on secure_path while the sudoers rule pins `<pinned-path>`. On sudo ≥1.9.15 this *breaks* the orchestrator's `sudo machinectl …` grant (availability failure — the operator will hit password prompts); on sudo 1.9.5p2 the grant still works (sudo runs the pinned binary, V9e-2) but the unexpected binary is a hygiene concern. Remediation either way: `remove the unexpected '<found-path>' (the orchestrator expects only the systemd '<pinned-path>'), or run 'sudo sandbox setup' to re-evaluate`. WARN (not FAIL) per the check's policy — and because on the enterprise floor it is not a functional break.
+
+#### Scenario: Operator removed from sb-ws
+- **WHEN** an admin runs `gpasswd -d <operator> sb-ws` and the operator runs `sandbox doctor`
+- **THEN** the check reports WARN with detail `operator <operator> not in sb-ws group per /etc/group. Run 'sudo sandbox setup' to restore (and log out/in to refresh group set).`
+
+#### Scenario: Installed rule shape disagrees with the toml's auth mode
+- **WHEN** the operator toml's `[host].machinectl_authentication` is `sudo` but a `/etc/polkit-1/rules.d/49-sandbox-ai-machinectl.rules` file is also present on disk (or the toml is `polkit` but a `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` is present), and the operator runs `sandbox doctor`
+- **THEN** the rule-shape-agreement invariant reports WARN naming the stray opposite-mode rule and noting the toml/rule disagreement (the operator's runtime crossings would use one mechanism while the rule grants the other); remediation suggests removing the stale rule or reconciling the toml
+
+#### Scenario: Installed drop-in contains an F-004 silent-footgun shape
+- **WHEN** the installed `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` contains a `"` character inside a `Cmnd_Spec` body (e.g. an operator hand-edited it, or an old buggy renderer wrote it) and the operator runs `sandbox doctor`
+- **THEN** the rule-body content audit reports WARN: `sudoers drop-in content drifted from canonical (F-004 silent-footgun shape: double-quote in a Cmnd_Spec — the rule passes 'visudo -cf' but matches nothing at runtime). Run 'sudo sandbox setup' to regenerate.`
+
+#### Scenario: Op enumeration drifted after a wheel upgrade
+- **WHEN** the wheel was upgraded so `core.dispatch.Op` gained an op, but `sudo sandbox setup` was not re-run, so the installed drop-in's `SANDBOX_OPS` under-enumerates the current op set, and the operator runs `sandbox doctor`
+- **THEN** the rule-body content audit reports WARN naming the missing op(s) and `Run 'sudo sandbox setup' to regenerate the rule for the current dispatcher op set.`
+
+#### Scenario: Host sudo predates the validated floor
+- **WHEN** `sandbox doctor` runs on a host whose `sudo --version` is older than 1.9.5p2 (e.g. an EOL RHEL 7 with sudo 1.8.23)
+- **THEN** the sudo-version-floor invariant reports WARN: `sudo 1.8.23 predates the validated floor 1.9.5p2; the V9 sudoers rule shape is unverified on this version (supported enterprise distros ship ≥1.9.5p2; only EOL distros are below).` — WARN not FAIL (out-of-support EOL territory, not a functional break per V9c knowledge)
 
