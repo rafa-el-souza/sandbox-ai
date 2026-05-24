@@ -185,7 +185,7 @@ def _runtime_registered(host_config: HostConfig) -> bool:
     return _RESERVED_RUNTIME_KEY in (result.stdout or "")
 
 
-def _restart_and_poll(host_config: HostConfig) -> None:
+def _restart_and_poll(host_config: HostConfig) -> str:
     """Restart rootless docker StartLimit-safely; poll until the runtime loads.
 
     F-023-driven properties (fresh-VM-capture-confirmed):
@@ -218,7 +218,7 @@ def _restart_and_poll(host_config: HostConfig) -> None:
     user = _sandbox_user(host_config)
     auth = host_config.host.machinectl_authentication
     wait_user_manager_ready(user)
-    run_crossing_until_delivered(
+    restart = run_crossing_until_delivered(
         user,
         auth,
         "systemctl --user reset-failed docker.service; "
@@ -235,16 +235,23 @@ def _restart_and_poll(host_config: HostConfig) -> None:
         "&& { echo " + _RUNTIME_LOADED_MARKER + "; exit 0; }; "
         "sleep 1; done; echo " + _RUNTIME_ABSENT_MARKER + "; exit 0"
     )
-    result = run_crossing_until_delivered(
+    poll_delivery = run_crossing_until_delivered(
         user, auth, poll, what="docker runtime readiness poll"
     )
-    if _RUNTIME_LOADED_MARKER not in (result.stdout or ""):
+    if _RUNTIME_LOADED_MARKER not in (poll_delivery.completed.stdout or ""):
         raise SandboxExecutionError(
             f"[FATAL] Sandbox Execution Fault: rootless docker restarted but the "
             f"reserved runtime {_RESERVED_RUNTIME_KEY!r} was not loaded within "
             f"30s (docker info never listed it). Inspect the sandbox user's "
             f"docker journal: journalctl --user -u docker."
         )
+    # Surface the per-crossing attempt counts so a passing fresh-VM smoke still
+    # shows whether the first-session lost-sentinel transient was hit (>1) or
+    # the sessions delivered cleanly (1) — the F-023c capture hook.
+    return (
+        f"restart crossing delivered on attempt {restart.attempt}, "
+        f"runtime-readiness poll on attempt {poll_delivery.attempt}"
+    )
 
 
 def _act(ctx: SetupContext) -> str:
@@ -275,8 +282,11 @@ def _act(ctx: SetupContext) -> str:
         old_text = ""
     if new_text != old_text:
         _write_inode_stable(path, new_text)
-    _restart_and_poll(host_config)
-    return "reserved runtime key ensured; rootless docker restarted + runtime loaded"
+    diag = _restart_and_poll(host_config)
+    return (
+        f"reserved runtime key ensured; rootless docker restarted + runtime "
+        f"loaded ({diag})"
+    )
 
 
 def _reverify(ctx: SetupContext) -> bool:

@@ -807,7 +807,7 @@ def test_wait_user_manager_ready_attempts_is_parametrized(
 def test_run_crossing_until_delivered_returns_first_delivered_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delivered crossing's CompletedProcess is returned as-is (no raise)."""
+    """A clean first delivery returns the process + attempt 1 (no raise)."""
     from core.host_config import MachinectlAuth
 
     def _run(
@@ -816,10 +816,11 @@ def test_run_crossing_until_delivered_returns_first_delivered_result(
         return subprocess.CompletedProcess(cmd, 0, "delivered\n", "")
 
     monkeypatch.setattr("core.executor.Executor.run", _run)
-    result = run_crossing_until_delivered(
+    delivery = run_crossing_until_delivered(
         "sandboxuser", MachinectlAuth.SUDO, "echo hi", what="x", attempts=3
     )
-    assert result.stdout == "delivered\n"
+    assert delivery.completed.stdout == "delivered\n"
+    assert delivery.attempt == 1
 
 
 def test_run_crossing_until_delivered_crosses_via_machinectl_with_inner(
@@ -865,11 +866,12 @@ def test_run_crossing_until_delivered_retries_lost_sentinel_then_delivers(
         return subprocess.CompletedProcess(cmd, 0, "delivered", "")
 
     monkeypatch.setattr("core.executor.Executor.run", _run)
-    result = run_crossing_until_delivered(
+    delivery = run_crossing_until_delivered(
         "sandboxuser", MachinectlAuth.SUDO, "echo hi", what="x", attempts=3
     )
     assert calls["n"] == 2
-    assert result.stdout == "delivered"
+    assert delivery.completed.stdout == "delivered"
+    assert delivery.attempt == 2
 
 
 def test_run_crossing_until_delivered_raises_after_exhausting_attempts(

@@ -200,6 +200,10 @@ def test_act_creates_and_merges_preserving_operator_runtimes(
     assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
     assert doc["debug"] is True
     assert "ensured" in detail
+    # F-023c capture hook: the act detail surfaces the per-crossing attempt
+    # counts so a passing run still shows whether the transient was hit.
+    assert "delivered on attempt 1" in detail
+    assert "runtime-readiness poll on attempt 1" in detail
     assert any("restart --no-block docker" in r for r in restarts)
 
 

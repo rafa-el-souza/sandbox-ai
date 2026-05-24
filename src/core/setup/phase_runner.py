@@ -463,6 +463,22 @@ def wait_user_manager_ready(user: str, *, attempts: int = 30) -> None:
     )
 
 
+@dataclass(frozen=True)
+class CrossingDelivery:
+    """A delivered sandbox-user crossing + the attempt it delivered on.
+
+    ``attempt`` is 1-based: ``1`` means the first fresh session delivered
+    cleanly; ``>1`` means the per-session lost-sentinel transient was hit and
+    retried through. Threading it into a phase's operator-facing detail makes
+    the transient observable from a *passing* run's output (the F-023c capture
+    hook), so the fresh-VM smoke confirms the mechanism instead of just going
+    green silently. See :func:`run_crossing_until_delivered`.
+    """
+
+    completed: subprocess.CompletedProcess[str]
+    attempt: int
+
+
 def run_crossing_until_delivered(
     user: str,
     auth: MachinectlAuth,
@@ -470,7 +486,7 @@ def run_crossing_until_delivered(
     *,
     what: str,
     attempts: int = 30,
-) -> subprocess.CompletedProcess[str]:
+) -> CrossingDelivery:
     """Run a sandbox-user crossing, retrying on the lost-sentinel transient.
 
     :func:`wait_user_manager_ready` polls ``is-active user@<uid>.service`` — a
@@ -496,16 +512,17 @@ def run_crossing_until_delivered(
     thing that makes :meth:`Executor.run` raise here — is unambiguously the
     transient and is retried, never conflated with a non-zero inner exit. The
     restart is StartLimit-safe to re-issue (its ``reset-failed`` precedes it)
-    and the poll is a pure read, so retrying either crossing is safe. Returns
-    the first delivered :class:`subprocess.CompletedProcess`; raises a
-    diagnostic naming ``what`` (vs the opaque "Exit sentinel not found") if no
-    crossing delivers within ``attempts``. Run it AFTER
+    and the poll is a pure read, so retrying either crossing is safe. Returns a
+    :class:`CrossingDelivery` (the delivered process + the 1-based attempt it
+    delivered on, so the caller can surface the transient in its detail);
+    raises a diagnostic naming ``what`` (vs the opaque "Exit sentinel not
+    found") if no crossing delivers within ``attempts``. Run it AFTER
     :func:`wait_user_manager_ready`.
     """
     cmd = [*machinectl_cmd(user, auth), "/bin/bash", "-c", inner]
-    for _ in range(attempts):
+    for attempt in range(1, attempts + 1):
         try:
-            return Executor().run(cmd, sentinel=True)
+            return CrossingDelivery(Executor().run(cmd, sentinel=True), attempt)
         except SandboxExecutionError:
             # Lost-sentinel (empty stdout) crossing — the fresh session did not
             # service this crossing; wait and retry. The inner exits 0, so a
@@ -707,6 +724,7 @@ def _failed(
 
 __all__ = [
     "ActFn",
+    "CrossingDelivery",
     "Identity",
     "Phase",
     "PhaseApplyOutcome",
