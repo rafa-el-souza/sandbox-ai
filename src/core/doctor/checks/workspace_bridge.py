@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from typing import TYPE_CHECKING
 
 from core.doctor.types import CheckResult
@@ -168,42 +167,6 @@ def check_subuid_resolver_works(host_user: str, distro: str | None) -> CheckResu
         status="pass",
         name="subuid resolver",
         detail=f"in-container uid 1000 → host uid {host_uid}",
-        category="Workspace Bridge",
-    )
-
-
-def check_helper_image_pulled(host_user: str, distro: str | None) -> CheckResult:
-    """Warn-only: helper container image is locally available."""
-    del host_user, distro
-    from core.hydration import IMAGE_REGISTRY
-
-    image = IMAGE_REGISTRY["busybox_musl"].pinned
-    docker_inspect_failures: tuple[type[BaseException], ...] = (FileNotFoundError, subprocess.TimeoutExpired)
-    try:
-        result = subprocess.run(
-            ["docker", "image", "inspect", image],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except docker_inspect_failures:
-        return CheckResult(
-            status="warn",
-            name="helper image cached",
-            detail="docker not reachable from current shell; will pull on first sandbox start",
-            category="Workspace Bridge",
-        )
-    if result.returncode == 0:
-        return CheckResult(
-            status="pass",
-            name="helper image cached",
-            detail=f"{image} present locally",
-            category="Workspace Bridge",
-        )
-    return CheckResult(
-        status="warn",
-        name="helper image cached",
-        detail=f"{image} not in local cache; will be pulled on first sandbox start",
         category="Workspace Bridge",
     )
 
@@ -602,7 +565,6 @@ __all__ = [
     "check_backups_partial_dirs_present",
     "check_dev_in_workspace_bridge_group",
     "check_dev_umask_workspace_friendly",
-    "check_helper_image_pulled",
     "check_pre_existing_instance_layout",
     "check_secrets_hydrated_restrictively",
     "check_subuid_resolver_works",

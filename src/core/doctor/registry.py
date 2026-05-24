@@ -46,7 +46,6 @@ from core.doctor.checks.workspace_bridge import (
     check_backups_partial_dirs_present,
     check_dev_in_workspace_bridge_group,
     check_dev_umask_workspace_friendly,
-    check_helper_image_pulled,
     check_pre_existing_instance_layout,
     check_secrets_hydrated_restrictively,
     check_subuid_resolver_works,
@@ -281,14 +280,6 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             category="Workspace Bridge",
             depends_on=[],
             run=check_subuid_resolver_works,
-            remediation="",
-        ),
-        Check(
-            id="helper_image_pulled",
-            name="helper image cached",
-            category="Workspace Bridge",
-            depends_on=[],
-            run=check_helper_image_pulled,
             remediation="",
         ),
         Check(
