@@ -12,6 +12,8 @@ from __future__ import annotations
 import functools
 from collections import defaultdict, deque
 
+from core.doctor.checks.binary_integrity_posture import check_binary_integrity_posture
+from core.doctor.checks.dispatcher_sha_drift import check_dispatcher_sha_drift
 from core.doctor.checks.filesystem import check_acl_support, check_ancestor_traverse, check_setfacl
 from core.doctor.checks.per_user_tree import (
     check_legacy_cwd_files,
@@ -36,13 +38,14 @@ from core.doctor.checks.privilege_boundary import (
     check_user_exists,
 )
 from core.doctor.checks.repo_integrity import check_state_dir_writable, check_tooling_plane
+from core.doctor.checks.runsc_pinned_match import check_runsc_pinned_match
+from core.doctor.checks.setup_invariants import check_setup_invariants
 from core.doctor.checks.supply_chain import check_image_digests
 from core.doctor.checks.workspace_bridge import (
     check_backups_disk_pressure,
     check_backups_partial_dirs_present,
     check_dev_in_workspace_bridge_group,
     check_dev_umask_workspace_friendly,
-    check_helper_image_pulled,
     check_pre_existing_instance_layout,
     check_secrets_hydrated_restrictively,
     check_subuid_resolver_works,
@@ -200,7 +203,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             name="ancestor traverse",
             category="Filesystem",
             depends_on=["acl_support"],
-            run=check_ancestor_traverse,
+            run=functools.partial(check_ancestor_traverse, auth_mode=auth_mode),
             remediation="",
         ),
         # Chain 3: repo integrity
@@ -265,7 +268,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
         ),
         Check(
             id="dev_in_workspace_bridge_group",
-            name="dev in workspace bridge group",
+            name="operator in workspace bridge group",
             category="Workspace Bridge",
             depends_on=["workspace_bridge_group_exists"],
             run=check_dev_in_workspace_bridge_group,
@@ -277,14 +280,6 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             category="Workspace Bridge",
             depends_on=[],
             run=check_subuid_resolver_works,
-            remediation="",
-        ),
-        Check(
-            id="helper_image_pulled",
-            name="helper image cached",
-            category="Workspace Bridge",
-            depends_on=[],
-            run=check_helper_image_pulled,
             remediation="",
         ),
         Check(
@@ -321,7 +316,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
         ),
         Check(
             id="dev_umask_workspace_friendly",
-            name="dev umask workspace-friendly",
+            name="operator umask workspace-friendly",
             category="Workspace Bridge",
             depends_on=[],
             run=check_dev_umask_workspace_friendly,
@@ -365,6 +360,45 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             category="Per-User Tree",
             depends_on=[],
             run=check_legacy_registry_shape,
+            remediation="",
+        ),
+        # Chain 7: setup integrity (sandbox-setup Group 9).
+        # Independent filesystem/local probes — no doctor-internal deps
+        # (spec "runsc Pinned Match Check" / "Dispatcher Sha Drift Check" /
+        # "Binary Integrity Posture Check" / "Setup Invariants Check":
+        # dependencies are filesystem readability only). The two auth-mode
+        # checks are partial-bound with ``auth_mode`` so the host_config they
+        # build carries the configured mode.
+        Check(
+            id="runsc_pinned_match",
+            name="runsc pinned match",
+            category="Setup Integrity",
+            depends_on=[],
+            run=functools.partial(check_runsc_pinned_match, auth_mode=auth_mode),
+            remediation="",
+        ),
+        Check(
+            id="dispatcher_sha_drift",
+            name="dispatcher sha drift",
+            category="Setup Integrity",
+            depends_on=[],
+            run=check_dispatcher_sha_drift,
+            remediation="",
+        ),
+        Check(
+            id="binary_integrity_posture",
+            name="binary integrity posture",
+            category="Setup Integrity",
+            depends_on=[],
+            run=check_binary_integrity_posture,
+            remediation="",
+        ),
+        Check(
+            id="setup_invariants",
+            name="setup invariants",
+            category="Setup Integrity",
+            depends_on=[],
+            run=functools.partial(check_setup_invariants, auth_mode=auth_mode),
             remediation="",
         ),
     ]

@@ -13,6 +13,12 @@ from typing import Any
 from unittest.mock import mock_open, patch
 
 from core.exceptions import SandboxExecutionError
+from core.setup.l6_daemon_json import _RESERVED_RUNTIME_KEY
+
+# The runtime is registered under the reserved key "sandbox-ai-runsc" (F-024 —
+# the doctor previously looked up the wrong literal "runsc"; these fixtures had
+# encoded the same bug). Single-sourced from L6 so the test and the check agree.
+_RUNSC = _RESERVED_RUNTIME_KEY
 
 
 def _ok(stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -287,7 +293,7 @@ class TestDockerChecks:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok('{"runsc": {}, "runc": {}}')
+            return _ok(json.dumps({_RUNSC: {}, "runc": {}}))
 
         monkeypatch.setattr("core.dispatch.invoke", capture)
         result = check_runsc_registered("sandbox", None)
@@ -300,6 +306,23 @@ class TestDockerChecks:
         from core.doctor import check_runsc_registered
 
         monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok('{"runc": {}}'))
+        result = check_runsc_registered("sandbox", None)
+        assert result.status == "fail"
+
+    def test_runsc_registered_requires_reserved_key_not_bare_runsc(
+        self, monkeypatch: Any
+    ) -> None:
+        """F-024 regression: the check requires the reserved key, NOT a runtime
+        literally named 'runsc'. A daemon advertising only a bare 'runsc' must
+        NOT satisfy the check — the previous code did `if "runsc" in runtimes`
+        and wrongly passed (or, with the real 'sandbox-ai-runsc' key, wrongly
+        failed). This pins the reserved-key contract."""
+        from core.doctor import check_runsc_registered
+
+        assert _RUNSC == "sandbox-ai-runsc"
+        monkeypatch.setattr(
+            "core.dispatch.invoke", lambda *a, **k: _ok(json.dumps({"runsc": {}, "runc": {}}))
+        )
         result = check_runsc_registered("sandbox", None)
         assert result.status == "fail"
 
@@ -335,12 +358,14 @@ class TestRunscJsonDecodeError:
 
 
 class TestCheckRunscRuntimeArgs:
-    def test_both_args_present_pass(self, monkeypatch: Any) -> None:
+    def test_expected_arg_present_passes_extra_args_ok(self, monkeypatch: Any) -> None:
+        # Expected args are single-sourced from l6._EXPECTED_RUNTIME (["--oci-seccomp"]);
+        # an extra --debug-log on disk is fine — only the expected set must be present.
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
             {
-                "runsc": {
+                _RUNSC: {
                     "path": "/usr/local/bin/runsc",
                     "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
                 }
@@ -358,7 +383,6 @@ class TestCheckRunscRuntimeArgs:
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "pass"
         assert "--oci-seccomp" in result.detail
-        assert "--debug-log" in result.detail
         assert captured["op"] == "docker-info"
         assert list(captured["args"]) == ["runtimes"]
         assert captured["timeout"] == 15
@@ -368,7 +392,7 @@ class TestCheckRunscRuntimeArgs:
 
         docker_info = json.dumps(
             {
-                "runsc": {
+                _RUNSC: {
                     "path": "/usr/local/bin/runsc",
                     "runtimeArgs": ["--debug-log=/var/log/runsc/%ID%/"],
                 }
@@ -379,12 +403,15 @@ class TestCheckRunscRuntimeArgs:
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
 
-    def test_missing_debug_log_warn(self, monkeypatch: Any) -> None:
+    def test_debug_log_not_expected_oci_seccomp_only_passes(self, monkeypatch: Any) -> None:
+        # --debug-log is NOT in l6._EXPECTED_RUNTIME (it is a deferred opt-in), so
+        # the default config of just --oci-seccomp satisfies the check (no false
+        # "Missing --debug-log" WARN — the F-024-pattern single-source fix).
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
             {
-                "runsc": {
+                _RUNSC: {
                     "path": "/usr/local/bin/runsc",
                     "runtimeArgs": ["--oci-seccomp"],
                 }
@@ -392,15 +419,16 @@ class TestCheckRunscRuntimeArgs:
         )
         monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
-        assert result.status == "warn"
-        assert "--debug-log" in result.detail
+        assert result.status == "pass"
+        assert "--oci-seccomp" in result.detail
+        assert "--debug-log" not in result.detail
 
     def test_empty_runtime_args_warn(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
             {
-                "runsc": {
+                _RUNSC: {
                     "path": "/usr/local/bin/runsc",
                 }
             }
@@ -409,12 +437,11 @@ class TestCheckRunscRuntimeArgs:
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
-        assert "--debug-log" in result.detail
 
     def test_remediation_references_daemon_json(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_runtimeargs
 
-        docker_info = json.dumps({"runsc": {"path": "/usr/local/bin/runsc"}})
+        docker_info = json.dumps({_RUNSC: {"path": "/usr/local/bin/runsc"}})
         monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.remediation is not None
@@ -427,7 +454,7 @@ class TestCheckHostUds:
 
         docker_info = json.dumps(
             {
-                "runsc": {
+                _RUNSC: {
                     "path": "/usr/local/bin/runsc",
                     "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
                 }
@@ -453,7 +480,7 @@ class TestCheckHostUds:
 
         docker_info = json.dumps(
             {
-                "runsc": {
+                _RUNSC: {
                     "path": "/usr/local/bin/runsc",
                     "runtimeArgs": ["--oci-seccomp", "--host-uds=all"],
                 }

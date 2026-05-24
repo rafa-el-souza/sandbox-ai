@@ -53,9 +53,6 @@ from core.doctor.checks.workspace_bridge import (
     check_dev_umask_workspace_friendly as check_dev_umask_workspace_friendly,
 )
 from core.doctor.checks.workspace_bridge import (
-    check_helper_image_pulled as check_helper_image_pulled,
-)
-from core.doctor.checks.workspace_bridge import (
     check_pre_existing_instance_layout as check_pre_existing_instance_layout,
 )
 from core.doctor.checks.workspace_bridge import (
@@ -98,7 +95,6 @@ __all__ = [
     "check_dev_umask_workspace_friendly",
     "check_docker_available",
     "check_docker_rootless",
-    "check_helper_image_pulled",
     "check_host_uds",
     "check_image_digests",
     "check_legacy_cwd_files",

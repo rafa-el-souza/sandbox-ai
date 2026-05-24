@@ -40,7 +40,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 ### Requirement: Sub-Process Privilege Bounding
 The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host` for PTY-needing paths and `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) for byte-pipe paths. The machinectl invocation prefix SHALL be determined by the `machinectl_authentication` setting from host config (`sandbox-ai.toml`). When `machinectl_authentication` is `"sudo"`, all machinectl commands SHALL be prefixed with `sudo`. When `machinectl_authentication` is `"polkit"`, machinectl commands SHALL be invoked directly without `sudo`, relying on D-Bus native polkit authorization via `org.freedesktop.machine1.shell`. The centralized `machinectl_cmd()` builder from `core.host_config` SHALL be called only by the three documented allowlist categories defined in the `host-config` capability: `src/core/host_config.py` (self), `src/core/dispatch.py` (the typed dispatcher's orchestration module), and `src/core/setup/*.py` (the setup-phase package — sister change `sandbox-setup`; setup runs as root and crosses the boundary before the dispatcher is installed, so it cannot route through `core.dispatch`). Every other module crossing the boundary SHALL route through `core.dispatch.invoke(op, args, host_config)`. Byte-pipe call sites (notably the operator-handover `ProxyCommand`) SHALL use `pipe_cmd()` from `core.host_config`; `pipe_cmd` is polkit-authenticated via the `manage-units` action and is NEVER prefixed with `sudo` regardless of `machinectl_authentication` mode.
 
-The orchestrator's non-interactive Docker invocations SHALL take the shape `[*machinectl_cmd(user, auth), "/bin/bash", "-c", f"/usr/local/libexec/sandbox-ai/dispatch {op} {shlex.join(args)}"]` rather than embedding inline bash. The outer `/bin/bash -c` wrapper is retained permanently: it is what bridges the orchestrator's argv (composed on the operator's host) into a bash environment inside the `docker_unprivileged_user` session, where the dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is reachable. This shape is also backward-compatible with operators' manually-installed legacy NOPASSWD sudoers rules whose Cmnd_Spec ends in `/bin/bash -c *` (the trailing `*` swallows the dispatcher command as one bash command), so this capability can ship before the sister capability `sandbox-setup`. The sister capability writes a narrower sudoers RULE shape — per-op `Cmnd_Alias` with the full invocation prefix and backslash-escaped whitespace, validated empirically by V9 (`openspec/explorations/ongoing/sandbox-setup/validation.md`) and grounded in finding F-004 (sudoers-cmnd-spec-quoting-not-shell-quoting); the orchestrator's invocation shape defined here is forward-compatible with that V9 rule shape (the V9 rule's per-op `Cmnd_Spec` matches argv-by-argv against this exact invocation), so operators upgrading via `sandbox setup` continue working without any orchestrator-side change. The dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is `root:root` mode `0755` on disk (with `chattr +i`), but EXECUTES at runtime as `[host].docker_unprivileged_user` — the `machinectl shell <user>@.host` crossing drops root before bash execs the dispatcher.
+The orchestrator's non-interactive Docker invocations SHALL take the shape `[*machinectl_cmd(user, auth), "/bin/bash", "-c", f"/usr/local/libexec/sandbox-ai/dispatch {op} {shlex.join(args)}"]` rather than embedding inline bash. The outer `/bin/bash -c` wrapper is retained permanently: it is what bridges the orchestrator's argv (composed on the operator's host) into a bash environment inside the `docker_unprivileged_user` session, where the dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is reachable. This shape is also backward-compatible with operators' manually-installed legacy NOPASSWD sudoers rules whose Cmnd_Spec ends in `/bin/bash -c *` (the trailing `*` swallows the dispatcher command as one bash command), so this capability can ship before the sister capability `sandbox-setup`. The sister capability writes a narrower sudoers RULE shape — per-op `Cmnd_Spec`s inlined directly into the operator user-spec (no shared `Cmnd_Alias` — F-020), each carrying the full invocation prefix and backslash-escaped whitespace, validated empirically by V9 (`openspec/explorations/ongoing/sandbox-setup/validation.md`) and grounded in finding F-004 (sudoers-cmnd-spec-quoting-not-shell-quoting); the orchestrator's invocation shape defined here is forward-compatible with that V9 rule shape (the V9 rule's per-op `Cmnd_Spec` matches argv-by-argv against this exact invocation), so operators upgrading via `sandbox setup` continue working without any orchestrator-side change. The dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is `root:root` mode `0755` on disk (with `chattr +i`), but EXECUTES at runtime as `[host].docker_unprivileged_user` — the `machinectl shell <user>@.host` crossing drops root before bash execs the dispatcher.
 
 `machinectl_cmd()` deliberately emits the **relative** command name `machinectl` (`["sudo", "machinectl", "shell", …]`), not an absolute path — this is intentional and unchanged by this capability. Under SUDO auth mode, `sudo` resolves that relative `machinectl` against the sudoers `secure_path` and matches the *resolved absolute path* against the rule's `Cmnd_Spec`. Making the orchestrator's relative emission and the sister rule's absolute Cmnd_Spec coincide is owned entirely by `sandbox-setup` (it resolves `machinectl` on the same secure_path basis at L0, pins that path in the rule, verifies the bridge per-host with a relative-form L3a probe, and re-checks it via `setup_invariants`). This capability asserts only that the runtime invocation uses relative `machinectl`; it does NOT pin an absolute path (doing so would be scope creep into the load-bearing `machinectl_cmd()` primitive and every one of its callers). See `sandbox-setup` design B-3 and validation track V9e.
 
@@ -108,4 +108,55 @@ The codebase SHALL include a regression test (e.g., `tests/unit/cli/test_markup_
 #### Scenario: Allowlist covers genuine style tokens
 - **WHEN** `console.print` calls use Rich style markup like `[red]`, `[bold]`, `[/red]`, `[green bold]`
 - **THEN** the markup-safety test passes for these calls because the bracketed tokens are in the enumerated allowlist; no `markup=False` is required for genuine style usage
+
+### Requirement: `sandbox setup` CLI Subcommand
+
+The CLI SHALL expose a `setup` subcommand invoked as `sudo sandbox setup`. The subcommand SHALL be implemented in `src/cli/main.py` (alongside the existing `init`, `start`, `stop`, `attach`, `destroy`, `status`, `doctor`, `workspace ...` subcommands). The subcommand SHALL require root (`os.geteuid() == 0`); if invoked without root, exit with `sandbox setup must be run as root. Re-invoke as: sudo sandbox setup`.
+
+The full flag surface:
+
+| Flag | Behavior |
+|---|---|
+| `--operator <name>` | escape hatch for non-`sudo` privilege escalation paths; takes precedence over `$SUDO_USER` / `$PKEXEC_UID` |
+| `--dry-run` | run plan pass only; no mutations; exit code 0 regardless of plan content |
+| `--yes` / `-y` | non-interactive apply (skip the TTY confirm prompt) |
+| `--update-runsc` | run ONLY L6a phase against the current pinned registry, ignoring "already installed" skip |
+| `--enable-fapolicyd-integration` | install fapolicyd (via distro package manager; verify-only refuses if absent) + register sandbox-ai binaries in its trust DB |
+| `--enable-aide-integration` | drop `/etc/aide/aide.conf.d/sandbox-ai.conf` listing sandbox-ai binaries; run `aide --init` if needed |
+
+The subcommand SHALL emit doctor-style output to stdout (plan pass + apply pass + finalization summary), per the `sandbox-setup` capability's plan/apply UX requirements. The subcommand SHALL exit 0 on full success; non-zero on any phase failure or rollback.
+
+#### Scenario: Setup subcommand exists in CLI
+- **WHEN** the operator runs `sandbox --help`
+- **THEN** the output enumerates `setup` as an available subcommand alongside `init`, `start`, `stop`, `attach`, `destroy`, `status`, `doctor`, `workspace`
+
+#### Scenario: Setup requires sudo
+- **WHEN** a non-root user runs `sandbox setup`
+- **THEN** the command exits non-zero with the message naming `sudo sandbox setup` as the canonical invocation
+
+#### Scenario: --dry-run produces plan output without mutation
+- **WHEN** the operator runs `sudo sandbox setup --dry-run` on a host requiring mutations
+- **THEN** stdout contains the doctor-style plan output showing every phase's probe verdict; no files are written; no operator/sandbox state changes; exit code 0
+
+#### Scenario: --update-runsc runs only L6a
+- **WHEN** the operator runs `sudo sandbox setup --update-runsc` on a host where every other phase is `already correct` and only L6a shows drift
+- **THEN** stdout shows L6a apply (download + verify + install) and finalization summary; phases L0..L8 other than L6a show `skip (already correct)` or `skip (only L6a in this mode)`; exit 0
+
+#### Scenario: --enable-fapolicyd-integration adds to base setup flow
+- **WHEN** the operator runs `sudo sandbox setup --enable-fapolicyd-integration` on a fresh host
+- **THEN** the base setup phases L0..L8 execute as normal, AND a subsequent fapolicyd-integration phase installs fapolicyd (via apt/dnf/pacman recommendation; verify-only if package not present) and registers `/usr/local/libexec/sandbox-ai/dispatch`, `/usr/local/libexec/sandbox-ai/runsc`, plus the operator's distro binaries the dispatcher invokes in fapolicyd's trust DB
+
+### Requirement: Setup Bypasses Runtime Sudoers Rule
+
+Setup SHALL invoke machinectl via `[*machinectl_cmd(...), "/bin/bash", "-c", "<cmd>"]` directly (no dispatcher routing, no sudoers/polkit rule required), because setup runs as root and root MUST cross the privilege boundary into the sandbox user's session without prior authentication setup (per V8 empirical validation). The orchestrator's runtime sudoers/polkit rule (installed by setup's L3 phase) SHALL apply only to the operator's NON-root invocations of `sandbox start`, `sandbox doctor`, etc., AFTER setup completes.
+
+The convention meta-test from the sibling capability (`runtime-dispatcher`) SHALL NOT reject setup's phase implementations: setup's modules under `src/core/setup/*.py` MAY import `machinectl_cmd` directly. This change SHALL NOT amend or edit the meta-test. `runtime-dispatcher`'s `host-config` capability already defines `src/core/setup/*.py` as one of the three documented allowlist categories (a forward reference it ships deliberately, since it lands first per the integration order). Setup modules pass the convention check by matching that pre-existing bounded glob — single source of truth (the meta-test, owned by `runtime-dispatcher`); this change adds modules the already-installed rule permits, not an allowlist edit. (Phase-3 review B-4: an earlier draft here said the allowlist "SHALL be amended", contradicting `runtime-dispatcher`'s then-"two-entry, no globs" wording; reconciled by `runtime-dispatcher` owning the complete three-category allowlist up front.)
+
+#### Scenario: Setup phase modules call machinectl_cmd directly
+- **WHEN** a setup phase module (e.g., `src/core/setup/l5_dockerd.py`) needs to invoke `dockerd-rootless-setuptool.sh install` via machinectl
+- **THEN** the module imports `machinectl_cmd` from `core.host_config` and constructs the argv directly (no `core.dispatch` routing); the meta-test does not flag it because its path matches the `src/core/setup/*.py` allowlist category already defined by `runtime-dispatcher`
+
+#### Scenario: This change makes no edit to the convention meta-test
+- **WHEN** this change's diff is reviewed
+- **THEN** it contains NO modification to `tests/unit/test_conventions.py::test_machinectl_cmd_callers_restricted`; setup modules pass solely by matching the pre-existing `src/core/setup/*.py` allowlist category. The effective allowlist at runtime is `{"src/core/host_config.py", "src/core/dispatch.py"} ∪ {paths matching "src/core/setup/*.py"}`, but that union is defined entirely by `runtime-dispatcher` — this change neither widens nor restates it.
 

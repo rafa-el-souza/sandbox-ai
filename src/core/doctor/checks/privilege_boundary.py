@@ -9,10 +9,22 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from typing import cast
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import MachinectlAuth, minimal_host_config
+
+# Single-source the reserved runtime key AND the expected runtimeArgs from the
+# phase that registers them (L6) rather than hardcoding (F-024 — the doctor
+# previously looked up the wrong literal "runsc"; and hardcoded a runtimeArgs
+# wishlist [--oci-seccomp, --debug-log] that diverged from what L6 actually
+# configures [--oci-seccomp], producing a permanent false "Missing --debug-log"
+# WARN). Deriving expected from l6._EXPECTED_RUNTIME makes the two single-source:
+# whatever L6 configures is exactly what doctor expects, so they cannot drift
+# (and a future opt-in that adds --debug-log to _EXPECTED_RUNTIME is followed
+# automatically). Precedent: dispatcher_sha_drift reusing l65's single source.
+from core.setup.l6_daemon_json import _EXPECTED_RUNTIME, _RESERVED_RUNTIME_KEY
 
 
 def check_sudo(user: str, distro: str | None) -> CheckResult:
@@ -189,11 +201,11 @@ def check_runsc_registered(
     if outcome.ok:
         try:
             runtimes = json.loads(outcome.stdout.strip())
-            if "runsc" in runtimes:
+            if _RESERVED_RUNTIME_KEY in runtimes:
                 return CheckResult(
                     status="pass",
                     name="gVisor runsc",
-                    detail="runsc runtime registered in Docker",
+                    detail=f"{_RESERVED_RUNTIME_KEY} runtime registered in Docker",
                 )
         except json.JSONDecodeError:
             pass
@@ -210,10 +222,14 @@ def check_runsc_registered(
 def check_runsc_runtimeargs(
     user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
 ) -> CheckResult:
-    """Check that runsc runtimeArgs include --oci-seccomp and --debug-log.
+    """Check that runsc runtimeArgs match what L6 configures (single-sourced).
 
-    Validates defense-in-depth configuration for the gVisor runtime.
-    Returns warn (not fail) when args are missing — this is an advisory check.
+    The expected args are read from ``l6._EXPECTED_RUNTIME["runtimeArgs"]`` — NOT
+    hardcoded — so doctor expects exactly what setup configures and the two
+    cannot drift (F-024 pattern). Today that is ``["--oci-seccomp"]``; if a
+    future opt-in adds ``--debug-log=<path>`` to the L6 target, this check
+    follows automatically. WARN (not fail) when an expected arg is absent — this
+    is a defense-in-depth advisory.
     """
     outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode), timeout=15)
     if not outcome.ok:
@@ -234,24 +250,18 @@ def check_runsc_runtimeargs(
             remediation=f"Check ~{user}/.config/docker/daemon.json",
         )
 
-    runsc_entry = runtimes.get("runsc", {})
+    runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
     runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
 
-    has_seccomp = any(arg == "--oci-seccomp" for arg in runtime_args)
-    has_debug_log = any(arg.startswith("--debug-log") for arg in runtime_args)
+    expected_args = cast("list[str]", _EXPECTED_RUNTIME["runtimeArgs"])
+    missing = [exp for exp in expected_args if not _runtime_arg_present(exp, runtime_args)]
 
-    if has_seccomp and has_debug_log:
+    if not missing:
         return CheckResult(
             status="pass",
             name="runsc runtimeArgs",
-            detail="--oci-seccomp and --debug-log configured",
+            detail=f"{', '.join(expected_args)} configured",
         )
-
-    missing: list[str] = []
-    if not has_seccomp:
-        missing.append("--oci-seccomp")
-    if not has_debug_log:
-        missing.append("--debug-log")
 
     return CheckResult(
         status="warn",
@@ -259,6 +269,17 @@ def check_runsc_runtimeargs(
         detail=f"Missing runtimeArgs: {', '.join(missing)}",
         remediation=(f"Add {', '.join(missing)} to runsc runtimeArgs in ~{user}/.config/docker/daemon.json"),
     )
+
+
+def _runtime_arg_present(expected: str, runtime_args: list[str]) -> bool:
+    """``True`` iff ``expected`` is satisfied by ``runtime_args``.
+
+    A value-bearing expected arg (e.g. ``--debug-log=/path``) is matched on its
+    flag token, so any configured value satisfies it; a flag-only arg (e.g.
+    ``--oci-seccomp``) matches exactly.
+    """
+    flag = expected.split("=", 1)[0]
+    return any(arg == expected or arg.split("=", 1)[0] == flag for arg in runtime_args)
 
 
 def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> CheckResult:
@@ -286,7 +307,7 @@ def check_host_uds(user: str, distro: str | None, auth_mode: MachinectlAuth = Ma
             remediation=f"Check ~{user}/.config/docker/daemon.json",
         )
 
-    runsc_entry = runtimes.get("runsc", {})
+    runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
     runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
 
     has_host_uds_all = any(arg == "--host-uds=all" for arg in runtime_args)

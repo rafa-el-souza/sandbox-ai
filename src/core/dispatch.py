@@ -715,7 +715,7 @@ def build_invocation(
     :class:`~core.executor.Executor` run — per-op validation, the Q6 compose
     wire-expansion / deterministic passthrough, the ``dispatch <op> <wire>``
     inner string, and the ``machinectl_cmd`` + ``bash -c`` crossing. :func:`invoke`
-    is exactly ``Executor().run(build_invocation(...), sentinel=True,
+    is exactly ``Executor().run(build_invocation(...), framed=True,
     timeout=...)``; the
     ``sandbox start --dry-run`` preview and :class:`core.actions.ComposeUpAction`
     derive their displayed/executed command from this same function so no
@@ -750,7 +750,7 @@ def build_invocation(
     ]
 
 
-# Layer map: invoke() = Executor().run(build_invocation(...), sentinel=True);
+# Layer map: invoke() = Executor().run(build_invocation(...), framed=True);
 # build_invocation() = machinectl-crossed argv; build_target_argv() = the
 # inner dispatcher-spawned argv.
 def invoke(
@@ -782,16 +782,23 @@ def invoke(
     boundary-crossing invocation (produced by the sterile
     :class:`core.executor.Executor`).
 
-    The crossing runs with the sterile ``Executor``'s ``sentinel=True``
-    mechanism: ``machinectl shell`` does NOT propagate the inner
+    The crossing runs with the sterile ``Executor``'s ``framed=True``
+    mechanism (F-018): ``machinectl shell`` does NOT propagate the inner
     ``/bin/bash -c`` payload's exit code (it exits 0 even when that payload
-    fails), so the Executor injects ``…; echo __SANDBOX_EXIT_<tok>_$?``,
-    parses the real in-container exit, and raises
-    :class:`~core.exceptions.SandboxExecutionError` on a non-zero inner
-    exit. Without this every dispatched op's failure would be silently
-    masked as success — :func:`probe` (which wraps :func:`invoke` and
-    catches that error) and the doctor verdicts depend on the recovered
-    inner exit being faithful.
+    fails). The exit recovery therefore lives in the **dispatcher**, which —
+    AFTER sudo/polkit authorizes the bare ``dispatch <op>`` crossing —
+    announces a ``__SANDBOX_BEGIN_<nonce>`` line and echoes
+    ``__SANDBOX_EXIT_<nonce>_$?``; the Executor binds the recovered exit to
+    that nonce and raises :class:`~core.exceptions.SandboxExecutionError` on a
+    non-zero inner exit. Crucially the sentinel is NOT injected into the
+    crossed payload (the pre-F-018 ``sentinel=True`` wrap was — which made the
+    authorized command unmatchable by the per-op ``Cmnd_Spec`` and silently
+    broke every op for a SUDO-mode password-operator). Untrusted op output (a
+    malicious image, ``docker-manifest-inspect`` registry JSON, compose logs)
+    cannot forge the trailer: it cannot read the dispatcher's prior stdout to
+    learn the nonce. :func:`probe` (which wraps :func:`invoke` and catches the
+    error) and the doctor verdicts depend on the recovered inner exit being
+    faithful.
 
     Flow (Q6):
 
@@ -813,11 +820,11 @@ def invoke(
     The command construction (validate -> Q6 wire-expand / passthrough ->
     inner -> crossed argv) lives in :func:`build_invocation`; :func:`invoke`
     is exactly that argv handed to the sterile :class:`~core.executor.Executor`
-    with ``sentinel=True`` (anti-hack rules 4 + 7 — one seam, no parallel
+    with ``framed=True`` (anti-hack rules 4 + 7 — one seam, no parallel
     construction).
     """
     return Executor().run(
-        build_invocation(op, args, host_config), sentinel=True, timeout=timeout
+        build_invocation(op, args, host_config), framed=True, timeout=timeout
     )
 
 

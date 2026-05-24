@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -78,6 +79,11 @@ from core.scaffold import (
     write_initialized_sentinel,
     write_sandbox_toml,
 )
+from core.setup import cli_flow
+from core.setup.extras import selected_extras
+from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
+from core.setup.l6a_runsc import set_force_update
+from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
 from core.workspace_backups import (
@@ -2097,6 +2103,263 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
+
+
+# ─── `sandbox setup` (privileged host-provisioning ceremony) ─────────────────
+
+
+class _SetupAborted(Exception):
+    """Operator pressed Ctrl-C during the setup ceremony (exit 130)."""
+
+
+class _SetupAuthRefused(Exception):
+    """Setup refuses the requested auth mode before any mutation (F-022 / D2).
+
+    Raised by :func:`_resolve_setup_auth` when POLKIT is selected (via the
+    ``--machinectl-auth`` flag OR an operator toml already requesting it).
+    Carries the operator-facing refusal text; the entry point prints it and
+    exits non-zero WITHOUT entering the plan or apply pass — no host state is
+    touched (the "no permissive window" property extends to "no half-wired
+    polkit rule either").
+    """
+
+
+_POLKIT_FENCE_MESSAGE = (
+    "POLKIT auth mode is not yet supported by `sandbox setup` (tracked: the "
+    "POLKIT auth-mode follow-on change + validation track V9d-polkit-e2e). "
+    "Setup's per-op verification phases (L3a/L8) probe SUDO-only, so a "
+    "polkit rule it installed could not be verified and would be rolled back. "
+    "Re-run with `--machinectl-auth sudo`, or configure the polkit rule "
+    "manually per docs/setup-guide.md (the SUDO-vs-POLKIT security models "
+    "differ — see that guide before choosing polkit)."
+)
+
+
+def _run_setup_update_runsc(ctx: SetupContext) -> int:
+    """``--update-runsc``: run ONLY the L6a phase with ``force=True``.
+
+    Per spec task 8.6 / R1: L6a is a distinct phase, so "run only L6a" is
+    well-defined — filter the discovered phase set to the ``l6a`` phase and
+    flip the module-local force toggle so ``install_pinned(force=True)``
+    bypasses the drift-skip.
+    """
+    set_force_update(True)
+    phases = [p for p in cli_flow.build_phase_list(()) if p.id == "l6a"]
+    # Subset run: l6a's ``l6`` dependency is not in this single-phase list but
+    # is known-satisfied on the converged host --update-runsc runs against, so
+    # order the subset with external deps assumed satisfied (else order_phases'
+    # strict guard raises PhaseDependencyError on the dangling ``l6`` edge).
+    plan = run_plan_pass(phases, ctx, allow_external_deps=True)
+    for line in cli_flow.render_plan(phases, plan):
+        console.print(line, markup=False)
+    console.print(
+        cli_flow.plan_summary_line(cli_flow.tally_plan(plan)), markup=False
+    )
+    apply_outcomes = run_apply_pass(phases, ctx, allow_external_deps=True)
+    for line in cli_flow.summarize_apply(phases, apply_outcomes):
+        console.print(line, markup=False)
+    return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
+
+
+@app.command()
+def setup(
+    operator: str | None = typer.Option(
+        None, "--operator", help="Operator user (precedence: this flag → $SUDO_USER → $PKEXEC_UID)"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Run only the plan pass; apply nothing"),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the untested-distro and apply-confirm prompts"
+    ),
+    update_runsc: bool = typer.Option(
+        False, "--update-runsc", help="Re-run ONLY the L6a runsc phase with force=True"
+    ),
+    enable_fapolicyd_integration: bool = typer.Option(
+        False, "--enable-fapolicyd-integration", help="Opt in to the fapolicyd trust drop-in phase"
+    ),
+    enable_aide_integration: bool = typer.Option(
+        False, "--enable-aide-integration", help="Opt in to the AIDE config drop-in phase"
+    ),
+    machinectl_auth: str | None = typer.Option(
+        None,
+        "--machinectl-auth",
+        help="machinectl auth mode: 'sudo' (default; only supported mode) or 'polkit' (refused — see docs)",
+    ),
+) -> None:
+    """Provision the host: privileged plan/apply two-pass ceremony (run as root)."""
+    if os.geteuid() != 0:
+        console.print(
+            "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        ctx = _build_setup_context_with_operator(operator, machinectl_auth)
+    except OperatorResolutionError as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+    except _SetupAuthRefused as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def _sigint(_signum: int, _frame: object) -> None:
+        raise _SetupAborted
+
+    signal.signal(signal.SIGINT, _sigint)
+    try:
+        exit_code = _setup_body(
+            ctx,
+            dry_run=dry_run,
+            yes=yes,
+            update_runsc=update_runsc,
+            flags={
+                "fapolicyd": enable_fapolicyd_integration,
+                "aide": enable_aide_integration,
+            },
+        )
+    except _SetupAborted:
+        print(
+            "aborted by operator (SIGINT). No mutations applied.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=130) from None
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+
+    raise typer.Exit(code=exit_code)
+
+
+def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | None) -> MachinectlAuth:
+    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2).
+
+    Precedence: the ``--machinectl-auth`` flag (explicit operator intent) wins;
+    else the operator toml's value if a toml is present; else the SUDO default.
+    POLKIT through *any* of those channels is refused — raising
+    :class:`_SetupAuthRefused` BEFORE any phase runs — because setup's L3a/L8
+    verification probes are SUDO-only, so a polkit rule it wrote could not be
+    verified (and would be rolled back). An explicit ``--machinectl-auth sudo``
+    is the affirmative SUDO selection even if a stale toml says polkit (the
+    `setup_invariants` doctor cross-check then WARNs on the toml/rule
+    disagreement so the operator fixes the toml).
+    """
+    if machinectl_auth_flag is not None:
+        try:
+            effective = MachinectlAuth(machinectl_auth_flag)
+        except ValueError:
+            raise _SetupAuthRefused(
+                f"Invalid --machinectl-auth value: '{machinectl_auth_flag}'. Must be 'sudo' or 'polkit'."
+            ) from None
+    elif toml is not None:
+        effective = toml.host.machinectl_authentication
+    else:
+        effective = MachinectlAuth.SUDO
+    if effective == MachinectlAuth.POLKIT:
+        raise _SetupAuthRefused(_POLKIT_FENCE_MESSAGE)
+    return effective
+
+
+def _build_setup_context_with_operator(
+    operator_flag: str | None, machinectl_auth_flag: str | None = None
+) -> SetupContext:
+    """Build the per-run :class:`SetupContext` for ``sandbox setup``.
+
+    On a fresh host ``<sandbox_ai_home()>/config/sandbox-ai.toml`` does not
+    exist — and setup does NOT create it (the per-operator tree + toml are
+    ``sandbox init``'s artifact, created as the operator; F-021). The CLI still
+    needs a :class:`HostConfig` to construct the context *before* any phase
+    runs, so: load the toml when present, else fall back to defaults
+    (``docker_unprivileged_user="sandbox"``). The auth mode is an **explicit
+    input** via ``--machinectl-auth`` (F-022) — resolved + POLKIT-fenced by
+    :func:`_resolve_setup_auth` — NOT inferred from an absent toml. The
+    constructed config always carries the resolved (always-SUDO past the fence)
+    auth mode, even if a present toml said otherwise, so L3 renders the sudoers
+    rule the verification phases can actually check. Operator is resolved once
+    via the canonical L0 resolver, threading ``--operator``.
+    """
+    try:
+        toml: HostConfig | None = HostConfig.from_toml()
+    except FileNotFoundError:
+        toml = None
+    auth = _resolve_setup_auth(machinectl_auth_flag, toml)
+    if toml is None:
+        host_config = minimal_host_config("sandbox", auth)
+    else:
+        host_config = toml.model_copy(
+            update={"host": toml.host.model_copy(update={"machinectl_authentication": auth})}
+        )
+    return SetupContext(
+        host_config=host_config, operator=resolve_operator(operator_flag)
+    )
+
+
+def _setup_body(
+    ctx: SetupContext,
+    *,
+    dry_run: bool,
+    yes: bool,
+    update_runsc: bool,
+    flags: dict[str, bool],
+) -> int:
+    """The setup ceremony proper. Returns the process exit code.
+
+    SIGINT is handled by the caller (translated to exit 130); the distro gate,
+    plan pass, gating decision, prompt, and apply pass all run here.
+    """
+    if update_runsc:
+        return _run_setup_update_runsc(ctx)
+
+    emit_distro_gate(is_tty=_stdin_is_tty(), assume_yes=yes)
+
+    extras = selected_extras(flags)
+    phases = cli_flow.build_phase_list(extras)
+
+    plan = run_plan_pass(phases, ctx)
+    for line in cli_flow.render_plan(phases, plan):
+        console.print(line, markup=False)
+    tally = cli_flow.tally_plan(plan)
+    console.print(cli_flow.plan_summary_line(tally), markup=False)
+
+    if dry_run:
+        return 0
+
+    decision = cli_flow.decide_gate(
+        plan, is_tty=_stdin_is_tty(), assume_yes=yes
+    )
+
+    if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
+        console.print("Nothing to apply. Setup is complete.", markup=False)
+        return 0
+
+    if decision.outcome == cli_flow.GateOutcome.REFUSED:
+        for line in cli_flow.refusal_lines(phases, plan):
+            console.print(line, markup=False)
+        console.print("Setup will not enter the apply pass.", markup=False)
+        return 1
+
+    if decision.outcome == cli_flow.GateOutcome.NON_TTY_NEEDS_YES:
+        console.print(
+            "non-interactive context requires --yes flag to apply mutations",
+            style="red",
+            markup=False,
+        )
+        return 1
+
+    if decision.outcome == cli_flow.GateOutcome.PROMPT:
+        response = input("Proceed with apply? [y/N]: ")
+        if not cli_flow.prompt_response_proceeds(response):
+            console.print(
+                "aborted by operator (n). No mutations applied.",
+                markup=False,
+            )
+            return 0
+
+    apply_outcomes = run_apply_pass(phases, ctx)
+    for line in cli_flow.summarize_apply(phases, apply_outcomes):
+        console.print(line, markup=False)
+    return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
 
 
 @app.command()

@@ -36,7 +36,7 @@ Any other op MUST be rejected by the dispatcher with exit code non-zero and a cl
 
 Every op SHALL additionally accept a single `--check` flag as its lone argument: when present, the dispatcher SHALL validate the op name, log the invocation to journald (with `check=1`), and exit 0 WITHOUT performing the op's side effect. The `--check` flag enables the sister change `sandbox-setup`'s L3a per-op probe (validates each op in `SANDBOX_OPS` resolves to MATCH at the sudoers layer without actually running compose-up / docker / helper-chown).
 
-**Sister-change carry-forward (C-002 `sandbox-setup` L3a — F-004 silent-footgun class).** When the sister change's L3a per-op probe crosses the boundary to run `dispatch <op> --check`, it MUST recover the inner exit via the sentinel mechanism (`core.executor.Executor(...).run(..., sentinel=True)` or the equivalent inner-exit recovery), exactly as `core.dispatch.invoke()`/`probe()` do (this change's Finding I; design Q8). `machinectl shell` does NOT propagate the inner `/bin/bash -c` exit code, so without the sentinel a dispatcher *reject* (op-name validation failure → non-zero exit) is masked as a sudoers *MATCH* — the L3a probe would report a misconfigured rule as healthy (the same F-004 silent-footgun root cause as Finding I). L3a MUST branch on the **recovered inner exit code**, never on journald presence: journald (the `check=1` structured entry) is the **audit channel**, not a control-flow signal — a journald entry is written for both the short-circuit-success path and is independent of the process exit, so presence/absence of a journal line says nothing about whether the rule resolved to MATCH. This is a forward reference for C-002's rule-renderer golden/MATCH test, not a behavior change in this change.
+**Sister-change carry-forward (C-002 `sandbox-setup` L3a — F-004 / F-018 silent-footgun class).** When the sister change's L3a per-op probe (and the L8 fresh-session re-probe, and `core.dispatch.invoke()`/`probe()` at runtime) crosses the operator's privilege-boundary rule to run `dispatch <op> [--check]`, it MUST recover the inner exit via the **dispatcher-emitted begin/exit framing** (`core.executor.Executor(...).run(..., framed=True)`), per the "Dispatcher-Emitted Exit Framing" requirement — NOT via an orchestrator-injected `sentinel=True` wrap. The wrap injected `{ <cmd>; }; echo __SANDBOX_EXIT_<tok>_$?` INTO the crossed payload, which no per-op `Cmnd_Spec` could match, so it silently broke the probe (and the runtime grant) for every SUDO-mode password-operator while NOPASSWD-blanket / POLKIT operators masked it (F-018). `framed=True` keeps the crossed payload the bare `dispatch <op>` the rule matches and recovers the exit from the dispatcher's nonce-bound trailer. `machinectl shell` does NOT propagate the inner `/bin/bash -c` exit code, so without this framing a dispatcher *reject* (op-name validation failure → non-zero exit) would be masked as a sudoers *MATCH* — the probe would report a misconfigured rule as healthy. L3a MUST branch on the **recovered inner exit code**, never on journald presence: journald (the `check=1` structured entry) is the **audit channel**, not a control-flow signal — a journald entry is written for both the short-circuit-success path and is independent of the process exit, so presence/absence of a journal line says nothing about whether the rule resolved to MATCH. (The root setup-phase crossings L5/L6/L7 run as root with no rule to match and so keep the orchestrator-injected `sentinel=True` wrap, now token-validated per the `orchestrator-executor` capability.)
 
 #### Scenario: Known op accepted
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch auth-probe`
@@ -48,7 +48,7 @@ Every op SHALL additionally accept a single `--check` flag as its lone argument:
 
 #### Scenario: --check flag short-circuits to exit 0 without side effect
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch <any-known-op> --check` (e.g., `dispatch compose-up --check`, `dispatch helper-chown-files --check`) — exactly one trailing argument, equal to literal `--check`
-- **THEN** the dispatcher exits 0; no target argv is built; no `os.execv` is performed; journald records the invocation with `check=1`; the on-host state is unchanged
+- **THEN** the dispatcher exits 0; no target argv is built; no `os.execv` is performed; journald records the invocation with `check=1`; the on-host state is unchanged (the begin/exit framing carrying `_0` is still emitted per the "Dispatcher-Emitted Exit Framing" requirement)
 
 #### Scenario: --check in a non-lone position does NOT short-circuit
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch <known-op> <args...> --check` where the op has additional preceding args (e.g., `dispatch helper-chown-files /srv/parent 0644 1000 1000 --check`)
@@ -277,4 +277,28 @@ After installation, the dispatcher binary SHALL carry the immutable file attribu
 #### Scenario: chattr -i required before replace
 - **WHEN** maintenance attempts to overwrite `/usr/local/libexec/sandbox-ai/dispatch` while the immutable bit is set
 - **THEN** the write fails with `Operation not permitted`; the operator must run `sudo chattr -i /usr/local/libexec/sandbox-ai/dispatch` first (or use `sandbox setup --refresh` which handles the toggle)
+
+### Requirement: Dispatcher-Emitted Exit Framing
+
+`machinectl shell` does NOT propagate the inner `/bin/bash -c` exit code (it exits 0 even when the payload fails), so the inner exit must be recovered out-of-band. The recovery framing SHALL be emitted **by the dispatcher itself**, AFTER sudo/polkit has authorized the bare `dispatch <op>` crossing — NOT injected into the crossed payload by the orchestrator. This keeps the crossed (authorized) command the bare `dispatch <op> [args]` that the per-op `Cmnd_Spec` matches; an orchestrator-injected wrap (`{ <cmd>; }; echo __SANDBOX_EXIT_…`) made the authorized command unmatchable and silently broke every op for a SUDO-mode password-operator (F-018).
+
+The dispatcher SHALL:
+
+1. Generate a per-invocation nonce with `crypto/rand` (a hex string matching `[0-9a-f]+`). A nonce-generation failure SHALL emit NO begin line and exit non-zero, so the orchestrator fails closed rather than trusting an unframed exit.
+2. Emit `__SANDBOX_BEGIN_<nonce>` on stdout BEFORE running the op (so it precedes all op output).
+3. Emit `__SANDBOX_EXIT_<nonce>_<code>` on stdout AFTER the op, on EVERY exit path — the success path (the dispatcher execs `/bin/bash -c '{ <inner>; }; echo __SANDBOX_EXIT_<nonce>_$?'`, so the wrapped bash emits it), the `--check` short-circuit (`_0`), and every early-exit path (usage / unknown-op / validation / symlink-guard reject — emitted by the dispatcher before it returns the code). The success path SHALL preserve process-image replacement via `syscall.Exec` (it execs the sentinel-wrapped bash; the wrap is added post-authorization, as the sandbox user).
+
+The nonce binds the trailer: untrusted op output (a malicious image, `docker-manifest-inspect` registry JSON, compose logs) cannot forge a matching `__SANDBOX_EXIT_` line because it cannot read the dispatcher's prior stdout to learn the nonce, and it cannot precede the dispatcher's begin line. This does NOT defend against a fully-compromised sandbox UID (the dispatcher runs as that UID); that is out of reach of any in-band scheme and is bounded by OS isolation + the immutable root-owned binary.
+
+#### Scenario: Success path frames the recovered exit
+- **WHEN** the dispatcher runs a known op that succeeds
+- **THEN** stdout carries `__SANDBOX_BEGIN_<nonce>` before the op's output and `__SANDBOX_EXIT_<nonce>_0` after it, bound to the same nonce
+
+#### Scenario: --check path frames exit 0
+- **WHEN** the dispatcher is invoked with a lone `--check`
+- **THEN** it emits `__SANDBOX_BEGIN_<nonce>` and `__SANDBOX_EXIT_<nonce>_0` (no op side effect), so the operator-rule probe recovers exit 0 = MATCH
+
+#### Scenario: Early-exit path frames the reject code
+- **WHEN** the dispatcher rejects an unknown op (or a validation/symlink-guard failure)
+- **THEN** it emits `__SANDBOX_BEGIN_<nonce>` and `__SANDBOX_EXIT_<nonce>_<non-zero>` so the orchestrator recovers the reject code rather than a masked success
 

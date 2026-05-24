@@ -121,7 +121,9 @@ class TestCheckAncestorTraverse:
             assert result.status == "fail"
             assert "does not exist" in result.detail
 
-    def test_fail_missing_execute(self) -> None:
+    def test_fail_when_blocked_and_a_sandbox_is_running(self) -> None:
+        # Blocked ancestor WHILE a sandbox is running → real FAIL (it cannot
+        # reach its workspace). _no_sandbox_running → False.
         from core.doctor import check_ancestor_traverse
 
         blocked = _make_stat(uid=0, gid=0, mode=0o700)
@@ -136,11 +138,33 @@ class TestCheckAncestorTraverse:
             patch("core.doctor.checks.filesystem.sandbox_ai_home", return_value=Path("/synthetic/project")),
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
+            patch("core.doctor.checks.filesystem._no_sandbox_running", return_value=False),
         ):
             result = check_ancestor_traverse("sandbox", None)
             assert result.status == "fail"
             assert "lacks execute" in result.detail
             assert "setfacl" in (result.remediation or "")
+
+    def test_skip_when_blocked_and_no_sandbox_running(self) -> None:
+        # Blocked ancestor but NO sandbox running → the traverse ACL is a
+        # first-`sandbox start` grant; report SKIP (not FAIL), not yet applicable.
+        from core.doctor import check_ancestor_traverse
+
+        blocked = _make_stat(uid=0, gid=0, mode=0o700)
+        traversable = _make_stat(uid=0, gid=0, mode=0o755)
+
+        def controlled_stat(path: str) -> MagicMock:
+            return blocked if path == "/synthetic" else traversable
+
+        with (
+            patch("core.doctor.checks.filesystem.sandbox_ai_home", return_value=Path("/synthetic/project")),
+            patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
+            patch("os.stat", side_effect=controlled_stat),
+            patch("core.doctor.checks.filesystem._no_sandbox_running", return_value=True),
+        ):
+            result = check_ancestor_traverse("sandbox", None)
+            assert result.status == "skip"
+            assert "first 'sandbox start'" in result.detail
 
 
 class TestAncestorTraverseEdgeCases:
@@ -317,7 +341,68 @@ class TestAncestorTraverseWithAclFallback:
             patch("pwd.getpwnam", return_value=_mock_pwd("sandbox")),
             patch("os.stat", side_effect=controlled_stat),
             patch("subprocess.run", return_value=mock_getfacl),
+            patch("core.doctor.checks.filesystem._no_sandbox_running", return_value=False),
         ):
             result = check_ancestor_traverse("sandbox", None)
             assert result.status == "fail"
             assert "lacks execute" in result.detail
+
+
+class TestNoSandboxRunning:
+    def test_true_when_zero_projects(self, monkeypatch: Any) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor.checks.filesystem import _no_sandbox_running
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr(
+            "core.dispatch.probe",
+            lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="[]", message=""),
+        )
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is True
+
+    def test_false_when_projects_present(self, monkeypatch: Any) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor.checks.filesystem import _no_sandbox_running
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr(
+            "core.dispatch.probe",
+            lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout='[{"Name": "sandbox-x"}]', message=""),
+        )
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+
+    def test_false_when_probe_not_ok(self, monkeypatch: Any) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor.checks.filesystem import _no_sandbox_running
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr(
+            "core.dispatch.probe",
+            lambda *a, **k: ProbeOutcome(ok=False, timed_out=False, stdout="", message="docker unreachable"),
+        )
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+
+    def test_false_when_unparseable(self, monkeypatch: Any) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor.checks.filesystem import _no_sandbox_running
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr(
+            "core.dispatch.probe",
+            lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="not json{{{", message=""),
+        )
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+
+    def test_false_when_json_not_a_list(self, monkeypatch: Any) -> None:
+        # Valid JSON that decodes to a non-list (e.g. a daemon that emits an
+        # object on error). The ``isinstance(…, list)`` guard must fail-safe to
+        # False (report the real traverse gap, not hide it behind a SKIP).
+        from core.dispatch import ProbeOutcome
+        from core.doctor.checks.filesystem import _no_sandbox_running
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr(
+            "core.dispatch.probe",
+            lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="{}", message=""),
+        )
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False

@@ -26,6 +26,7 @@ from core.host_config import (
     parse_subuid_for_user,
     pipe_cmd,
     sandbox_ai_home,
+    sudo_as_operator,
     workspace_bridge_gid,
 )
 from pydantic import ValidationError
@@ -247,6 +248,28 @@ class TestPipeCmd:
         """
         assert set(inspect.signature(pipe_cmd).parameters) == {"user"}
         assert set(inspect.signature(machinectl_cmd).parameters) == {"user", "auth"}
+
+
+# ─── sudo_as_operator() setuid-safe operator drop ────────────────────────────
+
+
+class TestSudoAsOperator:
+    """sudo_as_operator() — normal-process operator drop (F-016)."""
+
+    def test_returns_sudo_u_invocation(self) -> None:
+        """Canonical shape: ['sudo', '-u', '<operator>']."""
+        assert sudo_as_operator("alice") == ["sudo", "-u", "alice"]
+
+    def test_is_not_a_transient_unit_drop(self) -> None:
+        """Distinct from pipe_cmd: no systemd-run/transient-unit context.
+
+        The whole point (F-016): a setuid binary run as the operator must be
+        exec'd from a normal process, not a ``systemd-run --uid`` unit (which
+        EXIT_EXECs on setuid). So sudo_as_operator must never emit systemd-run.
+        """
+        argv = sudo_as_operator("alice")
+        assert "systemd-run" not in argv
+        assert not any(a.startswith("--uid=") for a in argv)
 
 
 # ─── Subuid / subgid resolvers ──────────────────────────────────────────────

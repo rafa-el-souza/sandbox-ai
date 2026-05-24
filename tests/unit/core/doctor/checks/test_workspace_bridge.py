@@ -11,7 +11,7 @@ import os
 from typing import Any
 
 
-def test_module_exposes_eleven_check_functions() -> None:
+def test_module_exposes_ten_check_functions() -> None:
     from core.doctor.checks import workspace_bridge
 
     expected = {
@@ -19,7 +19,6 @@ def test_module_exposes_eleven_check_functions() -> None:
         "check_backups_partial_dirs_present",
         "check_dev_in_workspace_bridge_group",
         "check_dev_umask_workspace_friendly",
-        "check_helper_image_pulled",
         "check_pre_existing_instance_layout",
         "check_secrets_hydrated_restrictively",
         "check_subuid_resolver_works",
@@ -358,43 +357,6 @@ class TestCheckSubuidResolverWorks:
         result = check_subuid_resolver_works("claude-sandbox", None)
         assert result.status == "fail"
         assert "rootless" in (result.remediation or "")
-
-
-class TestCheckHelperImagePulled:
-    def test_pass_when_present(self, monkeypatch: Any) -> None:
-        import subprocess
-
-        from core.doctor import check_helper_image_pulled
-
-        monkeypatch.setattr(
-            "core.doctor.checks.workspace_bridge.subprocess.run",
-            lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""),
-        )
-        result = check_helper_image_pulled("u", None)
-        assert result.status == "pass"
-
-    def test_warn_when_absent(self, monkeypatch: Any) -> None:
-        import subprocess
-
-        from core.doctor import check_helper_image_pulled
-
-        monkeypatch.setattr(
-            "core.doctor.checks.workspace_bridge.subprocess.run",
-            lambda *a, **k: subprocess.CompletedProcess([], 1, "", "not found"),
-        )
-        result = check_helper_image_pulled("u", None)
-        assert result.status == "warn"
-
-    def test_warn_when_docker_unreachable(self, monkeypatch: Any) -> None:
-        from core.doctor import check_helper_image_pulled
-
-        def _raise(*a: Any, **k: Any) -> Any:
-            raise FileNotFoundError("no docker")
-
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge.subprocess.run", _raise)
-        result = check_helper_image_pulled("u", None)
-        assert result.status == "warn"
-        assert "docker not reachable" in result.detail
 
 
 class TestCheckSecretsHydratedRestrictively:
