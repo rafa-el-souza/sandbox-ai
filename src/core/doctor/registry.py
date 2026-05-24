@@ -268,7 +268,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
         ),
         Check(
             id="dev_in_workspace_bridge_group",
-            name="dev in workspace bridge group",
+            name="operator in workspace bridge group",
             category="Workspace Bridge",
             depends_on=["workspace_bridge_group_exists"],
             run=check_dev_in_workspace_bridge_group,
@@ -316,7 +316,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
         ),
         Check(
             id="dev_umask_workspace_friendly",
-            name="dev umask workspace-friendly",
+            name="operator umask workspace-friendly",
             category="Workspace Bridge",
             depends_on=[],
             run=check_dev_umask_workspace_friendly,

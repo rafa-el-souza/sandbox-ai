@@ -101,7 +101,7 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
     import grp
     import pwd
 
-    settings_or_skip = _load_host_settings_or_skip("dev in workspace bridge group")
+    settings_or_skip = _load_host_settings_or_skip("operator in workspace bridge group")
     if isinstance(settings_or_skip, CheckResult):
         return settings_or_skip
     host = settings_or_skip
@@ -110,7 +110,7 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
     except (WorkspaceBridgeGroupMissingError, SubgidOutOfRangeError, NoSubgidRangeError) as exc:
         return CheckResult(
             status="fail",
-            name="dev in workspace bridge group",
+            name="operator in workspace bridge group",
             detail=str(exc),
             remediation="See `workspace bridge group` check",
             category="Workspace Bridge",
@@ -119,7 +119,7 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
     if bridge_gid in os.getgroups():
         return CheckResult(
             status="pass",
-            name="dev in workspace bridge group",
+            name="operator in workspace bridge group",
             detail=f"current process supplementary groups include gid {bridge_gid}",
             category="Workspace Bridge",
         )
@@ -129,7 +129,7 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
     if in_etc_group:
         return CheckResult(
             status="fail",
-            name="dev in workspace bridge group",
+            name="operator in workspace bridge group",
             detail=(
                 f"User {current_user!r} is a member of {host.workspace_bridge_group!r} in "
                 f"/etc/group but the current process's supplementary groups do not include gid "
@@ -140,7 +140,7 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
         )
     return CheckResult(
         status="fail",
-        name="dev in workspace bridge group",
+        name="operator in workspace bridge group",
         detail=f"User {current_user!r} is not a member of {host.workspace_bridge_group!r}",
         remediation=f"sudo usermod -aG {host.workspace_bridge_group} {current_user} && relogin",
         category="Workspace Bridge",
@@ -466,7 +466,7 @@ def check_dev_umask_workspace_friendly(host_user: str, distro: str | None) -> Ch
     if not _scan_instance_workspace_paths():
         return CheckResult(
             status="skip",
-            name="dev umask workspace-friendly",
+            name="operator umask workspace-friendly",
             detail="no workspaces registered; skipping umask check",
             category="Workspace Bridge",
         )
@@ -477,15 +477,21 @@ def check_dev_umask_workspace_friendly(host_user: str, distro: str | None) -> Ch
         # The check: if "group write" is masked (saved & 0o020 != 0), warn.
         return CheckResult(
             status="warn",
-            name="dev umask workspace-friendly",
-            detail=f"dev umask {saved:04o} masks group-write; workspace files won't be group-writable for the agent",
-            remediation="Add `umask 002` to your shell rc (~/.bashrc, ~/.zshrc) so files in workspaces land mode 0664",
+            name="operator umask workspace-friendly",
+            detail=(
+                f"operator umask {saved:04o} masks group-write; workspace files "
+                f"won't be group-writable for the agent"
+            ),
+            remediation=(
+                "Add `umask 007` to your shell rc (~/.bashrc, ~/.zshrc) so workspace "
+                "files land mode 0660 (group rw, no access for others)"
+            ),
             category="Workspace Bridge",
         )
     return CheckResult(
         status="pass",
-        name="dev umask workspace-friendly",
-        detail=f"dev umask {saved:04o} preserves group write",
+        name="operator umask workspace-friendly",
+        detail=f"operator umask {saved:04o} preserves group write",
         category="Workspace Bridge",
     )
 
