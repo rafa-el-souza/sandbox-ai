@@ -1,6 +1,6 @@
 """L2a — systemd ``Delegate=yes`` drop-in for the sandbox user's manager.
 
-Sub-phase between L2 and L4 (spec "Phase Execution Order"). It owns one
+Sub-phase between L2 and L5 (spec "Phase Execution Order"). It owns one
 on-disk file, narrow-scoped to the sandbox user's per-user systemd manager:
 
 - ``/etc/systemd/system/user-<sandbox-uid>.service.d/sandbox-ai-delegate.conf``

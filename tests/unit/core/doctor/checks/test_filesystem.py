@@ -392,3 +392,17 @@ class TestNoSandboxRunning:
             lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="not json{{{", message=""),
         )
         assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+
+    def test_false_when_json_not_a_list(self, monkeypatch: Any) -> None:
+        # Valid JSON that decodes to a non-list (e.g. a daemon that emits an
+        # object on error). The ``isinstance(…, list)`` guard must fail-safe to
+        # False (report the real traverse gap, not hide it behind a SKIP).
+        from core.dispatch import ProbeOutcome
+        from core.doctor.checks.filesystem import _no_sandbox_running
+        from core.host_config import MachinectlAuth
+
+        monkeypatch.setattr(
+            "core.dispatch.probe",
+            lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="{}", message=""),
+        )
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False

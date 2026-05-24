@@ -190,7 +190,7 @@ def sudo_as_operator(operator: str) -> list[str]:
     the operator invokes the boundary at runtime (their own login process runs
     ``sudo machinectl``, never a transient unit). See finding F-016.
 
-    ``pipe_cmd`` remains correct for plain-binary operator crossings (L4) and is
+    ``pipe_cmd`` remains correct for plain-binary operator crossings (L8) and is
     *required* for the SSH binary-frame path; this is the setuid-only sibling.
     """
     return ["sudo", "-u", operator]

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from core.binary_install import detect_drift, install_pinned
+from core.binary_install import SHA_DISPLAY_PREFIX, detect_drift, install_pinned
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -70,9 +70,11 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
             PhaseResult.ALREADY_CORRECT,
             "runsc present and matches the pinned sha512",
         )
+    installed = drift.installed_sha or "?"
     detail = (
-        f"runsc version drift: installed sha {drift.installed_sha}, pinned "
-        f"sha {drift.pinned_sha}. To update: sudo sandbox setup --update-runsc"
+        f"runsc version drift: installed sha {installed[:SHA_DISPLAY_PREFIX]}…, "
+        f"pinned sha {drift.pinned_sha[:SHA_DISPLAY_PREFIX]}…. "
+        "To update: sudo sandbox setup --update-runsc"
     )
     if _FORCE.enabled:
         return PhaseResult.DRIFT, f"{detail} (--update-runsc: will overwrite)"

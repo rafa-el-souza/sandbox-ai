@@ -15,11 +15,9 @@ Verdicts (spec):
 from __future__ import annotations
 
 from core import binary_install
+from core.binary_install import SHA_DISPLAY_PREFIX
 from core.doctor.types import CheckResult
 from core.host_config import MachinectlAuth, minimal_host_config
-
-# Truncation length for sha512 values shown in operator-facing detail strings.
-_SHA_PREFIX = 16
 
 
 def check_runsc_pinned_match(
@@ -40,7 +38,7 @@ def check_runsc_pinned_match(
         return CheckResult(
             status="pass",
             name="runsc pinned match",
-            detail=f"runsc matches pinned sha ({installed[:_SHA_PREFIX]}…)",
+            detail=f"runsc matches pinned sha ({installed[:SHA_DISPLAY_PREFIX]}…)",
         )
 
     if result.status == "absent":
@@ -56,8 +54,8 @@ def check_runsc_pinned_match(
         status="warn",
         name="runsc pinned match",
         detail=(
-            f"runsc drift: installed sha {installed[:_SHA_PREFIX]}…, "
-            f"pinned sha {result.pinned_sha[:_SHA_PREFIX]}…. "
+            f"runsc drift: installed sha {installed[:SHA_DISPLAY_PREFIX]}…, "
+            f"pinned sha {result.pinned_sha[:SHA_DISPLAY_PREFIX]}…. "
             f"Run 'sudo sandbox setup --update-runsc' to apply."
         ),
         remediation="run 'sudo sandbox setup --update-runsc' to apply the pinned version",

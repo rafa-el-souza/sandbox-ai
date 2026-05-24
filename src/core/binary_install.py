@@ -47,6 +47,12 @@ class BinarySha512MismatchError(SandboxExecutionError):
     """
 
 
+# How many leading sha512 hex chars to show in operator-facing drift/match
+# messages (the full 128-char digest is unreadable). Single source so setup's
+# L6a drift message and doctor's ``runsc_pinned_match`` truncate identically.
+SHA_DISPLAY_PREFIX = 16
+
+
 @dataclass(frozen=True)
 class DriftResult:
     """Outcome of a read-only on-disk drift probe.
