@@ -619,12 +619,17 @@ func TestWrapSentinel(t *testing.T) {
 
 // TestWrapSentinelSurvivesInnerExit guards the F-023 root cause: an inner that
 // ends in `exit` must NOT swallow the nonce-bound trailer. The subshell wrap
-// contains the exit; a brace group would have terminated the shell first.
+// contains the exit; a brace group would have terminated the shell first. Run
+// under /bin/sh (POSIX subshell — no bash-isms) so this validates inside the
+// golang:1.23-alpine compile container, which ships busybox /bin/sh and NO
+// /bin/bash (the authoritative `go test` runs there as compile_dispatcher's
+// first step — a /bin/bash dependency here would fail that build, which is
+// exactly how this footgun was first caught).
 func TestWrapSentinelSurvivesInnerExit(t *testing.T) {
 	wrapped := wrapSentinel("echo loaded; exit 0", "deadbeef")
-	out, err := exec.Command("/bin/bash", "-c", wrapped).Output()
+	out, err := exec.Command("/bin/sh", "-c", wrapped).Output()
 	if err != nil {
-		t.Fatalf("bash -c %q: %v", wrapped, err)
+		t.Fatalf("sh -c %q: %v", wrapped, err)
 	}
 	if !strings.Contains(string(out), "__SANDBOX_EXIT_deadbeef_0") {
 		t.Fatalf("inner exit swallowed the trailer; stdout=%q", out)
