@@ -358,7 +358,9 @@ class TestRunscJsonDecodeError:
 
 
 class TestCheckRunscRuntimeArgs:
-    def test_both_args_present_pass(self, monkeypatch: Any) -> None:
+    def test_expected_arg_present_passes_extra_args_ok(self, monkeypatch: Any) -> None:
+        # Expected args are single-sourced from l6._EXPECTED_RUNTIME (["--oci-seccomp"]);
+        # an extra --debug-log on disk is fine — only the expected set must be present.
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
@@ -381,7 +383,6 @@ class TestCheckRunscRuntimeArgs:
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "pass"
         assert "--oci-seccomp" in result.detail
-        assert "--debug-log" in result.detail
         assert captured["op"] == "docker-info"
         assert list(captured["args"]) == ["runtimes"]
         assert captured["timeout"] == 15
@@ -402,7 +403,10 @@ class TestCheckRunscRuntimeArgs:
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
 
-    def test_missing_debug_log_warn(self, monkeypatch: Any) -> None:
+    def test_debug_log_not_expected_oci_seccomp_only_passes(self, monkeypatch: Any) -> None:
+        # --debug-log is NOT in l6._EXPECTED_RUNTIME (it is a deferred opt-in), so
+        # the default config of just --oci-seccomp satisfies the check (no false
+        # "Missing --debug-log" WARN — the F-024-pattern single-source fix).
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
@@ -415,8 +419,9 @@ class TestCheckRunscRuntimeArgs:
         )
         monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
-        assert result.status == "warn"
-        assert "--debug-log" in result.detail
+        assert result.status == "pass"
+        assert "--oci-seccomp" in result.detail
+        assert "--debug-log" not in result.detail
 
     def test_empty_runtime_args_warn(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_runtimeargs
@@ -432,7 +437,6 @@ class TestCheckRunscRuntimeArgs:
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
-        assert "--debug-log" in result.detail
 
     def test_remediation_references_daemon_json(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_runtimeargs
