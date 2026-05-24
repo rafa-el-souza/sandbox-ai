@@ -313,6 +313,16 @@ def check_setup_invariants(
     drop_in_path = l3._drop_in_path(host_config, operator)
     is_sudo = auth_mode == MachinectlAuth.SUDO
     drop_in_text: str | None
+    # ``drop_in_readable`` is False when the drop-in EXISTS but the current
+    # (non-root) process cannot read it — the normal case under a plain
+    # ``sandbox doctor``, where the operator runs as themselves and the drop-in
+    # is root-only (mode 0440 in a 0750 /etc/sudoers.d). That is NOT "missing"
+    # (do not flag a violation) and MUST NOT crash: the rule-body +
+    # machinectl-stability audits that need the file content are skipped (the
+    # rule is validated at install time by L3a's per-op probe; ``sudo sandbox
+    # doctor`` is NOT a fuller path — it resolves root's home, not the
+    # operator's, per F-021).
+    drop_in_readable = True
     try:
         drop_in_text = drop_in_path.read_text()
     except FileNotFoundError:
@@ -322,6 +332,9 @@ def check_setup_invariants(
             f"{kind} drop-in {drop_in_path} missing. Run 'sudo sandbox "
             f"setup' to restore."
         )
+    except PermissionError:
+        drop_in_text = None
+        drop_in_readable = False
 
     _audit_rule_shape_agreement(is_sudo, operator, violations)
 
@@ -332,14 +345,20 @@ def check_setup_invariants(
         _audit_sudo_floor(violations)
 
     if not violations:
-        return CheckResult(
-            status="pass",
-            name="setup invariants",
-            detail=(
+        if drop_in_readable:
+            detail = (
                 f"all setup invariants hold (operator={operator}, "
                 f"drop-in={drop_in_path.name})"
-            ),
-        )
+            )
+        else:
+            detail = (
+                f"operator-readable setup invariants hold (operator={operator}); "
+                f"rule-body + machinectl-stability audits skipped — "
+                f"{drop_in_path.name} is root-only (mode 0440), not readable by "
+                f"the operator. The rule is validated at install time by setup's "
+                f"L3a per-op probe."
+            )
+        return CheckResult(status="pass", name="setup invariants", detail=detail)
 
     return CheckResult(
         status="warn",

@@ -74,6 +74,23 @@ class TestTopLevelVerdicts:
         assert "all setup invariants hold" in result.detail
         assert "operator=alice" in result.detail
 
+    def test_root_only_drop_in_under_plain_doctor_passes_with_note(self, monkeypatch: Any) -> None:
+        # Under a plain `sandbox doctor` the operator can't read the root-only
+        # 0440 sudoers drop-in → PermissionError. The audit MUST NOT crash: skip
+        # the rule-body audit and PASS-with-note (other invariants hold).
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+
+        _patch_all_green(monkeypatch)
+
+        def _denied(self: Any) -> str:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("pathlib.Path.read_text", _denied)
+        result = check_setup_invariants("sandbox", None)
+        assert result.status == "pass"
+        assert "root-only" in result.detail
+        assert "L3a per-op probe" in result.detail
+
     def test_operator_unresolvable_falls_back_to_current_user(self, monkeypatch: Any) -> None:
         # Under a plain `sandbox doctor` (no sudo context) resolve_operator()
         # raises; the check must NOT short-circuit (that left the audit dead in
