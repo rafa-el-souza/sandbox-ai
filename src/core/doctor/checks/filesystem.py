@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 
+from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import sandbox_ai_home
+from core.host_config import MachinectlAuth, minimal_host_config, sandbox_ai_home
 
 _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
 
@@ -86,14 +88,23 @@ def _has_acl_exec(directory: str, user: str) -> bool:
     return False
 
 
-def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
+def check_ancestor_traverse(
+    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+) -> CheckResult:
     """Check that all ancestor directories of sandboxes/ are traversable by the sandbox user.
 
     Walks from SANDBOX_AI_HOME/sandboxes upward to root, checking --x permission
     via a two-tier probe: (1) os.stat() mode bits (fast, no subprocess), then
     (2) getfacl for named-user ACL entries if mode bits deny access.
     Also detects symlink divergence (WARN).
-    Reports FAIL with fix command on first blocked ancestor (D10).
+
+    The ancestor-traverse ACL on the operator's home is granted at the **first
+    `sandbox start`** (lifecycle: granted-once/persistent), NOT by setup or
+    `sandbox init`. So a blocked ancestor on a freshly-set-up host with no
+    sandbox started yet is expected, not a defect: report SKIP ("applied at
+    first start"). Only when a sandbox is actually running (compose-ls > 0) but
+    traverse is still missing is it a real FAIL — that sandbox cannot reach its
+    workspace.
     """
     import pwd
     import stat
@@ -154,6 +165,17 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
             has_exec = _has_acl_exec(directory, user)
 
         if not has_exec:
+            if _no_sandbox_running(user, auth_mode):
+                return CheckResult(
+                    status="skip",
+                    name="ancestor traverse",
+                    detail=(
+                        f"User '{user}' cannot yet traverse to {directory}; the "
+                        f"ancestor-traverse ACL is granted at first 'sandbox "
+                        f"start' (no sandbox running). It will be applied then."
+                    ),
+                    remediation=f"start a sandbox, or grant manually: setfacl -m u:{user}:--x {directory}",
+                )
             return CheckResult(
                 status="fail",
                 name="ancestor traverse",
@@ -173,6 +195,25 @@ def check_ancestor_traverse(user: str, distro: str | None) -> CheckResult:
         name="ancestor traverse",
         detail=f"All ancestor directories traversable by '{user}'",
     )
+
+
+def _no_sandbox_running(user: str, auth_mode: MachinectlAuth) -> bool:
+    """``True`` iff the sandbox daemon reports zero compose projects.
+
+    Distinguishes "no sandbox started yet" (traverse-absent is expected — the
+    grant is a first-`start` artifact) from "a sandbox is running but traverse
+    is missing" (a real failure). Fail-safe: if the daemon can't be queried
+    (docker down / probe failure / unparseable output), return ``False`` so the
+    caller reports the real traverse gap rather than hiding it behind a SKIP.
+    """
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, auth_mode), timeout=15)
+    if not outcome.ok:
+        return False
+    try:
+        projects = json.loads(outcome.stdout.strip() or "[]")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(projects, list) and len(projects) == 0
 
 
 __all__ = [

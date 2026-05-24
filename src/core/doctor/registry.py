@@ -203,7 +203,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             name="ancestor traverse",
             category="Filesystem",
             depends_on=["acl_support"],
-            run=check_ancestor_traverse,
+            run=functools.partial(check_ancestor_traverse, auth_mode=auth_mode),
             remediation="",
         ),
         # Chain 3: repo integrity
