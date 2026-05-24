@@ -74,18 +74,30 @@ class TestTopLevelVerdicts:
         assert "all setup invariants hold" in result.detail
         assert "operator=alice" in result.detail
 
-    def test_operator_unresolvable_warns(self, monkeypatch: Any) -> None:
+    def test_operator_unresolvable_falls_back_to_current_user(self, monkeypatch: Any) -> None:
+        # Under a plain `sandbox doctor` (no sudo context) resolve_operator()
+        # raises; the check must NOT short-circuit (that left the audit dead in
+        # its normal invocation) — it falls back to the current real user and
+        # runs the full audit. resolve_operator() stays strict for setup itself.
+        import os
+        import pwd
+
         from core.doctor.checks.setup_invariants import check_setup_invariants
         from core.setup.l0_identity import OperatorResolutionError
+
+        _patch_all_green(monkeypatch)
 
         def boom() -> str:
             raise OperatorResolutionError("no operator")
 
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", boom)
+        monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
+
         result = check_setup_invariants("sandbox", None)
-        assert result.status == "warn"
-        assert "operator unresolvable" in result.detail
-        assert result.remediation == "run 'sudo sandbox setup' to restore canonical setup state"
+        current = pwd.getpwuid(os.getuid()).pw_name
+        assert result.status == "pass"
+        assert f"operator={current}" in result.detail
+        assert "operator unresolvable" not in result.detail
 
     def test_drop_in_missing_warns(self, monkeypatch: Any) -> None:
         from core.doctor.checks.setup_invariants import check_setup_invariants

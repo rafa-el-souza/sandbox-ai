@@ -30,6 +30,8 @@ matches ``[a-z0-9-]+`` (re-rendering via the L3 renderer raises
 from __future__ import annotations
 
 import grp
+import os
+import pwd
 import re
 import socket
 import stat
@@ -295,17 +297,15 @@ def check_setup_invariants(
 
     try:
         operator = l0.resolve_operator()
-    except l0.OperatorResolutionError as exc:
-        return CheckResult(
-            status="warn",
-            name="setup invariants",
-            detail=(
-                f"cannot audit setup invariants: operator unresolvable ({exc}). "
-                f"Re-run 'sandbox doctor' as the operator (or pass setup's "
-                f"--operator equivalent context)."
-            ),
-            remediation="run 'sudo sandbox setup' to restore canonical setup state",
-        )
+    except l0.OperatorResolutionError:
+        # Under a plain `sandbox doctor` (run by the operator AS THEMSELVES, not
+        # via sudo), resolve_operator()'s setup precedence ($SUDO_USER →
+        # $PKEXEC_UID → --operator → refuse) has no context and raises — which
+        # used to short-circuit the whole audit, so it never ran in doctor's
+        # normal invocation. The current real user IS the operator here, so fall
+        # back to it. resolve_operator() itself stays STRICT for setup (which
+        # MUST refuse without explicit context — no heuristics; load-bearing).
+        operator = pwd.getpwuid(os.getuid()).pw_name
 
     _audit_reserved_dir(violations)
     _audit_subid_and_group(user, operator, bridge_group, violations)
