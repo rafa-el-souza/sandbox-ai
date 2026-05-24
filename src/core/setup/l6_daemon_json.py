@@ -42,7 +42,7 @@ from core.setup.phase_runner import (
     Phase,
     PhaseResult,
     probe_sandbox_pw_or_missing,
-    wait_user_crossing_ready,
+    run_crossing_until_delivered,
     wait_user_manager_ready,
 )
 
@@ -52,6 +52,11 @@ if TYPE_CHECKING:
 
 # The single reserved key + its expected value (the content-aware target).
 _RESERVED_RUNTIME_KEY = "sandbox-ai-runsc"
+# Definitive stdout markers the readiness-poll crossing emits (it always exits 0
+# so a lost sentinel is unambiguously the first-session transient, never
+# conflated with a non-zero inner exit — see ``_restart_and_poll``).
+_RUNTIME_LOADED_MARKER = "__SBX_RUNTIME_LOADED__"
+_RUNTIME_ABSENT_MARKER = "__SBX_RUNTIME_ABSENT__"
 _EXPECTED_RUNTIME: dict[str, object] = {
     "path": "/usr/local/libexec/sandbox-ai/runsc",
     "runtimeArgs": ["--oci-seccomp"],
@@ -183,55 +188,63 @@ def _runtime_registered(host_config: HostConfig) -> bool:
 def _restart_and_poll(host_config: HostConfig) -> None:
     """Restart rootless docker StartLimit-safely; poll until the runtime loads.
 
-    Three F-023-driven properties (battery-confirmed on a real host):
+    F-023-driven properties (fresh-VM-capture-confirmed):
 
     - ``reset-failed`` before the restart clears any prior failed state AND the
       systemd ``StartLimit`` counter, so the restart cannot trip "start of the
-      service was attempted too often" and leave docker down (battery B5/B6). A
-      blind restart-retry is the wrong fix precisely because it trips this.
-    - ``restart --no-block`` returns immediately instead of synchronously
-      waiting on the job, so a ``machinectl shell`` session teardown *during*
-      the restart cannot swallow the injected exit sentinel (the first-apply
-      empty-sentinel, original G3). Success/failure is observed by the poll.
+      service was attempted too often" and leave docker down (battery B5/B6) —
+      and, crucially, makes the restart **safe to re-issue** when a fresh
+      session drops its sentinel (below).
+    - ``restart --no-block`` returns without synchronously waiting on the job;
+      the **poll**, not the restart crossing, observes success.
     - the readiness poll waits until docker is up **and the reserved runtime is
       loaded** (``docker info`` runtimes contains the key), not merely until the
-      daemon answers — the daemon needs a moment after restart before the
-      runtime appears (battery B4a needed a settle). Bounded + fail-closed.
+      daemon answers (battery B4a needed a settle). The poll's loaded-runtime
+      marker is the authoritative success signal (F-023: confirm the daemon's
+      LOADED runtime, never just the ``daemon.json`` file).
 
-    The ``wait_user_manager_ready`` gate (F-014) is retained: it is a root-side
-    query, cheap, and still the right precondition before crossing. It is now
-    followed by ``wait_user_crossing_ready`` (F-023): ``is-active`` is necessary
-    but not sufficient — on a truly-first-ever session the first crossing after
-    L5's dockerd-install churn returns empty stdout even though the manager
-    reports active, so we gate on a crossing that actually *delivers* (a no-op
-    echo probe, StartLimit-safe) before issuing the mutating restart.
+    The first-session empty-sentinel transient is **per-session** (each
+    ``machinectl shell`` is a fresh PTY): a delivered crossing does not prove
+    the next delivers, so the round-9 ``wait_user_crossing_ready`` pre-gate —
+    which proved a throwaway echo session delivered, then restarted through a
+    *separate* session that independently dropped its sentinel — could not fix
+    it (F-023 first-apply, fresh-VM re-smoke). Instead the restart and the poll
+    each run via :func:`run_crossing_until_delivered`, which retries the
+    crossing itself on a lost sentinel: re-issuing the ``reset-failed`` +
+    ``restart`` is StartLimit-safe and the poll is a pure read, so both are safe
+    to repeat. ``wait_user_manager_ready`` (F-014, root-side ``is-active``)
+    remains the cheap necessary precondition.
     """
     user = _sandbox_user(host_config)
     auth = host_config.host.machinectl_authentication
     wait_user_manager_ready(user)
-    # is-active is necessary but not sufficient: on a truly-first-ever session
-    # the first crossing after L5's dockerd-install churn returns empty stdout
-    # (F-023 fresh-VM capture). Gate on a crossing that actually DELIVERS before
-    # the mutating restart, so the restart's sentinel is not lost to that
-    # transient. NOT a restart retry (StartLimit-safe); a no-op echo probe.
-    wait_user_crossing_ready(user, auth)
-    prefix = machinectl_cmd(user, auth)
-    Executor().run(
-        [
-            *prefix,
-            "/bin/bash",
-            "-c",
-            "systemctl --user reset-failed docker.service; "
-            "systemctl --user restart --no-block docker",
-        ],
-        sentinel=True,
+    run_crossing_until_delivered(
+        user,
+        auth,
+        "systemctl --user reset-failed docker.service; "
+        "systemctl --user restart --no-block docker",
+        what="docker restart",
     )
+    # The crossing always exits 0 and emits a definitive marker, so a lost
+    # sentinel (empty stdout) is retried as the first-session transient while a
+    # delivered "runtime absent" is a genuine failure raised on below.
     poll = (
         "for i in $(seq 1 30); do "
         "docker info --format '{{json .Runtimes}}' 2>/dev/null "
-        "| grep -qF " + _RESERVED_RUNTIME_KEY + " && exit 0; sleep 1; done; exit 1"
+        "| grep -qF " + _RESERVED_RUNTIME_KEY + " "
+        "&& { echo " + _RUNTIME_LOADED_MARKER + "; exit 0; }; "
+        "sleep 1; done; echo " + _RUNTIME_ABSENT_MARKER + "; exit 0"
     )
-    Executor().run([*prefix, "/bin/bash", "-c", poll], sentinel=True)
+    result = run_crossing_until_delivered(
+        user, auth, poll, what="docker runtime readiness poll"
+    )
+    if _RUNTIME_LOADED_MARKER not in (result.stdout or ""):
+        raise SandboxExecutionError(
+            f"[FATAL] Sandbox Execution Fault: rootless docker restarted but the "
+            f"reserved runtime {_RESERVED_RUNTIME_KEY!r} was not loaded within "
+            f"30s (docker info never listed it). Inspect the sandbox user's "
+            f"docker journal: journalctl --user -u docker."
+        )
 
 
 def _act(ctx: SetupContext) -> str:

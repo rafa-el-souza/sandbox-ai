@@ -72,10 +72,15 @@ def restarts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     ) -> subprocess.CompletedProcess[str]:
         inner = cmd[-1]
         seen.append(inner)
-        # The F-023 working-crossing gate (wait_user_crossing_ready) polls a
-        # trivial echo until it delivers its marker — make it deliver on the
-        # first probe so act tests don't spin the bounded retry loop.
-        stdout = "__crossing_ready__" if "__crossing_ready__" in inner else ""
+        # The readiness-poll crossing reports the runtime LOADED (its inner
+        # echoes the loaded marker on success); the is-active gate and the
+        # restart crossing carry no marker. Returning a delivered result (no
+        # raise) keeps act tests off the lost-sentinel retry loop.
+        stdout = (
+            l6._RUNTIME_LOADED_MARKER
+            if l6._RUNTIME_LOADED_MARKER in inner
+            else ""
+        )
         return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
     monkeypatch.setattr("core.executor.Executor.run", fake_run)
@@ -205,22 +210,22 @@ def test_act_settle_gate_runs_before_restart_crossing(
 
     Round-5 fedora: L6's first crossing landed while L5's dockerd
     enable/restart was still churning ``user@<uid>.service`` → empty stdout →
-    sentinel-not-found. The gate (``systemctl is-active user@<uid>.service``,
-    root-side) must run BEFORE the ``systemctl --user restart docker`` crossing.
+    sentinel-not-found. The root-side ``systemctl is-active user@<uid>.service``
+    gate must run BEFORE the ``systemctl --user restart docker`` crossing, which
+    must in turn precede the runtime-readiness poll.
     """
     _write(daemon_json, {})
     l6.PHASE.act(ctx)
     gate_idx = next(
         i for i, r in enumerate(restarts) if "is-active user@4242.service" in r
     )
-    crossing_idx = next(
-        i for i, r in enumerate(restarts) if "__crossing_ready__" in r
-    )
     restart_idx = next(
         i for i, r in enumerate(restarts) if "restart --no-block docker" in r
     )
-    # Both readiness gates (is-active, then working-crossing) precede the restart.
-    assert gate_idx < crossing_idx < restart_idx
+    poll_idx = next(
+        i for i, r in enumerate(restarts) if l6._RUNTIME_LOADED_MARKER in r
+    )
+    assert gate_idx < restart_idx < poll_idx
 
 
 def test_act_fresh_file_when_absent(
@@ -254,6 +259,37 @@ def test_act_always_restarts_even_when_byte_identical(
     l6.PHASE.act(ctx)
     assert any("restart --no-block docker" in r for r in restarts)
     assert any("reset-failed docker.service" in r for r in restarts)
+
+
+def test_act_raises_when_runtime_never_loads(
+    daemon_json: Path, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Poll delivers but docker never loaded the runtime → act raises (F-023).
+
+    The readiness-poll crossing ran its full loop and emitted the ABSENT marker
+    (``docker info`` never listed the reserved runtime). That is a genuine
+    convergence failure — distinct from a lost sentinel (which raises inside the
+    crossing and is retried) — so act must surface a diagnostic naming the
+    unloaded runtime, never silently report success.
+    """
+    _write(daemon_json, {})
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        inner = cmd[-1]
+        # is-active gate + restart deliver empty; the poll delivers the ABSENT
+        # marker. Every crossing delivers (no lost-sentinel raise).
+        stdout = (
+            l6._RUNTIME_ABSENT_MARKER
+            if l6._RUNTIME_ABSENT_MARKER in inner
+            else ""
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+    with pytest.raises(SandboxExecutionError, match="was not loaded within"):
+        l6.PHASE.act(ctx)
 
 
 def test_act_replaces_non_dict_runtimes(

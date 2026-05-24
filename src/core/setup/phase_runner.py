@@ -70,6 +70,7 @@ from core.executor import Executor
 from core.host_config import machinectl_cmd, pipe_cmd
 
 if TYPE_CHECKING:
+    import subprocess
     from types import ModuleType
 
     from core.host_config import HostConfig, MachinectlAuth
@@ -462,49 +463,60 @@ def wait_user_manager_ready(user: str, *, attempts: int = 30) -> None:
     )
 
 
-def wait_user_crossing_ready(
-    user: str, auth: MachinectlAuth, *, attempts: int = 30
-) -> None:
-    """Bounded poll until a ``machinectl shell`` crossing into ``user`` DELIVERS.
+def run_crossing_until_delivered(
+    user: str,
+    auth: MachinectlAuth,
+    inner: str,
+    *,
+    what: str,
+    attempts: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    """Run a sandbox-user crossing, retrying on the lost-sentinel transient.
 
     :func:`wait_user_manager_ready` polls ``is-active user@<uid>.service`` — a
-    root-side proxy that is necessary but NOT sufficient. On a truly-first-ever
-    session (a freshly created + lingered user, right after L5's
-    ``dockerd-rootless-setuptool.sh install`` churns the manager with a
-    daemon-reload + service start), the FIRST ``machinectl shell`` crossing
-    connects and terminates with **empty stdout** (sentinel-not-found) even
-    though the manager already reports ``active``. The F-023 fresh-VM capture
-    confirmed this is a brief **transient**: crossings deliver a few seconds
-    later, and the restart the empty crossing triggered actually succeeds — only
-    the sentinel is lost (a warm box cannot reproduce it).
+    root-side proxy that is necessary but NOT sufficient. Right after L5's
+    ``dockerd-rootless-setuptool.sh install`` churns the manager (daemon-reload
+    + service start), a ``machinectl shell`` crossing into the freshly
+    created + lingered user connects and terminates with **empty stdout** even
+    though the manager already reports ``active`` — the injected exit sentinel
+    is lost and :class:`~core.executor.Executor` fail-closes. The F-023 fresh-VM
+    capture proved this is a brief **transient** AND that the inner command runs
+    regardless (the restart it triggered actually succeeded; only the sentinel
+    was lost).
 
-    This gate tests the precondition ``is-active`` only proxies — that a crossing
-    actually delivers output — by retrying a trivial sentinel-bearing ``echo``
-    until it returns. It is **not** a retry of the mutating restart (that would
-    trip systemd's ``StartLimit``); a no-op echo is safe to repeat. Fail-closed
-    with a diagnostic message (vs the opaque "Exit sentinel not found") if no
+    Crucially the transient is **per-session**: each crossing is a fresh PTY,
+    so one delivered crossing does NOT prove the next one delivers. The
+    round-9 ``wait_user_crossing_ready`` gate proved a throwaway ``echo``
+    session delivered, then issued the restart through a *separate* session that
+    independently dropped its sentinel — which is exactly why a pre-gate cannot
+    fix this and the crossing that MATTERS must retry itself.
+
+    Contract for ``inner``: it MUST exit 0 and encode its real outcome in
+    **stdout** (a marker the caller inspects). Then a lost sentinel — the only
+    thing that makes :meth:`Executor.run` raise here — is unambiguously the
+    transient and is retried, never conflated with a non-zero inner exit. The
+    restart is StartLimit-safe to re-issue (its ``reset-failed`` precedes it)
+    and the poll is a pure read, so retrying either crossing is safe. Returns
+    the first delivered :class:`subprocess.CompletedProcess`; raises a
+    diagnostic naming ``what`` (vs the opaque "Exit sentinel not found") if no
     crossing delivers within ``attempts``. Run it AFTER
-    :func:`wait_user_manager_ready` and BEFORE the phase's real sandbox-user
-    crossing.
+    :func:`wait_user_manager_ready`.
     """
-    cmd = [*machinectl_cmd(user, auth), "/bin/bash", "-c", "echo __crossing_ready__"]
+    cmd = [*machinectl_cmd(user, auth), "/bin/bash", "-c", inner]
     for _ in range(attempts):
         try:
-            result = Executor().run(cmd, sentinel=True)
+            return Executor().run(cmd, sentinel=True)
         except SandboxExecutionError:
-            # Empty/sentinel-not-found crossing — the session is not yet
-            # servicing crossings; wait and retry the no-op probe.
+            # Lost-sentinel (empty stdout) crossing — the fresh session did not
+            # service this crossing; wait and retry. The inner exits 0, so a
+            # raise here is the transient, not a real inner failure.
             time.sleep(1)
-            continue
-        if "__crossing_ready__" in (result.stdout or ""):
-            return
-        time.sleep(1)
     raise SandboxExecutionError(
-        f"[FATAL] Sandbox Execution Fault: a machinectl-shell crossing into "
-        f"{user!r} did not deliver output after {attempts} attempts. The "
-        f"per-user manager reported active but its session never serviced a "
-        f"crossing (the post-dockerd-install churn window did not clear); "
-        f"refusing to restart docker through a session that drops output."
+        f"[FATAL] Sandbox Execution Fault: the {what} crossing into {user!r} "
+        f"never delivered output after {attempts} attempts. The per-user "
+        f"manager reported active but each fresh machinectl-shell session "
+        f"terminated with empty stdout (the post-dockerd-install churn window "
+        f"did not clear)."
     )
 
 
@@ -713,6 +725,7 @@ __all__ = [
     "resolve_sandbox_pw",
     "route",
     "run_apply_pass",
+    "run_crossing_until_delivered",
     "run_plan_pass",
     "wait_user_manager_ready",
 ]

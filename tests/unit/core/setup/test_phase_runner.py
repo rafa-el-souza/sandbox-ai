@@ -39,8 +39,8 @@ from core.setup.phase_runner import (
     resolve_sandbox_pw,
     route,
     run_apply_pass,
+    run_crossing_until_delivered,
     run_plan_pass,
-    wait_user_crossing_ready,
     wait_user_manager_ready,
 )
 
@@ -801,48 +801,56 @@ def test_wait_user_manager_ready_attempts_is_parametrized(
     assert "seq 1 5" in captured[0]
 
 
-# ── wait_user_crossing_ready (F-023: gate on a working crossing) ─────────────
+# ── run_crossing_until_delivered (F-023: per-session lost-sentinel retry) ─────
 
 
-def test_wait_user_crossing_ready_returns_when_crossing_delivers(
+def test_run_crossing_until_delivered_returns_first_delivered_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crossing that delivers its marker satisfies the gate (no raise)."""
+    """A delivered crossing's CompletedProcess is returned as-is (no raise)."""
     from core.host_config import MachinectlAuth
 
     def _run(
         _self: object, cmd: list[str], **_kw: object
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "delivered\n", "")
 
     monkeypatch.setattr("core.executor.Executor.run", _run)
-    wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
+    result = run_crossing_until_delivered(
+        "sandboxuser", MachinectlAuth.SUDO, "echo hi", what="x", attempts=3
+    )
+    assert result.stdout == "delivered\n"
 
 
-def test_wait_user_crossing_ready_crosses_via_machinectl_with_echo_payload(
+def test_run_crossing_until_delivered_crosses_via_machinectl_with_inner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The probe is a machinectl crossing of a trivial echo — NOT a mutation."""
+    """It crosses via machinectl with the given inner payload + sentinel=True."""
     from core.host_config import MachinectlAuth
 
     captured: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
 
     def _run(
-        _self: object, cmd: list[str], **_kw: object
+        _self: object, cmd: list[str], **kw: object
     ) -> subprocess.CompletedProcess[str]:
         captured.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__", "")
+        kwargs_seen.append(kw)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     monkeypatch.setattr("core.executor.Executor.run", _run)
-    wait_user_crossing_ready("sbx", MachinectlAuth.SUDO, attempts=3)
+    run_crossing_until_delivered(
+        "sbx", MachinectlAuth.SUDO, "systemctl --user restart docker", what="x"
+    )
     assert "machinectl" in " ".join(captured[0])
-    assert captured[0][-1] == "echo __crossing_ready__"
+    assert captured[0][-1] == "systemctl --user restart docker"
+    assert kwargs_seen[0].get("sentinel") is True
 
 
-def test_wait_user_crossing_ready_retries_empty_then_delivers(
+def test_run_crossing_until_delivered_retries_lost_sentinel_then_delivers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty (sentinel-not-found) crossing is retried until one delivers."""
+    """A lost-sentinel (raising) crossing is retried until one delivers."""
     from core.host_config import MachinectlAuth
 
     monkeypatch.setattr("core.setup.phase_runner.time.sleep", lambda _s: None)
@@ -854,39 +862,20 @@ def test_wait_user_crossing_ready_retries_empty_then_delivers(
         calls["n"] += 1
         if calls["n"] == 1:
             raise SandboxExecutionError("Exit sentinel not found")
-        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__", "")
+        return subprocess.CompletedProcess(cmd, 0, "delivered", "")
 
     monkeypatch.setattr("core.executor.Executor.run", _run)
-    wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
+    result = run_crossing_until_delivered(
+        "sandboxuser", MachinectlAuth.SUDO, "echo hi", what="x", attempts=3
+    )
     assert calls["n"] == 2
+    assert result.stdout == "delivered"
 
 
-def test_wait_user_crossing_ready_retries_when_marker_absent(
+def test_run_crossing_until_delivered_raises_after_exhausting_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crossing that returns but lacks the marker is also retried."""
-    from core.host_config import MachinectlAuth
-
-    monkeypatch.setattr("core.setup.phase_runner.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def _run(
-        _self: object, cmd: list[str], **_kw: object
-    ) -> subprocess.CompletedProcess[str]:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        return subprocess.CompletedProcess(cmd, 0, "__crossing_ready__", "")
-
-    monkeypatch.setattr("core.executor.Executor.run", _run)
-    wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
-    assert calls["n"] == 2
-
-
-def test_wait_user_crossing_ready_raises_after_exhausting_attempts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No crossing ever delivers → fail-closed with a diagnostic (not opaque)."""
+    """No crossing ever delivers → fail-closed with a ``what``-named diagnostic."""
     from core.host_config import MachinectlAuth
 
     monkeypatch.setattr("core.setup.phase_runner.time.sleep", lambda _s: None)
@@ -897,8 +886,17 @@ def test_wait_user_crossing_ready_raises_after_exhausting_attempts(
         raise SandboxExecutionError("Exit sentinel not found")
 
     monkeypatch.setattr("core.executor.Executor.run", _boom)
-    with pytest.raises(SandboxExecutionError, match="did not deliver output after 3 attempts"):
-        wait_user_crossing_ready("sandboxuser", MachinectlAuth.SUDO, attempts=3)
+    with pytest.raises(
+        SandboxExecutionError,
+        match="docker restart crossing into 'sandboxuser' never delivered output after 3 attempts",
+    ):
+        run_crossing_until_delivered(
+            "sandboxuser",
+            MachinectlAuth.SUDO,
+            "echo hi",
+            what="docker restart",
+            attempts=3,
+        )
 
 
 # ── assert_phase_content_aware conftest fixture (consumed, not imported) ──────
