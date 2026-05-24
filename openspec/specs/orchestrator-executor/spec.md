@@ -27,7 +27,7 @@ The system SHALL strictly isolate POSIX level string generation away from execut
 
 The system SHALL recover the inner command's exit code from non-interactive `machinectl shell` crossings and SHALL bind the recovered exit to a value untrusted command output cannot forge. There are two mechanisms:
 
-1. **Wrap path (`sentinel=True`).** The Executor SHALL inject a per-invocation nonce sentinel into the bash payload, wrapping it as `{ <original_cmd>; }; echo __SANDBOX_EXIT_{token}_$?` where `token` is `secrets.token_hex(8)`. The recovered exit SHALL be taken from the `__SANDBOX_EXIT_` line whose token EQUALS the injected token — a line carrying any other token SHALL be ignored (so injected/forged output cannot spoof the exit). When the command is not a `bash -c` form (no injection point), no wrap is applied and no recovery is performed.
+1. **Wrap path (`sentinel=True`).** The Executor SHALL inject a per-invocation nonce sentinel into the bash payload, wrapping it as `( <original_cmd> ); echo __SANDBOX_EXIT_{token}_$?` — a SUBSHELL `( … )`, NOT a brace group `{ … }`, so an inner `exit` in `<original_cmd>` cannot swallow the trailing sentinel echo (the F-023 root cause) — where `token` is `secrets.token_hex(8)`. The recovered exit SHALL be taken from the `__SANDBOX_EXIT_` line whose token EQUALS the injected token — a line carrying any other token SHALL be ignored (so injected/forged output cannot spoof the exit). When the command is not a `bash -c` form (no injection point), no wrap is applied and no recovery is performed.
 
 2. **Framed path (`framed=True`).** The Executor SHALL inject nothing; the dispatcher emits `__SANDBOX_BEGIN_<nonce>` BEFORE the op and `__SANDBOX_EXIT_<nonce>_<code>` AFTER it (per the `runtime-dispatcher` capability). The Executor SHALL read the nonce from the FIRST `__SANDBOX_BEGIN_` line (the dispatcher's — emitted before any op output) and SHALL accept only an `__SANDBOX_EXIT_` line carrying that exact nonce. Untrusted op output cannot forge the trailer because it cannot read the dispatcher's prior stdout to learn the nonce.
 
@@ -37,7 +37,7 @@ This forge-binding closes the F-018 residual: an `__SANDBOX_EXIT_` line is autho
 
 #### Scenario: Wrap-path exit code recovered and bound to the injected token
 - **WHEN** `Executor.run()` is called with `sentinel=True` and `interactive=False`
-- **THEN** the inner bash payload is wrapped as `{ <original_cmd>; }; echo __SANDBOX_EXIT_{token}_$?` and only an `__SANDBOX_EXIT_` line carrying that exact `token` is used to recover the exit
+- **THEN** the inner bash payload is wrapped as `( <original_cmd> ); echo __SANDBOX_EXIT_{token}_$?` (a subshell, so an inner `exit` cannot swallow the sentinel — F-023) and only an `__SANDBOX_EXIT_` line carrying that exact `token` is used to recover the exit
 
 #### Scenario: Framed-path exit recovered from the dispatcher's begin-bound nonce
 - **WHEN** `Executor.run()` is called with `framed=True` and the captured output contains `__SANDBOX_BEGIN_<nonce>` followed by `__SANDBOX_EXIT_<nonce>_<code>`

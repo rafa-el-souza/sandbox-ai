@@ -286,7 +286,7 @@ Setup SHALL validate the staged rule via `visudo -cf <staged-path>` before insta
 
 #### Scenario: Rule body excludes double-quote characters in any Cmnd_Spec (F-004)
 - **WHEN** setup renders the sudoers rule body via the Jinja2 template
-- **THEN** the rendered bytes contain ZERO `"` characters within any `Cmnd_Spec` segment of a `Cmnd_Alias` body; embedded whitespace within a single argv pattern is encoded via backslash-escape (`\ `)
+- **THEN** the rendered bytes contain ZERO `"` characters within any `Cmnd_Spec` segment of the inlined operator user-spec; embedded whitespace within a single argv pattern is encoded via backslash-escape (`\ `)
 
 #### Scenario: Op names rendered into the rule body MUST match [a-z0-9-]+
 - **WHEN** setup renders the sudoers rule body
@@ -307,7 +307,7 @@ This requirement defines the *intended shape* of the polkit rule. **In this vers
 
 In POLKIT auth mode, the system SHALL write `/etc/polkit-1/rules.d/49-sandbox-ai-machinectl.rules` granting the operator the `org.freedesktop.machine1.shell` action for the sandbox user without password prompt, scoped via JavaScript subject/action checks per polkit's rule syntax.
 
-**Narrowing asymmetry (known, not merely unvalidated).** POLKIT-mode narrowing is inherently *coarser* than SUDO-mode. The sudoers `Cmnd_Spec` can match on the full argv (the V9 per-op `Cmnd_Alias` enumerates each dispatcher op + its arg shape). polkit's `org.freedesktop.machine1.shell` action does NOT expose the invoked command/argv as a matchable attribute — its inspectable subject/action fields are essentially the requesting user and the target machine/user. The polkit rule therefore grants "operator may `machinectl shell` into the sandbox user" at the *action* level; it canNOT enumerate or restrict to the ten dispatcher ops the way the sudoers rule does. **In POLKIT mode the per-op narrowing lives ONLY at the application layer**: the orchestrator only ever invokes `core.dispatch`, and the convention meta-test (`runtime-dispatcher` host-config capability) enforces that no other `src/` code crosses the boundary — exactly the same application-layer enforcement that backstops the SUDO legacy-rule case. Operator docs MUST state this asymmetry plainly (POLKIT mode = action-level grant + application-layer op discipline; SUDO mode = sudoers-layer per-op enumeration on top of the same application-layer discipline).
+**Narrowing asymmetry (known, not merely unvalidated).** POLKIT-mode narrowing is inherently *coarser* than SUDO-mode. The sudoers `Cmnd_Spec` can match on the full argv (the V9 per-op `Cmnd_Spec`s, inlined into the operator user-spec, enumerate each dispatcher op + its arg shape). polkit's `org.freedesktop.machine1.shell` action does NOT expose the invoked command/argv as a matchable attribute — its inspectable subject/action fields are essentially the requesting user and the target machine/user. The polkit rule therefore grants "operator may `machinectl shell` into the sandbox user" at the *action* level; it canNOT enumerate or restrict to the ten dispatcher ops the way the sudoers rule does. **In POLKIT mode the per-op narrowing lives ONLY at the application layer**: the orchestrator only ever invokes `core.dispatch`, and the convention meta-test (`runtime-dispatcher` host-config capability) enforces that no other `src/` code crosses the boundary — exactly the same application-layer enforcement that backstops the SUDO legacy-rule case. Operator docs MUST state this asymmetry plainly (POLKIT mode = action-level grant + application-layer op discipline; SUDO mode = sudoers-layer per-op enumeration on top of the same application-layer discipline).
 
 **Empirical status.** End-to-end confirmation that this polkit rule actually grants (the JS predicate returns `polkit.Result.YES` through a live `polkitd` + `systemd-machined`) is **deferred to validation track V9d-polkit-e2e** and is NOT yet established. V9c route-1 confirmed only that `pkaction` is present and the rule file parses syntactically across distros; it did NOT exercise the predicate against a running machined (containers have no machined). The SHALL above is the *intended* rule shape; the grant behavior is expected-but-unproven pending V9d-polkit-e2e (filed in `next.md`).
 
@@ -392,7 +392,7 @@ The content-aware probe semantic applies to:
 - **THEN** L6.5 recompiles, installs the new binary, updates the manifest with the new `compiled_sha512` + `source_bundle_sha512`
 
 #### Scenario: L3 sudoers probe re-renders on Op enum change
-- **WHEN** the existing sudoers drop-in's `Cmnd_Alias SANDBOX_OPS = ...` enumeration differs from what `core.dispatch.Op` now contains (e.g., wheel upgrade added a new op)
+- **WHEN** the existing sudoers drop-in's inlined per-op `Cmnd_Spec` enumeration differs from what `core.dispatch.Op` now contains (e.g., wheel upgrade added a new op)
 - **THEN** the L3 probe detects the mismatch; L3 act re-renders from the current `core.dispatch.Op` enum, runs visudo -cf on the new content, and atomically replaces the drop-in; the L3a per-op probe re-verifies
 
 ### Requirement: Dispatcher Manifest Schema
