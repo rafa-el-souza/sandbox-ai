@@ -35,3 +35,4 @@ htmlcov/
 
 dist/
 scripts/integration-probe.sh
+docs/assets/
