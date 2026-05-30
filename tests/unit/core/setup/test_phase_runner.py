@@ -17,11 +17,18 @@ import pwd
 import subprocess
 import sys
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, machinectl_cmd, minimal_host_config, pipe_cmd
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    machinectl_cmd,
+    minimal_host_config,
+    pipe_cmd,
+    sudo_as_operator,
+)
 from core.setup.phase_runner import (
     Identity,
     Phase,
@@ -33,6 +40,8 @@ from core.setup.phase_runner import (
     SandboxUserNotYetCreated,
     SetupContext,
     _is_phase_module_name,
+    daemon_owner_crossing,
+    daemon_owner_user,
     discover_phases,
     order_phases,
     probe_sandbox_pw_or_missing,
@@ -57,10 +66,13 @@ if TYPE_CHECKING:
 
 
 def _ctx(
-    user: str = "sandboxuser", auth: MachinectlAuth = MachinectlAuth.SUDO
+    user: str = "sandboxuser",
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    operator: str = "op",
 ) -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config(user, auth), operator="op"
+        host_config=minimal_host_config(user, auth, mode), operator=operator
     )
 
 
@@ -73,19 +85,22 @@ def _phase(
     act: Callable[[SetupContext], str] | None = None,
     reverify: Callable[[SetupContext], bool] | None = None,
     rollback: Callable[[SetupContext], None] | None = None,
+    probe: Callable[[SetupContext], tuple[PhaseResult, str]] | None = None,
+    applies_in: frozenset[DockerExecutionMode] | None = None,
 ) -> Phase:
-    def _probe(_c: SetupContext) -> tuple[PhaseResult, str]:
+    def _default_probe(_c: SetupContext) -> tuple[PhaseResult, str]:
         return probe_result, f"{pid} probed {probe_result}"
 
     return Phase(
         id=pid,
         name=f"phase {pid}",
         identity=identity,
-        probe=_probe,
+        probe=probe if probe is not None else _default_probe,
         act=act if act is not None else (lambda _c: f"{pid} acted"),
         reverify=reverify if reverify is not None else (lambda _c: True),
         depends_on=depends_on,
         rollback=rollback,
+        **({} if applies_in is None else {"applies_in": applies_in}),
     )
 
 
@@ -832,3 +847,170 @@ def test_content_aware_fixture_rejects_a_file_exists_only_probe(
     phase = _phase("naive", probe_result=PhaseResult.ALREADY_CORRECT)
     with pytest.raises(AssertionError, match="must report DRIFT"):
         assert_phase_content_aware(phase, _ctx(), lambda: None)
+
+
+# ── applies_in mode-gating (Phase field + both-pass skip emission) ────────────
+
+
+def test_applies_in_defaults_to_all_modes() -> None:
+    """A phase built with no ``applies_in`` opts into every execution mode."""
+    phase = _phase("a")
+    assert phase.applies_in == frozenset(DockerExecutionMode)
+    assert DockerExecutionMode.SEPARATE_USER in phase.applies_in
+    assert DockerExecutionMode.OPERATOR_ROOTLESS in phase.applies_in
+
+
+def test_default_phase_runs_in_both_modes() -> None:
+    """A default (all-modes) phase is probed in separate-user AND rootless."""
+    for mode in DockerExecutionMode:
+        probed: list[str] = []
+
+        def _probe(
+            _c: SetupContext, _p: list[str] = probed
+        ) -> tuple[PhaseResult, str]:
+            _p.append("probed")
+            return PhaseResult.ALREADY_CORRECT, "ok"
+
+        phase = _phase("a", probe=_probe)
+        out = run_plan_pass([phase], _ctx(mode=mode))
+        assert probed == ["probed"]
+        assert out[0].result == PhaseResult.ALREADY_CORRECT
+
+
+def _explode(_c: SetupContext) -> NoReturn:
+    raise AssertionError("callback must not run for a mode-skipped phase")
+
+
+def _separate_user_only_phase(
+    pid: str, *, depends_on: tuple[str, ...] = ()
+) -> Phase:
+    """A phase pinned to separate-user mode whose every callback explodes.
+
+    If the runner runs ANY callback while in operator-rootless mode, the test
+    fails loudly — proving the mode-skip path never invokes probe/act/reverify.
+    """
+    return Phase(
+        id=pid,
+        name=f"phase {pid}",
+        identity=Identity.ROOT,
+        probe=_explode,
+        act=_explode,
+        reverify=_explode,
+        depends_on=depends_on,
+        applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
+    )
+
+
+def test_plan_pass_mode_skips_excluded_phase() -> None:
+    """A separate-user-only phase is SKIPPED (probe never called) in rootless."""
+    phase = _separate_user_only_phase("a")
+    out = run_plan_pass([phase], _ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS))
+    assert out[0].result == PhaseResult.SKIPPED
+    assert out[0].detail == "skipped (operator-rootless)"
+    assert isinstance(out[0], PhasePlanOutcome)
+
+
+def test_apply_pass_mode_skips_excluded_phase() -> None:
+    """Same phase SKIPPED in the apply pass — act/reverify never called."""
+    phase = _separate_user_only_phase("a")
+    out = run_apply_pass([phase], _ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS))
+    assert out[0].result == PhaseResult.SKIPPED
+    assert out[0].detail == "skipped (operator-rootless)"
+    assert out[0].reverified is False
+    assert isinstance(out[0], PhaseApplyOutcome)
+
+
+def test_excluded_phase_runs_normally_in_its_mode() -> None:
+    """The same separate-user-only phase runs (probe called) in separate-user."""
+    probed: list[str] = []
+
+    def _probe(_c: SetupContext) -> tuple[PhaseResult, str]:
+        probed.append("probed")
+        return PhaseResult.ALREADY_CORRECT, "ok"
+
+    phase = Phase(
+        id="a",
+        name="phase a",
+        identity=Identity.ROOT,
+        probe=_probe,
+        act=lambda _c: "acted",
+        reverify=lambda _c: True,
+        applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
+    )
+    out = run_plan_pass([phase], _ctx(mode=DockerExecutionMode.SEPARATE_USER))
+    assert probed == ["probed"]
+    assert out[0].result == PhaseResult.ALREADY_CORRECT
+
+
+def test_apply_pass_mode_skip_does_not_block_dependents() -> None:
+    """A phase depending on a mode-skipped phase still runs (not BLOCKED_BY).
+
+    Mirrors operator-rootless: l65 is mode-skipped, but a phase depending on
+    it must still run — a mode-skip is dependency-satisfied, never a failure.
+    """
+    a = _separate_user_only_phase("a")
+    b = _phase("b", probe_result=PhaseResult.MISSING, depends_on=("a",))
+
+    out = {
+        o.phase_id: o
+        for o in run_apply_pass(
+            [a, b], _ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS)
+        )
+    }
+    assert out["a"].result == PhaseResult.SKIPPED
+    # B is NOT blocked by the mode-skipped A — it acts and reverifies.
+    assert out["b"].result == PhaseResult.ALREADY_CORRECT
+    assert out["b"].reverified is True
+
+
+# ── daemon_owner_user / daemon_owner_crossing (M4 shared contract) ────────────
+
+
+def test_daemon_owner_user_separate_user_is_sandbox_user() -> None:
+    ctx = _ctx(user="sbuser", mode=DockerExecutionMode.SEPARATE_USER)
+    assert daemon_owner_user(ctx) == "sbuser"
+
+
+def test_daemon_owner_user_operator_rootless_is_operator() -> None:
+    ctx = _ctx(
+        user="sbuser",
+        mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        operator="alice",
+    )
+    assert daemon_owner_user(ctx) == "alice"
+
+
+def test_daemon_owner_crossing_separate_user_is_machinectl_cmd() -> None:
+    """separate-user crossing equals machinectl_cmd(...) byte-for-byte."""
+    ctx = _ctx(user="sbuser", auth=MachinectlAuth.SUDO)
+    assert daemon_owner_crossing(ctx) == machinectl_cmd(
+        "sbuser", MachinectlAuth.SUDO
+    )
+
+
+def test_daemon_owner_crossing_separate_user_polkit() -> None:
+    ctx = _ctx(user="sbuser", auth=MachinectlAuth.POLKIT)
+    assert daemon_owner_crossing(ctx) == machinectl_cmd(
+        "sbuser", MachinectlAuth.POLKIT
+    )
+
+
+def test_daemon_owner_crossing_operator_rootless_is_cprime_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """operator-rootless crossing is the locked C-prime sudo -u + user-session env."""
+    monkeypatch.setattr(
+        "core.setup.phase_runner.pwd.getpwnam",
+        lambda _n: _fake_pw(5000, "/home/alice"),
+    )
+    ctx = _ctx(
+        user="sbuser",
+        mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        operator="alice",
+    )
+    assert daemon_owner_crossing(ctx) == [
+        *sudo_as_operator("alice"),
+        "env",
+        "XDG_RUNTIME_DIR=/run/user/5000",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
+    ]
