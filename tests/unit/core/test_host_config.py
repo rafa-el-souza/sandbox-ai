@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from core.host_config import (
+    DockerExecutionMode,
     HostConfig,
     HostSettings,
     MachinectlAuth,
@@ -22,6 +23,7 @@ from core.host_config import (
     host_id_for_in_container,
     in_container_gid_for_host_gid,
     machinectl_cmd,
+    minimal_host_config,
     parse_subgid_for_user,
     parse_subuid_for_user,
     pipe_cmd,
@@ -199,6 +201,67 @@ class TestMachinectlAuthEnum:
         """Enum values are the expected strings."""
         assert MachinectlAuth.SUDO.value == "sudo"
         assert MachinectlAuth.POLKIT.value == "polkit"
+
+
+class TestDockerExecutionMode:
+    """DockerExecutionMode selector field and StrEnum members."""
+
+    def test_exactly_two_members(self) -> None:
+        """DockerExecutionMode contains exactly SEPARATE_USER and OPERATOR_ROOTLESS."""
+        members = list(DockerExecutionMode)
+        assert len(members) == 2
+        assert DockerExecutionMode.SEPARATE_USER in members
+        assert DockerExecutionMode.OPERATOR_ROOTLESS in members
+
+    def test_string_values(self) -> None:
+        """Enum values are the expected strings."""
+        assert DockerExecutionMode.SEPARATE_USER.value == "separate-user"
+        assert DockerExecutionMode.OPERATOR_ROOTLESS.value == "operator-rootless"
+
+    def test_defaults_to_separate_user_when_omitted(self) -> None:
+        """A [host] section without docker_execution_mode defaults to SEPARATE_USER."""
+        hc = HostSettings.model_validate({"docker_unprivileged_user": "sandbox"})
+        assert hc.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+    def test_operator_rootless_parses(self) -> None:
+        """'operator-rootless' parses to the OPERATOR_ROOTLESS member."""
+        hc = HostSettings.model_validate(
+            {"docker_unprivileged_user": "sandbox", "docker_execution_mode": "operator-rootless"}
+        )
+        assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+    def test_invalid_value_raises_validation_error(self) -> None:
+        """An invalid enum value raises pydantic.ValidationError."""
+        with pytest.raises(ValidationError):
+            HostSettings.model_validate(
+                {"docker_unprivileged_user": "sandbox", "docker_execution_mode": "rootful"}
+            )
+
+    def test_machinectl_auth_inert_under_operator_rootless(self) -> None:
+        """operator-rootless together with machinectl_authentication=sudo validates (inert, not error)."""
+        hc = HostSettings.model_validate(
+            {
+                "docker_unprivileged_user": "sandbox",
+                "docker_execution_mode": "operator-rootless",
+                "machinectl_authentication": "sudo",
+            }
+        )
+        assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+        assert hc.machinectl_authentication == MachinectlAuth.SUDO
+
+
+class TestMinimalHostConfigMode:
+    """minimal_host_config() docker_execution_mode parameter (additive, defaulted)."""
+
+    def test_default_mode_is_separate_user(self) -> None:
+        """Omitting the mode parameter yields SEPARATE_USER."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+    def test_explicit_operator_rootless_mode(self) -> None:
+        """Passing mode=OPERATOR_ROOTLESS sets the field."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 # ─── Task 1.3: machinectl_cmd() ──────────────────────────────────────────────

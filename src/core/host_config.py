@@ -81,11 +81,33 @@ class MachinectlAuth(StrEnum):
     POLKIT = "polkit"
 
 
+class DockerExecutionMode(StrEnum):
+    """Selects how Docker runtime ops reach the daemon.
+
+    ``SEPARATE_USER`` is the existing behavior: Docker runs as the dedicated
+    ``docker_unprivileged_user`` and every op crosses the ``machinectl``
+    privilege boundary. ``OPERATOR_ROOTLESS`` runs rootless Docker as the
+    operator's own user, invoking ops as local subprocesses with no boundary
+    crossing.
+    """
+
+    SEPARATE_USER = "separate-user"
+    OPERATOR_ROOTLESS = "operator-rootless"
+
+
 class HostSettings(BaseModel):
-    """[host] section of sandbox-ai.toml."""
+    """[host] section of sandbox-ai.toml.
+
+    ``machinectl_authentication`` is **inert** when
+    ``docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS``: there
+    is no crossing to authorize, so the value is accepted and ignored rather
+    than rejected. The two fields are intentionally not cross-validated —
+    Pydantic accepting both together IS the inert behavior.
+    """
 
     docker_unprivileged_user: str
     machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
+    docker_execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
     workspace_bridge_group: str = "sb-ws"
 
 
@@ -114,13 +136,21 @@ class HostConfig(BaseModel):
         return cls.model_validate(raw)
 
 
-def minimal_host_config(user: str, auth: MachinectlAuth) -> HostConfig:
-    """Build a HostConfig carrying only the two fields the dispatch boundary reads.
+def minimal_host_config(
+    user: str, auth: MachinectlAuth, mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
+) -> HostConfig:
+    """Build a HostConfig carrying only the fields the dispatch boundary reads.
 
-    The two fields are ``docker_unprivileged_user`` and
-    ``machinectl_authentication``.
+    The fields are ``docker_unprivileged_user``, ``machinectl_authentication``,
+    and ``docker_execution_mode`` (defaulting to ``SEPARATE_USER``).
     """
-    return HostConfig(host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth))
+    return HostConfig(
+        host=HostSettings(
+            docker_unprivileged_user=user,
+            machinectl_authentication=auth,
+            docker_execution_mode=mode,
+        )
+    )
 
 
 def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
