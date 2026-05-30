@@ -126,6 +126,26 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _pin_console_width() -> object:
+    """Pin the CLI's Rich console to a fixed wide, non-terminal width.
+
+    ``cli.main.console`` is a bare ``Console()`` that auto-detects the
+    terminal width and wraps output to it. In a narrow environment (an
+    80-column CI / pre-commit subprocess, a non-TTY pipe) Rich wraps error
+    messages mid-token — e.g. a ``<home>`` path splits across a newline — and
+    substring assertions on paths/messages break even though the content is
+    correct. Pinning to a fixed wide, plain (no-ANSI) console makes captured
+    output independent of the host's ``COLUMNS`` / PTY state. Width 1000 is
+    wider than any single line the CLI emits. (Tests that pin their own
+    console — e.g. the dry-run fixture gate — override this within the test.)
+    """
+    from rich.console import Console
+
+    with patch("cli.main.console", Console(width=1000, force_terminal=False, color_system=None)):
+        yield
+
+
 @pytest.fixture()
 def runner() -> CliRunner:
     return CliRunner()

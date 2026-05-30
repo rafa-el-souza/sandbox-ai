@@ -25,9 +25,7 @@ Dry-run: sandbox start
     workspace: chmod 2770 <TMP>/.sandbox-ai/workspaces/fixture-inst/scratch
     workspace: setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/workspaces/fixture-inst/scratch
     workspace: setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx,u:dev:rwx <TMP>/.sandbox-ai/workspaces/fixture-inst/scratch
-    $ setfacl -m u:sandbox:--x <PYTEST_ROOT>  # ancestor traverse: <PYTEST_ROOT>
-    $ setfacl -m u:sandbox:--x <TMP>  # ancestor traverse: <TMP>
-    $ setfacl -m u:sandbox:--x <TMP>  # ancestor traverse: <TMP>
+    $ setfacl -m u:sandbox:--x <TMP-ANCESTORS>  # ancestor traverse: <TMP-ANCESTORS>
     $ setfacl -m u:sandbox:--x <TMP>/.sandbox-ai  # ancestor traverse: <TMP>/.sandbox-ai
     $ setfacl -m u:sandbox:--x <TMP>/.sandbox-ai/instances  # ancestor traverse: <TMP>/.sandbox-ai/instances
     $ setfacl -m u:sandbox:r-x <TMP>/.sandbox-ai/instances/fixture-inst  # instance root: <TMP>/.sandbox-ai/instances/fixture-inst
@@ -50,9 +48,7 @@ Dry-run: sandbox start
     $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/cache/core  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/cache/core
     $ setfacl -m u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/log  # helper-recipe parent: <TMP>/.sandbox-ai/instances/fixture-inst/log
     $ setfacl -d -m u::rwx,g::rwx,o::---,m::rwx,u:sandbox:rwx <TMP>/.sandbox-ai/instances/fixture-inst/log  # helper-recipe parent default ACL: <TMP>/.sandbox-ai/instances/fixture-inst/log
-    $ setfacl -m u:sandbox:--x <PYTEST_ROOT>  # workspace ancestor traverse: <PYTEST_ROOT>
-    $ setfacl -m u:sandbox:--x <TMP>  # workspace ancestor traverse: <TMP>
-    $ setfacl -m u:sandbox:--x <TMP>  # workspace ancestor traverse: <TMP>
+    $ setfacl -m u:sandbox:--x <TMP-ANCESTORS>  # workspace ancestor traverse: <TMP-ANCESTORS>
     $ setfacl -m u:sandbox:--x <TMP>/.sandbox-ai  # workspace ancestor traverse: <TMP>/.sandbox-ai
     $ setfacl -m u:sandbox:--x <TMP>/.sandbox-ai/workspaces  # workspace ancestor traverse: <TMP>/.sandbox-ai/workspaces
     $ setfacl -m u:sandbox:--x <TMP>/.sandbox-ai/workspaces/fixture-inst  # workspace ancestor traverse: <TMP>/.sandbox-ai/workspaces/fixture-inst
