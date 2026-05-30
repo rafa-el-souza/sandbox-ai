@@ -50,10 +50,11 @@ from typing import TYPE_CHECKING
 
 from core.compose import compose_project_name
 from core.exceptions import SandboxExecutionError
-from core.executor import Executor
+from core.executor import Executor, normalize_captured_output
 from core.helper_container import _hardened_docker_run
-from core.host_config import machinectl_cmd, pipe_cmd
+from core.host_config import DockerExecutionMode, machinectl_cmd, pipe_cmd
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
+from core.journal_audit import emit_op_audit
 from core.registry import InstanceRegistry
 
 if TYPE_CHECKING:
@@ -703,6 +704,21 @@ def build_target_argv(op: Op | str, args: Sequence[str], host_config: HostConfig
     return OP_SPECS[resolved].build_target_argv(args, host_config)
 
 
+def _is_operator_rootless(host_config: HostConfig) -> bool:
+    """Return ``True`` iff ``host_config`` selects the operator-rootless mode.
+
+    Reads ``host.docker_execution_mode`` (C-003 precursor field). A host config
+    that predates the field — or a lightweight stand-in that omits it — defaults
+    to ``SEPARATE_USER``, the same default the :class:`HostSettings` model
+    declares, so the dispatcher keeps its historical behavior unless the
+    operator-rootless mode is explicitly selected.
+    """
+    mode = getattr(
+        host_config.host, "docker_execution_mode", DockerExecutionMode.SEPARATE_USER
+    )
+    return mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+
 def build_invocation(
     op: Op | str,
     args: Sequence[str],
@@ -713,17 +729,26 @@ def build_invocation(
     This is the single command-construction seam (anti-hack rules 4 + 7): it
     performs everything :func:`invoke` does *except* the
     :class:`~core.executor.Executor` run — per-op validation, the Q6 compose
-    wire-expansion / deterministic passthrough, the ``dispatch <op> <wire>``
-    inner string, and the ``machinectl_cmd`` + ``bash -c`` crossing. :func:`invoke`
-    is exactly ``Executor().run(build_invocation(...), framed=True,
-    timeout=...)``; the
-    ``sandbox start --dry-run`` preview and :class:`core.actions.ComposeUpAction`
-    derive their displayed/executed command from this same function so no
-    parallel argv/inner construction exists anywhere.
+    wire-expansion / deterministic passthrough, and the mode-appropriate argv
+    assembly. :func:`invoke` is exactly ``Executor().run(build_invocation(...),
+    …)``; the ``sandbox start --dry-run`` preview and
+    :class:`core.actions.ComposeUpAction` derive their displayed/executed
+    command from this same function so no parallel argv/inner construction
+    exists anywhere.
 
-    Returns the argv list ``[*machinectl_cmd(user, auth), "/bin/bash", "-c",
-    "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` (design D2 — the outer
-    argv shape is preserved so operators' existing sudoers rule still matches).
+    The validation + wire-expansion pipeline is shared across both execution
+    modes (C-003 design D1/D4); ONLY the crossing prefix differs:
+
+    - ``separate-user`` (default): returns ``[*machinectl_cmd(user, auth),
+      "/bin/bash", "-c", "<dispatch-binary> <op> <shlex.join(wire_args)>"]``
+      (design D2 — the outer argv shape is preserved so operators' existing
+      sudoers rule still matches, and the bare ``dispatch <op>`` payload is what
+      the per-op ``Cmnd_Spec`` matches).
+    - ``operator-rootless``: returns the op's target-argv **directly** (the same
+      ``["/bin/bash", "-c", "<inner>"]`` / hardened ``docker run`` the per-op
+      builder produces) with NO ``machinectl_cmd`` prefix and NO
+      ``<dispatch-binary> <op>`` indirection — the Go dispatcher is bypassed and
+      the op runs as a plain local subprocess.
 
     Raises:
         DispatchValidationError: the typed args are malformed for ``op`` (raised
@@ -738,6 +763,8 @@ def build_invocation(
         if op_value in _COMPOSE_VERB
         else list(args)
     )
+    if _is_operator_rootless(host_config):
+        return build_target_argv(resolved, wire_args, host_config)
     inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
     return [
         *machinectl_cmd(
@@ -820,12 +847,37 @@ def invoke(
     The command construction (validate -> Q6 wire-expand / passthrough ->
     inner -> crossed argv) lives in :func:`build_invocation`; :func:`invoke`
     is exactly that argv handed to the sterile :class:`~core.executor.Executor`
-    with ``framed=True`` (anti-hack rules 4 + 7 — one seam, no parallel
-    construction).
+    (anti-hack rules 4 + 7 — one seam, no parallel construction).
+
+    Operator-rootless mode (C-003 design D4) takes the local branch:
+    :func:`build_invocation` returns the bare op argv (no dispatcher
+    indirection), so there is no ``machinectl shell`` PTY masking the inner exit
+    — the Executor runs with ``framed=False`` and recovers the result from the
+    local process's native exit code. Before spawning, a structured journald
+    audit record is emitted (mirroring the Go dispatcher's per-op entry that the
+    bypassed dispatcher would otherwise have written), carrying the op name, the
+    typed args summary, and the instance token (the first typed arg for the
+    three compose ops; ``""`` otherwise — mirroring the Go ``instanceForOp``).
+    The captured stdout is run through the SAME
+    :func:`~core.executor.normalize_captured_output` helper the ``separate-user``
+    framing path applies, so callers see identically-normalized output in both
+    modes; normalization is applied here (NOT in ``Executor.run``'s default
+    ``framed=False`` path, which other callers rely on for raw output). The
+    raise-on-failure contract is preserved automatically: ``framed=False`` runs
+    with ``check=True``, so a non-zero exit / timeout raises
+    :class:`~core.exceptions.SandboxExecutionError` before any normalization
+    runs.
     """
-    return Executor().run(
-        build_invocation(op, args, host_config), framed=True, timeout=timeout
-    )
+    argv = build_invocation(op, args, host_config)
+    if _is_operator_rootless(host_config):
+        op_value = Op(op).value
+        instance = args[0] if op_value in _COMPOSE_VERB else ""
+        emit_op_audit(op_value, list(args), argv, instance)
+        cp = Executor().run(argv, framed=False, timeout=timeout)
+        return subprocess.CompletedProcess(
+            cp.args, cp.returncode, normalize_captured_output(cp.stdout), cp.stderr
+        )
+    return Executor().run(argv, framed=True, timeout=timeout)
 
 
 def probe(

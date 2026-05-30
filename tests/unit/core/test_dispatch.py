@@ -837,13 +837,17 @@ class TestComposeWireExpansion:
 class _FakeHostSettings:
     docker_unprivileged_user = "sandbox"
 
-    def __init__(self, auth: object) -> None:
+    def __init__(self, auth: object, mode: object) -> None:
         self.machinectl_authentication = auth
+        self.docker_execution_mode = mode
 
 
 class _FakeHostConfig:
-    def __init__(self, auth: object) -> None:
-        self.host = _FakeHostSettings(auth)
+    def __init__(self, auth: object, mode: object | None = None) -> None:
+        from core.host_config import DockerExecutionMode
+
+        resolved_mode = DockerExecutionMode.SEPARATE_USER if mode is None else mode
+        self.host = _FakeHostSettings(auth, resolved_mode)
 
 
 class TestInvoke:
@@ -1147,6 +1151,274 @@ class TestProbe:
         # DispatchValidationError still raises (it is not an outcome).
         with pytest.raises(DispatchValidationError):
             probe("docker-info", ["bogus-preset"], self._fake_hc())
+
+
+# ─── operator-rootless local invocation seam (C-003 Milestone C) ────────────
+#
+# When docker_execution_mode == operator-rootless the Go dispatcher is
+# bypassed: build_invocation returns the bare op argv, invoke runs it locally
+# with framed=False (native exit), emits a journald audit before the spawn,
+# and normalizes stdout via the same shared helper the separate-user path uses.
+
+
+def _separate_hc() -> HostConfig:
+    from core.host_config import DockerExecutionMode, MachinectlAuth
+
+    return cast(
+        "HostConfig",
+        _FakeHostConfig(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER),
+    )
+
+
+def _rootless_hc() -> HostConfig:
+    from core.host_config import DockerExecutionMode, MachinectlAuth
+
+    return cast(
+        "HostConfig",
+        _FakeHostConfig(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS),
+    )
+
+
+class TestOperatorRootlessBuildInvocation:
+    def test_deterministic_op_emits_bare_argv(self) -> None:
+        # auth-probe is a deterministic op (no host_config / state needed). In
+        # rootless mode build_invocation returns the op's target-argv directly.
+        argv = build_invocation("auth-probe", [], _rootless_hc())
+        assert argv == build_target_argv("auth-probe", [], _rootless_hc())
+        assert argv[:2] == ["/bin/bash", "-c"]
+        # No crossing prefix, no dispatcher indirection.
+        for token in argv:
+            assert "sudo" not in token
+            assert "machinectl" not in token
+            assert "systemd-run" not in token
+            assert "/usr/local/libexec/sandbox-ai/dispatch" not in token
+
+    def test_compose_op_emits_bare_argv_with_wire_expansion(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # The compose op still runs the Q6 wire-expansion (resolving
+        # project/compose-file/env-file from dev context) before the pure
+        # builder — only the crossing prefix is dropped.
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        rootless = _rootless_hc()
+        argv = build_invocation("compose-up", ["demo"], rootless)
+        wire = _expand_compose_wire("compose-up", ["demo"])
+        assert argv == build_target_argv("compose-up", wire, rootless)
+        assert argv[:2] == ["/bin/bash", "-c"]
+        for token in argv:
+            assert "machinectl" not in token
+            assert "/usr/local/libexec/sandbox-ai/dispatch" not in token
+        # The inner string is the real local `docker compose ... up` command.
+        assert argv[2].startswith("TERM=dumb NO_COLOR=1")
+        assert " up -d --build --wait" in argv[2]
+
+    def test_separate_user_build_invocation_unchanged(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # Same compose op in separate-user mode still yields the machinectl
+        # crossing + bare `dispatch <op>` payload.
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        argv = build_invocation("compose-up", ["demo"], _separate_hc())
+        assert argv[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
+        assert argv[4:6] == ["/bin/bash", "-c"]
+        assert argv[6].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up demo")
+
+
+class TestOperatorRootlessInvoke:
+    def test_non_zero_local_exit_raises_and_probe_branches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> object:
+            raise SandboxExecutionError("[FATAL] local boom")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        with pytest.raises(SandboxExecutionError):
+            invoke("auth-probe", [], _rootless_hc())
+        out = probe("auth-probe", [], _rootless_hc())
+        assert out == ProbeOutcome(
+            ok=False, timed_out=False, stdout="", message="[FATAL] local boom"
+        )
+
+    def test_local_timeout_discriminated_by_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> object:
+            err = SandboxExecutionError("[FATAL] local timed out")
+            err.__cause__ = subprocess.TimeoutExpired(cmd="docker", timeout=10)
+            raise err
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        out = probe("auth-probe", [], _rootless_hc(), timeout=10)
+        assert out.ok is False
+        assert out.timed_out is True
+
+    def test_validation_runs_before_local_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import Mock
+
+        run_mock = Mock()
+        monkeypatch.setattr("core.dispatch.Executor.run", run_mock)
+        with pytest.raises(DispatchValidationError):
+            invoke("docker-info", ["bogus-preset"], _rootless_hc())
+        run_mock.assert_not_called()
+
+    def test_runs_framed_false_with_native_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        rootless = _rootless_hc()
+        result = invoke("auth-probe", [], rootless, timeout=15)
+        assert result.returncode == 0
+        assert captured["cmd"] == build_invocation("auth-probe", [], rootless)
+        assert cast("dict[str, object]", captured["kwargs"]) == {
+            "framed": False,
+            "timeout": 15,
+        }
+
+
+class TestOperatorRootlessStdoutNormalization:
+    _RAW = "line1\r\n\x1b[31mred\x1b[0m\n\n\n\ntail\r\n"
+
+    def test_stdout_normalized_identically_in_rootless_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        from core.executor import normalize_captured_output
+
+        raw = self._RAW
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, raw, "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        out = invoke("auth-probe", [], _rootless_hc())
+        assert out.stdout == normalize_captured_output(raw)
+        assert "\r" not in out.stdout
+        assert "\x1b[" not in out.stdout
+        assert "\n\n\n" not in out.stdout
+
+    def test_probe_inherits_rootless_normalization(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        from core.executor import normalize_captured_output
+
+        raw = self._RAW
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, raw, "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        out = probe("auth-probe", [], _rootless_hc())
+        assert out.ok is True
+        assert out.stdout == normalize_captured_output(raw)
+
+    def test_executor_default_framed_false_path_not_globally_altered(self) -> None:
+        # The normalization lives in core.dispatch, NOT in Executor.run's
+        # default framed=False path — a direct Executor call returns raw output.
+        # (ANSI + 3+-newline runs are chosen as the probe: text-mode universal
+        # newlines already fold CRLF, so CR is not a faithful raw witness, but
+        # ANSI escapes and blank-line runs survive iff no normalization runs.)
+        from core.executor import Executor
+
+        raw = "\x1b[31mred\x1b[0m\n\n\n\ntail\n"
+        result = Executor().run(["printf", "%s", raw], framed=False)
+        assert "\x1b[31m" in result.stdout
+        assert "\n\n\n" in result.stdout
+
+
+class TestOperatorRootlessAudit:
+    def test_audit_emitted_before_subprocess_with_op_and_instance(
+        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        from unittest.mock import Mock
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        manager = Mock()
+
+        def fake_emit(
+            op: str, args: object, target_argv: object, instance: str
+        ) -> None:
+            manager.emit(op, list(cast("list[str]", args)), instance)
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            manager.run(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", fake_emit)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        invoke("compose-up", ["demo"], _rootless_hc())
+        names = [c[0] for c in manager.mock_calls]
+        assert names.index("emit") < names.index("run")
+        emit_call = next(c for c in manager.mock_calls if c[0] == "emit")
+        assert emit_call.args[0] == "compose-up"
+        assert emit_call.args[1] == ["demo"]
+        assert emit_call.args[2] == "demo"
+
+    def test_deterministic_op_audit_has_empty_instance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_emit(
+            op: str, args: object, target_argv: object, instance: str
+        ) -> None:
+            captured["op"] = op
+            captured["instance"] = instance
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", fake_emit)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        invoke("auth-probe", [], _rootless_hc())
+        assert captured["op"] == "auth-probe"
+        assert captured["instance"] == ""
+
+    def test_separate_user_mode_emits_no_audit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        from unittest.mock import Mock
+
+        emit_mock = Mock()
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", emit_mock)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        invoke("auth-probe", [], _separate_hc())
+        emit_mock.assert_not_called()
 
 
 # ─── compile_dispatcher(): offline reproducible compile recipe ──────────────
