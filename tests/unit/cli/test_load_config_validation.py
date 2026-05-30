@@ -17,9 +17,10 @@ import errno
 import tomllib
 from pathlib import Path
 
+import cli.main as _cli_main
 import pytest
 import typer
-from cli.main import _load_config, console
+from cli.main import _load_config
 
 
 def _flatten(text: str) -> str:
@@ -54,7 +55,7 @@ host_uid = "1000"
 bootstrap_mode = "empty"
 """,
         )
-        with console.capture() as cap, pytest.raises(typer.Exit) as exc_info:
+        with _cli_main.console.capture() as cap, pytest.raises(typer.Exit) as exc_info:
             _load_config(str(toml_path.parent))
 
         assert exc_info.value.exit_code == 1
@@ -80,7 +81,7 @@ bootstrap_mode = "empty"
 bootstrap_mode = "empty"
 """,
         )
-        with console.capture() as cap, pytest.raises(typer.Exit) as exc_info:
+        with _cli_main.console.capture() as cap, pytest.raises(typer.Exit) as exc_info:
             _load_config(str(toml_path.parent))
 
         assert exc_info.value.exit_code == 1
@@ -105,7 +106,7 @@ host_uid = "1000"
 [workspaces]
 """,
         )
-        with console.capture() as cap, pytest.raises(typer.Exit) as exc_info:
+        with _cli_main.console.capture() as cap, pytest.raises(typer.Exit) as exc_info:
             _load_config(str(toml_path.parent))
 
         assert exc_info.value.exit_code == 1

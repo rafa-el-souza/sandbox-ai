@@ -60,24 +60,55 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def _normalize(output: str, tmp_root: Path) -> str:
-    """Replace per-run tmp_path prefix with a stable token + strip ANSI.
+# An ancestor-traverse line, e.g.
+#   ``    $ setfacl -m u:<user>:--x <PATH>  # ancestor traverse: <PATH>``
+# The label is either ``ancestor traverse`` (instance dir, _acl_grant_plan) or
+# ``workspace ancestor traverse`` (workspace shared-group plan) — both walk a
+# UID-owned ancestor chain whose AT/ABOVE-tmp_root portion is env-dependent.
+_ANCESTOR_RE = re.compile(
+    r"^(?P<indent>\s*)\$ setfacl -m u:(?P<user>[^:]+):--x (?P<path>\S+)"
+    r"  # (?P<label>(?:workspace )?ancestor traverse): (?P=path)$"
+)
 
-    Two-step replacement:
-      1. Resolve ``tmp_root`` (drop any ``/private`` prefix on macOS) and
-         replace it with ``<TMP>``.
-      2. Replace any residual absolute pytest tmp prefix
-         (``/tmp/pytest-of-…``) defensively.
+
+def _normalize(output: str, tmp_root: Path) -> str:
+    """Make the dry-run output portable across hosts/CI + strip ANSI.
+
+    1. Strip ANSI escape sequences.
+    2. Replace the per-run ``tmp_root`` prefix with the stable token ``<TMP>``.
+    3. Collapse the ancestor-traverse chain that walks AT/ABOVE ``tmp_root`` up
+       to the ownership boundary (``_compute_ancestors`` stops at the first
+       non-UID-owned parent) into a single ``<TMP-ANCESTORS>`` line. The number
+       and names of those entries are environment-specific — they depend on how
+       deep ``$TMPDIR`` nests the pytest basetemp (e.g. ``/tmp/pytest-of-<user>``
+       vs ``/tmp/<sandbox>/pytest-of-<user>``), so they are not a stable
+       assertion. Ancestor-traverse entries BELOW ``tmp_root`` (``<TMP>/…``,
+       e.g. ``.sandbox-ai`` and ``instances``) are real plan structure and are
+       preserved verbatim, as is every within-instance-tree ACL line.
     """
     text = _strip_ansi(output)
+    text = text.replace(str(tmp_root.resolve()), "<TMP>")
     text = text.replace(str(tmp_root), "<TMP>")
-    # The dry-run preview also emits ancestor-traverse entries that walk
-    # ABOVE ``tmp_root`` (e.g. ``/tmp/pytest-of-dev`` and ``/tmp``). These
-    # vary by host (uid embedded in the user name); collapse them all to
-    # a single ``<PYTEST_ROOT>`` token so the fixture is portable.
-    text = re.sub(r"/tmp/pytest-of-[^/\s]+/pytest-\d+", "<TMP>", text)
-    text = re.sub(r"/tmp/pytest-of-[^/\s]+", "<PYTEST_ROOT>", text)
-    return text
+
+    out: list[str] = []
+    in_above_run = False
+    for line in text.split("\n"):
+        m = _ANCESTOR_RE.match(line)
+        # An ancestor-traverse entry is "at/above tmp_root" iff its path is the
+        # tmp_root token itself or still a raw absolute path (a parent of
+        # tmp_root, not yet tokenized). Entries below tmp_root read "<TMP>/…".
+        if m and (m.group("path") == "<TMP>" or m.group("path").startswith("/")):
+            if in_above_run:
+                continue  # collapse the run into the single line already emitted
+            out.append(
+                f"{m.group('indent')}$ setfacl -m u:{m.group('user')}:--x "
+                f"<TMP-ANCESTORS>  # {m.group('label')}: <TMP-ANCESTORS>"
+            )
+            in_above_run = True
+            continue
+        in_above_run = False
+        out.append(line)
+    return "\n".join(out)
 
 
 def _create_tooling_plane(home: Path) -> None:
