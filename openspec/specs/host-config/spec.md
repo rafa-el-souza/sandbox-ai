@@ -281,3 +281,31 @@ The repository's `CLAUDE.md` "Privilege boundary" section SHALL document that th
 - **WHEN** a reader opens `CLAUDE.md` and reads the "Privilege boundary (load-bearing)" section
 - **THEN** the section mentions `core.dispatch` as the canonical orchestrator-to-sandbox crossing path and notes that `machinectl_cmd(...)` is consumed only by `core.host_config` (self), `core.dispatch`, and the `src/core/setup/` setup-phase package (the latter populated by the `sandbox-setup` change; setup phases cross the boundary as root before the dispatcher exists)
 
+### Requirement: Docker Execution Mode Selector
+
+The `[host]` section SHALL accept an optional field `docker_execution_mode`, a string enum with exactly two values: `"separate-user"` and `"operator-rootless"`. The field SHALL default to `"separate-user"` when omitted. `HostSettings` SHALL expose it via a `DockerExecutionMode` StrEnum (`SEPARATE_USER = "separate-user"`, `OPERATOR_ROOTLESS = "operator-rootless"`).
+
+`"separate-user"` selects the existing behavior: Docker runs as the dedicated `docker_unprivileged_user`, reached across the `machinectl` privilege boundary. `"operator-rootless"` selects rootless Docker running as the operator's own user, invoked as local subprocesses with no boundary crossing.
+
+In `"operator-rootless"` mode the `machinectl_authentication` field SHALL be inert (there is no crossing to authorize); it SHALL be accepted and ignored rather than rejected.
+
+#### Scenario: Mode defaults to separate-user
+
+- **WHEN** `sandbox-ai.toml` contains `[host]` without `docker_execution_mode`
+- **THEN** the model applies `docker_execution_mode == DockerExecutionMode.SEPARATE_USER`
+
+#### Scenario: operator-rootless mode parsed
+
+- **WHEN** `sandbox-ai.toml` contains `[host]` with `docker_execution_mode = "operator-rootless"`
+- **THEN** the model validates with `docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS`
+
+#### Scenario: Invalid mode rejected
+
+- **WHEN** `sandbox-ai.toml` contains `docker_execution_mode = "rootful"`
+- **THEN** the Pydantic model raises a `ValidationError` identifying the invalid enum value
+
+#### Scenario: machinectl_authentication inert under operator-rootless
+
+- **WHEN** `[host]` sets `docker_execution_mode = "operator-rootless"` together with `machinectl_authentication = "sudo"`
+- **THEN** the model validates successfully and the orchestrator performs no `machinectl` crossing for runtime ops (the authentication value is ignored, not an error)
+

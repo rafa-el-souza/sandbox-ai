@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox attach` command lifecycle, governing warm state verification and PTY handover without re-hydration.
-
 ## Requirements
-
 ### Requirement: Optional Workspace Argument
 
 `sandbox attach <inst> [<ws-name>]` SHALL accept an optional workspace name. When the instance has exactly one workspace (N=1), the argument MAY be omitted; the system defaults to that single workspace. When N>1 and the argument is omitted, the system SHALL exit with the list of available workspaces and exit code 1. When the argument is supplied, it MUST exist in `sandbox.toml [workspaces]`.
@@ -88,3 +86,18 @@ The tlog invocation form is `tlog-rec --writer=file --file-path=<path> -- ssh ..
 #### Scenario: sandbox doctor checks for tlog presence
 - **WHEN** `sandbox doctor` runs on a host where `tlog-rec` is not installed
 - **THEN** the doctor reports the missing `tlog` dependency with a remediation hint (e.g., `apt install tlog`, `dnf install tlog`, AUR `tlog`); `sandbox attach` continues to function only when `tlog-rec` is on `PATH`
+
+### Requirement: Attach ProxyCommand in Operator-Rootless Mode
+
+When `host_config.host.docker_execution_mode == operator-rootless`, `cli.attach` SHALL construct the SSH `ProxyCommand` **without** the `pipe_cmd(...)` (`systemd-run -q --pipe --uid=…`) byte-pipe prefix: the ProxyCommand SHALL be the bare local `docker exec -i <project>-admin-1 /fwd <core_ipc_ip>:9999`. The surrounding handover structure (`tlog-rec -- ssh -i … -o ProxyCommand="…" -p 9999 -t agent@<core_ipc_ip>`) SHALL be unchanged; only the inner crossing prefix is removed. In `separate-user` mode the ProxyCommand SHALL continue to compose `pipe_cmd(docker_unprivileged_user)` exactly as before.
+
+#### Scenario: operator-rootless ProxyCommand has no pipe_cmd prefix
+
+- **WHEN** `sandbox attach <inst>` runs with `docker_execution_mode == operator-rootless`
+- **THEN** the `ProxyCommand` argument is `docker exec -i <project>-admin-1 /fwd <core_ipc_ip>:9999` with no `systemd-run`/`--uid=` prefix
+
+#### Scenario: separate-user ProxyCommand unchanged
+
+- **WHEN** `sandbox attach <inst>` runs with `docker_execution_mode == separate-user`
+- **THEN** the `ProxyCommand` argument is composed via `pipe_cmd(host_config.host.docker_unprivileged_user)` exactly as before this change
+

@@ -302,3 +302,77 @@ The nonce binds the trailer: untrusted op output (a malicious image, `docker-man
 - **WHEN** the dispatcher rejects an unknown op (or a validation/symlink-guard failure)
 - **THEN** it emits `__SANDBOX_BEGIN_<nonce>` and `__SANDBOX_EXIT_<nonce>_<non-zero>` so the orchestrator recovers the reject code rather than a masked success
 
+### Requirement: Operator-Rootless Local Invocation Mode
+
+When `host_config.host.docker_execution_mode == operator-rootless`, `core.dispatch.build_invocation(op, args, host_config)` SHALL return the op's target-argv **directly** — the same `["/bin/bash", "-c", "<inner>"]` (or hardened `docker run`) produced by the existing per-op target-argv builder — with **no `machinectl_cmd(...)` prefix** and **no `<dispatch-binary> <op>` indirection**. The Go dispatcher binary SHALL NOT be invoked in this mode. The 10-op surface, per-op argument validators, and per-op target-argv builders SHALL be reused unchanged across both modes. The operator-rootless path SHALL still perform the same upstream steps before the builder as the `separate-user` path — per-op argument validation AND, for the compose ops, the Q6 operator-side wire-expansion (`_expand_compose_wire`, which resolves dev-context project/compose-file/env-file state the pure builder cannot re-derive) — so that **only the crossing prefix is dropped**, not the validation/expansion pipeline.
+
+In `separate-user` mode `build_invocation` behavior SHALL remain exactly as before (the `machinectl_cmd(user, auth)` prefix + bare `dispatch <op>` payload).
+
+#### Scenario: build_invocation emits bare argv in operator-rootless mode
+
+- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == operator-rootless`
+- **THEN** the returned argv begins with `/bin/bash`, `-c` (no `sudo`/`machinectl`/`systemd-run` prefix and no `/usr/local/libexec/sandbox-ai/dispatch` token), and the `<inner>` string is byte-identical to the op's target-argv builder output
+
+#### Scenario: separate-user mode unchanged
+
+- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user`
+- **THEN** the returned argv is the existing `machinectl_cmd(user, auth) + ["/bin/bash", "-c", "<dispatch> compose-up …"]` form
+
+### Requirement: Native Exit Recovery for Operator-Rootless invoke/probe
+
+In `operator-rootless` mode, `core.dispatch.invoke()` SHALL execute the bare argv via `Executor.run(..., framed=False)` and recover the result from the local process's native exit code (no `__SANDBOX_BEGIN/EXIT` nonce framing). `invoke()` SHALL preserve its raise-on-failure contract (raise `SandboxExecutionError` on non-zero exit or timeout). `core.dispatch.probe()` SHALL preserve its branch-on-outcome contract, returning a `ProbeOutcome` with `ok`/`timed_out`/`stdout` derived from the local subprocess result.
+
+Typed argument validation SHALL run before execution in both modes (the local path does not skip validation).
+
+The captured stdout returned to callers SHALL be normalized identically in both modes: `core.dispatch` SHALL pass the operator-rootless local result's stdout through the **same** normalization applied during `separate-user` framing recovery (ANSI-escape stripping, carriage-return removal, collapse of 3+ consecutive newlines). This normalization SHALL be a single shared helper used by both paths (no duplicated logic), and SHALL be applied at the `core.dispatch` layer — NOT in `Executor.run`'s default `framed=False` path (which other callers rely on for raw output).
+
+#### Scenario: Operator-rootless stdout normalized identically to separate-user
+
+- **WHEN** an op's local output in `operator-rootless` mode contains carriage returns, ANSI escape sequences, or 3+ consecutive newlines
+- **THEN** the stdout returned by `invoke()`/`probe()` is normalized identically to the `separate-user` framed path (no `\r`, no ANSI, ≤2 consecutive newlines)
+
+#### Scenario: Executor's default framed=False path is not globally altered
+
+- **WHEN** a non-dispatch caller uses `Executor.run(..., framed=False)` (e.g. a setup plain crossing or `compile_dispatcher`)
+- **THEN** its raw stdout is returned unchanged — the normalization lives in `core.dispatch`, not in the executor default
+
+#### Scenario: Non-zero local exit raises
+
+- **WHEN** an op run in `operator-rootless` mode exits non-zero locally
+- **THEN** `invoke()` raises `SandboxExecutionError` and `probe()` returns `ProbeOutcome(ok=False, …)`
+
+#### Scenario: Local timeout discriminated by probe
+
+- **WHEN** an op run in `operator-rootless` mode exceeds its timeout
+- **THEN** `probe()` returns `ProbeOutcome(ok=False, timed_out=True, …)`
+
+#### Scenario: Validation still runs before local execution
+
+- **WHEN** `invoke()` is called in `operator-rootless` mode with malformed args for the op
+- **THEN** validation raises before any local subprocess is spawned
+
+### Requirement: Operator-Rootless Op Audit Trail
+
+In `operator-rootless` mode, before executing each op locally, the orchestrator SHALL emit a structured journald record carrying at least the op name, an args summary, and the instance token (when applicable), mirroring the structured audit entry the Go dispatcher emits in `separate-user` mode, so the per-op audit trail is preserved despite bypassing the dispatcher.
+
+#### Scenario: Audit record emitted before local op
+
+- **WHEN** an op is invoked in `operator-rootless` mode
+- **THEN** a journald record identifying the op (and instance token when applicable) is emitted before the local subprocess runs
+
+### Requirement: Lifecycle Call Sites Thread Execution Mode
+
+Every orchestrator call site that invokes a dispatcher op for a lifecycle command SHALL pass a `host_config` carrying the resolved `docker_execution_mode`, so that in `operator-rootless` mode ALL such ops run as local subprocesses (no `machinectl` crossing). This covers `start`'s `compose-up` and helper-container ops (`helper-chown-files`, `helper-mkdir-chown-dirs`), `stop`/`destroy`'s `compose-down`, and the status/warm-check `compose-ps`. (The local `setfacl` ACL operations do not cross the dispatcher and are unaffected.)
+
+#### Scenario: stop and destroy run compose-down locally in operator-rootless
+- **WHEN** `sandbox stop <inst>` or `sandbox destroy <inst>` runs with `docker_execution_mode == operator-rootless`
+- **THEN** the `compose-down` op runs as a local `docker compose down` subprocess with no `machinectl` crossing
+
+#### Scenario: helper-container ops run locally in operator-rootless
+- **WHEN** `sandbox start <inst>`'s helper-recipe ops (`helper-chown-files`, `helper-mkdir-chown-dirs`) run with `docker_execution_mode == operator-rootless`
+- **THEN** each helper op runs as a local hardened `docker run` subprocess with no `machinectl` crossing
+
+#### Scenario: status and warm-check compose-ps run locally in operator-rootless
+- **WHEN** a `sandbox status` query or a lifecycle warm-check runs `compose-ps` with `docker_execution_mode == operator-rootless`
+- **THEN** the `compose-ps` op runs as a local `docker compose ps` subprocess with no `machinectl` crossing
+

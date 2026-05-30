@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox status` command, which displays the current state of the sandbox instance for the current project directory — including container health, IPAM allocation, enabled components, and configuration completeness warnings.
-
 ## Requirements
-
 ### Requirement: Workspaces Section in Status Panel
 
 `sandbox status [<inst>]` SHALL display a Workspaces section in the Rich panel listing each workspace's name, bootstrap mode, path, and state. State values:
@@ -112,7 +110,6 @@ The `ip_map` used by `sandbox status` SHALL include entries for all containers w
 - **WHEN** `sandbox status` constructs the IP display map
 - **THEN** the map does NOT reference `dns_sidecar_ip`, `proxy_ip`, `admin_isolated_ip`, `mcp_firecrawl_isolated_ip`, `admin_admin_ip`, `admin_proxy_ip`, `coredns_admin_ip`, `dnsdist_admin_ip`, `proxy_admin_ip`, or `db_postgres_admin_ip`
 
-
 ### Requirement: Per-User State Initialization Required
 The `sandbox status` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
 
@@ -123,3 +120,18 @@ The `sandbox status` command SHALL refuse to operate when the per-user state tre
 #### Scenario: Resolved home in error message
 - **WHEN** the status command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home`
+
+### Requirement: Container-Status Probe Honors Execution Mode
+
+The container-status query that backs `sandbox status` and the lifecycle warm-checks (`_container_status` → `compose-ps`) SHALL honor `docker_execution_mode`. In `operator-rootless` mode it SHALL obtain container status by running `docker compose ps` as a local subprocess (via `core.dispatch.probe(Op.COMPOSE_PS, …)`, which itself routes to the local path), with no `machinectl` crossing. The returned status semantics (running / stopped / not-created) and the non-raising warm-check behavior SHALL be identical across both modes.
+
+#### Scenario: status query runs locally in operator-rootless mode
+
+- **WHEN** `sandbox status <inst>` (or a lifecycle warm-check) queries container status with `docker_execution_mode == operator-rootless`
+- **THEN** the `compose-ps` probe runs as a local `docker compose ps` subprocess with no `machinectl` crossing, and yields the same running/stopped/not-created determination it would in `separate-user` mode
+
+#### Scenario: warm-check remains non-raising across modes
+
+- **WHEN** the warm-check probe fails (daemon down, instance absent) in `operator-rootless` mode
+- **THEN** it returns a non-running result without raising, identically to `separate-user` mode
+
