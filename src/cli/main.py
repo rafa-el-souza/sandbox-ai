@@ -45,6 +45,7 @@ from core.doctor import (
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import (
+    DockerExecutionMode,
     HostConfig,
     HostSettings,
     MachinectlAuth,
@@ -292,6 +293,7 @@ def _container_status(
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
 
@@ -314,7 +316,7 @@ def _container_status(
     # ``--compose-file`` / ``--env-file`` operands are resolved internally by
     # ``invoke``'s single operator-side resolver (``_resolve_compose_state``),
     # so they are no longer constructed here.
-    host_config = minimal_host_config(host_user, auth)
+    host_config = minimal_host_config(host_user, auth, mode)
     outcome = dispatch.probe("compose-ps", [config.instance.name], host_config)
     if not outcome.ok:
         return []
@@ -345,6 +347,7 @@ def _warm_check(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> bool:
     """Check if containers are already running. Returns True if warm.
 
@@ -355,7 +358,7 @@ def _warm_check(
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, host_user, config, auth))
+    return bool(_container_status(instance_dir, host_user, config, auth, mode))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -1664,11 +1667,17 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     session_log = session_log_dir / f"{timestamp}.log"
 
-    # ProxyCommand: pipe_cmd → docker exec -i <admin> /fwd <ip>:9999.
+    # ProxyCommand: docker exec -i <admin> /fwd <ip>:9999, optionally
+    # crossing the privilege boundary via ``pipe_cmd``.
     # Joined via shlex.join so the value can be passed as a single
     # ``-o ProxyCommand=...`` token to ssh.
-    proxy_argv = [
-        *pipe_cmd(sbuser),
+    #
+    # In operator-rootless mode (per design D5) the dockerd runs under the
+    # operator itself, so there is no boundary to cross: the ProxyCommand is
+    # the bare local ``docker exec`` with no ``systemd-run --pipe --uid=``
+    # prefix. In separate-user mode the ``pipe_cmd`` byte-pipe prefix crosses
+    # into the unprivileged sandbox user as before.
+    docker_exec_argv = [
         "/usr/bin/docker",
         "exec",
         "-i",
@@ -1676,6 +1685,10 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         "/fwd",
         f"{core_ipc_ip}:9999",
     ]
+    if host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        proxy_argv = docker_exec_argv
+    else:
+        proxy_argv = [*pipe_cmd(sbuser), *docker_exec_argv]
     proxy_command = shlex.join(proxy_argv)
 
     return [
@@ -2630,7 +2643,7 @@ def start(
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, host_user, auth):
+    if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
@@ -2789,10 +2802,12 @@ def stop(
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    host_user, auth = _resolve_host_config()
+    host_settings = _resolve_host_settings()
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
 
     # Warm check
-    if not _warm_check(instance_dir, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
@@ -2875,7 +2890,7 @@ def attach(
         raise typer.Exit(code=1)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth, host_config.host.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
@@ -3253,7 +3268,9 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     auth = host_settings.machinectl_authentication
 
     # Container status
-    containers = _container_status(instance_dir, host_user, config, auth)
+    containers = _container_status(
+        instance_dir, host_user, config, auth, host_settings.docker_execution_mode
+    )
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
@@ -3395,8 +3412,10 @@ def _require_instance_stopped(inst: str, instance_dir: str) -> None:
     Workspace mutations (add/remove/rename/restore) require the instance to
     be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
     """
-    host_user, auth = _resolve_host_config()
-    if _warm_check(instance_dir, host_user, auth):
+    host_settings = _resolve_host_settings()
+    host_user = host_settings.docker_unprivileged_user
+    auth = host_settings.machinectl_authentication
+    if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(
             f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
             style="red",

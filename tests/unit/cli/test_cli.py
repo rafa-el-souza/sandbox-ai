@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, call, patch
 import cli.main as _cli_main_module
 import pytest
 import typer
+from core.host_config import DockerExecutionMode
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
@@ -1803,6 +1804,7 @@ class TestBuildAttachArgv:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
+        mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
     ) -> list[str]:
         from cli.main import _build_attach_argv
         from core.host_config import HostConfig, HostSettings
@@ -1819,7 +1821,9 @@ class TestBuildAttachArgv:
         (home / "instances" / "myproj" / "secrets").mkdir(parents=True)
         monkeypatch.setenv("SANDBOX_AI_HOME", str(home))
 
-        cfg = HostConfig(host=HostSettings(docker_unprivileged_user="sandbox"))
+        cfg = HostConfig(
+            host=HostSettings(docker_unprivileged_user="sandbox", docker_execution_mode=mode)
+        )
         return _build_attach_argv("myproj", "main", cfg)
 
     def test_argv_starts_with_tlog_rec_writer_file(
@@ -1847,6 +1851,7 @@ class TestBuildAttachArgv:
     def test_argv_proxy_command_uses_pipe_cmd_not_sudo(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # Default mode is separate-user — ProxyCommand crosses via pipe_cmd.
         argv = self._invoke(monkeypatch, tmp_path)
         proxy = next(a for a in argv if a.startswith("ProxyCommand="))
         # pipe_cmd shape: systemd-run -q --pipe --uid=<sbuser>
@@ -1859,6 +1864,27 @@ class TestBuildAttachArgv:
         # /fwd into the admin container.
         assert "/fwd" in proxy
         assert "myproj-admin-1" in proxy
+        assert ":9999" in proxy
+
+    def test_argv_proxy_command_operator_rootless_has_no_pipe_cmd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Operator-rootless mode (C-003 §5 / design D5): the ProxyCommand is
+        # the bare local ``docker exec`` with NO ``systemd-run --pipe --uid=``
+        # byte-pipe prefix — the dockerd runs under the operator, so there is
+        # no boundary to cross.
+        argv = self._invoke(
+            monkeypatch, tmp_path, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        assert "systemd-run" not in proxy
+        assert "--uid=" not in proxy
+        # Still the same bare docker exec -i <project>-admin-1 /fwd <ip>:9999
+        # (matching the separate-user test's loose substring assertions; the
+        # project name carries the sanitized-username prefix, e.g. dev-myproj).
+        assert "/usr/bin/docker exec -i " in proxy
+        assert "myproj-admin-1" in proxy
+        assert "/fwd" in proxy
         assert ":9999" in proxy
 
     def test_argv_target_port_user_and_remote_command(
@@ -3567,6 +3593,68 @@ class TestContainerStatus:
             containers = _container_status(str(tmp_path), "s", self._config())
 
         assert containers == []
+
+    def test_default_mode_probes_separate_user(self, tmp_path: Path) -> None:
+        """Omitting ``mode`` threads ``SEPARATE_USER`` into the probe host_config
+        (C-003 §6: the default execution mode is separate-user)."""
+        from cli.main import _container_status
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch(
+            "cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout="")
+        ) as mock_probe:
+            _container_status(str(tmp_path), "s", self._config())
+
+        (_op, _args, host_config), _kwargs = mock_probe.call_args
+        assert host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+
+    def test_operator_rootless_mode_threaded_to_probe(self, tmp_path: Path) -> None:
+        """C-003 §6: when ``mode=OPERATOR_ROOTLESS`` is threaded, the probe's
+        ``host_config`` carries the operator-rootless mode — so dispatch.probe
+        routes to the local path (the local-vs-machinectl argv shape is covered
+        by test_dispatch.py; this is the cli-layer contract)."""
+        from cli.main import _container_status
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        with patch(
+            "cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout="")
+        ) as mock_probe:
+            _container_status(
+                str(tmp_path),
+                "s",
+                self._config(),
+                mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            )
+
+        (_op, _args, host_config), _kwargs = mock_probe.call_args
+        assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+    def test_warm_check_non_raising_in_operator_rootless(self, tmp_path: Path) -> None:
+        """C-003 §6: a failing probe (daemon down / instance absent) yields a
+        non-running result without raising in operator-rootless mode, identically
+        to separate-user."""
+        from cli.main import _warm_check
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+        (tmp_path / "sandbox.toml").write_text(
+            '[instance]\nname = "t"\nhost_uid = "1000"\n'
+            '[workspaces.main]\nbootstrap_mode = "empty"\npath = "/x"\n'
+        )
+
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=False)):
+            warm = _warm_check(
+                str(tmp_path), "s", mode=DockerExecutionMode.OPERATOR_ROOTLESS
+            )
+
+        assert warm is False
 
 
 # ── Status Command ───────────────────────────────────────────────────────────
@@ -6003,9 +6091,11 @@ class TestPolkitEndToEnd:
             host_user: str,
             config: object,
             auth: MachinectlAuth,
+            mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
         ) -> list[object]:
             captured["host_user"] = host_user
             captured["auth"] = auth
+            captured["mode"] = mode
             return []
 
         with (
