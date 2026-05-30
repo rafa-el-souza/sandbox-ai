@@ -1749,7 +1749,7 @@ class TestPhaseComposeUpDirect:
         from typing import cast
 
         from cli.main import _phase_compose_up
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         inst_dir = isolated_sandbox_ai_home / "instances" / "t"
         (inst_dir / "docker").mkdir(parents=True, exist_ok=True)
@@ -1772,6 +1772,7 @@ class TestPhaseComposeUpDirect:
         class _FakeHostSettings:
             docker_unprivileged_user = "sandbox"
             machinectl_authentication = MachinectlAuth.SUDO
+            docker_execution_mode = DockerExecutionMode.SEPARATE_USER
 
         class _FakeHostConfig:
             host = _FakeHostSettings()

@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 from cli.main import _compose_up_cmd_plan, _phase_compose_up
 from core.compose import compose_project_name
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
 
 if TYPE_CHECKING:
     import pytest
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 class _FakeHostSettings:
     docker_unprivileged_user = "sandbox"
+    docker_execution_mode = DockerExecutionMode.SEPARATE_USER
 
     def __init__(self, auth: MachinectlAuth) -> None:
         self.machinectl_authentication = auth

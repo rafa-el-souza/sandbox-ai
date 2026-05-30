@@ -17,7 +17,7 @@ from core.actions.compose import ComposeUpAction
 from core.actions.context import ActionContext
 from core.compose import compose_project_name
 from core.executor import Executor
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
 
 if TYPE_CHECKING:
     from core.host_config import HostConfig
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 class _FakeHostSettings:
     docker_unprivileged_user = "claude-sandbox"
+    docker_execution_mode = DockerExecutionMode.SEPARATE_USER
 
     def __init__(self, auth: MachinectlAuth) -> None:
         self.machinectl_authentication = auth

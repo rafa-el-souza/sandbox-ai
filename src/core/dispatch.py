@@ -705,18 +705,8 @@ def build_target_argv(op: Op | str, args: Sequence[str], host_config: HostConfig
 
 
 def _is_operator_rootless(host_config: HostConfig) -> bool:
-    """Return ``True`` iff ``host_config`` selects the operator-rootless mode.
-
-    Reads ``host.docker_execution_mode`` (C-003 precursor field). A host config
-    that predates the field — or a lightweight stand-in that omits it — defaults
-    to ``SEPARATE_USER``, the same default the :class:`HostSettings` model
-    declares, so the dispatcher keeps its historical behavior unless the
-    operator-rootless mode is explicitly selected.
-    """
-    mode = getattr(
-        host_config.host, "docker_execution_mode", DockerExecutionMode.SEPARATE_USER
-    )
-    return mode is DockerExecutionMode.OPERATOR_ROOTLESS
+    """Return ``True`` iff ``host_config`` selects the operator-rootless mode."""
+    return host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 def build_invocation(
