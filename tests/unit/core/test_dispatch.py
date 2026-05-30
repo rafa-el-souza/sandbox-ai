@@ -1162,12 +1162,12 @@ class TestProbe:
 
 
 def _separate_hc() -> HostConfig:
-    from core.host_config import DockerExecutionMode, MachinectlAuth
+    # Canonical separate-user fake: ``_FakeHostConfig`` defaults mode to
+    # SEPARATE_USER, so the bare ``MachinectlAuth.SUDO`` construction is the
+    # single source for the operator-rootless tests' separate-user arm.
+    from core.host_config import MachinectlAuth
 
-    return cast(
-        "HostConfig",
-        _FakeHostConfig(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER),
-    )
+    return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
 
 
 def _rootless_hc() -> HostConfig:

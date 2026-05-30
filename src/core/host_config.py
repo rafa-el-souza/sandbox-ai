@@ -153,6 +153,11 @@ def minimal_host_config(
     )
 
 
+def is_operator_rootless(host_config: HostConfig) -> bool:
+    """True iff host_config selects operator-rootless execution mode."""
+    return host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+
 def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
     """Build the machinectl shell prefix for the given user and auth mode.
 

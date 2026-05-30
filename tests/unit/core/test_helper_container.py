@@ -28,7 +28,7 @@ from core import dispatch
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
-from core.host_config import MachinectlAuth, SubuidOutOfRangeError
+from core.host_config import DockerExecutionMode, MachinectlAuth, SubuidOutOfRangeError
 
 # Standard fixture matching the change's spec scenarios:
 # /etc/subuid and /etc/subgid both have ``claude-sandbox:165536:65536``.
@@ -127,6 +127,37 @@ class TestHelperChownFiles:
         )
         hc = captured_invoke[0]["host_config"]
         assert hc.host.machinectl_authentication == MachinectlAuth.POLKIT
+
+    def test_default_execution_mode_is_separate_user(
+        self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
+    ) -> None:
+        helper_chown_files(
+            _HOST_USER,
+            "/p",
+            ["a"],
+            owner_uid=_HOST_UID,
+            owner_gid=_HOST_GID,
+            mode=0o640,
+            machinectl_auth=MachinectlAuth.SUDO,
+        )
+        hc = captured_invoke[0]["host_config"]
+        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+    def test_operator_rootless_execution_mode_propagates(
+        self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
+    ) -> None:
+        helper_chown_files(
+            _HOST_USER,
+            "/p",
+            ["a"],
+            owner_uid=_HOST_UID,
+            owner_gid=_HOST_GID,
+            mode=0o640,
+            machinectl_auth=MachinectlAuth.SUDO,
+            execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        )
+        hc = captured_invoke[0]["host_config"]
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_empty_files_is_noop_skips_translation(
         self, captured_invoke: list[dict[str, Any]]
@@ -347,6 +378,35 @@ class TestHelperMkdirChownDirs:
         hc = captured_invoke[0]["host_config"]
         assert hc.host.docker_unprivileged_user == _HOST_USER
         assert hc.host.machinectl_authentication == MachinectlAuth.POLKIT
+
+    def test_default_execution_mode_is_separate_user(
+        self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
+    ) -> None:
+        helper_mkdir_chown_dirs(
+            _HOST_USER,
+            "/p",
+            ["x"],
+            owner_uid=_HOST_UID,
+            owner_gid=_HOST_GID,
+            machinectl_auth=MachinectlAuth.SUDO,
+        )
+        hc = captured_invoke[0]["host_config"]
+        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+    def test_operator_rootless_execution_mode_propagates(
+        self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
+    ) -> None:
+        helper_mkdir_chown_dirs(
+            _HOST_USER,
+            "/p",
+            ["x"],
+            owner_uid=_HOST_UID,
+            owner_gid=_HOST_GID,
+            machinectl_auth=MachinectlAuth.SUDO,
+            execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        )
+        hc = captured_invoke[0]["host_config"]
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_translation_host_absolute_to_in_container(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]

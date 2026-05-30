@@ -52,7 +52,7 @@ from core.compose import compose_project_name
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor, normalize_captured_output
 from core.helper_container import _hardened_docker_run
-from core.host_config import DockerExecutionMode, machinectl_cmd, pipe_cmd
+from core.host_config import is_operator_rootless, machinectl_cmd, pipe_cmd
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
 from core.journal_audit import emit_op_audit
 from core.registry import InstanceRegistry
@@ -704,11 +704,6 @@ def build_target_argv(op: Op | str, args: Sequence[str], host_config: HostConfig
     return OP_SPECS[resolved].build_target_argv(args, host_config)
 
 
-def _is_operator_rootless(host_config: HostConfig) -> bool:
-    """Return ``True`` iff ``host_config`` selects the operator-rootless mode."""
-    return host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
-
-
 def build_invocation(
     op: Op | str,
     args: Sequence[str],
@@ -753,7 +748,7 @@ def build_invocation(
         if op_value in _COMPOSE_VERB
         else list(args)
     )
-    if _is_operator_rootless(host_config):
+    if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
     inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
     return [
@@ -859,7 +854,7 @@ def invoke(
     runs.
     """
     argv = build_invocation(op, args, host_config)
-    if _is_operator_rootless(host_config):
+    if is_operator_rootless(host_config):
         op_value = Op(op).value
         instance = args[0] if op_value in _COMPOSE_VERB else ""
         emit_op_audit(op_value, list(args), argv, instance)

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from core.actions.context import ActionContext
 from core.executor import Executor
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
 
 
 def _make_ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> ActionContext:
@@ -41,3 +41,19 @@ def test_context_is_frozen() -> None:
 def test_context_supports_polkit_auth() -> None:
     ctx = _make_ctx(MachinectlAuth.POLKIT)
     assert ctx.auth == MachinectlAuth.POLKIT
+
+
+def test_docker_execution_mode_defaults_to_separate_user() -> None:
+    ctx = _make_ctx()
+    assert ctx.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+
+def test_docker_execution_mode_round_trips() -> None:
+    ctx = ActionContext(
+        host_user="claude-sandbox",
+        auth=MachinectlAuth.SUDO,
+        executor=Executor(),
+        instance_dir=Path("/inst"),
+        docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+    )
+    assert ctx.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS

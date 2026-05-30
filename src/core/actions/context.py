@@ -6,6 +6,12 @@ Bundles state that is uniform across a phase invocation:
   daemon (``[host].docker_unprivileged_user`` from ``sandbox-ai.toml``).
 - ``auth`` — the machinectl auth mode (sudo / polkit) read from the
   same per-host config file.
+- ``docker_execution_mode`` — the resolved
+  :class:`~core.host_config.DockerExecutionMode` (separate-user / operator-rootless),
+  flat plumbing alongside ``auth``. The helper-container Actions
+  (``HelperMkdirChownAction`` / ``HelperCpChownAction``) forward it to the
+  helper primitive so that in ``operator-rootless`` mode the helper ``docker
+  run`` op executes as a local subprocess with no ``machinectl`` crossing.
 - ``executor`` — the sterile-subprocess executor; the only sanctioned
   way to shell out from an Action's ``.execute()``.
 - ``instance_dir`` — the per-instance directory the action is operating
@@ -28,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from core.host_config import DockerExecutionMode
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -44,3 +52,4 @@ class ActionContext:
     executor: Executor
     instance_dir: Path
     host_config: HostConfig | None = None
+    docker_execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER

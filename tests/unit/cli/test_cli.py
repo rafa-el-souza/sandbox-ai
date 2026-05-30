@@ -21,7 +21,9 @@ from core.host_config import DockerExecutionMode
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
+    from core.actions.context import ActionContext
     from core.dispatch import ProbeOutcome
+    from core.host_config import HostConfig
     from core.hydration import InstanceConfig
 
     from tests.unit.conftest import HostConfigFactory
@@ -1110,6 +1112,128 @@ class TestStopClean:
             assert down_call[1].get("volumes") is True
 
 
+def _operator_rootless_config() -> HostConfig:
+    from core.host_config import HostConfig
+
+    return HostConfig.model_validate(
+        {
+            "host": {
+                "docker_unprivileged_user": HOST_USER,
+                "machinectl_authentication": "sudo",
+                "docker_execution_mode": "operator-rootless",
+            }
+        }
+    )
+
+
+class TestLifecycleThreadsExecutionMode:
+    """B2: stop/destroy thread the resolved mode into ``_compose_down``'s
+    ``dispatch.invoke`` host_config; start's helper phases set the mode on the
+    ActionContext that drives the helper-container ops."""
+
+    def test_stop_threads_operator_rootless_into_compose_down(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+        from core import dispatch
+
+        captured: list[HostConfig] = []
+
+        def _capture_invoke(op: object, args: object, host_config: HostConfig, **kw: object) -> object:
+            captured.append(host_config)
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
+            patch("cli.main._warm_check", return_value=True),
+            patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
+            patch.object(dispatch, "invoke", side_effect=_capture_invoke),
+        ):
+            result = runner.invoke(app, ["stop", inst])
+            assert result.exit_code == 0
+            assert len(captured) == 1
+            assert captured[0].host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+    def test_destroy_threads_operator_rootless_into_compose_down(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+
+        from cli.main import app
+        from core import dispatch
+
+        captured: list[HostConfig] = []
+
+        def _capture_invoke(op: object, args: object, host_config: HostConfig, **kw: object) -> object:
+            captured.append(host_config)
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._revoke_acls"),
+            patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
+            patch("cli.main._release_lock"),
+            patch("shutil.rmtree"),
+            patch.object(dispatch, "invoke", side_effect=_capture_invoke),
+        ):
+            result = runner.invoke(
+                app, ["destroy", inst, "--force", "--backup-workspaces=none"]
+            )
+            assert result.exit_code == 0
+            # D3 compose-down + D5 compose-down -v both carry the mode.
+            assert len(captured) == 2
+            for hc in captured:
+                assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+    def test_start_helper_phases_set_action_context_mode(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path, stub_bridge_resolution: None
+    ) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import _phase_helper_cp_chown_ro_files, _phase_helper_mkdir_chown_cache_log
+        from core.host_config import MachinectlAuth
+
+        cp_ctx: list[ActionContext] = []
+        mkdir_ctx: list[ActionContext] = []
+
+        class _RecordCp:
+            parent = Path("/inst/secrets")
+            files = ("k",)
+
+            def execute(self, ctx: ActionContext) -> None:
+                cp_ctx.append(ctx)
+
+        class _RecordMkdir:
+            parent = Path("/inst/cache")
+            leaves = ("c",)
+
+            def execute(self, ctx: ActionContext) -> None:
+                mkdir_ctx.append(ctx)
+
+        with patch("cli.main._helper_cp_chown_plan", return_value=[_RecordCp()]):
+            _phase_helper_cp_chown_ro_files(
+                "/inst", HOST_USER, MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+            )
+        assert cp_ctx[0].docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+        with (
+            patch("cli.main._helper_mkdir_chown_plan", return_value=[_RecordMkdir()]),
+            patch("cli.main.subprocess.run"),
+        ):
+            _phase_helper_mkdir_chown_cache_log(
+                "/inst", HOST_USER, MachinectlAuth.SUDO, None, DockerExecutionMode.OPERATOR_ROOTLESS
+            )
+        assert mkdir_ctx[0].docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+
 # ── sandbox attach ───────────────────────────────────────────────────────────
 
 
@@ -1767,8 +1891,6 @@ class TestPhaseComposeUpDirect:
         (state / "instances.json").write_text(
             _json.dumps({"t": {"instance_dir": str(inst_dir), "created_at": "2026-01-01T00:00:00Z"}})
         )
-
-        from core.host_config import HostConfig
 
         class _FakeHostSettings:
             docker_unprivileged_user = "sandbox"
@@ -3366,6 +3488,43 @@ class TestDryRunExistingInstance:
 
         result = runner.invoke(app, ["start", inst, "--dry-run"])
         assert "docker compose" in result.output.lower() or "compose" in result.output.lower()
+
+    def test_dry_run_handover_preview_uses_pipe_cmd_in_separate_user(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """B1: default separate-user mode shows the pipe_cmd-prefixed ProxyCommand."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
+
+        from cli.main import app
+
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert result.exit_code == 0
+        assert "ProxyCommand=" in result.output
+        assert "systemd-run" in result.output
+        assert "--uid=" in result.output
+
+    def test_dry_run_handover_preview_no_pipe_cmd_in_operator_rootless(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """B1: operator-rootless preview's ProxyCommand has no systemd-run/--uid= token."""
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
+
+        from cli.main import app
+
+        with patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()):
+            result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert result.exit_code == 0
+        assert "ProxyCommand=" in result.output
+        # The handover preview must NOT misrepresent the runtime command: in
+        # operator-rootless the ProxyCommand is a bare local docker exec.
+        assert "systemd-run" not in result.output
+        assert "--uid=" not in result.output
 
     def test_dry_run_template_error_exits_1(
         self, runner: CliRunner, mock_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch

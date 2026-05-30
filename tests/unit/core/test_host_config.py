@@ -22,6 +22,7 @@ from core.host_config import (
     host_gid_for_in_container,
     host_id_for_in_container,
     in_container_gid_for_host_gid,
+    is_operator_rootless,
     machinectl_cmd,
     minimal_host_config,
     parse_subgid_for_user,
@@ -262,6 +263,20 @@ class TestMinimalHostConfigMode:
         """Passing mode=OPERATOR_ROOTLESS sets the field."""
         hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
         assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+
+class TestIsOperatorRootless:
+    """is_operator_rootless() single-source mode predicate."""
+
+    def test_true_for_operator_rootless(self) -> None:
+        """Returns True when the host_config carries OPERATOR_ROOTLESS."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert is_operator_rootless(hc) is True
+
+    def test_false_for_separate_user(self) -> None:
+        """Returns False for the default SEPARATE_USER mode."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        assert is_operator_rootless(hc) is False
 
 
 # ─── Task 1.3: machinectl_cmd() ──────────────────────────────────────────────

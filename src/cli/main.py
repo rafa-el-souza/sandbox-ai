@@ -53,6 +53,7 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
+    is_operator_rootless,
     minimal_host_config,
     pipe_cmd,
     sandbox_ai_home,
@@ -1446,6 +1447,7 @@ def _phase_helper_cp_chown_ro_files(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> None:
     """Phase 5d: helper-cp + chown for ro single-file mounts.
 
@@ -1463,6 +1465,7 @@ def _phase_helper_cp_chown_ro_files(
         auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
+        docker_execution_mode=mode,
     )
     for action in _helper_cp_chown_plan(instance_dir, host_user):
         action.execute(ctx)
@@ -1498,6 +1501,7 @@ def _phase_helper_mkdir_chown_cache_log(
     host_user: str,
     auth: MachinectlAuth,
     dev_user: str | None = None,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> None:
     """Phase 5c: helper-mkdir + chown for cache/log leaves.
 
@@ -1515,6 +1519,7 @@ def _phase_helper_mkdir_chown_cache_log(
         auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
+        docker_execution_mode=mode,
     )
     for action in _helper_mkdir_chown_plan(instance_dir, host_user):
         parent_abs = str(action.parent)
@@ -1685,10 +1690,9 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         "/fwd",
         f"{core_ipc_ip}:9999",
     ]
-    if host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS:
-        proxy_argv = docker_exec_argv
-    else:
-        proxy_argv = [*pipe_cmd(sbuser), *docker_exec_argv]
+    proxy_argv = (
+        docker_exec_argv if is_operator_rootless(host_config) else [*pipe_cmd(sbuser), *docker_exec_argv]
+    )
     proxy_command = shlex.join(proxy_argv)
 
     return [
@@ -1722,6 +1726,7 @@ def _compose_down(
     *,
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> None:
     """Run docker compose down via the typed ``compose-down`` dispatcher op.
 
@@ -1736,7 +1741,7 @@ def _compose_down(
     ``--compose-file`` expansion are all internal to the single
     ``core.dispatch`` seam — not constructed here.
     """
-    host_config = minimal_host_config(host_user, auth)
+    host_config = minimal_host_config(host_user, auth, mode)
     args = [config.instance.name, "--volumes"] if volumes else [config.instance.name]
     dispatch.invoke("compose-down", args, host_config)
 
@@ -1778,6 +1783,7 @@ def _phase_stop_teardown(
     *,
     volumes: bool,
     auth: MachinectlAuth,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[str]:
     """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
     Sequence requirement).
@@ -1795,7 +1801,7 @@ def _phase_stop_teardown(
     compose-down (stop propagates, destroy demotes to a warning).
     """
     warnings: list[str] = []
-    _compose_down(host_user, config, volumes=volumes, auth=auth)
+    _compose_down(host_user, config, volumes=volumes, auth=auth, mode=mode)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
     warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
     return warnings
@@ -1940,9 +1946,24 @@ def _dry_run_pipeline(inst: str) -> None:
     workspace_names = sorted(config.workspaces.keys())
     ws_preview = workspace_names[0] if len(workspace_names) == 1 else "<ws>"
     sbuser = host_user
-    proxy_cmd_preview = shlex.join(
-        [*pipe_cmd(sbuser), "/usr/bin/docker", "exec", "-i", f"{project_name}-admin-1", "/fwd", "<core_ipc_ip>:9999"]
+    # Branch the preview exactly like ``_build_attach_argv`` so the dry-run does
+    # not misrepresent the runtime command (design D2 / anti-hack rule 7): in
+    # operator-rootless mode the ProxyCommand is the bare local ``docker exec``
+    # with no ``pipe_cmd`` (``systemd-run --pipe --uid=``) prefix.
+    proxy_docker_exec = [
+        "/usr/bin/docker",
+        "exec",
+        "-i",
+        f"{project_name}-admin-1",
+        "/fwd",
+        "<core_ipc_ip>:9999",
+    ]
+    proxy_argv_preview = (
+        proxy_docker_exec
+        if is_operator_rootless(preview_host_config)
+        else [*pipe_cmd(sbuser), *proxy_docker_exec]
     )
+    proxy_cmd_preview = shlex.join(proxy_argv_preview)
     handover_preview = (
         f"tlog-rec --writer=file --file-path=<sessions>/{project_name}/<UTC>.log -- "
         f"ssh -i <inst>/secrets/ipc_ssh_key "
@@ -2733,11 +2754,13 @@ def start(
         console.print("✓ ACL — post-hydrate daemon-readable files")
 
         # Phase 6a: helper-mkdir+chown for cache/log leaves
-        _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
+        _phase_helper_mkdir_chown_cache_log(
+            instance_dir, host_user, auth, dev_user, host_settings.docker_execution_mode
+        )
         console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
         # Phase 6b: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
-        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
+        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth, host_settings.docker_execution_mode)
         console.print("✓ Ownership — ro config files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase).
@@ -2835,7 +2858,13 @@ def stop(
     # `_phase_stop_teardown` (cluster 3 — Teardown Sequence requirement).
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     for w in _phase_stop_teardown(
-        instance_dir, host_user, config, ws_paths, volumes=clean, auth=auth
+        instance_dir,
+        host_user,
+        config,
+        ws_paths,
+        volumes=clean,
+        auth=auth,
+        mode=host_settings.docker_execution_mode,
     ):
         console.print(f"⚠ {w}", style="yellow")
 
@@ -2981,7 +3010,10 @@ def destroy(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    host_user, auth = _resolve_host_config()
+    host_config = _resolve_full_host_config()
+    host_user = host_config.host.docker_unprivileged_user
+    auth = host_config.host.machinectl_authentication
+    mode = host_config.host.docker_execution_mode
     available = set(config.workspaces.keys())
 
     # D1: Confirmation + backup-set selection.
@@ -3033,7 +3065,7 @@ def destroy(
 
         # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(host_user, config, volumes=False, auth=auth)
+            _compose_down(host_user, config, volumes=False, auth=auth, mode=mode)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
@@ -3084,6 +3116,7 @@ def destroy(
                     ws_paths,
                     volumes=True,
                     auth=auth,
+                    mode=mode,
                 )
             except SandboxExecutionError as e:
                 console.print(f"⚠ Compose teardown warning: {e}", style="yellow")

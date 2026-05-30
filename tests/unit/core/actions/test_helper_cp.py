@@ -9,18 +9,22 @@ from typing import TYPE_CHECKING
 from core.actions.context import ActionContext
 from core.actions.helper_cp import HelperCpChownAction
 from core.executor import Executor
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
 
 if TYPE_CHECKING:
     import pytest
 
 
-def _ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> ActionContext:
+def _ctx(
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+) -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
         auth=auth,
         executor=Executor(),
         instance_dir=Path("/inst"),
+        docker_execution_mode=mode,
     )
 
 
@@ -89,8 +93,9 @@ def test_execute_delegates_to_helper_chown_files(monkeypatch: pytest.MonkeyPatch
         gid: int,
         mode: int,
         auth: object,
+        execution_mode: object = DockerExecutionMode.SEPARATE_USER,
     ) -> None:
-        invocations.append((host_user, parent, tuple(files), uid, gid, mode, auth))
+        invocations.append((host_user, parent, tuple(files), uid, gid, mode, auth, execution_mode))
 
     monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
     action = HelperCpChownAction(
@@ -102,8 +107,44 @@ def test_execute_delegates_to_helper_chown_files(monkeypatch: pytest.MonkeyPatch
     )
     action.execute(_ctx(MachinectlAuth.SUDO))
     assert invocations == [
-        ("claude-sandbox", "/inst/secrets", ("ipc_host_key",), 166535, 166535, 0o600, MachinectlAuth.SUDO)
+        (
+            "claude-sandbox",
+            "/inst/secrets",
+            ("ipc_host_key",),
+            166535,
+            166535,
+            0o600,
+            MachinectlAuth.SUDO,
+            DockerExecutionMode.SEPARATE_USER,
+        )
     ]
+
+
+def test_execute_forwards_operator_rootless_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake(
+        host_user: str,
+        parent: str,
+        files: Iterable[str],
+        uid: int,
+        gid: int,
+        mode: int,
+        auth: object,
+        execution_mode: object = DockerExecutionMode.SEPARATE_USER,
+    ) -> None:
+        captured["execution_mode"] = execution_mode
+
+    monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
+    action = HelperCpChownAction(
+        parent=Path("/inst/secrets"),
+        files=("ipc_host_key",),
+        owner_uid=166535,
+        owner_gid=166535,
+        mode=0o600,
+    )
+    action.execute(_ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS))
+    assert captured["execution_mode"] == DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 def test_typed_field_access_for_uid_gid_mode() -> None:

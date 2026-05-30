@@ -18,6 +18,15 @@ Intentional divergence from the Go version: the Go dispatcher prints a stderr
 note when journald is unavailable. Operator-side, stderr is the user's own
 terminal, so this shim stays silent — it catches ``OSError`` and returns
 without raising or printing. The op must never fail because journald is down.
+
+A second intentional divergence: ``SANDBOX_AI_ARGS_SUMMARY`` carries the
+*typed* args this shim is handed (what callers pass to
+``core.dispatch.invoke``/``probe``), NOT the post-``_expand_compose_wire``
+wire-expanded form the Go dispatcher logs. This is deliberate — the typed
+args are the cleaner audit summary and avoid a second wire-expansion
+side-effect on the local path. There is also no ``SANDBOX_AI_CHECK`` field:
+the local path issues no ``--check`` self-tests, so the Go dispatcher's
+check-marker field has no operator-side analogue.
 """
 
 from __future__ import annotations
