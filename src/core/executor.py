@@ -21,6 +21,25 @@ _BEGIN_RE = re.compile(r"^__SANDBOX_BEGIN_([0-9a-f]+)\s*$", re.MULTILINE)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
+def normalize_captured_output(raw: str) -> str:
+    """Normalize captured op output (single source of truth).
+
+    Three-step normalization shared by the ``separate-user`` framing-recovery
+    path (via :meth:`Executor._sanitize_pty_output`) and the
+    ``operator-rootless`` ``core.dispatch`` path:
+
+    - Strip ANSI escape sequences
+    - Remove carriage returns (PTY ONLCR line discipline artifact)
+    - Collapse runs of 3+ consecutive newlines to exactly 2
+
+    Idempotent: applying it to already-normalized output is a no-op.
+    """
+    clean = _ANSI_RE.sub("", raw)
+    clean = clean.replace("\r", "")
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean
+
+
 class Executor:
     """
     Deterministically handles POSIX subprocess executions.
@@ -31,15 +50,11 @@ class Executor:
     def _sanitize_pty_output(raw: str) -> str:
         """Strip PTY artifacts from captured non-interactive output.
 
-        Layer 2 defense-in-depth (D2):
-        - Strip ANSI escape sequences
-        - Remove carriage returns from PTY ONLCR line discipline
-        - Collapse runs of 3+ consecutive newlines to exactly 2
+        Layer 2 defense-in-depth (D2). Thin delegator to the module-level
+        :func:`normalize_captured_output` — the single source of truth for the
+        three-step normalization (ANSI strip, CR removal, blank-line collapse).
         """
-        clean = _ANSI_RE.sub("", raw)
-        clean = clean.replace("\r", "")
-        clean = re.sub(r"\n{3,}", "\n\n", clean)
-        return clean
+        return normalize_captured_output(raw)
 
     def run(
         self,
