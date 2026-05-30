@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING
 
 from core.dispatch import _DISPATCH_SOURCE_ENTRIES, compile_dispatcher
 from core.exceptions import SandboxExecutionError
+from core.host_config import DockerExecutionMode
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -274,4 +275,7 @@ PHASE = Phase(
     act=_act,
     reverify=_reverify,
     depends_on=("l6a",),
+    # fork B (E-005/F-027): operator-rootless bypasses the dispatcher entirely,
+    # so no dispatcher binary is ever compiled or installed in that mode.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

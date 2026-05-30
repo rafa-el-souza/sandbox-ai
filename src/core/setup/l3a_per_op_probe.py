@@ -73,7 +73,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import sudo_as_operator
+from core.host_config import DockerExecutionMode, sudo_as_operator
 from core.setup.l0_identity import resolve_machinectl_path
 from core.setup.l3_sudoers_polkit import _drop_in_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
@@ -219,4 +219,7 @@ PHASE = Phase(
     reverify=_reverify,
     depends_on=("l3",),
     rollback=_rollback,
+    # operator-rootless installs no L3 boundary rule, so there is no per-op
+    # sudoers grant to probe.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

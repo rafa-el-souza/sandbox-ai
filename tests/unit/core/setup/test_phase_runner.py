@@ -963,6 +963,105 @@ def test_apply_pass_mode_skip_does_not_block_dependents() -> None:
     assert out["b"].reverified is True
 
 
+# ── crossing-only phases skip in operator-rootless (M2 real-phase drive) ──────
+
+
+# The four crossing-only phases mode-gated to separate-user (M2): no dispatcher
+# binary, no sudoers/polkit AUTH GATE, no per-op probe, no fresh-session
+# re-probe in operator-rootless. Driving the REAL discovered phase set proves
+# the declarative ``applies_in`` skip reaches the runner end-to-end.
+_CROSSING_ONLY_IDS = frozenset({"l65", "l3", "l3a", "l8"})
+
+
+def _real_crossing_only_phases() -> list[Phase]:
+    """The real discovered l65/l3/l3a/l8 phases (their inter-deps preserved).
+
+    Filtered from ``discover_phases()`` so the assertions bind to the SHIPPED
+    ``PHASE`` objects, not a synthetic stand-in. ``l3a``→``l3``→``l8`` edges are
+    internal to this subset; ``l65``→``l6a`` and ``l3``→``l7`` are external and
+    satisfied via ``allow_external_deps`` in the passes below.
+    """
+    return [p for p in discover_phases() if p.id in _CROSSING_ONLY_IDS]
+
+
+def test_crossing_only_phases_are_separate_user_only() -> None:
+    """Each shipped crossing-only phase opts out of operator-rootless."""
+    phases = {p.id: p for p in _real_crossing_only_phases()}
+    assert set(phases) == _CROSSING_ONLY_IDS
+    for phase in phases.values():
+        assert phase.applies_in == frozenset(
+            {DockerExecutionMode.SEPARATE_USER}
+        )
+
+
+def test_real_crossing_only_phases_skip_in_operator_rootless_plan() -> None:
+    """Plan pass over the real phases SKIPS l65/l3/l3a/l8 in operator-rootless.
+
+    The mode-skip fires BEFORE any probe, so none of their host-touching probes
+    (``resolve_machinectl_path``, manifest/source-bundle reads) run — proving the
+    "no boundary rule, no dispatcher" end state declaratively.
+    """
+    phases = _real_crossing_only_phases()
+    out = {
+        o.phase_id: o
+        for o in run_plan_pass(
+            phases,
+            _ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS),
+            allow_external_deps=True,
+        )
+    }
+    assert set(out) == _CROSSING_ONLY_IDS
+    for pid in _CROSSING_ONLY_IDS:
+        assert out[pid].result == PhaseResult.SKIPPED
+        assert out[pid].detail == "skipped (operator-rootless)"
+
+
+def test_real_crossing_only_phases_skip_in_operator_rootless_apply() -> None:
+    """Apply pass SKIPS the same four — their acts (compile/install/probe) never
+    run in operator-rootless, so no host mutation or crossing is attempted."""
+    phases = _real_crossing_only_phases()
+    out = {
+        o.phase_id: o
+        for o in run_apply_pass(
+            phases,
+            _ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS),
+            allow_external_deps=True,
+        )
+    }
+    assert set(out) == _CROSSING_ONLY_IDS
+    for pid in _CROSSING_ONLY_IDS:
+        assert out[pid].result == PhaseResult.SKIPPED
+        assert out[pid].reverified is False
+
+
+def test_real_crossing_only_phases_run_in_separate_user_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SAME four real phases are NOT skipped in separate-user mode.
+
+    Their probes run (deterministically MISSING on a fresh tree: absent drop-in
+    / absent dispatcher manifest / verification-only l3a/l8) — the point is that
+    none come back SKIPPED, i.e. the mode gate is inactive in separate-user.
+    ``resolve_machinectl_path`` is pinned so l3's probe is host-independent.
+    """
+    monkeypatch.setattr(
+        "core.setup.l3_sudoers_polkit.resolve_machinectl_path",
+        lambda _hc: "/usr/bin/machinectl",
+    )
+    phases = _real_crossing_only_phases()
+    out = {
+        o.phase_id: o
+        for o in run_plan_pass(
+            phases,
+            _ctx(mode=DockerExecutionMode.SEPARATE_USER),
+            allow_external_deps=True,
+        )
+    }
+    assert set(out) == _CROSSING_ONLY_IDS
+    for pid in _CROSSING_ONLY_IDS:
+        assert out[pid].result != PhaseResult.SKIPPED
+
+
 # ── daemon_owner_user / daemon_owner_crossing (M4 shared contract) ────────────
 
 

@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import pipe_cmd, sudo_as_operator
+from core.host_config import DockerExecutionMode, pipe_cmd, sudo_as_operator
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -178,4 +178,8 @@ PHASE = Phase(
     reverify=_reverify,
     depends_on=("l3a",),
     rollback=None,
+    # operator-rootless has no privilege-boundary crossing and no boundary
+    # group to re-probe; the operator's subuid/linger posture is a doctor
+    # concern (C-005), not L8's. So L8 SKIPS entirely in operator-rootless.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

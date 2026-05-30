@@ -26,7 +26,12 @@ from pathlib import Path
 import pytest
 from core.dispatch import Op
 from core.exceptions import SandboxExecutionError
-from core.host_config import HostConfig, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    HostConfig,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l3a_per_op_probe as l3a
 from core.setup.l3a_per_op_probe import PHASE, PerOpProbeError
 from core.setup.phase_runner import (
@@ -290,3 +295,5 @@ def test_phase_identity_and_graph() -> None:
     assert PHASE.depends_on == ("l3",)
     assert PHASE.identity == Identity.OPERATOR
     assert PHASE.rollback is l3a._rollback
+    # no L3 rule to probe in operator-rootless → separate-user only.
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})

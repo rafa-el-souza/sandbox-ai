@@ -13,7 +13,12 @@ import subprocess
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import HostConfig, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    HostConfig,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l8_fresh_session as l8
 from core.setup.l8_fresh_session import PHASE, FreshSessionError
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -196,3 +201,5 @@ def test_phase_identity_and_graph() -> None:
     assert PHASE.depends_on == ("l3a",)
     assert PHASE.identity == Identity.OPERATOR
     assert PHASE.rollback is None
+    # no crossing/boundary group to re-probe in operator-rootless → sep-user only.
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})

@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING
 # the rule pins inside the bash command argv slot; ``Op`` is the single source
 # of truth for the enumerated ops (do not duplicate either literal).
 from core.dispatch import _DISPATCH_BINARY, Op
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
 from core.setup.l0_identity import resolve_machinectl_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
@@ -319,4 +319,7 @@ PHASE = Phase(
     reverify=_reverify,
     depends_on=("l7",),
     rollback=_rollback,
+    # operator-rootless has no orchestrator→sandbox crossing, so no
+    # privilege-boundary rule (sudoers/polkit AUTH GATE) is ever written.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

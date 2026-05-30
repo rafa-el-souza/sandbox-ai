@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.dispatch import Op
-from core.host_config import HostConfig, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    HostConfig,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l3_sudoers_polkit as l3
 from core.setup.l3_sudoers_polkit import (
     PHASE,
@@ -384,3 +389,5 @@ def test_phase_identity_and_graph() -> None:
     assert PHASE.depends_on == ("l7",)
     assert PHASE.identity == Identity.ROOT
     assert PHASE.rollback is l3._rollback
+    # no crossing → no sudoers/polkit AUTH GATE → separate-user only.
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})
