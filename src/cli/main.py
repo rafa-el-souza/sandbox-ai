@@ -2666,6 +2666,11 @@ def _setup_body(
     if update_runsc:
         return _run_setup_update_runsc(ctx)
 
+    if is_operator_rootless(ctx.host_config):
+        return _setup_body_operator_rootless(
+            ctx, dry_run=dry_run, yes=yes, flags=flags
+        )
+
     emit_distro_gate(is_tty=_stdin_is_tty(), assume_yes=yes)
 
     extras = selected_extras(flags)
@@ -2715,6 +2720,128 @@ def _setup_body(
     for line in cli_flow.summarize_apply(phases, apply_outcomes):
         console.print(line, markup=False)
     return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
+
+
+def _resolve_sandbox_executable() -> str:
+    """Resolve the absolute path of the running ``sandbox`` CLI for re-invocation.
+
+    The escalation re-invokes ``sandbox _bootstrap-host`` under ``sudo``; a bare
+    ``sandbox`` may not be on root's ``secure_path`` (the CLI is operator-installed
+    via ``pip``/``uv`` — design D6), so an absolute path is used. Prefer the PATH
+    lookup; fall back to this process's own ``argv[0]`` realpath.
+    """
+    return shutil.which("sandbox") or os.path.realpath(sys.argv[0])
+
+
+def _run_bootstrap_escalation(
+    items: frozenset[host_batch.BatchItem],
+    params: host_batch.BatchParams,
+    *,
+    is_tty: bool,
+) -> bool:
+    """Escalate the host-root batch ONCE via ``sudo sandbox _bootstrap-host`` (§8-D).
+
+    Returns ``True`` iff the batch was applied (sudo authorized and the sub-step
+    exited 0); ``False`` iff there is no usable escalation path or the sub-step
+    failed — the caller then emits the remediation block and exits non-zero
+    (fail-closed). De-escalation is automatic: the sub-step applies the batch as
+    root and exits, and this operator-run parent continues unprivileged.
+
+    TTY-aware (O2): interactive → attempt ``sudo`` directly (a password prompt is
+    normal, so stdio is inherited); non-interactive → a prompt cannot be answered,
+    so require passwordless sudo (a ``sudo -n true`` probe) before attempting.
+    """
+    flags = host_batch.build_bootstrap_argv(items, params)[2:]
+    sub_argv = [_resolve_sandbox_executable(), "_bootstrap-host", *flags]
+    if is_tty:
+        return subprocess.run(["sudo", *sub_argv]).returncode == 0
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        return False
+    return subprocess.run(["sudo", "-n", *sub_argv]).returncode == 0
+
+
+def _host_root_batch_plan_lines(
+    items: frozenset[host_batch.BatchItem],
+) -> list[str]:
+    """Operator-facing plan lines for the host-root escalation batch."""
+    if not items:
+        return ["Host-root prerequisites: all satisfied (no escalation needed)."]
+    ordered = ", ".join(i.value for i in host_batch.HOST_ROOT_BATCH if i in items)
+    return [
+        f"Host-root prerequisites needing one `sudo` escalation: {ordered}",
+    ]
+
+
+def _operator_rootless_finalization_lines(
+    items: frozenset[host_batch.BatchItem],
+    params: host_batch.BatchParams,
+) -> list[str]:
+    """Finalization lines, incl. the re-login note when the operator was added to
+    the bridge group (supplementary groups don't refresh until re-login — P9 /
+    §8.5; mirrors ``doctor/checks/workspace_bridge.py``)."""
+    if host_batch.BatchItem.GROUPADD in items:
+        return [
+            "Setup complete.",
+            f"You were added to the '{params.bridge_group}' group — log out and "
+            "back in to refresh your group membership before `sandbox start`.",
+        ]
+    return ["Setup complete."]
+
+
+def _setup_body_operator_rootless(
+    ctx: SetupContext,
+    *,
+    dry_run: bool,
+    yes: bool,
+    flags: dict[str, bool],
+) -> int:
+    """Operator-run, least-privilege setup body (D5/D5a; §8-D). Returns exit code.
+
+    Runs as the operator (non-root). Flow: distro gate → unprivileged plan pass
+    (read-only phase probes) → content-aware host-root batch classification → if
+    the batch is non-empty, escalate ONCE via ``sudo sandbox _bootstrap-host``
+    (auto de-escalation) → operator-space apply pass run locally. A converged
+    host (empty batch) escalates zero times; no escalation path → a copy-pasteable
+    ``sudo`` remediation block + exit non-zero (fail-closed, mutating nothing).
+    """
+    emit_distro_gate(is_tty=_stdin_is_tty(), assume_yes=yes)
+
+    extras = selected_extras(flags)
+    phases = cli_flow.build_phase_list(extras)
+
+    plan = run_plan_pass(phases, ctx)
+    for line in cli_flow.render_plan(phases, plan):
+        console.print(line, markup=False)
+    console.print(cli_flow.plan_summary_line(cli_flow.tally_plan(plan)), markup=False)
+
+    items, params = host_batch.classify_host_root_batch(ctx)
+    for line in _host_root_batch_plan_lines(items):
+        console.print(line, markup=False)
+
+    if dry_run:
+        return 0
+
+    if items and not _run_bootstrap_escalation(
+        items, params, is_tty=_stdin_is_tty()
+    ):
+        console.print(
+            "no escalation path for the host-root prerequisites; run them manually:",
+            style="red",
+            markup=False,
+        )
+        for line in host_batch.render_remediation_block(items, params).splitlines():
+            console.print(line, markup=False)
+        return 1
+
+    apply_outcomes = run_apply_pass(phases, ctx)
+    for line in cli_flow.summarize_apply(phases, apply_outcomes):
+        console.print(line, markup=False)
+    if cli_flow.apply_pass_failed(apply_outcomes):
+        return 1
+
+    for line in _operator_rootless_finalization_lines(items, params):
+        console.print(line, markup=False)
+    return 0
 
 
 @app.command()

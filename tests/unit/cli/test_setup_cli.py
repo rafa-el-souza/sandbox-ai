@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock, patch
 
 import pytest
 import typer
 from cli.main import (
     _build_setup_context_with_operator,
+    _host_root_batch_plan_lines,
+    _operator_rootless_finalization_lines,
     _refuse_wrong_setup_identity,
+    _resolve_sandbox_executable,
     _resolve_setup_operator,
+    _run_bootstrap_escalation,
+    _setup_body_operator_rootless,
     _SetupAborted,
     _SetupFlagRefused,
     _SetupModeConflict,
@@ -175,6 +180,273 @@ def test_resolve_setup_operator_root_refusal_reraises() -> None:
         pytest.raises(OperatorResolutionError),
     ):
         _resolve_setup_operator(None)
+
+
+# ── §8-D operator-rootless orchestration body ─────────────────────────────────
+
+
+def _bp() -> BatchParams:
+    return BatchParams(
+        operator="dev",
+        operator_uid=1000,
+        bridge_group="sb-ws",
+        bridge_gid=100100,
+        distro_family="ubuntu",
+        mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+    )
+
+
+def _oprl_ctx() -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(
+            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+        ),
+        operator="dev",
+    )
+
+
+def _patch_oprl_body(
+    *, batch: frozenset[BatchItem], escalated: bool = True, apply_failed: bool = False
+) -> tuple[Any, ...]:
+    """Common patch set for `_setup_body_operator_rootless` unit tests."""
+    return (
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(batch, _bp()),
+        ),
+        patch("cli.main._run_bootstrap_escalation", return_value=escalated),
+        patch("cli.main.run_apply_pass", return_value=[]),
+        patch("cli.main.cli_flow.apply_pass_failed", return_value=apply_failed),
+        patch("cli.main._stdin_is_tty", return_value=True),
+    )
+
+
+def test_oprootless_body_converged_zero_escalation() -> None:
+    # Spec scenario: converged re-run (empty batch) escalates zero times.
+    p = _patch_oprl_body(batch=frozenset())
+    with p[0], p[1], p[2], p[3] as esc, p[4], p[5], p[6]:
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=True, flags={}
+        )
+    assert rc == 0
+    esc.assert_not_called()
+
+
+def test_oprootless_body_nonempty_batch_escalates_once() -> None:
+    # Spec scenario: a non-empty batch escalates exactly once, then applies.
+    p = _patch_oprl_body(batch=frozenset({BatchItem.SUBID, BatchItem.MARKER}))
+    with p[0], p[1], p[2], p[3] as esc, p[4] as apply_pass, p[5], p[6]:
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=True, flags={}
+        )
+    assert rc == 0
+    esc.assert_called_once()
+    apply_pass.assert_called_once()
+
+
+def test_oprootless_body_no_escalation_path_remediates() -> None:
+    # Spec scenario: no escalation path → remediation block + exit non-zero,
+    # mutating nothing (the apply pass never runs).
+    p = _patch_oprl_body(
+        batch=frozenset({BatchItem.SUBID}), escalated=False
+    )
+    with p[0], p[1], p[2], p[3], p[4] as apply_pass, p[5], p[6]:
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=True, flags={}
+        )
+    assert rc == 1
+    apply_pass.assert_not_called()
+
+
+def test_oprootless_body_dry_run_skips_escalation_and_apply() -> None:
+    p = _patch_oprl_body(batch=frozenset({BatchItem.SUBID}))
+    with p[0], p[1], p[2], p[3] as esc, p[4] as apply_pass, p[5], p[6]:
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=True, yes=True, flags={}
+        )
+    assert rc == 0
+    esc.assert_not_called()
+    apply_pass.assert_not_called()
+
+
+def test_oprootless_body_apply_failure_exits_nonzero() -> None:
+    p = _patch_oprl_body(batch=frozenset(), apply_failed=True)
+    with p[0], p[1], p[2], p[3], p[4], p[5], p[6]:
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=True, flags={}
+        )
+    assert rc == 1
+
+
+def test_oprootless_body_renders_plan_lines() -> None:
+    # The unprivileged plan pass is rendered to the operator before any escalation.
+    with (
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.cli_flow.render_plan", return_value=["L0: already correct"]
+        ),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset(), _bp()),
+        ),
+        patch("cli.main._stdin_is_tty", return_value=True),
+    ):
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=True, yes=True, flags={}
+        )
+    assert rc == 0
+
+
+# ── §8-D escalation helper (TTY-aware) ────────────────────────────────────────
+
+
+def test_escalation_interactive_success() -> None:
+    with (
+        patch("cli.main._resolve_sandbox_executable", return_value="/usr/bin/sandbox"),
+        patch("cli.main.subprocess.run", return_value=Mock(returncode=0)) as run,
+    ):
+        ok = _run_bootstrap_escalation(
+            frozenset({BatchItem.SUBID}), _bp(), is_tty=True
+        )
+    assert ok is True
+    assert run.call_args.args[0][0] == "sudo"
+    assert "-n" not in run.call_args.args[0]  # interactive: no `-n`
+
+
+def test_escalation_interactive_failure() -> None:
+    with (
+        patch("cli.main._resolve_sandbox_executable", return_value="/usr/bin/sandbox"),
+        patch("cli.main.subprocess.run", return_value=Mock(returncode=1)),
+    ):
+        assert (
+            _run_bootstrap_escalation(
+                frozenset({BatchItem.SUBID}), _bp(), is_tty=True
+            )
+            is False
+        )
+
+
+def test_escalation_noninteractive_no_passwordless_sudo() -> None:
+    # `sudo -n true` fails → no usable escalation path; never attempt the batch.
+    with (
+        patch("cli.main._resolve_sandbox_executable", return_value="/usr/bin/sandbox"),
+        patch("cli.main.subprocess.run", return_value=Mock(returncode=1)) as run,
+    ):
+        ok = _run_bootstrap_escalation(
+            frozenset({BatchItem.SUBID}), _bp(), is_tty=False
+        )
+    assert ok is False
+    run.assert_called_once()  # only the `sudo -n true` probe ran
+
+
+def test_escalation_noninteractive_success() -> None:
+    with (
+        patch("cli.main._resolve_sandbox_executable", return_value="/usr/bin/sandbox"),
+        patch(
+            "cli.main.subprocess.run",
+            side_effect=[Mock(returncode=0), Mock(returncode=0)],
+        ),
+    ):
+        assert (
+            _run_bootstrap_escalation(
+                frozenset({BatchItem.SUBID}), _bp(), is_tty=False
+            )
+            is True
+        )
+
+
+def test_escalation_noninteractive_bootstrap_fails() -> None:
+    with (
+        patch("cli.main._resolve_sandbox_executable", return_value="/usr/bin/sandbox"),
+        patch(
+            "cli.main.subprocess.run",
+            side_effect=[Mock(returncode=0), Mock(returncode=3)],
+        ),
+    ):
+        assert (
+            _run_bootstrap_escalation(
+                frozenset({BatchItem.SUBID}), _bp(), is_tty=False
+            )
+            is False
+        )
+
+
+# ── §8-D sandbox-executable resolution + plan/finalization lines ──────────────
+
+
+def test_resolve_sandbox_executable_from_path() -> None:
+    with patch("cli.main.shutil.which", return_value="/usr/local/bin/sandbox"):
+        assert _resolve_sandbox_executable() == "/usr/local/bin/sandbox"
+
+
+def test_resolve_sandbox_executable_fallback_to_argv0() -> None:
+    with (
+        patch("cli.main.shutil.which", return_value=None),
+        patch("cli.main.os.path.realpath", return_value="/venv/bin/sandbox"),
+    ):
+        assert _resolve_sandbox_executable() == "/venv/bin/sandbox"
+
+
+def test_host_root_batch_plan_lines_empty() -> None:
+    lines = _host_root_batch_plan_lines(frozenset())
+    assert "all satisfied" in lines[0]
+
+
+def test_host_root_batch_plan_lines_canonical_order() -> None:
+    # Rendered in HOST_ROOT_BATCH order (subid before marker), not set order.
+    lines = _host_root_batch_plan_lines(frozenset({BatchItem.MARKER, BatchItem.SUBID}))
+    assert "subid, marker" in lines[0]
+
+
+def test_finalization_relogin_when_groupadd() -> None:
+    lines = _operator_rootless_finalization_lines(
+        frozenset({BatchItem.GROUPADD}), _bp()
+    )
+    assert any("log out" in line for line in lines)
+    assert any("sb-ws" in line for line in lines)
+
+
+def test_finalization_no_relogin_without_groupadd() -> None:
+    lines = _operator_rootless_finalization_lines(
+        frozenset({BatchItem.SUBID}), _bp()
+    )
+    assert lines == ["Setup complete."]
+
+
+def test_setup_operator_rootless_bare_invocation_converges(
+    runner: CliRunner,
+) -> None:
+    # End-to-end through the command: bare `sandbox setup --docker-execution-mode
+    # operator-rootless` (no --operator, non-root) resolves the operator to the
+    # invoking user via the fallback, passes the identity gate, and converges with
+    # zero escalation. This exercises the §8-C+§8-D wiring the earlier op-rootless
+    # entry tests could not (they mocked resolve_operator).
+    with (
+        patch("cli.main.os.geteuid", return_value=1000),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        patch(
+            "cli.main.resolve_operator",
+            side_effect=OperatorResolutionError("no $SUDO_USER"),
+        ),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset(), _bp()),
+        ),
+        patch("cli.main.run_apply_pass", return_value=[]),
+        patch("cli.main._stdin_is_tty", return_value=True),
+    ):
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "operator-rootless"]
+        )
+    assert result.exit_code == 0
+    assert "Setup complete." in result.output
 
 
 # ── operator resolution error surfacing ──────────────────────────────────────
