@@ -69,8 +69,9 @@ The apply pass executes phases in this named order (the order is named, not coun
 | Phase | What it does |
 |---|---|
 | **L0** | Root assertion; operator resolution (`--operator` → `$SUDO_USER`+`$SUDO_UID` → `$PKEXEC_UID` → refuse); distro-tier classification; required-binary check; `MACHINECTL_PATH` uniqueness assertion on the sudoers `secure_path` basis. |
-| **L1** | `/etc/sysctl.d/49-sandbox-ai.conf` (+ `sysctl -w`); `Delegate=yes` drop-in scoped to `user-<sandbox-uid>.service.d/`; verify-only ACL-FS support + cgroup-v2 hierarchy. |
+| **L1** | `/etc/sysctl.d/49-sandbox-ai.conf` (+ `sysctl -w`); verify-only ACL-FS support + cgroup-v2 hierarchy. (Resolves no OS user.) |
 | **L2** | systemd-machined enable+start; `useradd` for the sandbox user; `/etc/subuid`/`/etc/subgid` append-only-when-safe; `groupadd sb-ws` at an autodetected gid in the subuid range; `usermod -aG sb-ws <operator>`. (Does **not** install runsc.) |
+| **L2a** | `Delegate=yes` drop-in at `user-<sandbox-uid>.service.d/` — split out of L1 because its path is uid-scoped to the sandbox user L2 creates (`depends_on=("l2",)`, ordered before L5; F-014). |
 | **L5** | `loginctl enable-linger <sandbox-user>`; rootless dockerd install via machinectl. |
 | **L6** | Merge `runtimes["sandbox-ai-runsc"]` into `~<sandbox-user>/.config/docker/daemon.json` (preserving the operator's other runtimes); conditional `systemctl --user restart docker` + readiness poll. |
 | **L6a** | runsc install (own phase): install the pinned binary if absent; on drift, mention it in the summary without auto-overwriting; `chattr +i`. |
