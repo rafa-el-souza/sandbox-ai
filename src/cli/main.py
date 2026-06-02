@@ -2521,6 +2521,34 @@ def _parse_mode_flag(mode_flag: str | None) -> DockerExecutionMode | None:
         ) from None
 
 
+def _resolve_setup_operator(operator_flag: str | None) -> str:
+    """Resolve the operator for ``sandbox setup``, euid-aware (D5/D7; §8-D).
+
+    The canonical :func:`resolve_operator` precedence (``--operator`` →
+    ``$SUDO_USER`` → ``$PKEXEC_UID`` → refuse; no TTY heuristics) is specified
+    **"when running as root"** — that is the separate-user path, used unchanged
+    here. operator-rootless setup runs **non-root as the operator themselves**
+    (D5): the invoking user IS the operator, and the spec's "Operator-Run
+    Least-Privilege Provisioning" requirement resolves the daemon owner as that
+    invoking user. ``euid`` partitions the modes cleanly (separate-user REQUIRES
+    root; op-rootless REFUSES it — see :func:`_refuse_wrong_setup_identity`), so a
+    non-root invocation that the root-scoped precedence cannot resolve (no
+    ``--operator``, no ``$SUDO_USER``) falls back to the current user — never the
+    F-021-banned TTY heuristic, just the process owner. A ``--operator`` value
+    naming a different user is refused later by :func:`_guard_setup_flags`.
+
+    The fallback fires ONLY when :func:`resolve_operator` actually refuses, so the
+    root path (and any test that stubs ``resolve_operator`` to succeed) is
+    unchanged; the F-021 root refusal is preserved by re-raising under ``euid == 0``.
+    """
+    try:
+        return resolve_operator(operator_flag)
+    except OperatorResolutionError:
+        if os.geteuid() != 0:
+            return getpass.getuser()
+        raise
+
+
 def _build_setup_context_with_operator(
     operator_flag: str | None,
     machinectl_auth_flag: str | None = None,
@@ -2540,15 +2568,16 @@ def _build_setup_context_with_operator(
     **explicit inputs** via flags (with documented defaults). The auth mode is
     POLKIT-fenced by :func:`_resolve_setup_auth`; the execution mode is decided
     against the per-operator marker by :func:`resolve_effective_mode` (the marker
-    WRITE is §8). Operator is resolved once via the canonical L0 resolver,
-    threading ``--operator`` (never from a toml).
+    WRITE is §8). Operator is resolved once via :func:`_resolve_setup_operator`
+    (euid-aware: the canonical root-scoped precedence, with a non-root current-user
+    fallback for operator-run op-rootless), threading ``--operator`` (never a toml).
 
     Refuse-all guards (D9, fail-closed) run BEFORE the context is built: an
     inapplicable flag in the active mode, or a dangerous resolved owner / cross-
     operator daemon owner, raise :class:`_SetupFlagRefused` with no mutation.
     """
     auth = _resolve_setup_auth(machinectl_auth_flag)
-    operator = resolve_operator(operator_flag)
+    operator = _resolve_setup_operator(operator_flag)
     mode = resolve_effective_mode(operator, _parse_mode_flag(mode_flag))
     host_config = HostConfig(
         host=HostSettings(

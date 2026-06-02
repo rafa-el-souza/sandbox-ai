@@ -19,6 +19,7 @@ import typer
 from cli.main import (
     _build_setup_context_with_operator,
     _refuse_wrong_setup_identity,
+    _resolve_setup_operator,
     _SetupAborted,
     _SetupFlagRefused,
     _SetupModeConflict,
@@ -134,6 +135,46 @@ def test_identity_gate_operator_rootless_nonroot_ok() -> None:
     ctx = _identity_ctx(DockerExecutionMode.OPERATOR_ROOTLESS)
     with patch("cli.main.os.geteuid", return_value=1000):
         _refuse_wrong_setup_identity(ctx)  # no raise — non-root is correct here
+
+
+# ── _resolve_setup_operator: euid-aware operator resolution (§8-D) ─────────────
+
+
+def test_resolve_setup_operator_root_uses_precedence() -> None:
+    # As root (separate-user), the canonical root-scoped precedence is used as-is.
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="alice"),
+    ):
+        assert _resolve_setup_operator(None) == "alice"
+
+
+def test_resolve_setup_operator_nonroot_falls_back_to_current_user() -> None:
+    # Non-root (operator-rootless) with no resolvable operator → the invoking user
+    # (spec "Operator-Run Least-Privilege Provisioning"; the canonical precedence
+    # is root-scoped, so its refusal is the fallback trigger here).
+    with (
+        patch("cli.main.os.geteuid", return_value=1000),
+        patch(
+            "cli.main.resolve_operator",
+            side_effect=OperatorResolutionError("cannot resolve operator user."),
+        ),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+    ):
+        assert _resolve_setup_operator(None) == "dev"
+
+
+def test_resolve_setup_operator_root_refusal_reraises() -> None:
+    # As root, a refusal is preserved (F-021 — no current-user fallback under root).
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch(
+            "cli.main.resolve_operator",
+            side_effect=OperatorResolutionError("cannot resolve operator user."),
+        ),
+        pytest.raises(OperatorResolutionError),
+    ):
+        _resolve_setup_operator(None)
 
 
 # ── operator resolution error surfacing ──────────────────────────────────────
