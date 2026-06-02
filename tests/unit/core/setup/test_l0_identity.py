@@ -10,7 +10,7 @@ content-aware-probe contract via the conftest fixture.
 from __future__ import annotations
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup import l0_identity
 from core.setup.l0_identity import (
     PHASE,
@@ -30,6 +30,15 @@ from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        operator=operator,
+    )
+
+
+def _oprootless_ctx(operator: str = "alice") -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+        ),
         operator=operator,
     )
 
@@ -668,6 +677,41 @@ def test_reverify_false_machinectl_unresolvable(
         "os.access", lambda p, m: not p.endswith("machinectl")
     )
     assert PHASE.reverify(_ctx()) is False
+
+
+# ── operator-rootless: machinectl-path assertion is gated out (§5.1) ──────────
+
+
+def test_probe_oprootless_skips_machinectl_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """op-rootless L0 probe must NOT run the machinectl uniqueness assertion.
+
+    With ``machinectl`` ABSENT from secure_path — a CONFLICT in separate-user
+    (see ``test_probe_conflict_machinectl``) — operator-rootless still converges
+    ``ALREADY_CORRECT`` and the detail carries no ``machinectl=`` field, because
+    there is no machinectl crossing in that mode (D2).
+    """
+    _ok_world(monkeypatch)
+    monkeypatch.setattr("os.access", lambda p, m: not p.endswith("machinectl"))
+    result, detail = PHASE.probe(_oprootless_ctx())
+    assert result == PhaseResult.ALREADY_CORRECT
+    assert "machinectl=" not in detail
+    assert "operator=alice" in detail
+
+
+def test_reverify_oprootless_skips_machinectl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """op-rootless reverify mirrors the probe: machinectl unresolvable is moot.
+
+    An unresolvable machinectl makes ``_reverify`` False in separate-user (see
+    ``test_reverify_false_machinectl_unresolvable``); in operator-rootless it is
+    True so long as the required binaries are present.
+    """
+    _ok_world(monkeypatch)
+    monkeypatch.setattr("os.access", lambda p, m: not p.endswith("machinectl"))
+    assert PHASE.reverify(_oprootless_ctx()) is True
 
 
 # ── content-aware probe contract (conftest fixture) ──────────────────────────

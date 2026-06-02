@@ -16,6 +16,12 @@ performs the shared, idempotent, host-level prerequisite mutations:
 
 **L2 does NOT install runsc** — that is its own phase L6a (R1).
 
+**L2 is separate-user only** (``applies_in`` excludes operator-rootless, D5a/O3):
+its dedicated-user + machined work is inapplicable when the daemon runs as the
+operator, and its genuinely-privileged subuid/subgid + ``sb-ws`` mutations are
+owned by the ``host_batch`` classifier + ``_bootstrap-host`` escalation in
+operator-rootless. The runner reports it ``skipped (operator-rootless)``.
+
 Content-aware probe (design D10): the expected state is computed from the
 current source (the configured sandbox user / bridge-group name, the subuid
 minimum-range requirement). The probe compares it to the observed host:
@@ -32,6 +38,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from core.host_config import (
+    DockerExecutionMode,
     autodetect_workspace_bridge_gid_recommendation,
     parse_subgid_for_user,
     parse_subuid_for_user,
@@ -266,6 +273,15 @@ PHASE = Phase(
     act=_act,
     reverify=_reverify,
     depends_on=("l1",),
+    # separate-user only. Every L2 mutation is either inapplicable or host-root-
+    # batch-owned in operator-rootless: the dedicated useradd is skipped (the
+    # daemon runs as the operator's own pre-existing user), systemd-machined is
+    # skipped (no machinectl consumer), and the genuinely-privileged subuid/subgid
+    # + sb-ws groupadd are applied by the classifier + ``_bootstrap-host`` host-root
+    # batch (design D5a / O3) rather than by this unprivileged apply pass. So the
+    # phase is gated OUT of operator-rootless (reported ``skipped`` in both passes)
+    # — mirroring the M2 crossing-only phases (L3/L3a/L6.5/L8).
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )
 
 __all__ = ["PHASE"]

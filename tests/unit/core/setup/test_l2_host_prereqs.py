@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup import l2_host_prereqs
 from core.setup.l2_host_prereqs import PHASE
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -104,6 +104,10 @@ def test_phase_identity_and_deps() -> None:
     assert PHASE.id == "l2"
     assert PHASE.depends_on == ("l1",)
     assert PHASE.identity == Identity.ROOT
+    # separate-user only: every L2 mutation is inapplicable or host-root-batch-
+    # owned in operator-rootless (D5a/O3), so the runner reports it skipped there
+    # — joining the M2 crossing-only phases (L3/L3a/L6.5/L8).
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})
 
 
 # ── probe ────────────────────────────────────────────────────────────────────

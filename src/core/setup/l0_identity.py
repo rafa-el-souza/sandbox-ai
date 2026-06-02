@@ -6,7 +6,10 @@ the operator user (precedence rule), classifies the detected distro into the
 three support tiers (Validated / Untested / Unrecognized), verifies every
 required host binary is present, captures the sudo-version floor, and resolves
 ``machinectl`` on the sudoers ``secure_path`` basis with the uniqueness
-assertion (B-3, F-005).
+assertion (B-3, F-005). The machinectl assertion underpins the privilege
+boundary's sudoers ``Cmnd_Spec`` path, so it is gated to the crossing modes —
+**skipped in operator-rootless** (no machinectl crossing exists there; D2) while
+operator/distro/binary resolution stays mode-agnostic.
 
 Content-aware probe (design D10): L0's convergence target is "operator
 resolvable AND distro supported AND every required binary present AND exactly
@@ -39,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from core.doctor import detect_distro, get_install_cmd
+from core.host_config import is_operator_rootless
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -485,12 +489,20 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
             f"required binaries missing: {', '.join(missing)} — install: {cmds}",
         )
 
-    try:
-        machinectl_path = resolve_machinectl_path(ctx.host_config)
-    except MachinectlResolutionError as exc:
-        return PhaseResult.CONFLICT, str(exc)
+    # The machinectl-path uniqueness assertion (B-3, F-005) underpins the
+    # privilege boundary's sudoers ``Cmnd_Spec`` path — a crossing-mode concern.
+    # operator-rootless has no machinectl crossing (L3/L3a/L8 are skipped and the
+    # runtime bypasses the dispatcher), so the assertion is gated out (D2); the
+    # operator-resolution + distro + binary checks above stay unchanged.
+    machinectl_detail = ""
+    if not is_operator_rootless(ctx.host_config):
+        try:
+            machinectl_path = resolve_machinectl_path(ctx.host_config)
+        except MachinectlResolutionError as exc:
+            return PhaseResult.CONFLICT, str(exc)
+        machinectl_detail = f", machinectl={machinectl_path}"
 
-    detail = f"operator={operator}, distro={raw_id} ({tier}), machinectl={machinectl_path}"
+    detail = f"operator={operator}, distro={raw_id} ({tier}){machinectl_detail}"
     floor_warn = sudo_floor_warning()
     if floor_warn:
         detail += f" [WARN: {floor_warn}]"
@@ -521,13 +533,18 @@ def _act(ctx: SetupContext) -> str:
 
 
 def _reverify(ctx: SetupContext) -> bool:
-    """L0 converged iff no required binary is missing and machinectl resolves."""
+    """L0 converged iff no required binary is missing and machinectl resolves.
+
+    The machinectl resolution is asserted only in crossing modes; operator-
+    rootless has no machinectl crossing, so it is skipped there (D2).
+    """
     if missing_binaries():
         return False
-    try:
-        resolve_machinectl_path(ctx.host_config)
-    except MachinectlResolutionError:
-        return False
+    if not is_operator_rootless(ctx.host_config):
+        try:
+            resolve_machinectl_path(ctx.host_config)
+        except MachinectlResolutionError:
+            return False
     return True
 
 
