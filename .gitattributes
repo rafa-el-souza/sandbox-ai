@@ -27,9 +27,8 @@ Makefile text eol=lf
 *.cast  binary
 *.pdf   binary
 
-# GitHub linguist: keep the language bar honest. The verbatim license / CLA texts
-# and packaged config templates are not authored project source.
+# GitHub linguist: keep the language bar honest. The verbatim license text and
+# packaged config templates are not authored project source.
 LICENSE            linguist-vendored
-docs/legal/**      linguist-vendored
 docs/**            linguist-documentation
 src/templates/**   linguist-vendored

@@ -3,7 +3,7 @@
 Thanks for your interest in `sandbox-ai`. This is a security tool with a
 deliberately small, deterministic core, so contributions are held to a high bar
 for clarity, isolation, and test coverage. This guide covers the development
-workflow, the gate every change must pass, and the one-time CLA step.
+workflow, the gate every change must pass, and how contribution licensing works.
 
 ## Before you start
 
@@ -66,37 +66,16 @@ Before opening a PR, make sure your change:
 Use clear, conventional commit messages (e.g. `feat:`, `fix:`, `docs:`,
 `refactor:`). Keep commits coherent and reviewable.
 
-## Contributor License Agreement (CLA)
+## Licensing of your contributions
 
-`sandbox-ai` requires every contributor to agree to a Contributor License
-Agreement before their contribution can be merged. We use the **Apache Software
-Foundation ICLA and CCLA**, served verbatim:
+`sandbox-ai` follows the standard open-source **inbound = outbound** model:
+when you contribute, your contribution is licensed under the project's existing
+license, **AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)). **There is no
+Contributor License Agreement to sign** — opening a pull request is itself your
+agreement to license your contribution under AGPL-3.0-or-later. This is the same
+rule encoded in [GitHub's Terms of Service](https://docs.github.com/site-policy/github-terms/github-terms-of-service#6-contributions-under-repository-license)
+for contributions to a repository that carries a license.
 
-- **Individuals** — the [Individual CLA](docs/legal/apache-icla.md).
-- **Contributing on behalf of an employer / corporation** — the
-  [Corporate CLA](docs/legal/apache-ccla.md).
-
-We collect signatures with **[CLA Assistant](https://cla-assistant.io/)**, so
-signing is a one-click step in your pull request:
-
-1. Open your pull request as usual.
-2. The CLA Assistant bot comments on the PR with a link.
-3. Click it, review the agreement, and sign in with your GitHub account. Your
-   signature is recorded once and applies to all future PRs.
-4. The CLA check on the PR turns green, and your PR becomes mergeable.
-
-If you are contributing as an employee and your employer holds rights to your
-work, your organization should also have a signed Corporate CLA on file — see
-the [CCLA](docs/legal/apache-ccla.md).
-
-> **Maintainer note (out-of-band setup).** The CLA Assistant GitHub App is
-> configured by the maintainer outside the repository: install the app on the
-> repo and point it at the CLA text published from
-> [`docs/legal/`](docs/legal/). No in-repo workflow file is required for the
-> hosted CLA Assistant app; the verbatim agreements in `docs/legal/` are the
-> source of truth for the signed text.
-
-## License
-
-By contributing, you agree that your contributions are licensed under the
-project's [AGPL-3.0-or-later license](LICENSE), consistent with the CLA above.
+Please only submit work you have the right to contribute under this license. If
+your contribution incorporates third-party code, call it out in your pull
+request along with its source and license so we can review compatibility.

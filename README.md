@@ -158,9 +158,9 @@ idea — the privilege boundary. The documentation is split by concern:
 ## Contributing
 
 Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
-development workflow, the test/coverage gate, and the one-click CLA flow
-(`sandbox-ai` uses the Apache ICLA/CCLA, collected via CLA Assistant). Security
-reports: see [`SECURITY.md`](SECURITY.md).
+development workflow and the test/coverage gate. Contributions are accepted
+under the project's AGPL-3.0-or-later license (inbound = outbound) — there is
+**no CLA to sign**. Security reports: see [`SECURITY.md`](SECURITY.md).
 
 ## License
 

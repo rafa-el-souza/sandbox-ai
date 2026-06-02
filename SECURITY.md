@@ -61,7 +61,8 @@ project's roadmap.
 - **Maintainer / account compromise of the project itself.** Long-game social
   engineering of a maintainer (the "xz" pattern), or compromise of the project's
   source-forge account, is a supply-chain risk on *us*, mitigated by process
-  (review, the CLA, history hygiene) rather than by the runtime boundary.
+  (review, history hygiene, account security) rather than by the runtime
+  boundary.
 - **Release-pipeline compromise.** Signed tags, provenance/attestation
   (e.g. cosign), and reproducible builds are **not yet** in place — the release
   pipeline is a separate trust surface from the runtime. *Revisit when:* the
