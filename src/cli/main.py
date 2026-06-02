@@ -84,7 +84,7 @@ from core.scaffold import (
     write_initialized_sentinel,
     write_sandbox_toml,
 )
-from core.setup import cli_flow
+from core.setup import cli_flow, host_batch
 from core.setup.extras import selected_extras
 from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
 from core.setup.l6a_runsc import set_force_update
@@ -2160,6 +2160,9 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
+_BOOTSTRAP_ITEM_FLAG = typer.Option(
+    [], "--item", help="A host-root BatchItem to apply (repeatable, canonical order)"
+)
 
 
 # ─── `sandbox setup` (privileged host-provisioning ceremony) ─────────────────
@@ -2332,6 +2335,79 @@ def setup(
         signal.signal(signal.SIGINT, original_handler)
 
     raise typer.Exit(code=exit_code)
+
+
+@app.command("_bootstrap-host", hidden=True)
+def _bootstrap_host(
+    items: list[str] = _BOOTSTRAP_ITEM_FLAG,
+    operator: str = typer.Option(..., "--operator", help="The operator the batch provisions for"),
+    operator_uid: int = typer.Option(..., "--operator-uid", help="The operator's numeric uid"),
+    bridge_group: str = typer.Option(..., "--bridge-group", help="The workspace bridge group name"),
+    bridge_gid: int = typer.Option(
+        ..., "--bridge-gid", help="The bridge gid (autodetected in the operator's subgid range)"
+    ),
+    distro_family: str = typer.Option(
+        ..., "--distro-family", help="The distro family (sysctl + nftables module branch)"
+    ),
+    docker_execution_mode: str = typer.Option(
+        ..., "--docker-execution-mode", help="The execution mode written to the marker"
+    ),
+) -> None:
+    """Apply the enumerated host-root batch as root, then exit (operator-rootless §8).
+
+    Hidden, root-only escalation sub-step. Operator-rootless ``sandbox setup``
+    runs unprivileged and escalates ONCE via ``sudo sandbox _bootstrap-host …``
+    (the argv built by :func:`core.setup.host_batch.build_bootstrap_argv`) to
+    apply EXACTLY the typed, dependency-ordered batch — no shell, no
+    operator-controlled argv beyond the typed flags. The applier walks the
+    canonical :data:`~core.setup.host_batch.HOST_ROOT_BATCH` order (marker LAST,
+    crash-safe), so a mid-batch failure can never reach the marker write; on any
+    applier failure this exits non-zero so the unprivileged parent detects it.
+    """
+    if os.geteuid() != 0:
+        console.print(
+            "sandbox _bootstrap-host must be run as root; it is the operator-rootless "
+            "host-root escalation step (invoked via: sudo sandbox _bootstrap-host).",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        batch_items = frozenset(host_batch.BatchItem(item) for item in items)
+    except ValueError as exc:
+        console.print(f"Invalid --item: {exc}", style="red", markup=False)
+        raise typer.Exit(code=1) from None
+
+    try:
+        mode = DockerExecutionMode(docker_execution_mode)
+    except ValueError:
+        console.print(
+            f"Invalid --docker-execution-mode value: '{docker_execution_mode}'. "
+            "Must be 'separate-user' or 'operator-rootless'.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1) from None
+
+    params = host_batch.BatchParams(
+        operator=operator,
+        operator_uid=operator_uid,
+        bridge_group=bridge_group,
+        bridge_gid=bridge_gid,
+        distro_family=distro_family,
+        mode=mode,
+    )
+    try:
+        host_batch.apply_host_root_batch(batch_items, params)
+    except (subprocess.SubprocessError, OSError, SandboxExecutionError) as exc:
+        console.print(
+            f"host-root batch failed: {exc}. The mode marker is written last, so a "
+            "partial-batch failure leaves no marker (re-run setup to retry).",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1) from None
 
 
 def _resolve_setup_auth(machinectl_auth_flag: str | None) -> MachinectlAuth:

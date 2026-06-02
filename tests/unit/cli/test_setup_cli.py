@@ -10,6 +10,7 @@ sticky-opt-in extras inclusion, and ``--yes`` skipping both prompts. Subprocess
 from __future__ import annotations
 
 import contextlib
+import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ from cli.main import (
     resolve_effective_mode,
 )
 from core.host_config import DockerExecutionMode
+from core.setup.host_batch import BatchItem, BatchParams
 from core.setup.l0_identity import OperatorResolutionError
 from core.setup.phase_runner import (
     Identity,
@@ -796,3 +798,125 @@ def test_guard_unknown_daemon_owner_user_not_treated_as_root() -> None:
             docker_unprivileged_user="brand-new-svc",
         )
     assert ctx.host_config.host.docker_unprivileged_user == "brand-new-svc"
+
+
+# ── `_bootstrap-host` hidden root-only escalation sub-step (§8-B) ─────────────
+
+_BOOTSTRAP_PARAM_ARGS = [
+    "--operator",
+    "alice",
+    "--operator-uid",
+    "1001",
+    "--bridge-group",
+    "sb-ws",
+    "--bridge-gid",
+    "100100",
+    "--distro-family",
+    "arch",
+    "--docker-execution-mode",
+    "operator-rootless",
+]
+
+
+def test_bootstrap_host_refuses_non_root(runner: CliRunner) -> None:
+    """`_bootstrap-host` is the root-only escalation step; non-root is refused."""
+    with patch("cli.main.os.geteuid", return_value=1000):
+        result = runner.invoke(
+            app, ["_bootstrap-host", "--item", "subid", *_BOOTSTRAP_PARAM_ARGS]
+        )
+    assert result.exit_code == 1
+    assert "_bootstrap-host must be run as root" in result.output
+
+
+def test_bootstrap_host_applies_typed_batch_as_root(runner: CliRunner) -> None:
+    """Root invocation reconstructs the typed batch + params and applies them."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.host_batch.apply_host_root_batch") as apply_mock,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "_bootstrap-host",
+                "--item",
+                "subid",
+                "--item",
+                "groupadd",
+                "--item",
+                "marker",
+                *_BOOTSTRAP_PARAM_ARGS,
+            ],
+        )
+    assert result.exit_code == 0
+    apply_mock.assert_called_once()
+    items, params = apply_mock.call_args.args
+    assert items == frozenset({BatchItem.SUBID, BatchItem.GROUPADD, BatchItem.MARKER})
+    assert params == BatchParams(
+        operator="alice",
+        operator_uid=1001,
+        bridge_group="sb-ws",
+        bridge_gid=100100,
+        distro_family="arch",
+        mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+    )
+
+
+def test_bootstrap_host_rejects_unknown_item(runner: CliRunner) -> None:
+    """An ``--item`` that is not a BatchItem is refused before any apply."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.host_batch.apply_host_root_batch") as apply_mock,
+    ):
+        result = runner.invoke(
+            app, ["_bootstrap-host", "--item", "bogus", *_BOOTSTRAP_PARAM_ARGS]
+        )
+    assert result.exit_code == 1
+    assert "Invalid --item" in result.output
+    apply_mock.assert_not_called()
+
+
+def test_bootstrap_host_rejects_unknown_mode(runner: CliRunner) -> None:
+    """An unrecognized ``--docker-execution-mode`` is refused before any apply."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.host_batch.apply_host_root_batch") as apply_mock,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "_bootstrap-host",
+                "--item",
+                "subid",
+                "--operator",
+                "alice",
+                "--operator-uid",
+                "1001",
+                "--bridge-group",
+                "sb-ws",
+                "--bridge-gid",
+                "100100",
+                "--distro-family",
+                "arch",
+                "--docker-execution-mode",
+                "nonsense",
+            ],
+        )
+    assert result.exit_code == 1
+    assert "Invalid --docker-execution-mode" in result.output
+    apply_mock.assert_not_called()
+
+
+def test_bootstrap_host_applier_failure_exits_nonzero(runner: CliRunner) -> None:
+    """A mid-batch applier failure surfaces as a non-zero exit + diagnostic."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch(
+            "cli.main.host_batch.apply_host_root_batch",
+            side_effect=subprocess.CalledProcessError(1, ["groupadd"]),
+        ),
+    ):
+        result = runner.invoke(
+            app, ["_bootstrap-host", "--item", "groupadd", *_BOOTSTRAP_PARAM_ARGS]
+        )
+    assert result.exit_code == 1
+    assert "host-root batch failed" in result.output
