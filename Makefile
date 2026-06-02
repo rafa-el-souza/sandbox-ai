@@ -1,4 +1,4 @@
-.PHONY: test test-file test-integration coverage lint format typecheck
+.PHONY: test test-file test-integration coverage lint typecheck
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
@@ -16,10 +16,6 @@ test-integration:
 
 lint:
 	@uv run --quiet ruff check --output-format concise .
-
-format:
-	@uv run --quiet ruff format .
-	@uv run --quiet ruff check --fix .
 
 typecheck:
 	@uv run --quiet mypy --no-error-summary .
