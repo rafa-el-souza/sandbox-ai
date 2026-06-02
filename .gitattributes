@@ -1,0 +1,35 @@
+# Normalize line endings: treat everything as text with LF in the repo, and let
+# Git detect binary automatically. Keeps diffs and the gate deterministic across
+# contributor platforms.
+* text=auto eol=lf
+
+# Explicit text types (belt-and-suspenders for files Git might misclassify).
+*.py    text eol=lf
+*.pyi   text eol=lf
+*.go    text eol=lf
+*.j2    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.txt   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.cfg   text eol=lf
+*.ini   text eol=lf
+Makefile text eol=lf
+
+# Binary assets — never normalize or diff as text.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.svg   binary
+*.cast  binary
+*.pdf   binary
+
+# GitHub linguist: keep the language bar honest. The verbatim license / CLA texts
+# and packaged config templates are not authored project source.
+LICENSE            linguist-vendored
+docs/legal/**      linguist-vendored
+docs/**            linguist-documentation
+src/templates/**   linguist-vendored
