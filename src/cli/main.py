@@ -2088,6 +2088,46 @@ def _refuse_root_euid() -> None:
         raise typer.Exit(code=1)
 
 
+def _refuse_wrong_setup_identity(ctx: SetupContext) -> None:
+    """Mode-conditional entry-identity gate for `sandbox setup` (D5; §8-C).
+
+    Unlike the runtime commands (which always refuse root), `setup`'s identity
+    requirement depends on the resolved execution mode, so this runs AFTER
+    `_build_setup_context_with_operator` has decided the mode (the build mutates
+    nothing — resolution + fail-closed flag guards only — so it is safe before
+    the identity gate):
+
+    - **separate-user** REQUIRES root: it creates the dedicated daemon user, the
+      sudoers rule, and the dispatcher, and crosses via ``machinectl``. A
+      non-root invocation is refused with the existing message.
+    - **operator-rootless** REFUSES root: it runs as the operator's own account
+      (the rootless daemon runs as that user; running as root would own the
+      daemon as the wrong user and create ``/root/.sandbox-ai``). A root
+      invocation is refused.
+
+    The ``--operator``≠invoker and root-daemon-owner refusals are enforced
+    earlier by :func:`_guard_setup_flags` (§4) during the context build.
+    """
+    if is_operator_rootless(ctx.host_config):
+        if os.geteuid() == 0:
+            console.print(
+                "operator-rootless setup must NOT be run as root. Re-invoke as your own "
+                "(non-root) operator account, without sudo — the rootless Docker daemon "
+                "runs as your user.",
+                style="red",
+                markup=False,
+            )
+            raise typer.Exit(code=1)
+        return
+    if os.geteuid() != 0:
+        console.print(
+            "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+
 def _require_per_user_state_initialized() -> None:
     """Hard-fail when ``<home>/state/instances.json`` is absent.
 
@@ -2284,15 +2324,14 @@ def setup(
         help="Workspace shared bridge group name",
     ),
 ) -> None:
-    """Provision the host: privileged plan/apply two-pass ceremony (run as root)."""
-    if os.geteuid() != 0:
-        console.print(
-            "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup",
-            style="red",
-            markup=False,
-        )
-        raise typer.Exit(code=1)
+    """Provision the host: mode-conditional plan/apply two-pass ceremony.
 
+    Entry identity is mode-conditional (D5): separate-user setup REQUIRES root;
+    operator-rootless setup REFUSES root and runs as the operator's own account.
+    The mode is decided by ``_build_setup_context_with_operator`` (flag/marker),
+    so the identity gate (:func:`_refuse_wrong_setup_identity`) runs AFTER the
+    context is built — that build mutates nothing, so it is safe before the gate.
+    """
     try:
         ctx = _build_setup_context_with_operator(
             operator,
@@ -2307,6 +2346,8 @@ def setup(
     except (_SetupAuthRefused, _SetupModeConflict, _SetupFlagRefused) as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
+
+    _refuse_wrong_setup_identity(ctx)
 
     original_handler = signal.getsignal(signal.SIGINT)
 

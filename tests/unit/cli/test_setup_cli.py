@@ -15,15 +15,17 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+import typer
 from cli.main import (
     _build_setup_context_with_operator,
+    _refuse_wrong_setup_identity,
     _SetupAborted,
     _SetupFlagRefused,
     _SetupModeConflict,
     app,
     resolve_effective_mode,
 )
-from core.host_config import DockerExecutionMode
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup.host_batch import BatchItem, BatchParams
 from core.setup.l0_identity import OperatorResolutionError
 from core.setup.phase_runner import (
@@ -66,13 +68,72 @@ def _apply(
 
 
 def test_refuses_non_root(runner: CliRunner) -> None:
-    with patch("cli.main.os.geteuid", return_value=1000):
+    # Mode-conditional identity gate (§8-C): the separate-user root requirement is
+    # checked AFTER the context build resolves the mode. With a resolvable operator
+    # and the default separate-user mode, a non-root invocation is refused with the
+    # exact existing message (the gate is reached through the real command path).
+    with (
+        patch("cli.main.os.geteuid", return_value=1000),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+    ):
         result = runner.invoke(app, ["setup"])
     assert result.exit_code == 1
     assert (
         "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup"
         in result.output
     )
+
+
+def test_setup_refuses_root_in_operator_rootless(runner: CliRunner) -> None:
+    # operator-rootless setup REFUSES root (§8-C / D5): with the op-rootless mode
+    # selected and a resolvable non-root daemon owner, euid==0 is refused before
+    # any mutation, through the real command path.
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+    ):
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "operator-rootless"]
+        )
+    assert result.exit_code == 1
+    assert "operator-rootless setup must NOT be run as root" in result.output
+
+
+# ── _refuse_wrong_setup_identity: the mode-conditional gate, in isolation ──────
+
+
+def _identity_ctx(mode: DockerExecutionMode) -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config("sandbox", MachinectlAuth.SUDO, mode),
+        operator="dev",
+    )
+
+
+def test_identity_gate_separate_user_requires_root() -> None:
+    ctx = _identity_ctx(DockerExecutionMode.SEPARATE_USER)
+    with patch("cli.main.os.geteuid", return_value=1000), pytest.raises(typer.Exit):
+        _refuse_wrong_setup_identity(ctx)
+
+
+def test_identity_gate_separate_user_root_ok() -> None:
+    ctx = _identity_ctx(DockerExecutionMode.SEPARATE_USER)
+    with patch("cli.main.os.geteuid", return_value=0):
+        _refuse_wrong_setup_identity(ctx)  # no raise — root is correct here
+
+
+def test_identity_gate_operator_rootless_refuses_root() -> None:
+    ctx = _identity_ctx(DockerExecutionMode.OPERATOR_ROOTLESS)
+    with patch("cli.main.os.geteuid", return_value=0), pytest.raises(typer.Exit):
+        _refuse_wrong_setup_identity(ctx)
+
+
+def test_identity_gate_operator_rootless_nonroot_ok() -> None:
+    ctx = _identity_ctx(DockerExecutionMode.OPERATOR_ROOTLESS)
+    with patch("cli.main.os.geteuid", return_value=1000):
+        _refuse_wrong_setup_identity(ctx)  # no raise — non-root is correct here
 
 
 # ── operator resolution error surfacing ──────────────────────────────────────
