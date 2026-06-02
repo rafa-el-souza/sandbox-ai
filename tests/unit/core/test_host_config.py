@@ -28,6 +28,7 @@ from core.host_config import (
     parse_subgid_for_user,
     parse_subuid_for_user,
     pipe_cmd,
+    resolve_daemon_owner,
     sandbox_ai_home,
     sudo_as_operator,
     workspace_bridge_gid,
@@ -277,6 +278,36 @@ class TestIsOperatorRootless:
         """Returns False for the default SEPARATE_USER mode."""
         hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
         assert is_operator_rootless(hc) is False
+
+
+class TestResolveDaemonOwner:
+    """resolve_daemon_owner() — runtime daemon-owner resolver (D7)."""
+
+    def test_operator_rootless_returns_invoking_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """In operator-rootless mode the owner is the current (invoking) user."""
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert resolve_daemon_owner(hc) == "alice"
+
+    def test_operator_rootless_never_reads_docker_unprivileged_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The op-rootless branch must NOT consult docker_unprivileged_user."""
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        hc = minimal_host_config(
+            "the-stale-default", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+        owner = resolve_daemon_owner(hc)
+        assert owner == "alice"
+        assert owner != "the-stale-default"
+
+    def test_separate_user_returns_docker_unprivileged_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In separate-user mode the owner is the configured dedicated user."""
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        assert resolve_daemon_owner(hc) == "sandbox"
 
 
 # ─── Task 1.3: machinectl_cmd() ──────────────────────────────────────────────

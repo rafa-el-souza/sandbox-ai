@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import getpass
 import json as _json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -56,6 +58,7 @@ from core.host_config import (
     is_operator_rootless,
     minimal_host_config,
     pipe_cmd,
+    resolve_daemon_owner,
     sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
@@ -86,6 +89,7 @@ from core.setup.extras import selected_extras
 from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
 from core.setup.l6a_runsc import set_force_update
 from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
+from core.setup_state import read_mode
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
 from core.workspace_backups import (
@@ -1024,7 +1028,6 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
     Returns:
         Diagnostic message string, or empty string if no failure found.
     """
-    import pwd
     import stat
 
     try:
@@ -2178,6 +2181,30 @@ class _SetupAuthRefused(Exception):
     """
 
 
+class _SetupModeConflict(Exception):
+    """Setup refuses a mode-switch that conflicts with the recorded marker (D6).
+
+    Raised by :func:`resolve_effective_mode` when the marker already records the
+    operator under one mode and ``--docker-execution-mode`` requests a different
+    one. Switching modes for a provisioned operator would create a catastrophic
+    mixed-mode host (separate-user artifacts + op-rootless artifacts for one
+    operator), so setup refuses BEFORE any mutation and directs the operator to
+    tear down first. Mirrors :class:`_SetupAuthRefused` (printed at the entry
+    point, exit non-zero, no host state touched).
+    """
+
+
+class _SetupFlagRefused(Exception):
+    """Setup refuses an inapplicable flag or a dangerous value (D9, fail-closed).
+
+    Raised before any mutation when a flag does not apply in the active mode
+    (e.g. ``--docker-unprivileged-user`` / ``--machinectl-auth`` in
+    operator-rootless), or when a flag carries a dangerous value (a resolved
+    daemon owner of root, or ``--operator`` naming someone other than the
+    invoker in operator-rootless). Mirrors :class:`_SetupAuthRefused`.
+    """
+
+
 _POLKIT_FENCE_MESSAGE = (
     "POLKIT auth mode is not yet supported by `sandbox setup` (tracked: the "
     "POLKIT auth-mode follow-on change + validation track V9d-polkit-e2e). "
@@ -2238,6 +2265,21 @@ def setup(
         "--machinectl-auth",
         help="machinectl auth mode: 'sudo' (default; only supported mode) or 'polkit' (refused — see docs)",
     ),
+    docker_execution_mode: str | None = typer.Option(
+        None,
+        "--docker-execution-mode",
+        help="Execution mode: 'separate-user' (default) or 'operator-rootless'; on re-run must match the marker.",
+    ),
+    docker_unprivileged_user: str = typer.Option(
+        "sandbox",
+        "--docker-unprivileged-user",
+        help="Dedicated daemon user (separate-user only; refused in operator-rootless)",
+    ),
+    workspace_bridge_group: str = typer.Option(
+        "sb-ws",
+        "--workspace-bridge-group",
+        help="Workspace shared bridge group name",
+    ),
 ) -> None:
     """Provision the host: privileged plan/apply two-pass ceremony (run as root)."""
     if os.geteuid() != 0:
@@ -2249,11 +2291,17 @@ def setup(
         raise typer.Exit(code=1)
 
     try:
-        ctx = _build_setup_context_with_operator(operator, machinectl_auth)
+        ctx = _build_setup_context_with_operator(
+            operator,
+            machinectl_auth,
+            mode_flag=docker_execution_mode,
+            docker_unprivileged_user=docker_unprivileged_user,
+            workspace_bridge_group=workspace_bridge_group,
+        )
     except OperatorResolutionError as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
-    except _SetupAuthRefused as exc:
+    except (_SetupAuthRefused, _SetupModeConflict, _SetupFlagRefused) as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
 
@@ -2310,8 +2358,59 @@ def _resolve_setup_auth(machinectl_auth_flag: str | None) -> MachinectlAuth:
     return effective
 
 
+def resolve_effective_mode(
+    operator: str, mode_flag: DockerExecutionMode | None
+) -> DockerExecutionMode:
+    """Decide the operator's effective execution mode from marker + flag (D6).
+
+    Single-mode-per-operator policy:
+
+    - **No marker entry**: use ``mode_flag`` when given, else the default
+      (:attr:`DockerExecutionMode.SEPARATE_USER`).
+    - **Entry present, no flag**: use the recorded mode (robust idempotent
+      re-run — no flag needed).
+    - **Entry present, conflicting flag**: refuse with :class:`_SetupModeConflict`
+      (switching a provisioned operator's mode would create a mixed-mode host).
+
+    DECISION ONLY — this does NOT write the marker (the write is §8). The caller
+    threads the result into the constructed ``host_config``.
+    """
+    recorded = read_mode(operator)
+    if recorded is None:
+        return mode_flag if mode_flag is not None else DockerExecutionMode.SEPARATE_USER
+    if mode_flag is not None and mode_flag is not recorded:
+        raise _SetupModeConflict(
+            f"operator '{operator}' is provisioned as {recorded.value}; "
+            f"switching to {mode_flag.value} requires teardown first"
+        )
+    return recorded
+
+
+def _parse_mode_flag(mode_flag: str | None) -> DockerExecutionMode | None:
+    """Parse the ``--docker-execution-mode`` string into the enum, or ``None``.
+
+    Returns ``None`` when the flag is absent. An unrecognized value is refused
+    (mirrors :func:`_resolve_setup_auth`'s invalid-value handling) before any
+    mutation via :class:`_SetupFlagRefused`.
+    """
+    if mode_flag is None:
+        return None
+    try:
+        return DockerExecutionMode(mode_flag)
+    except ValueError:
+        raise _SetupFlagRefused(
+            f"Invalid --docker-execution-mode value: '{mode_flag}'. "
+            "Must be 'separate-user' or 'operator-rootless'."
+        ) from None
+
+
 def _build_setup_context_with_operator(
-    operator_flag: str | None, machinectl_auth_flag: str | None = None
+    operator_flag: str | None,
+    machinectl_auth_flag: str | None = None,
+    *,
+    mode_flag: str | None = None,
+    docker_unprivileged_user: str = "sandbox",
+    workspace_bridge_group: str = "sb-ws",
 ) -> SetupContext:
     """Build the per-run :class:`SetupContext` for ``sandbox setup``.
 
@@ -2320,16 +2419,89 @@ def _build_setup_context_with_operator(
     sandbox-ai.toml`` (``HostConfig.from_toml``). This is the core G1 fix — a
     toml read here resolved to root's ``/root/.sandbox-ai`` (setup runs as root
     in separate-user mode), so an operator's real toml override never reached
-    setup. The daemon user is the documented default (``"sandbox"``); the auth
-    mode is an **explicit input** via ``--machinectl-auth`` (F-022) — resolved +
-    POLKIT-fenced by :func:`_resolve_setup_auth`. Operator is resolved once via
-    the canonical L0 resolver, threading ``--operator`` (never from a toml).
+    setup. The daemon user, auth mode, execution mode, and bridge group are all
+    **explicit inputs** via flags (with documented defaults). The auth mode is
+    POLKIT-fenced by :func:`_resolve_setup_auth`; the execution mode is decided
+    against the per-operator marker by :func:`resolve_effective_mode` (the marker
+    WRITE is §8). Operator is resolved once via the canonical L0 resolver,
+    threading ``--operator`` (never from a toml).
+
+    Refuse-all guards (D9, fail-closed) run BEFORE the context is built: an
+    inapplicable flag in the active mode, or a dangerous resolved owner / cross-
+    operator daemon owner, raise :class:`_SetupFlagRefused` with no mutation.
     """
     auth = _resolve_setup_auth(machinectl_auth_flag)
-    host_config = minimal_host_config("sandbox", auth)
-    return SetupContext(
-        host_config=host_config, operator=resolve_operator(operator_flag)
+    operator = resolve_operator(operator_flag)
+    mode = resolve_effective_mode(operator, _parse_mode_flag(mode_flag))
+    host_config = HostConfig(
+        host=HostSettings(
+            docker_unprivileged_user=docker_unprivileged_user,
+            machinectl_authentication=auth,
+            docker_execution_mode=mode,
+            workspace_bridge_group=workspace_bridge_group,
+        )
     )
+
+    _guard_setup_flags(
+        host_config,
+        operator=operator,
+        operator_flag=operator_flag,
+        machinectl_auth_flag=machinectl_auth_flag,
+        docker_unprivileged_user=docker_unprivileged_user,
+    )
+    # NOTE: the marker WRITE (persisting `mode` for `operator`) is §8 — this
+    # builder only DECIDES the effective mode; it never mutates host state.
+    return SetupContext(host_config=host_config, operator=operator)
+
+
+def _guard_setup_flags(
+    host_config: HostConfig,
+    *,
+    operator: str,
+    operator_flag: str | None,
+    machinectl_auth_flag: str | None,
+    docker_unprivileged_user: str,
+) -> None:
+    """Refuse-all guards for setup flags (D9, fail-closed, pre-mutation).
+
+    Inapplicable-flag guard: in operator-rootless mode neither a non-default
+    ``--docker-unprivileged-user`` nor ``--machinectl-auth`` applies (there is no
+    dedicated daemon user and no crossing to authorize). Dangerous-value guard:
+    a resolved daemon owner of ``root`` (or uid 0), or an ``--operator`` naming a
+    user other than the invoker in operator-rootless, is refused. Each refusal
+    raises :class:`_SetupFlagRefused` before any host state is touched.
+    """
+    if is_operator_rootless(host_config):
+        if docker_unprivileged_user != "sandbox":
+            raise _SetupFlagRefused(
+                "--docker-unprivileged-user does not apply in operator-rootless mode "
+                "(the rootless daemon runs as the operator's own user)."
+            )
+        if machinectl_auth_flag is not None:
+            raise _SetupFlagRefused(
+                "--machinectl-auth does not apply in operator-rootless mode "
+                "(there is no privilege-boundary crossing to authorize)."
+            )
+        if operator_flag is not None and operator_flag != getpass.getuser():
+            raise _SetupFlagRefused(
+                f"--operator '{operator_flag}' does not match the invoking user "
+                f"'{getpass.getuser()}'; operator-rootless setup provisions only for the invoker."
+            )
+
+    owner = resolve_daemon_owner(host_config)
+    if owner == "root" or _is_root_user(owner):
+        raise _SetupFlagRefused(
+            f"refusing: the resolved daemon owner is '{owner}' (root / uid 0); "
+            "the rootless daemon owner must never be root."
+        )
+
+
+def _is_root_user(name: str) -> bool:
+    """True iff ``name`` resolves to uid 0 (handles a root-aliased account)."""
+    try:
+        return pwd.getpwnam(name).pw_uid == 0
+    except KeyError:
+        return False
 
 
 def _setup_body(

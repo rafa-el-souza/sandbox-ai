@@ -9,6 +9,7 @@ Also exposes subuid/subgid resolvers and the workspace bridge group helpers
 used by the helper-container ACL/ownership recipes.
 """
 
+import getpass
 import grp
 import os
 import pwd
@@ -156,6 +157,22 @@ def minimal_host_config(
 def is_operator_rootless(host_config: HostConfig) -> bool:
     """True iff host_config selects operator-rootless execution mode."""
     return host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+
+def resolve_daemon_owner(host_config: HostConfig) -> str:
+    """Resolve the OS user that owns the rootless Docker daemon (design D7).
+
+    In ``separate-user`` mode the owner is the configured
+    ``docker_unprivileged_user``. In ``operator-rootless`` mode the owner is the
+    **invoking user** (the current process owner via :func:`getpass.getuser`) —
+    the daemon runs as the operator's own user. The ``operator-rootless`` branch
+    NEVER reads ``docker_unprivileged_user``: doing so would resolve to the stale
+    default ``"sandbox"`` and silently corrupt on-disk ownership. The runtime
+    parallel of setup's ``daemon_owner_user(ctx)``.
+    """
+    if is_operator_rootless(host_config):
+        return getpass.getuser()
+    return host_config.host.docker_unprivileged_user
 
 
 def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:

@@ -14,7 +14,15 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from cli.main import _SetupAborted, app
+from cli.main import (
+    _build_setup_context_with_operator,
+    _SetupAborted,
+    _SetupFlagRefused,
+    _SetupModeConflict,
+    app,
+    resolve_effective_mode,
+)
+from core.host_config import DockerExecutionMode
 from core.setup.l0_identity import OperatorResolutionError
 from core.setup.phase_runner import (
     Identity,
@@ -567,3 +575,224 @@ def test_extras_flags_passed_to_selected_extras(runner: CliRunner) -> None:
     flags_arg = sel_mock.call_args[0][0]
     assert flags_arg == {"fapolicyd": True, "aide": True}
     build_mock.assert_called_once_with(["fapolicyd"])
+
+
+# ── C-004 §4.2: resolve_effective_mode (marker decision + conflict refuse) ───
+
+
+def test_resolve_effective_mode_no_entry_no_flag_defaults_separate_user() -> None:
+    """No marker entry + no flag → default SEPARATE_USER (D6)."""
+    with patch("cli.main.read_mode", return_value=None):
+        assert (
+            resolve_effective_mode("alice", None) is DockerExecutionMode.SEPARATE_USER
+        )
+
+
+def test_resolve_effective_mode_no_entry_with_flag_uses_flag() -> None:
+    """No marker entry + flag → the requested mode (D6)."""
+    with patch("cli.main.read_mode", return_value=None):
+        assert (
+            resolve_effective_mode("alice", DockerExecutionMode.OPERATOR_ROOTLESS)
+            is DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+
+
+def test_resolve_effective_mode_entry_no_flag_uses_recorded() -> None:
+    """Marker entry + no flag → the recorded mode (idempotent re-run, D6)."""
+    with patch(
+        "cli.main.read_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS
+    ):
+        assert (
+            resolve_effective_mode("alice", None)
+            is DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+
+
+def test_resolve_effective_mode_entry_matching_flag_ok() -> None:
+    """Marker entry + matching flag → no conflict, recorded mode returned."""
+    with patch(
+        "cli.main.read_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS
+    ):
+        assert (
+            resolve_effective_mode("alice", DockerExecutionMode.OPERATOR_ROOTLESS)
+            is DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+
+
+def test_resolve_effective_mode_conflicting_flag_refused() -> None:
+    """Marker entry + conflicting flag → _SetupModeConflict (D6)."""
+    with (
+        patch(
+            "cli.main.read_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS
+        ),
+        pytest.raises(_SetupModeConflict) as exc,
+    ):
+        resolve_effective_mode("alice", DockerExecutionMode.SEPARATE_USER)
+    msg = str(exc.value)
+    assert "provisioned as operator-rootless" in msg
+    assert "switching to separate-user requires teardown first" in msg
+
+
+# ── C-004 §4.3/§4.4: setup flag threading + refuse-all guards ────────────────
+
+
+def test_invalid_mode_flag_refused(runner: CliRunner) -> None:
+    """An out-of-domain --docker-execution-mode value is refused, no plan pass."""
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.run_plan_pass") as plan_mock,
+    ):
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "bogus"]
+        )
+    assert result.exit_code == 1
+    assert "Invalid --docker-execution-mode value" in result.output
+    plan_mock.assert_not_called()
+
+
+def test_flags_threaded_into_host_config() -> None:
+    """--docker-unprivileged-user and --workspace-bridge-group thread into host_config."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+    ):
+        ctx = _build_setup_context_with_operator(
+            None,
+            None,
+            mode_flag="separate-user",
+            docker_unprivileged_user="customsvc",
+            workspace_bridge_group="custom-ws",
+        )
+    assert ctx.host_config.host.docker_unprivileged_user == "customsvc"
+    assert ctx.host_config.host.workspace_bridge_group == "custom-ws"
+    assert (
+        ctx.host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+    )
+
+
+def test_mode_flag_threaded_into_host_config() -> None:
+    """--docker-execution-mode operator-rootless threads through (invoker = operator)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+    ):
+        ctx = _build_setup_context_with_operator(
+            None, None, mode_flag="operator-rootless"
+        )
+    assert (
+        ctx.host_config.host.docker_execution_mode
+        is DockerExecutionMode.OPERATOR_ROOTLESS
+    )
+
+
+def test_guard_refuses_docker_unprivileged_user_in_operator_rootless() -> None:
+    """--docker-unprivileged-user in op-rootless is refused (inapplicable)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_setup_context_with_operator(
+            None,
+            None,
+            mode_flag="operator-rootless",
+            docker_unprivileged_user="foo",
+        )
+    assert "--docker-unprivileged-user does not apply in operator-rootless" in str(
+        exc.value
+    )
+
+
+def test_guard_refuses_machinectl_auth_in_operator_rootless() -> None:
+    """--machinectl-auth in op-rootless is refused (inapplicable)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_setup_context_with_operator(
+            None,
+            "sudo",
+            mode_flag="operator-rootless",
+        )
+    assert "--machinectl-auth does not apply in operator-rootless" in str(exc.value)
+
+
+def test_guard_refuses_operator_other_than_invoker_in_operator_rootless() -> None:
+    """--operator naming another user in op-rootless is refused (G5)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="someone-else"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_setup_context_with_operator(
+            "someone-else",
+            None,
+            mode_flag="operator-rootless",
+        )
+    assert "does not match the invoking user" in str(exc.value)
+
+
+def test_guard_refuses_root_daemon_owner_separate_user() -> None:
+    """A resolved daemon owner of root (uid 0) is refused (dangerous value)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_setup_context_with_operator(
+            None,
+            None,
+            mode_flag="separate-user",
+            docker_unprivileged_user="root",
+        )
+    assert "root / uid 0" in str(exc.value)
+
+
+def test_guard_refuses_root_aliased_daemon_owner() -> None:
+    """A non-'root' name that resolves to uid 0 is also refused (_is_root_user)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch(
+            "cli.main.pwd.getpwnam",
+            return_value=type("PW", (), {"pw_uid": 0})(),
+        ),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_setup_context_with_operator(
+            None,
+            None,
+            mode_flag="separate-user",
+            docker_unprivileged_user="toor",
+        )
+    assert "root / uid 0" in str(exc.value)
+
+
+def test_guard_unknown_daemon_owner_user_not_treated_as_root() -> None:
+    """_is_root_user tolerates a KeyError (unknown user) and does not refuse."""
+
+    def _missing(_name: str) -> object:
+        raise KeyError("no such user")
+
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.pwd.getpwnam", side_effect=_missing),
+    ):
+        ctx = _build_setup_context_with_operator(
+            None,
+            None,
+            mode_flag="separate-user",
+            docker_unprivileged_user="brand-new-svc",
+        )
+    assert ctx.host_config.host.docker_unprivileged_user == "brand-new-svc"
