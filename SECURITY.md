@@ -25,8 +25,9 @@ policy will be defined at the first release.
 
 ## What the boundary defends
 
-The threat model is summarized in the [README](README.md#threat-model). In
-short, `sandbox-ai` assumes a single-tenant Linux host with a trusted operator
+The threat model is summarized in the [README](README.md#threat-model) and
+detailed — with diagrams — in [`docs/security-model.md`](docs/security-model.md).
+In short, `sandbox-ai` assumes a single-tenant Linux host with a trusted operator
 and an **untrusted agent**, and it defends against the agent:
 
 - reading or exfiltrating the operator's credentials, keys, cloud config, or

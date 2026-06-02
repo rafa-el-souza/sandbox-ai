@@ -100,6 +100,10 @@ If your threat model includes a hostile kernel or you need hardware-level
 isolation, you want a microVM (Firecracker/Kata) or a separate physical host —
 not this.
 
+**Full security model** — the privilege boundary, deny-by-default network
+isolation, container hardening, the ACL model, and secrets handling, with
+diagrams: [`docs/security-model.md`](docs/security-model.md).
+
 ## Requirements
 
 - A Linux host with **systemd** (`machinectl` must be available) and **Docker**.
