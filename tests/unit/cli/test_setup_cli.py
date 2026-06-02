@@ -272,12 +272,94 @@ def test_oprootless_body_dry_run_skips_escalation_and_apply() -> None:
 
 
 def test_oprootless_body_apply_failure_exits_nonzero() -> None:
-    p = _patch_oprl_body(batch=frozenset(), apply_failed=True)
+    p = _patch_oprl_body(batch=frozenset({BatchItem.SUBID}), apply_failed=True)
     with p[0], p[1], p[2], p[3], p[4], p[5], p[6]:
         rc = _setup_body_operator_rootless(
             _oprl_ctx(), dry_run=False, yes=True, flags={}
         )
     assert rc == 1
+
+
+def test_oprootless_body_non_tty_needs_yes() -> None:
+    # Apply gate: a non-empty batch with no TTY and no --yes is refused (the host-
+    # root batch counts as pending mutations via decide_gate's extra_mutations).
+    with (
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset({BatchItem.SUBID}), _bp()),
+        ),
+        patch("cli.main._run_bootstrap_escalation") as esc,
+        patch("cli.main._stdin_is_tty", return_value=False),
+    ):
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=False, flags={}
+        )
+    assert rc == 1
+    esc.assert_not_called()
+
+
+def test_oprootless_body_prompt_abort() -> None:
+    # Apply gate: TTY, no --yes → [y/N] prompt; a non-affirmative answer aborts
+    # with no escalation and no mutation.
+    with (
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset({BatchItem.SUBID}), _bp()),
+        ),
+        patch("cli.main._run_bootstrap_escalation") as esc,
+        patch("cli.main._stdin_is_tty", return_value=True),
+        patch("builtins.input", return_value="n"),
+    ):
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=False, flags={}
+        )
+    assert rc == 0
+    esc.assert_not_called()
+
+
+def test_oprootless_body_prompt_proceed() -> None:
+    # Apply gate: TTY, no --yes, an affirmative answer proceeds to escalation.
+    with (
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset({BatchItem.SUBID}), _bp()),
+        ),
+        patch("cli.main._run_bootstrap_escalation", return_value=True) as esc,
+        patch("cli.main.run_apply_pass", return_value=[]),
+        patch("cli.main._stdin_is_tty", return_value=True),
+        patch("builtins.input", return_value="y"),
+    ):
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=False, flags={}
+        )
+    assert rc == 0
+    esc.assert_called_once()
+
+
+def test_oprootless_body_plan_refusal_blocks_apply() -> None:
+    # Apply gate: a plan refusal (CONFLICT) blocks the apply pass unconditionally.
+    refusal = [PhasePlanOutcome("l0", PhaseResult.CONFLICT, "unsupported distro")]
+    with (
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=refusal),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset({BatchItem.SUBID}), _bp()),
+        ),
+        patch("cli.main._run_bootstrap_escalation") as esc,
+        patch("cli.main._stdin_is_tty", return_value=True),
+    ):
+        rc = _setup_body_operator_rootless(
+            _oprl_ctx(), dry_run=False, yes=True, flags={}
+        )
+    assert rc == 1
+    esc.assert_not_called()
 
 
 def test_oprootless_body_renders_plan_lines() -> None:
@@ -437,13 +519,15 @@ def test_setup_operator_rootless_bare_invocation_converges(
         patch("cli.main.run_plan_pass", return_value=[]),
         patch(
             "cli.main.host_batch.classify_host_root_batch",
-            return_value=(frozenset(), _bp()),
+            return_value=(frozenset({BatchItem.SUBID}), _bp()),
         ),
+        patch("cli.main._run_bootstrap_escalation", return_value=True),
         patch("cli.main.run_apply_pass", return_value=[]),
         patch("cli.main._stdin_is_tty", return_value=True),
     ):
         result = runner.invoke(
-            app, ["setup", "--docker-execution-mode", "operator-rootless"]
+            app,
+            ["setup", "--docker-execution-mode", "operator-rootless", "--yes"],
         )
     assert result.exit_code == 0
     assert "Setup complete." in result.output

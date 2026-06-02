@@ -2821,6 +2821,36 @@ def _setup_body_operator_rootless(
     if dry_run:
         return 0
 
+    # Apply gate (same UX as separate-user), with the host-root batch counted as
+    # pending mutations the phase plan does not carry. The escalation's own sudo
+    # password prompt is a separate, later gate on the privileged sub-step.
+    decision = cli_flow.decide_gate(
+        plan,
+        is_tty=_stdin_is_tty(),
+        assume_yes=yes,
+        extra_mutations=len(items),
+    )
+    if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
+        console.print("Nothing to apply. Setup is complete.", markup=False)
+        return 0
+    if decision.outcome == cli_flow.GateOutcome.REFUSED:
+        for line in cli_flow.refusal_lines(phases, plan):
+            console.print(line, markup=False)
+        console.print("Setup will not enter the apply pass.", markup=False)
+        return 1
+    if decision.outcome == cli_flow.GateOutcome.NON_TTY_NEEDS_YES:
+        console.print(
+            "non-interactive context requires --yes flag to apply mutations",
+            style="red",
+            markup=False,
+        )
+        return 1
+    if decision.outcome == cli_flow.GateOutcome.PROMPT and not (
+        cli_flow.prompt_response_proceeds(input("Proceed with apply? [y/N]: "))
+    ):
+        console.print("aborted by operator (n). No mutations applied.", markup=False)
+        return 0
+
     if items and not _run_bootstrap_escalation(
         items, params, is_tty=_stdin_is_tty()
     ):
