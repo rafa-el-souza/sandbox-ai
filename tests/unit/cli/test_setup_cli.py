@@ -433,11 +433,19 @@ def test_sigint_handler_callback_raises_setup_aborted(
         handler(2, None)
 
 
-# ── fresh-host bootstrap: absent toml → defaults-based HostConfig ────────────
+# ── D8: setup is toml-free — host_config from flags + defaults only ──────────
 
 
 @pytest.mark.no_host_config_mock
-def test_fresh_host_uses_minimal_host_config(runner: CliRunner) -> None:
+def test_setup_is_toml_free(runner: CliRunner) -> None:
+    """D8 regression: setup builds host_config from flags + defaults and NEVER
+    reads the operator toml (`HostConfig.from_toml`).
+
+    The pre-fix tree called `HostConfig.from_toml()` on the setup path (resolving
+    to root's `/root/.sandbox-ai`); patching it to fail-on-call demonstrates the
+    read is gone. The config still comes from the documented default
+    (`docker_unprivileged_user="sandbox"`) and the resolved operator.
+    """
     phases = [_phase("l0")]
     plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
     captured: list[SetupContext] = []
@@ -448,15 +456,15 @@ def test_fresh_host_uses_minimal_host_config(runner: CliRunner) -> None:
         captured.append(ctx)
         return plan
 
+    def _explode() -> object:
+        raise AssertionError("setup must not read the operator toml (D8)")
+
     with (
         patch("cli.main.os.geteuid", return_value=0),
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.emit_distro_gate"),
         patch("cli.main.selected_extras", return_value=[]),
-        patch(
-            "cli.main.HostConfig.from_toml",
-            side_effect=FileNotFoundError("no toml"),
-        ),
+        patch("cli.main.HostConfig.from_toml", side_effect=_explode),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
         patch("cli.main.run_plan_pass", side_effect=_capture),
         patch("cli.main._stdin_is_tty", return_value=True),
@@ -464,8 +472,8 @@ def test_fresh_host_uses_minimal_host_config(runner: CliRunner) -> None:
         result = runner.invoke(app, ["setup"])
     assert result.exit_code == 0
     ctx = captured[0]
-    # Defaults-based config when the toml is absent: docker_unprivileged_user
-    # defaults to "sandbox" (the same value `sandbox init` later seeds).
+    # Defaults-based config: docker_unprivileged_user defaults to "sandbox"
+    # (the same value `sandbox init` later seeds); operator from the resolver.
     assert ctx.host_config.host.docker_unprivileged_user == "sandbox"
     assert ctx.operator == "dev"
 
@@ -491,7 +499,6 @@ def test_machinectl_auth_sudo_flag_accepted(runner: CliRunner) -> None:
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.emit_distro_gate"),
         patch("cli.main.selected_extras", return_value=[]),
-        patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError("no toml")),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
         patch("cli.main.run_plan_pass", side_effect=_capture),
         patch("cli.main._stdin_is_tty", return_value=True),
@@ -507,7 +514,6 @@ def test_machinectl_auth_polkit_flag_refused(runner: CliRunner) -> None:
     with (
         patch("cli.main.os.geteuid", return_value=0),
         patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError("no toml")),
         patch("cli.main.run_plan_pass") as plan_mock,
     ):
         result = runner.invoke(app, ["setup", "--machinectl-auth", "polkit"])
@@ -517,63 +523,11 @@ def test_machinectl_auth_polkit_flag_refused(runner: CliRunner) -> None:
 
 
 @pytest.mark.no_host_config_mock
-def test_polkit_toml_without_flag_refused(runner: CliRunner) -> None:
-    """A present operator toml requesting polkit is refused (no silent downgrade)."""
-    from core.host_config import MachinectlAuth, minimal_host_config
-
-    polkit_cfg = minimal_host_config("sandbox", MachinectlAuth.POLKIT)
-    with (
-        patch("cli.main.os.geteuid", return_value=0),
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
-        patch("cli.main.run_plan_pass") as plan_mock,
-    ):
-        result = runner.invoke(app, ["setup"])
-    assert result.exit_code == 1
-    assert "POLKIT auth mode is not yet supported" in result.output
-    plan_mock.assert_not_called()
-
-
-@pytest.mark.no_host_config_mock
-def test_sudo_flag_overrides_polkit_toml(runner: CliRunner) -> None:
-    """Explicit `--machinectl-auth sudo` overrides a stale polkit toml and proceeds."""
-    from core.host_config import MachinectlAuth, minimal_host_config
-
-    polkit_cfg = minimal_host_config("claude-sandbox", MachinectlAuth.POLKIT)
-    phases = [_phase("l0")]
-    plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
-    captured: list[SetupContext] = []
-
-    def _capture(_phs: object, ctx: SetupContext) -> list[PhasePlanOutcome]:
-        captured.append(ctx)
-        return plan
-
-    with (
-        patch("cli.main.os.geteuid", return_value=0),
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.emit_distro_gate"),
-        patch("cli.main.selected_extras", return_value=[]),
-        patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
-        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
-        patch("cli.main.run_plan_pass", side_effect=_capture),
-        patch("cli.main._stdin_is_tty", return_value=True),
-    ):
-        result = runner.invoke(app, ["setup", "--machinectl-auth", "sudo"])
-    assert result.exit_code == 0
-    # Config carries the resolved SUDO mode (so L3 renders the sudoers rule the
-    # verification phases can check), even though the toml said polkit; the
-    # other [host] fields from the toml are preserved.
-    assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
-    assert captured[0].host_config.host.docker_unprivileged_user == "claude-sandbox"
-
-
-@pytest.mark.no_host_config_mock
 def test_machinectl_auth_invalid_value_refused(runner: CliRunner) -> None:
     """An out-of-domain `--machinectl-auth` value is refused with a clear message."""
     with (
         patch("cli.main.os.geteuid", return_value=0),
         patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError("no toml")),
         patch("cli.main.run_plan_pass") as plan_mock,
     ):
         result = runner.invoke(app, ["setup", "--machinectl-auth", "bogus"])

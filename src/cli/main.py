@@ -2065,6 +2065,26 @@ def _stdin_is_tty() -> bool:
     return sys.stdin.isatty()
 
 
+def _refuse_root_euid() -> None:
+    """Hard-fail when a runtime command is invoked as root (``euid == 0``).
+
+    Runtime commands (`init`, `start`, `stop`, `status`, `attach`, `destroy`,
+    and the `workspace` subcommands) call this as their first step. Running them
+    as root would make ``sandbox_ai_home()`` (``~/.sandbox-ai``) resolve to
+    ``/root/.sandbox-ai`` — an operator-invisible tree (D8 / G1). `setup` and
+    `doctor` are exempt (setup legitimately runs as root in separate-user mode).
+    """
+    if os.geteuid() == 0:
+        console.print(
+            "Error: run sandbox as your operator account, not root. Running as root "
+            "would create /root/.sandbox-ai instead of your own ~/.sandbox-ai. "
+            "Re-invoke without sudo as your own (non-root) user.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+
 def _require_per_user_state_initialized() -> None:
     """Hard-fail when ``<home>/state/instances.json`` is absent.
 
@@ -2266,18 +2286,15 @@ def setup(
     raise typer.Exit(code=exit_code)
 
 
-def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | None) -> MachinectlAuth:
-    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2).
+def _resolve_setup_auth(machinectl_auth_flag: str | None) -> MachinectlAuth:
+    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2 / D8).
 
     Precedence: the ``--machinectl-auth`` flag (explicit operator intent) wins;
-    else the operator toml's value if a toml is present; else the SUDO default.
-    POLKIT through *any* of those channels is refused — raising
-    :class:`_SetupAuthRefused` BEFORE any phase runs — because setup's L3a/L8
-    verification probes are SUDO-only, so a polkit rule it wrote could not be
-    verified (and would be rolled back). An explicit ``--machinectl-auth sudo``
-    is the affirmative SUDO selection even if a stale toml says polkit (the
-    `setup_invariants` doctor cross-check then WARNs on the toml/rule
-    disagreement so the operator fixes the toml).
+    else the SUDO default. Setup is toml-free (D8) — it never reads the operator
+    toml — so there is no toml fallback channel for the auth mode. POLKIT through
+    the flag is refused — raising :class:`_SetupAuthRefused` BEFORE any phase
+    runs — because setup's L3a/L8 verification probes are SUDO-only, so a polkit
+    rule it wrote could not be verified (and would be rolled back).
     """
     if machinectl_auth_flag is not None:
         try:
@@ -2286,8 +2303,6 @@ def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | Non
             raise _SetupAuthRefused(
                 f"Invalid --machinectl-auth value: '{machinectl_auth_flag}'. Must be 'sudo' or 'polkit'."
             ) from None
-    elif toml is not None:
-        effective = toml.host.machinectl_authentication
     else:
         effective = MachinectlAuth.SUDO
     if effective == MachinectlAuth.POLKIT:
@@ -2300,30 +2315,18 @@ def _build_setup_context_with_operator(
 ) -> SetupContext:
     """Build the per-run :class:`SetupContext` for ``sandbox setup``.
 
-    On a fresh host ``<sandbox_ai_home()>/config/sandbox-ai.toml`` does not
-    exist — and setup does NOT create it (the per-operator tree + toml are
-    ``sandbox init``'s artifact, created as the operator; F-021). The CLI still
-    needs a :class:`HostConfig` to construct the context *before* any phase
-    runs, so: load the toml when present, else fall back to defaults
-    (``docker_unprivileged_user="sandbox"``). The auth mode is an **explicit
-    input** via ``--machinectl-auth`` (F-022) — resolved + POLKIT-fenced by
-    :func:`_resolve_setup_auth` — NOT inferred from an absent toml. The
-    constructed config always carries the resolved (always-SUDO past the fence)
-    auth mode, even if a present toml said otherwise, so L3 renders the sudoers
-    rule the verification phases can actually check. Operator is resolved once
-    via the canonical L0 resolver, threading ``--operator``.
+    Setup is **toml-free** (D8): it builds ``host_config`` purely from flags +
+    documented defaults and never reads ``<sandbox_ai_home()>/config/
+    sandbox-ai.toml`` (``HostConfig.from_toml``). This is the core G1 fix — a
+    toml read here resolved to root's ``/root/.sandbox-ai`` (setup runs as root
+    in separate-user mode), so an operator's real toml override never reached
+    setup. The daemon user is the documented default (``"sandbox"``); the auth
+    mode is an **explicit input** via ``--machinectl-auth`` (F-022) — resolved +
+    POLKIT-fenced by :func:`_resolve_setup_auth`. Operator is resolved once via
+    the canonical L0 resolver, threading ``--operator`` (never from a toml).
     """
-    try:
-        toml: HostConfig | None = HostConfig.from_toml()
-    except FileNotFoundError:
-        toml = None
-    auth = _resolve_setup_auth(machinectl_auth_flag, toml)
-    if toml is None:
-        host_config = minimal_host_config("sandbox", auth)
-    else:
-        host_config = toml.model_copy(
-            update={"host": toml.host.model_copy(update={"machinectl_authentication": auth})}
-        )
+    auth = _resolve_setup_auth(machinectl_auth_flag)
+    host_config = minimal_host_config("sandbox", auth)
     return SetupContext(
         host_config=host_config, operator=resolve_operator(operator_flag)
     )
@@ -2409,6 +2412,7 @@ def init(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
 ) -> None:
     """Initialize a new sandbox instance with one or more workspaces."""
+    _refuse_root_euid()
     _validate_name(inst, kind="instance", max_len=_INSTANCE_NAME_MAX)
 
     # Per-user tree creation (idempotent, mode 0700)
@@ -2608,6 +2612,7 @@ def start(
     ),
 ) -> None:
     """Start the sandbox."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     if dry_run:
@@ -2821,6 +2826,7 @@ def stop(
     clean: bool = False,
 ) -> None:
     """Stop the sandbox."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)
@@ -2882,6 +2888,7 @@ def attach(
     ws: str | None = typer.Argument(None, help="Workspace name (optional iff N=1)"),
 ) -> None:
     """Attach to a running sandbox."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     # Backup-lock check (cli-attach: refuse fast if held; attach holds no
@@ -2995,6 +3002,7 @@ def destroy(
     D10 IPAM release + registry remove
     D11 release locks
     """
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)
@@ -3414,6 +3422,7 @@ def status(
     detailed: bool = typer.Option(False, "--detailed", help="Include `du -sh` per workspace"),
 ) -> None:
     """Show sandbox instance status and diagnostics."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
     if inst is None:
         if detailed:
@@ -3472,6 +3481,7 @@ def workspace_add(
     empty: list[str] = _WORKSPACE_EMPTY_FLAG,
 ) -> None:
     """Add one or more workspaces to a stopped instance."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
     if not copy and not empty:
         console.print("Specify at least one --copy or --empty flag.", style="red")
@@ -3548,6 +3558,7 @@ def workspace_remove(
     purge: bool = typer.Option(False, "--purge", help="Remove without backup"),
 ) -> None:
     """Remove a workspace from a stopped instance."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     if backup and purge:
@@ -3653,6 +3664,7 @@ def workspace_rename(
     new: str = typer.Argument(..., help="New workspace name"),
 ) -> None:
     """Rename a workspace in a stopped instance (atomic, ACL-preserving)."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     if old == new:
@@ -3739,6 +3751,7 @@ def workspace_restore(
     ),
 ) -> None:
     """Restore a backup into a stopped instance as a new workspace."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
     _validate_name(ws_name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
 
@@ -3833,6 +3846,7 @@ def workspace_list(
     json_out: bool = typer.Option(False, "--json", help="Emit structured JSON output"),
 ) -> None:
     """List live workspaces and (by default) available backups for an instance."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)
