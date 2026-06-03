@@ -117,12 +117,23 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
     if "no_host_config_mock" in request.keywords:
         yield
         return
-    from core.host_config import HostConfig
+    from core.host_config import DockerExecutionMode, HostConfig
 
     cfg = HostConfig.model_validate(
         {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
     )
-    with patch("cli.main.HostConfig.from_toml", return_value=cfg):
+    # The runtime resolves the execution mode from the per-operator marker (D11)
+    # via ``_resolve_full_host_config`` → ``resolve_execution_mode``. The marker
+    # lives at a root-owned ``/usr/local/libexec`` path absent in tests, so stub
+    # the resolver to the default separate-user mode; op-rootless tests override
+    # it (or use ``@pytest.mark.no_host_config_mock``).
+    with (
+        patch("cli.main.HostConfig.from_toml", return_value=cfg),
+        patch(
+            "cli.main.resolve_execution_mode",
+            return_value=DockerExecutionMode.SEPARATE_USER,
+        ),
+    ):
         yield
 
 

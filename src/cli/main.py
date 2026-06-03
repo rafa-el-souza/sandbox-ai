@@ -89,7 +89,12 @@ from core.setup.extras import selected_extras
 from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
 from core.setup.l6a_runsc import set_force_update
 from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
-from core.setup_state import read_mode, write_mode_root_owned
+from core.setup_state import (
+    ModeMarkerMissing,
+    read_mode,
+    resolve_execution_mode,
+    write_mode_root_owned,
+)
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
 from core.workspace_backups import (
@@ -2031,10 +2036,21 @@ def _resolve_full_host_config() -> HostConfig:
     :func:`_resolve_host_settings` / :func:`_resolve_host_config`.
     """
     try:
-        return HostConfig.from_toml()
+        host_config = HostConfig.from_toml()
     except FileNotFoundError as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
+    # The execution mode is no longer a toml field (D11) — resolve it from the
+    # per-operator setup-state marker and overlay it onto the in-memory carrier.
+    # Fail closed when the host is not provisioned (no marker entry).
+    try:
+        mode = resolve_execution_mode(getpass.getuser())
+    except ModeMarkerMissing as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+    return host_config.model_copy(
+        update={"host": host_config.host.model_copy(update={"docker_execution_mode": mode})}
+    )
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:

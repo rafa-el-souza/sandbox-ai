@@ -164,6 +164,22 @@ class TestHostConfigFromToml:
         config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
+    def test_docker_execution_mode_in_toml_rejected(self, isolated_sandbox_ai_home: Path) -> None:
+        """docker_execution_mode is setup-determined (the marker), not a toml field (D11).
+
+        ``from_toml`` rejects a ``[host]`` table that sets it — a manual edit only
+        desyncs from the authoritative marker, so it fails loudly rather than being
+        silently overridden by the runtime overlay.
+        """
+        bad_toml = (
+            '[host]\n'
+            'docker_unprivileged_user = "sandbox"\n'
+            'docker_execution_mode = "operator-rootless"\n'
+        )
+        _seed_host_config(isolated_sandbox_ai_home, bad_toml)
+        with pytest.raises(ValueError, match="setup-determined"):
+            HostConfig.from_toml()
+
     def test_loader_honors_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Loader reads from SANDBOX_AI_HOME-resolved path."""
         custom_home = tmp_path / "custom"

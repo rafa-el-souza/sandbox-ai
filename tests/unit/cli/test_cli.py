@@ -1126,6 +1126,50 @@ def _operator_rootless_config() -> HostConfig:
     )
 
 
+class TestResolveFullHostConfigOverlaysMarkerMode:
+    """`_resolve_full_host_config` overlays the marker-resolved mode (D11/§7.2)."""
+
+    @staticmethod
+    def _toml_cfg() -> HostConfig:
+        from core.host_config import HostConfig
+
+        return HostConfig.model_validate(
+            {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
+        )
+
+    @pytest.mark.no_host_config_mock
+    def test_overlays_operator_rootless_from_marker(self) -> None:
+        """The mode comes from the marker, not the toml — toml fields preserved."""
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=self._toml_cfg()),
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
+        ):
+            resolved = _cli_main_module._resolve_full_host_config()
+        assert resolved.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+        assert resolved.host.docker_unprivileged_user == "sandbox"
+
+    @pytest.mark.no_host_config_mock
+    def test_fails_closed_when_marker_absent(self) -> None:
+        """A missing marker entry fails closed (exit 1) — 'run sudo sandbox setup'."""
+        from core.setup_state import ModeMarkerMissing
+
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=self._toml_cfg()),
+            patch(
+                "cli.main.resolve_execution_mode",
+                side_effect=ModeMarkerMissing(
+                    "no execution mode recorded for operator 'dev'. Run `sudo sandbox setup` first."
+                ),
+            ),
+            pytest.raises(typer.Exit) as exc,
+        ):
+            _cli_main_module._resolve_full_host_config()
+        assert exc.value.exit_code == 1
+
+
 class TestLifecycleThreadsExecutionMode:
     """B2: stop/destroy thread the resolved mode into ``_compose_down``'s
     ``dispatch.invoke`` host_config; start's helper phases set the mode on the
@@ -1148,6 +1192,10 @@ class TestLifecycleThreadsExecutionMode:
 
         with (
             patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._revoke_acls"),
             patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
@@ -1176,6 +1224,10 @@ class TestLifecycleThreadsExecutionMode:
 
         with (
             patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._revoke_acls"),
             patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
@@ -3517,7 +3569,13 @@ class TestDryRunExistingInstance:
 
         from cli.main import app
 
-        with patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()):
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
+        ):
             result = runner.invoke(app, ["start", inst, "--dry-run"])
         assert result.exit_code == 0
         assert "ProxyCommand=" in result.output

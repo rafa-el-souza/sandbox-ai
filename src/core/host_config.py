@@ -108,6 +108,11 @@ class HostSettings(BaseModel):
 
     docker_unprivileged_user: str
     machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
+    # In-memory carrier ONLY (D11): the execution mode is NOT a user-editable toml
+    # field — it is setup-determined and resolved at runtime from the per-operator
+    # marker (``core.setup_state.resolve_execution_mode``). ``from_toml`` rejects a
+    # toml that sets it; the field is populated programmatically (by setup, by
+    # ``minimal_host_config``, and by the runtime overlay in ``cli.main``).
     docker_execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
     workspace_bridge_group: str = "sb-ws"
 
@@ -127,6 +132,9 @@ class HostConfig(BaseModel):
             FileNotFoundError: If the canonical file does not exist.
             tomllib.TOMLDecodeError: If the file contains invalid TOML.
             pydantic.ValidationError: If the content fails schema validation.
+            ValueError: If the ``[host]`` table sets ``docker_execution_mode`` —
+                that field is setup-determined (the per-operator marker), not a
+                user-editable toml value (D11).
         """
         path = sandbox_ai_home() / "config" / "sandbox-ai.toml"
         try:
@@ -134,6 +142,13 @@ class HostConfig(BaseModel):
                 raw = tomllib.load(f)
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"No sandbox-ai.toml found at {path}. Run sandbox init to create one.") from exc
+        host_table = raw.get("host")
+        if isinstance(host_table, dict) and "docker_execution_mode" in host_table:
+            raise ValueError(
+                f"docker_execution_mode is no longer a sandbox-ai.toml field; it is "
+                f"setup-determined (the per-operator setup-state marker). Remove it "
+                f"from {path} and rerun `sudo sandbox setup` to change the mode."
+            )
         return cls.model_validate(raw)
 
 
