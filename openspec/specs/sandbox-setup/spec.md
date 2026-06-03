@@ -570,3 +570,107 @@ Setup SHALL acquire `state.lock` (per CLAUDE.md's per-user lock topology) for th
 - **WHEN** operator `alice` runs `sudo sandbox setup` twice concurrently (same operator's `state.lock` file)
 - **THEN** the second invocation blocks on `state.lock` until the first completes (or fails); the locks ARE NOT inter-operator (concurrent invocations under different operators run independently)
 
+### Requirement: Operator-Rootless Phase Gating
+
+When the active execution mode is `operator-rootless`, `sandbox setup` SHALL provision rootless Docker for the **operator's own** user rather than a dedicated `sandbox` user, by gating the named L0..L8 ceremony as follows. The phase identifiers and their order SHALL be preserved (no renumbering); a phase that does not run in this mode SHALL report an explicit "skipped (operator-rootless)" status in both the plan and apply passes (it SHALL NOT silently vanish). In `separate-user` mode every phase SHALL behave exactly as specified by the "Phase Execution Order" requirement (unchanged).
+
+Phase disposition in `operator-rootless` mode (reconciled to **O3** — a phase performing a *host-root mutation* cannot run in the unprivileged operator-run apply pass, so every such phase is gated OUT and its mutation is owned by the D5a host-root batch; only operator-space work runs in the apply pass):
+
+- **SKIPPED (gated out, reported "skipped (operator-rootless)")**: **L1** (the sysctl drop-in is a host-root mutation → batch `SYSCTL`); **L2** entirely — the `sandbox` `useradd` + `systemd-machined` enable are inapplicable (the operator is the daemon owner; machined backs `machinectl`, which has no consumer in this mode), and the `/etc/subuid`/`/etc/subgid` append + `sb-ws` `groupadd` are host-root mutations → batch `SUBID`/`GROUPADD`; **L2a** (the `Delegate=yes` drop-in is a host-root mutation → batch `DELEGATE`); **L6a** (the root-owned runsc install is a host-root mutation → batch `RUNSC`); **L6.5** dispatcher compile/install (no dispatcher is used in this mode); **L3** sudoers/polkit privilege-boundary rule install; **L3a** per-op probe; **L8** `machinectl` reachability re-probe.
+- **REPARAMETERIZED to the daemon owner (the operator), run locally**: the **operator-space** work of L5 (rootless dockerd install), L6 (`daemon.json` reserved-runtime merge + restart + runtime-aware readiness poll), and L7 (helper-image pre-pull) — all performed as local actions in the operator's own session (setup runs as the operator in this mode — see "Operator-Run Least-Privilege Provisioning"), with **no `machinectl` crossing and no privilege drop** — but the local crossing MUST re-inject the operator's user-session environment (`HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`) via an `env …` prefix, because the sterile subprocess executor scrubs all but `PATH`, and rootless `dockerd-rootless-setuptool.sh` / `systemctl --user` / `docker` require that session env. (Linger is NOT operator-space — it is a host-root batch item; see that requirement.)
+- **UNCHANGED**: L0 identity/distro/required-binary checks and operator resolution (the **machinectl-path uniqueness assertion** SHALL be gated to crossing modes only — it is meaningless when no crossing occurs).
+
+The host-root mutations of the gated-out phases (subuid/subgid, `sb-ws` group, sysctl drop-in, `nf_tables` load, `Delegate=yes` drop-in, **linger**, runsc placement, and the mode-marker write) are applied by the D5a host-root batch under a single `sudo sandbox _bootstrap-host` escalation, in dependency order with the marker LAST (see "Operator-Run Least-Privilege Provisioning"). The bridge group is kept (its gid lands inside the operator's subgid range; the operator's real uid differs from its subuids, so the bridge group remains the path by which the operator reads agent-created files). No `/etc/sudoers.d/sandbox-ai-machinectl-*` or `/etc/polkit-1/rules.d/49-sandbox-ai-machinectl.rules` file SHALL be created in this mode, and no dispatcher binary SHALL be installed.
+
+#### Scenario: operator-rootless skips the crossing-only phases
+
+- **WHEN** `sandbox setup` runs with the active mode `operator-rootless`
+- **THEN** L1 (sysctl), L2 (`sandbox` user / `systemd-machined` / subuid / `sb-ws`), L2a (`Delegate`), L6a (runsc), L6.5 (dispatcher), L3 (sudoers/polkit rule), L3a (per-op probe), and L8 (`machinectl` re-probe) each report "skipped (operator-rootless)" and perform no mutation in the apply pass; no privilege-boundary rule file and no dispatcher binary exist after the run
+
+#### Scenario: operator-rootless provisions the operator's own rootless daemon
+
+- **WHEN** `sandbox setup` runs with the active mode `operator-rootless` on a fresh host
+- **THEN** the host-root batch (`sudo sandbox _bootstrap-host`) ensures the operator has `/etc/subuid`/`/etc/subgid` ranges, the `sb-ws` bridge group (gid in the operator's subgid range), the `Delegate=yes` drop-in for the operator's user manager, linger, and the root-owned runsc; and the L5/L6/L7 operator-space apply runs locally as the operator (no `machinectl` crossing) to install rootless dockerd, merge the `sandbox-ai-runsc` runtime into the operator's `daemon.json`, and pre-pull the helper image
+
+#### Scenario: separate-user phase order unchanged
+
+- **WHEN** `sandbox setup` runs with the active mode `separate-user` (the existing behavior)
+- **THEN** the full L0..L8 ceremony executes exactly as the "Phase Execution Order" requirement specifies, including the dedicated `sandbox` user, the dispatcher install, and the L3 privilege-boundary rule
+
+#### Scenario: L0 machinectl-path assertion gated to crossing modes
+
+- **WHEN** L0 runs with the active mode `operator-rootless`
+- **THEN** the machinectl-path uniqueness assertion is not applied (it gates only the crossing modes); a host with no/ambiguous `machinectl` is not refused on that basis in operator-rootless mode
+
+### Requirement: Operator-Run Least-Privilege Provisioning
+
+`sandbox setup` SHALL require root in `separate-user` mode (unchanged) and SHALL require a **non-root operator running as themselves** in `operator-rootless` mode. In `operator-rootless` mode setup SHALL refuse to run as root (`os.geteuid() == 0`) and SHALL refuse a `--operator` value naming any user other than the invoking user; the daemon owner in this mode is the invoking operator.
+
+In `operator-rootless` mode, setup SHALL run operator-space actions (rootless dockerd install, the operator's `~/.config/docker/daemon.json` write, `systemctl --user`, helper-image pull, instance scaffolding) **unprivileged in the operator's own session**. Setup SHALL classify the remaining host-root prerequisites — `/etc/subuid`/`/etc/subgid` append (when missing), `groupadd <bridge>` (when missing), the sysctl drop-in (when unprivileged user namespaces are disabled), an `nf_tables` load (when absent), the `Delegate=yes` drop-in (when the user session is not already delegated), `loginctl enable-linger <operator>` (when the operator is not already lingering — self-linger is polkit-gated and unavailable on most distros, so linger is a host-root batch item, not operator-space), runsc placement (when installed under root-owned `/usr/local/libexec`), and the mode-marker write — and SHALL apply only those that are unsatisfied.
+
+When the host-root batch is non-empty, setup SHALL escalate **once** via an enumerated `sandbox _bootstrap-host` sub-step invoked through interactive `sudo`, applying the batch **in dependency order** (subuid/subgid before `groupadd`; subuid + sysctl + `nf_tables` + Delegate + linger before the operator-space rootless-dockerd install; runsc placement before the operator `daemon.json`; **the mode-marker write LAST**, so a partial-batch failure never leaves a marker claiming the host is provisioned), then return to the unprivileged operator context. A converged re-run (every prerequisite already satisfied) SHALL escalate zero times. When the operator has no escalation path at all (not a sudoer, no polkit authorization), setup SHALL emit the exact ordered batch as a copy-pasteable `sudo` remediation block and exit non-zero (fail-closed, never silent).
+
+Setup's finalization SHALL instruct the operator to re-login before `sandbox start` when the operator was just added to the bridge group (the running session's supplementary groups do not refresh until re-login).
+
+#### Scenario: operator-rootless setup refuses root
+
+- **WHEN** `sandbox setup --docker-execution-mode operator-rootless` is invoked as root (`euid == 0`, including under `sudo` where the owner resolves to root)
+- **THEN** it refuses and mutates nothing, with the actionable entry-identity message ("operator-rootless setup must NOT be run as root … re-invoke as your own non-root operator account, without sudo"). The entry-identity gate runs BEFORE the flag guards, so it deterministically wins over the generic owner-root refusal even under `sudo` (finding 8.7). The owner-root refusal ("the resolved daemon owner is 'root' … must never be root") remains the residual defense for a non-`euid==0` invocation whose resolved owner is nonetheless root (e.g. an explicit `--docker-unprivileged-user root` in separate-user).
+
+#### Scenario: operator-rootless setup refuses provisioning for another user
+
+- **WHEN** `sandbox setup --docker-execution-mode operator-rootless --operator <other>` is invoked by a different user
+- **THEN** it refuses (operator-rootless provisions only the invoking user's own daemon)
+
+#### Scenario: host-root prerequisites escalate once, in order, marker last
+
+- **WHEN** operator-run `sandbox setup` in `operator-rootless` mode finds one or more host-root prerequisites unsatisfied
+- **THEN** it applies them in a single `sudo _bootstrap-host` sub-step in dependency order with the mode-marker write last, then continues unprivileged; a simulated mid-batch failure leaves no mode marker written
+
+#### Scenario: converged operator-rootless re-run escalates zero times
+
+- **WHEN** operator-run `sandbox setup` in `operator-rootless` mode runs against a host where every host-root prerequisite is already satisfied
+- **THEN** it performs no escalation (no `sudo`) and reports the operator-space phases as already correct
+
+#### Scenario: no escalation path emits remediation
+
+- **WHEN** the host-root batch is non-empty but the operator can neither `sudo` nor authorize via polkit
+- **THEN** setup emits the exact ordered batch as a copy-pasteable `sudo` remediation block and exits non-zero, mutating nothing
+
+### Requirement: Execution-Mode Marker
+
+`sandbox setup` SHALL persist the provisioned execution mode in a root-owned host-plane marker `/usr/local/libexec/sandbox-ai/setup-state.json` (owner `root:root`, mode `0644`, world-readable), keyed per operator (`{"operators": {"<name>": {"mode": "<mode>"}}}`). The marker SHALL NOT live under `sandbox_ai_home()`. The marker is the single authority for the execution mode: the runtime SHALL resolve its mode by reading this marker for the current operator (no execution-mode field in the user toml — see the `host-config` delta), and setup SHALL consult it to enforce single-mode-per-operator. The marker SHALL be listed in the reserved-namespace / manual-uninstall enumeration.
+
+On `sandbox setup`: when the marker has no entry for the operator, setup SHALL provision the requested (`--docker-execution-mode`) or default mode and write the entry; when an entry exists and no mode flag is given, setup SHALL use the recorded mode; when an entry exists and a conflicting `--docker-execution-mode` is given, setup SHALL refuse with a message that switching modes requires teardown first (preventing a catastrophic mixed-mode host for one operator).
+
+#### Scenario: first provision writes the marker
+
+- **WHEN** `sandbox setup --docker-execution-mode operator-rootless` runs and the marker has no entry for the operator
+- **THEN** setup provisions operator-rootless and writes `{"operators": {"<operator>": {"mode": "operator-rootless"}}}` to the marker (as the last host-root batch action)
+
+#### Scenario: idempotent re-run uses the recorded mode
+
+- **WHEN** `sandbox setup` runs with no `--docker-execution-mode` flag and the marker records the operator as `operator-rootless`
+- **THEN** setup provisions operator-rootless from the recorded mode without requiring the flag
+
+#### Scenario: conflicting mode-switch refused
+
+- **WHEN** `sandbox setup --docker-execution-mode separate-user` runs and the marker records the operator as `operator-rootless`
+- **THEN** setup refuses, stating the operator is provisioned as operator-rootless and that switching requires teardown first; no mutation occurs
+
+### Requirement: Toml-Free Setup Identity and Setup Flags
+
+`sandbox setup` SHALL build its `host_config` exclusively from command-line flags and documented defaults, and SHALL NOT read `<sandbox_ai_home()>/config/sandbox-ai.toml` (`HostConfig.from_toml`) on the setup path — so setup never reads or depends on `/root/.sandbox-ai`. The operator is resolved by the existing precedence (`--operator` → `$SUDO_USER` → `$PKEXEC_UID`), never from a toml.
+
+Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}` (the default applies only when the flag is absent and the marker has no entry), `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only), and `--workspace-bridge-group <name>` (default `sb-ws`). A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` or `--machinectl-auth` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
+
+#### Scenario: setup does not read the operator toml
+
+- **WHEN** `sandbox setup` runs on a host with an operator `sandbox-ai.toml` present
+- **THEN** setup builds its configuration from flags + defaults only and does not read the toml (its mode comes from the flag/marker, not the file)
+
+#### Scenario: inapplicable flag refused
+
+- **WHEN** `sandbox setup --docker-execution-mode operator-rootless --docker-unprivileged-user foo` is invoked
+- **THEN** setup refuses, stating that `--docker-unprivileged-user` does not apply in operator-rootless mode; no mutation occurs
+

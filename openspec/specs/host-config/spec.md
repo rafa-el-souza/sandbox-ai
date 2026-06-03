@@ -283,29 +283,50 @@ The repository's `CLAUDE.md` "Privilege boundary" section SHALL document that th
 
 ### Requirement: Docker Execution Mode Selector
 
-The `[host]` section SHALL accept an optional field `docker_execution_mode`, a string enum with exactly two values: `"separate-user"` and `"operator-rootless"`. The field SHALL default to `"separate-user"` when omitted. `HostSettings` SHALL expose it via a `DockerExecutionMode` StrEnum (`SEPARATE_USER = "separate-user"`, `OPERATOR_ROOTLESS = "operator-rootless"`).
+The execution mode is a **setup-determined fact**, not a user-editable config field. `HostSettings` SHALL retain `docker_execution_mode` only as an **in-memory carrier** (the `DockerExecutionMode` StrEnum `SEPARATE_USER = "separate-user"` / `OPERATOR_ROOTLESS = "operator-rootless"`, populated programmatically by setup, by the runtime overlay, and by `minimal_host_config`); it SHALL NOT be sourced from the toml. `HostConfig.from_toml` SHALL **reject** a `[host]` table that sets `docker_execution_mode` (a fail-fast error directing the operator to setup, not a silent override) — its authoritative **source** is the setup-written execution-mode marker (`/usr/local/libexec/sandbox-ai/setup-state.json`, per the `sandbox-setup` capability's "Execution-Mode Marker" requirement), resolved per operator.
 
-`"separate-user"` selects the existing behavior: Docker runs as the dedicated `docker_unprivileged_user`, reached across the `machinectl` privilege boundary. `"operator-rootless"` selects rootless Docker running as the operator's own user, invoked as local subprocesses with no boundary crossing.
+The system SHALL provide `resolve_execution_mode(operator: str) -> DockerExecutionMode` in `core.setup_state` (the single module that owns the marker path + parsing; `core.host_config` would create an import cycle since `setup_state` imports `DockerExecutionMode` from it), reading the marker entry for `operator`. When the marker is absent or has no entry for the operator, the resolver SHALL fail closed by raising `ModeMarkerMissing` with a "run `sudo sandbox setup` first" message (parallel to the missing-`instances.json` "run sandbox init first" behavior) rather than silently defaulting; the runtime resolves the mode for the current user and overlays it onto the `HostConfig` built from the toml. `"separate-user"` selects the existing behavior (Docker as the dedicated `docker_unprivileged_user`, reached across the `machinectl` boundary); `"operator-rootless"` selects rootless Docker as the operator's own user with no boundary crossing. In `"operator-rootless"` mode the `machinectl_authentication` field is inert.
 
-In `"operator-rootless"` mode the `machinectl_authentication` field SHALL be inert (there is no crossing to authorize); it SHALL be accepted and ignored rather than rejected.
+#### Scenario: execution mode resolved from the marker
 
-#### Scenario: Mode defaults to separate-user
+- **WHEN** `resolve_execution_mode(operator)` is called and the marker records the operator as `operator-rootless`
+- **THEN** it returns `DockerExecutionMode.OPERATOR_ROOTLESS`
 
-- **WHEN** `sandbox-ai.toml` contains `[host]` without `docker_execution_mode`
-- **THEN** the model applies `docker_execution_mode == DockerExecutionMode.SEPARATE_USER`
+#### Scenario: missing marker fails closed
 
-#### Scenario: operator-rootless mode parsed
+- **WHEN** `resolve_execution_mode(operator)` is called and the marker is absent or has no entry for the operator
+- **THEN** it raises a "run `sandbox setup` first" error rather than defaulting to a mode
 
-- **WHEN** `sandbox-ai.toml` contains `[host]` with `docker_execution_mode = "operator-rootless"`
-- **THEN** the model validates with `docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS`
+#### Scenario: execution mode overlaid from the marker at runtime
 
-#### Scenario: Invalid mode rejected
+- **WHEN** a runtime command builds its `HostConfig` from the toml and the marker records the current operator as `operator-rootless`
+- **THEN** the resolved `HostConfig.host.docker_execution_mode` is `OPERATOR_ROOTLESS` (overlaid from the marker), regardless of the toml (which carries no mode), while the toml-sourced fields are preserved
 
-- **WHEN** `sandbox-ai.toml` contains `docker_execution_mode = "rootful"`
-- **THEN** the Pydantic model raises a `ValidationError` identifying the invalid enum value
+#### Scenario: docker_execution_mode in the toml is rejected
 
-#### Scenario: machinectl_authentication inert under operator-rootless
+- **WHEN** `sandbox-ai.toml` `[host]` contains a `docker_execution_mode` key
+- **THEN** `HostConfig.from_toml` raises a fail-fast error stating the mode is setup-determined (the marker) and is not a toml field — it is NOT silently ignored
 
-- **WHEN** `[host]` sets `docker_execution_mode = "operator-rootless"` together with `machinectl_authentication = "sudo"`
-- **THEN** the model validates successfully and the orchestrator performs no `machinectl` crossing for runtime ops (the authentication value is ignored, not an error)
+### Requirement: Daemon Owner Resolution
+
+The system SHALL provide the daemon-owner resolver in `core.host_config` returning the OS user that owns the rootless Docker daemon: in `separate-user` mode the configured `docker_unprivileged_user`; in `operator-rootless` mode the **invoking user** (the current process owner), never `docker_unprivileged_user`. It is provided in two forms sharing one implementation: `resolve_daemon_owner(host_config: HostConfig)` (the command-level alias) and `resolve_daemon_owner_settings(host: HostSettings)` (the single worker, for the internal helpers that hold only `HostSettings`); the former delegates to the latter. No `operator-rootless` code path SHALL resolve the daemon owner from `docker_unprivileged_user` (doing so would resolve to the stale default and silently corrupt on-disk ownership). All runtime owner-resolution sites (the lifecycle commands, the `compose-up` ActionContext, `workspace_bridge_gid`'s subgid validation, hydration's bridge-gid translation, the workspace shared-group phase, attach, doctor reads) SHALL route through this resolver; the worker is the sole sanctioned reader of `docker_unprivileged_user` for owner purposes.
+
+#### Scenario: owner is the invoking user in operator-rootless
+
+- **WHEN** `resolve_daemon_owner(...)` is called in `operator-rootless` mode
+- **THEN** it returns the current (invoking) user, not `docker_unprivileged_user`
+
+#### Scenario: owner is the dedicated user in separate-user
+
+- **WHEN** `resolve_daemon_owner(...)` is called in `separate-user` mode
+- **THEN** it returns `host.docker_unprivileged_user` (behavior unchanged)
+
+### Requirement: Runtime Commands Refuse Root
+
+The runtime commands (`init`, `start`, `stop`, `status`, `attach`, `destroy`, and the `workspace` subcommands) SHALL refuse to run as root (`os.geteuid() == 0`), with a message directing the operator to run as their own (non-root) account. This guarantees `sandbox_ai_home()` (`~/.sandbox-ai`) never resolves to `/root/.sandbox-ai` for a runtime command. `sandbox setup` is exempt from this guard (it legitimately runs as root in `separate-user` mode; its `operator-rootless` root-refusal is specified by the `sandbox-setup` capability).
+
+#### Scenario: runtime command refuses root
+
+- **WHEN** any runtime command (e.g. `sandbox start`) is invoked with `euid == 0`
+- **THEN** it refuses with a "run as your operator account, not root" message and creates no `/root/.sandbox-ai` tree
 
