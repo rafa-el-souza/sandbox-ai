@@ -462,12 +462,19 @@ def test_act_operator_rootless_local_writes_operator_home(
     assert any("restart --no-block docker" in j for j in joined)
     assert all("machinectl" not in j for j in joined)
     assert all("is-active user@" not in j for j in joined)
-    assert all(c[0] == "/bin/bash" for c, _ in seen)  # empty crossing prefix
+    # LOCAL env-injected prefix (finding 8.11) — restart/poll carry the session env.
+    assert all(c[0] == "env" for c, _ in seen)
+    assert all(
+        any(e.startswith("HOME=") for e in c) and any(e.startswith("DOCKER_HOST=") for e in c)
+        for c, _ in seen
+    )
     assert all(s is False for _, s in seen)
 
 
 def test_runtime_registered_operator_rootless_local(monkeypatch: pytest.MonkeyPatch) -> None:
-    """op-rootless ``_runtime_registered`` queries docker LOCAL (no machinectl, sentinel off)."""
+    """op-rootless ``_runtime_registered`` queries docker LOCAL with the injected
+    session env (no machinectl, sentinel off) — finding 8.11."""
+    monkeypatch.setattr("pwd.getpwnam", lambda _u: _fake_pw("/home/alice"))
     seen: list[tuple[list[str], object]] = []
 
     def fake_run(
@@ -480,7 +487,8 @@ def test_runtime_registered_operator_rootless_local(monkeypatch: pytest.MonkeyPa
 
     assert l6._runtime_registered(_oprootless_ctx()) is True
     (cmd, sentinel), = seen
-    assert cmd[0] == "/bin/bash"
+    assert cmd[0] == "env"
+    assert any(e.startswith("DOCKER_HOST=") for e in cmd)
     assert "machinectl" not in " ".join(cmd)
     assert sentinel is False
 

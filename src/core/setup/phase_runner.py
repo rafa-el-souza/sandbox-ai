@@ -407,18 +407,30 @@ def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
     what L5/L6/L7 build inline (so the L5/L6/L7 separate-user path is unchanged).
     Root must still drop into the dedicated ``sandbox`` user.
 
-    operator-rootless: an **empty (LOCAL) prefix** — ``[]`` (design D5/D4). Because
-    operator-rootless ``sandbox setup`` *already runs as the operator* (D5), the
-    owner-side work is a plain local subprocess in the operator's own live session.
-    There is no root→operator drop, so the earlier C-prime recipe
-    (``sudo_as_operator`` + injected ``XDG_RUNTIME_DIR``/``DBUS_SESSION_BUS_ADDRESS``)
-    is superseded — it solved a privilege drop that no longer happens. The
-    operator's session already carries its own ``XDG_RUNTIME_DIR`` / DBus address,
-    so ``systemctl --user`` / ``docker`` reach the operator's user-session bus
-    natively. The C-prime recipe survives only on the separate-user branch above.
+    operator-rootless: a LOCAL ``env …`` prefix that re-injects the operator's
+    user-session environment (no ``sudo`` drop — setup already runs AS the operator,
+    D5). There is no root→operator privilege drop, so the C-prime ``sudo_as_operator``
+    half is gone; but the **session env must still be injected explicitly**, because
+    :class:`core.executor.Executor` runs every subprocess in a *sterile matrix*
+    (only ``PATH`` survives — ``HOME`` / ``XDG_RUNTIME_DIR`` / ``DBUS_SESSION_BUS_ADDRESS``
+    / ``DOCKER_HOST`` are scrubbed *regardless of who runs setup*). Rootless docker +
+    ``systemctl --user`` need that session env: ``dockerd-rootless-setuptool.sh``
+    fails with "HOME needs to be set", and ``docker`` falls back to the rootful
+    ``/var/run/docker.sock`` (permission-denied) without ``DOCKER_HOST``. (Real-host
+    finding 8.11 — the §10 convergence smoke; D4/D5's "no injection needed" reasoning
+    was wrong: it accounted for the absent privilege drop but not the sterile Executor.)
+    The C-prime ``machinectl`` recipe survives only on the separate-user branch above.
     """
     if is_operator_rootless(ctx.host_config):
-        return []
+        pw = pwd.getpwnam(ctx.operator)
+        run_dir = f"/run/user/{pw.pw_uid}"
+        return [
+            "env",
+            f"HOME={pw.pw_dir}",
+            f"XDG_RUNTIME_DIR={run_dir}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path={run_dir}/bus",
+            f"DOCKER_HOST=unix://{run_dir}/docker.sock",
+        ]
     return machinectl_cmd(
         ctx.host_config.host.docker_unprivileged_user,
         ctx.host_config.host.machinectl_authentication,

@@ -1093,16 +1093,34 @@ def test_daemon_owner_crossing_separate_user_polkit() -> None:
     )
 
 
-def test_daemon_owner_crossing_operator_rootless_is_local_empty() -> None:
-    """operator-rootless crossing is a LOCAL (empty) prefix (D5/D4).
+def test_daemon_owner_crossing_operator_rootless_injects_session_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """operator-rootless crossing is a LOCAL ``env …`` prefix that re-injects the
+    operator's user-session environment (no sudo drop) — finding 8.11.
 
-    Setup already runs as the operator, so there is no root→operator drop: the
-    owner-side work is a plain local subprocess in the operator's own session.
-    The C-prime ``sudo_as_operator`` + injected XDG/DBus recipe is superseded.
+    The sterile Executor scrubs everything but PATH, so rootless docker +
+    ``systemctl --user`` need HOME / XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS /
+    DOCKER_HOST injected explicitly (else ``dockerd-rootless-setuptool.sh`` fails on
+    HOME and ``docker`` hits the rootful socket). There is NO ``sudo``/machinectl —
+    setup already runs as the operator.
     """
+    monkeypatch.setattr(
+        "core.setup.phase_runner.pwd.getpwnam",
+        lambda _n: _fake_pw(5000, "/home/alice"),
+    )
     ctx = _ctx(
         user="sbuser",
         mode=DockerExecutionMode.OPERATOR_ROOTLESS,
         operator="alice",
     )
-    assert daemon_owner_crossing(ctx) == []
+    assert daemon_owner_crossing(ctx) == [
+        "env",
+        "HOME=/home/alice",
+        "XDG_RUNTIME_DIR=/run/user/5000",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
+        "DOCKER_HOST=unix:///run/user/5000/docker.sock",
+    ]
+    # No privilege drop / no boundary crossing in op-rootless.
+    assert "sudo" not in daemon_owner_crossing(ctx)
+    assert "machinectl" not in daemon_owner_crossing(ctx)

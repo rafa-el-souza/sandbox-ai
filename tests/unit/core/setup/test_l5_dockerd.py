@@ -384,14 +384,32 @@ def _oprootless_ctx() -> SetupContext:
     )
 
 
-def test_act_operator_rootless_local_no_linger(monkeypatch: pytest.MonkeyPatch) -> None:
-    """op-rootless act installs dockerd LOCAL (no machinectl), no linger/readiness gate.
+def _alice_pw() -> pwd.struct_passwd:
+    return pwd.struct_passwd(("alice", "x", 5000, 5000, "", "/home/alice", "/bin/bash"))
 
-    Linger is host-root-batch-owned in operator-rootless (the ``LINGER`` item),
-    and setup runs in the operator's own live session — so L5 does NOT
-    ``enable-linger``, does NOT poll ``user@<uid>.service``, and crosses with an
-    empty LOCAL prefix (sentinel off — a local command's exit is not masked).
+
+# The op-rootless LOCAL crossing prefix (finding 8.11): the sterile Executor scrubs
+# the session env, so it must be re-injected for rootless docker + systemctl --user.
+_OPRL_ENV = [
+    "env",
+    "HOME=/home/alice",
+    "XDG_RUNTIME_DIR=/run/user/5000",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
+    "DOCKER_HOST=unix:///run/user/5000/docker.sock",
+]
+
+
+def test_act_operator_rootless_local_no_linger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """op-rootless act installs dockerd LOCAL (no machinectl), no linger/readiness gate,
+    with the operator's session env injected (finding 8.11).
+
+    Linger is host-root-batch-owned in operator-rootless (the ``LINGER`` item) — so L5
+    does NOT ``enable-linger``, does NOT poll ``user@<uid>.service``. The crossing is a
+    LOCAL ``env HOME=… XDG_RUNTIME_DIR=… DBUS…=… DOCKER_HOST=…`` prefix (sentinel off —
+    a local command's exit is not masked), so the sterile Executor doesn't strip the
+    session env rootless docker needs.
     """
+    monkeypatch.setattr("core.setup.phase_runner.pwd.getpwnam", lambda _n: _alice_pw())
     seen: list[tuple[list[str], object]] = []
 
     def fake_run(
@@ -421,20 +439,23 @@ def test_act_operator_rootless_local_no_linger(monkeypatch: pytest.MonkeyPatch) 
     ]
     assert len(install) == 1
     cmd, sentinel = install[0]
-    assert cmd[0] == "/bin/bash"  # empty crossing prefix → bash is argv[0]
+    # LOCAL env-injected prefix, then bash -c — NOT a bare bash (8.11 regression).
+    assert cmd[: len(_OPRL_ENV)] == _OPRL_ENV
+    assert cmd[len(_OPRL_ENV)] == "/bin/bash"
     assert sentinel is False
     assert "alice" in detail
 
 
-def test_probe_operator_rootless_local_skips_linger_and_pw_guard(
+def test_probe_operator_rootless_local_skips_linger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """op-rootless probe checks only LOCAL dockerd reachability (owner = operator).
+    """op-rootless probe checks only LOCAL dockerd reachability (owner = operator),
+    via the env-injected crossing — no machinectl, no ``loginctl show-user`` (linger).
 
-    The not-yet-created-user guard and the linger check are separate-user-only,
-    so ``pwd.getpwnam`` must NOT be consulted (we make it raise to prove it) and
-    no ``loginctl show-user`` crossing happens.
+    The not-yet-created-user guard and the linger check are separate-user-only; the
+    crossing legitimately resolves the operator's uid/home for the session env.
     """
+    monkeypatch.setattr("core.setup.phase_runner.pwd.getpwnam", lambda _n: _alice_pw())
     seen: list[tuple[list[str], object]] = []
 
     def fake_run(
@@ -447,11 +468,6 @@ def test_probe_operator_rootless_local_skips_linger_and_pw_guard(
 
     monkeypatch.setattr("core.executor.Executor.run", fake_run)
 
-    def _boom(_n: str) -> object:
-        raise KeyError("pwd.getpwnam must not be called on the op-rootless path")
-
-    monkeypatch.setattr("pwd.getpwnam", _boom)
-
     result, detail = l5.PHASE.probe(_oprootless_ctx())
 
     assert result == PhaseResult.ALREADY_CORRECT
@@ -460,3 +476,6 @@ def test_probe_operator_rootless_local_skips_linger_and_pw_guard(
     assert all("show-user" not in j for j in joined)
     assert all("machinectl" not in j for j in joined)
     assert all(s is False for _, s in seen)
+    # the docker info crossing carries the injected session env.
+    (info_cmd, _), = seen
+    assert info_cmd[: len(_OPRL_ENV)] == _OPRL_ENV

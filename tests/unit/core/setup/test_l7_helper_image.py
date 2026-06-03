@@ -127,11 +127,20 @@ def test_content_aware(
 
 
 def test_act_operator_rootless_local_pull(monkeypatch: pytest.MonkeyPatch) -> None:
-    """op-rootless act pulls the pinned digest LOCAL (no machinectl, sentinel off).
+    """op-rootless act pulls the pinned digest LOCAL with the injected session env
+    (no machinectl, sentinel off) — finding 8.11.
 
-    The daemon owner is the operator, so the pull is a plain local ``docker``
-    subprocess in the operator's session — empty crossing prefix, sentinel off.
+    The daemon owner is the operator, so the pull is a local ``docker`` subprocess
+    in the operator's session — but the sterile Executor scrubs the env, so the
+    crossing injects HOME / XDG_RUNTIME_DIR / DBUS / DOCKER_HOST so ``docker`` hits
+    the rootless socket (not the rootful ``/var/run/docker.sock``).
     """
+    import pwd
+
+    monkeypatch.setattr(
+        "core.setup.phase_runner.pwd.getpwnam",
+        lambda _n: pwd.struct_passwd(("alice", "x", 5000, 5000, "", "/home/alice", "/bin/bash")),
+    )
     seen: list[tuple[list[str], object]] = []
 
     def fake_run(
@@ -154,7 +163,16 @@ def test_act_operator_rootless_local_pull(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert f"docker pull {l7._HELPER_REF}" in detail or "pulled" in detail
     (cmd, sentinel), = seen
-    assert cmd == ["/bin/bash", "-c", f"docker pull {l7._HELPER_REF}"]  # empty prefix
+    assert cmd == [
+        "env",
+        "HOME=/home/alice",
+        "XDG_RUNTIME_DIR=/run/user/5000",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
+        "DOCKER_HOST=unix:///run/user/5000/docker.sock",
+        "/bin/bash",
+        "-c",
+        f"docker pull {l7._HELPER_REF}",
+    ]
     assert "machinectl" not in " ".join(cmd)
     assert sentinel is False
 
