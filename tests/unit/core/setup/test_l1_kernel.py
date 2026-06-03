@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l1_kernel
 from core.setup.l1_kernel import PHASE, render_sysctl_dropin
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -54,6 +58,10 @@ def test_phase_identity_and_deps() -> None:
     assert PHASE.id == "l1"
     assert PHASE.depends_on == ("l0",)
     assert PHASE.identity == Identity.ROOT
+    # separate-user only: the sysctl drop-in is host-root, so in operator-rootless
+    # it is owned by the host_batch SYSCTL item + _bootstrap-host escalation
+    # (D5a/O3); the runner reports the phase skipped there.
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})
 
 
 def test_l1_does_not_resolve_an_os_user(

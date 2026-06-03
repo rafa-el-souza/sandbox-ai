@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l6a_runsc as l6a
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -162,6 +166,12 @@ def test_phase_shape() -> None:
     assert l6a.PHASE.id == "l6a"
     assert l6a.PHASE.depends_on == ("l6",)
     assert l6a.PHASE.identity == Identity.ROOT
+    # separate-user only: the root-owned runsc install is host-root, so in
+    # operator-rootless it is owned by the host_batch RUNSC item + _bootstrap-host
+    # escalation (D5a/O3); the runner reports the phase skipped there.
+    assert l6a.PHASE.applies_in == frozenset(
+        {DockerExecutionMode.SEPARATE_USER}
+    )
 
 
 def test_update_runsc_subset_ordering_needs_external_deps_flag() -> None:

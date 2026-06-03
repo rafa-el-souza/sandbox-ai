@@ -27,7 +27,6 @@ from core.host_config import (
     machinectl_cmd,
     minimal_host_config,
     pipe_cmd,
-    sudo_as_operator,
 )
 from core.setup.phase_runner import (
     Identity,
@@ -1094,22 +1093,16 @@ def test_daemon_owner_crossing_separate_user_polkit() -> None:
     )
 
 
-def test_daemon_owner_crossing_operator_rootless_is_cprime_recipe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """operator-rootless crossing is the locked C-prime sudo -u + user-session env."""
-    monkeypatch.setattr(
-        "core.setup.phase_runner.pwd.getpwnam",
-        lambda _n: _fake_pw(5000, "/home/alice"),
-    )
+def test_daemon_owner_crossing_operator_rootless_is_local_empty() -> None:
+    """operator-rootless crossing is a LOCAL (empty) prefix (D5/D4).
+
+    Setup already runs as the operator, so there is no root→operator drop: the
+    owner-side work is a plain local subprocess in the operator's own session.
+    The C-prime ``sudo_as_operator`` + injected XDG/DBus recipe is superseded.
+    """
     ctx = _ctx(
         user="sbuser",
         mode=DockerExecutionMode.OPERATOR_ROOTLESS,
         operator="alice",
     )
-    assert daemon_owner_crossing(ctx) == [
-        *sudo_as_operator("alice"),
-        "env",
-        "XDG_RUNTIME_DIR=/run/user/5000",
-        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
-    ]
+    assert daemon_owner_crossing(ctx) == []

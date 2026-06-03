@@ -70,7 +70,6 @@ from core.host_config import (
     is_operator_rootless,
     machinectl_cmd,
     pipe_cmd,
-    sudo_as_operator,
 )
 
 if TYPE_CHECKING:
@@ -404,26 +403,22 @@ def daemon_owner_user(ctx: SetupContext) -> str:
 def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
     """argv prefix to run a ``/bin/bash -c`` as the rootless-daemon owner in their user session.
 
-    separate-user: ``machinectl_cmd(<sandbox-user>, <auth>)`` — BYTE-IDENTICAL to what L5/L6/L7 build inline
-    today (so a later milestone can refactor them onto this helper with zero behavior change).
-    operator-rootless: the locked C-prime recipe — ``sudo_as_operator(operator)`` + injected
-    ``XDG_RUNTIME_DIR``/``DBUS_SESSION_BUS_ADDRESS`` for ``/run/user/<op-uid>``.
+    separate-user: ``machinectl_cmd(<sandbox-user>, <auth>)`` — BYTE-IDENTICAL to
+    what L5/L6/L7 build inline (so the L5/L6/L7 separate-user path is unchanged).
+    Root must still drop into the dedicated ``sandbox`` user.
 
-    The C-prime recipe drops to the operator via ``sudo -u`` (NOT ``pipe_cmd``:
-    its transient ``--uid`` unit gives the uid but no ``XDG_RUNTIME_DIR``, so
-    ``systemctl --user`` cannot reach the operator's user-session bus). The
-    ``sudo -u`` drop is chosen over the transient-unit drop for cross-distro
-    robustness — it never touches systemd unit-hardening, so it is immune to
-    the F-016 setuid-exec failure class.
+    operator-rootless: an **empty (LOCAL) prefix** — ``[]`` (design D5/D4). Because
+    operator-rootless ``sandbox setup`` *already runs as the operator* (D5), the
+    owner-side work is a plain local subprocess in the operator's own live session.
+    There is no root→operator drop, so the earlier C-prime recipe
+    (``sudo_as_operator`` + injected ``XDG_RUNTIME_DIR``/``DBUS_SESSION_BUS_ADDRESS``)
+    is superseded — it solved a privilege drop that no longer happens. The
+    operator's session already carries its own ``XDG_RUNTIME_DIR`` / DBus address,
+    so ``systemctl --user`` / ``docker`` reach the operator's user-session bus
+    natively. The C-prime recipe survives only on the separate-user branch above.
     """
     if is_operator_rootless(ctx.host_config):
-        op_uid = pwd.getpwnam(ctx.operator).pw_uid
-        return [
-            *sudo_as_operator(ctx.operator),
-            "env",
-            f"XDG_RUNTIME_DIR=/run/user/{op_uid}",
-            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{op_uid}/bus",
-        ]
+        return []
     return machinectl_cmd(
         ctx.host_config.host.docker_unprivileged_user,
         ctx.host_config.host.machinectl_authentication,
