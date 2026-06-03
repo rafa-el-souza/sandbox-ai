@@ -98,18 +98,20 @@ def test_canonical_order_exact() -> None:
 def test_mid_batch_failure_never_writes_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     marker = tmp_path / "setup-state.json"
     monkeypatch.setattr("core.setup_state.MARKER_PATH", marker)
-    monkeypatch.setattr("core.setup.host_batch.MARKER_PATH", marker)
 
     write_calls: list[tuple[str, DockerExecutionMode]] = []
 
     def _spy_write_mode(operator: str, mode: DockerExecutionMode) -> None:
         write_calls.append((operator, mode))
 
-    monkeypatch.setattr(host_batch, "write_mode", _spy_write_mode)
+    # Spy the root-owned marker write that the real ``_apply_marker`` delegates to.
+    monkeypatch.setattr(host_batch, "write_mode_root_owned", _spy_write_mode)
 
-    # Make every applier a no-op except DELEGATE, which raises.
+    # Make every applier a no-op EXCEPT the real MARKER applier (kept real so the
+    # spy would fire iff it were reached) and DELEGATE, which raises mid-batch.
     for item in HOST_ROOT_BATCH:
-        monkeypatch.setitem(host_batch._APPLIERS, item, lambda _p: None)
+        if item is not BatchItem.MARKER:
+            monkeypatch.setitem(host_batch._APPLIERS, item, lambda _p: None)
 
     def _boom(_p: BatchParams) -> None:
         raise RuntimeError("delegate failed")
@@ -350,7 +352,6 @@ def test_runsc_applier_reuses_install_pinned(monkeypatch: pytest.MonkeyPatch) ->
 def test_marker_applier_writes_mode_and_root_owns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     marker = tmp_path / "setup-state.json"
     monkeypatch.setattr("core.setup_state.MARKER_PATH", marker)
-    monkeypatch.setattr("core.setup.host_batch.MARKER_PATH", marker)
     chmods: list[tuple[Path, int]] = []
     chowns: list[tuple[Path, int, int]] = []
     monkeypatch.setattr(os, "chmod", lambda p, m: chmods.append((p, m)))

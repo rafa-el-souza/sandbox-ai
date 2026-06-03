@@ -85,3 +85,40 @@ def test_write_mode_atomic_cleanup_on_failure(
     # No stray temp files left behind in the marker directory.
     leftovers = list(marker.parent.glob(".setup-state-*.tmp"))
     assert leftovers == []
+
+
+# ── resolve_execution_mode (runtime authority, D11) + write_mode_root_owned ──
+
+
+def test_resolve_execution_mode_returns_recorded(marker: Path) -> None:
+    setup_state.write_mode("alice", DockerExecutionMode.OPERATOR_ROOTLESS)
+    assert (
+        setup_state.resolve_execution_mode("alice")
+        is DockerExecutionMode.OPERATOR_ROOTLESS
+    )
+
+
+def test_resolve_execution_mode_missing_marker_fails_closed(marker: Path) -> None:
+    assert not marker.exists()
+    with pytest.raises(setup_state.ModeMarkerMissing, match="sandbox setup"):
+        setup_state.resolve_execution_mode("alice")
+
+
+def test_resolve_execution_mode_no_entry_for_operator_fails_closed(marker: Path) -> None:
+    setup_state.write_mode("alice", DockerExecutionMode.SEPARATE_USER)
+    with pytest.raises(setup_state.ModeMarkerMissing, match="bob"):
+        setup_state.resolve_execution_mode("bob")
+
+
+def test_write_mode_root_owned_writes_and_root_owns(
+    marker: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared root-owned write lands content + 0644 + chown root:root."""
+    chowns: list[tuple[object, int, int]] = []
+    monkeypatch.setattr("core.setup_state.os.chown", lambda p, u, g: chowns.append((p, u, g)))
+
+    setup_state.write_mode_root_owned("alice", DockerExecutionMode.SEPARATE_USER)
+
+    assert setup_state.read_mode("alice") is DockerExecutionMode.SEPARATE_USER
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o644
+    assert chowns == [(marker, 0, 0)]

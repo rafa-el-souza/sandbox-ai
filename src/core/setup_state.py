@@ -87,3 +87,46 @@ def write_mode(operator: str, mode: DockerExecutionMode) -> None:
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def write_mode_root_owned(operator: str, mode: DockerExecutionMode) -> None:
+    """Write the marker for ``operator`` and force root:root ``0644`` ownership.
+
+    The single source for the *root-owned* marker write both setup paths need:
+    the operator-rootless host-root batch (``host_batch._apply_marker``, run under
+    the one ``sudo`` escalation) and separate-user setup (run as root). ``write_mode``
+    lands the content + mode ``0644`` but not ownership; this wrapper additionally
+    ``chown``s the marker to root (the marker is a root-owned reserved-namespace
+    artifact, D6). The caller MUST hold root.
+    """
+    write_mode(operator, mode)
+    os.chmod(MARKER_PATH, 0o644)
+    os.chown(MARKER_PATH, 0, 0)
+
+
+class ModeMarkerMissing(LookupError):
+    """The setup-state marker records no execution mode for the operator.
+
+    Raised by :func:`resolve_execution_mode` (the runtime mode-resolution path)
+    when the marker is absent or has no entry for the current operator. The
+    runtime fails closed on this — a provisioned host always carries a marker
+    entry (setup writes it in both modes), so its absence means "not provisioned".
+    """
+
+
+def resolve_execution_mode(operator: str) -> DockerExecutionMode:
+    """Resolve ``operator``'s execution mode from the marker (runtime authority, D11).
+
+    The runtime parallel of setup's mode resolution: the marker is the **single
+    authority** for the execution mode (it is no longer a user-editable toml
+    field). Returns the recorded :class:`DockerExecutionMode`; raises
+    :class:`ModeMarkerMissing` (fail-closed) when no entry exists for ``operator``
+    — the caller surfaces "run `sudo sandbox setup` first".
+    """
+    mode = read_mode(operator)
+    if mode is None:
+        raise ModeMarkerMissing(
+            f"no execution mode recorded for operator {operator!r}. "
+            "Run `sudo sandbox setup` first."
+        )
+    return mode

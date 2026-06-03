@@ -37,7 +37,6 @@ operator-rootless path no longer touches linger.
 from __future__ import annotations
 
 import grp
-import os
 import pwd
 import subprocess
 from dataclasses import dataclass
@@ -57,7 +56,7 @@ from core.host_config import (
     parse_subuid_for_user,
 )
 from core.setup import l1_kernel, l2a_delegate
-from core.setup_state import MARKER_PATH, read_mode, write_mode
+from core.setup_state import read_mode, write_mode_root_owned
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -309,15 +308,13 @@ def _apply_runsc(params: BatchParams) -> None:
 
 
 def _apply_marker(params: BatchParams) -> None:
-    """Write the root-owned mode marker (LAST — the only ``write_mode`` caller).
+    """Write the root-owned mode marker (LAST in the batch — crash-safe).
 
-    Reuses ``core.setup_state.write_mode`` (atomic, mode 0644) and additionally
-    ensures root:root ownership (``write_mode`` sets the mode but not the owner —
-    root ownership is the host batch's concern).
+    Delegates to ``core.setup_state.write_mode_root_owned`` (the single source for
+    the root-owned marker write shared with separate-user setup): atomic content
+    write + mode ``0644`` + ``chown root:root``.
     """
-    write_mode(params.operator, params.mode)
-    os.chmod(MARKER_PATH, 0o644)
-    os.chown(MARKER_PATH, 0, 0)
+    write_mode_root_owned(params.operator, params.mode)
 
 
 # ``install_pinned`` reads no host-specific field (the reserved path is
