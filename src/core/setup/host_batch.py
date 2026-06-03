@@ -296,15 +296,30 @@ def _apply_linger(params: BatchParams) -> None:
 
 
 def _apply_runsc(params: BatchParams) -> None:
-    """Install the pinned runsc root-owned in the reserved dir (l6a/binary_install).
+    """Install / update the pinned runsc root-owned in the reserved dir.
 
-    Reuses ``core.binary_install.install_pinned`` (download + sha512-verify +
-    atomic install + ``chown root:root`` + ``chattr +i``) — the same mechanism
-    L6a drives. ``host_config`` is accepted by ``install_pinned`` only for API
-    uniformity (the reserved path is host-independent).
+    The host-root batch IS the operator-rootless runsc lifecycle: the classifier
+    selects ``RUNSC`` whenever the on-disk binary is absent OR drifts from the
+    pinned sha (``_runsc_satisfied`` requires an exact match), so this applier must
+    handle BOTH install and update. It therefore uses ``force=True``:
+
+    - **fresh install** (target absent) — ``force`` is inert (``install_pinned``
+      only ``chattr -i``s an *existing* target), so this is identical to the
+      validated fresh-host path;
+    - **drift update** (target present + ``chattr +i`` sealed) — ``force`` unseals
+      the immutable target before the atomic replace. With ``force=False`` the
+      ``os.rename`` over the sealed binary would hard-fail (EPERM), aborting the
+      batch — so a wheel upgrade that bumped the runsc pin would break op-rootless
+      setup. ``force=True`` lets a normal ``sandbox setup`` re-run converge runsc
+      to the new pin (surfaced in the plan + the one ``sudo`` escalation; not
+      silent). This is the op-rootless analogue of separate-user ``--update-runsc``
+      — convergence is the batch's model, so no separate force flag is needed.
+
+    ``host_config`` is accepted by ``install_pinned`` only for API uniformity
+    (the reserved path is host-independent).
     """
     del params  # the reserved runsc path is root-owned and host-independent
-    install_pinned("runsc", _RESERVED_HOST_CONFIG, force=False)
+    install_pinned("runsc", _RESERVED_HOST_CONFIG, force=True)
 
 
 def _apply_marker(params: BatchParams) -> None:

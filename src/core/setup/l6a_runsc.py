@@ -29,11 +29,15 @@ operator-rootless (where the apply pass runs unprivileged as the operator) it is
 owned by the ``host_batch`` ``RUNSC`` item + ``_bootstrap-host`` escalation
 (``host_batch._apply_runsc`` drives the same ``core.binary_install.install_pinned``
 mechanism). The runner reports the phase ``skipped (operator-rootless)`` in both
-passes, joining L1/L2/L2a and the M2 crossing-only phases. (Consequence for the
-``--update-runsc`` subset run: on a separate-user host it runs as today; on an
-operator-rootless host a root invocation is refused at the entry identity gate
-and an operator invocation cleanly skips L6a — runsc is host-root-batch-owned in
-operator-rootless, so there is no operator-runnable in-place update by design.)
+passes, joining L1/L2/L2a and the M2 crossing-only phases. (``--update-runsc``:
+on a separate-user host this phase runs as today. operator-rootless has NO L6a
+subset to run — instead the runsc lifecycle (install AND pin-update) is owned by
+the ``host_batch`` ``RUNSC`` item: the classifier selects it whenever the on-disk
+sha is absent or drifts, and ``host_batch._apply_runsc`` installs with
+``force=True`` (unsealing the immutable target on a drift re-install). So a normal
+``sandbox setup`` re-run converges runsc to the pin under the one escalation, and
+``--update-runsc`` routes to that op-rootless body — no privileged operator-side
+L6a step is needed or possible.)
 """
 
 from __future__ import annotations

@@ -25,6 +25,7 @@ from cli.main import (
     _resolve_sandbox_executable,
     _resolve_setup_operator,
     _run_bootstrap_escalation,
+    _setup_body,
     _setup_body_operator_rootless,
     _SetupAborted,
     _SetupFlagRefused,
@@ -434,6 +435,41 @@ def test_oprootless_body_renders_plan_lines() -> None:
 
 
 # ── §8-D escalation helper (TTY-aware) ────────────────────────────────────────
+
+
+def test_update_runsc_in_operator_rootless_routes_to_body() -> None:
+    """op-rootless ``--update-runsc`` converges runsc via the host-root batch body,
+    NOT the separate-user L6a-subset path (L6a is gated out in op-rootless, so the
+    subset would be a confusing no-op). The batch classifier detects runsc drift
+    and ``_apply_runsc`` force-updates it under the one escalation."""
+    with (
+        patch("cli.main._setup_body_operator_rootless", return_value=0) as body,
+        patch("cli.main._run_setup_update_runsc") as subset,
+    ):
+        rc = _setup_body(
+            _oprl_ctx(), dry_run=False, yes=True, update_runsc=True, flags={}
+        )
+    assert rc == 0
+    body.assert_called_once()
+    subset.assert_not_called()
+
+
+def test_update_runsc_in_separate_user_runs_l6a_subset() -> None:
+    """separate-user ``--update-runsc`` still routes to the L6a-only subset path."""
+    sep_ctx = SetupContext(
+        host_config=minimal_host_config("sandbox", MachinectlAuth.SUDO),
+        operator="dev",
+    )
+    with (
+        patch("cli.main._run_setup_update_runsc", return_value=0) as subset,
+        patch("cli.main._setup_body_operator_rootless") as body,
+    ):
+        rc = _setup_body(
+            sep_ctx, dry_run=False, yes=True, update_runsc=True, flags={}
+        )
+    assert rc == 0
+    subset.assert_called_once()
+    body.assert_not_called()
 
 
 def test_escalation_interactive_success() -> None:

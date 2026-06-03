@@ -336,7 +336,11 @@ def test_linger_applier_enables_linger_for_operator(monkeypatch: pytest.MonkeyPa
     assert runs == [["loginctl", "enable-linger", "alice"]]
 
 
-def test_runsc_applier_reuses_install_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runsc_applier_installs_with_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The batch is the op-rootless runsc lifecycle (install AND pin-update), so it
+    installs with ``force=True`` — unsealing the immutable target on a drift
+    re-install (``force=False`` would EPERM-fail the rename over a sealed binary
+    and abort the batch). Inert on a fresh install (no target to unseal)."""
     calls: list[tuple[str, bool]] = []
 
     def _spy_install(name: str, _host_config: object, *, force: bool) -> None:
@@ -346,7 +350,7 @@ def test_runsc_applier_reuses_install_pinned(monkeypatch: pytest.MonkeyPatch) ->
 
     host_batch._apply_runsc(_params())
 
-    assert calls == [("runsc", False)]
+    assert calls == [("runsc", True)]
 
 
 def test_marker_applier_writes_mode_and_root_owns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

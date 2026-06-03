@@ -2711,13 +2711,19 @@ def _setup_body(
     SIGINT is handled by the caller (translated to exit 130); the distro gate,
     plan pass, gating decision, prompt, and apply pass all run here.
     """
-    if update_runsc:
-        return _run_setup_update_runsc(ctx)
-
     if is_operator_rootless(ctx.host_config):
+        # operator-rootless converges runsc (install OR pin-update) through the
+        # host-root batch on ANY `sandbox setup` run — L6a is gated out, so the
+        # separate-user `--update-runsc` L6a-subset path does not apply here.
+        # `--update-runsc` therefore routes to the normal op-rootless body, which
+        # detects runsc drift in the batch classifier and escalates to converge it
+        # (the op-rootless analogue of `--update-runsc`).
         return _setup_body_operator_rootless(
             ctx, dry_run=dry_run, yes=yes, flags=flags
         )
+
+    if update_runsc:
+        return _run_setup_update_runsc(ctx)
 
     emit_distro_gate(is_tty=_stdin_is_tty(), assume_yes=yes)
 
