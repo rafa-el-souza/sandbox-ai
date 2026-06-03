@@ -1,7 +1,7 @@
 
-# 1. Isolated Lateral Boundary
-# Blackholes internal execution names to prevent
-# lateral subnet probing requests from escaping to the public internet natively.
+# 1. Internal-name boundary
+# Return NXDOMAIN for internal cluster names so they never resolve to
+# or leak toward the public internet.
 cluster.local local internal {
     template ANY ANY . {
         rcode NXDOMAIN
@@ -12,17 +12,17 @@ cluster.local local internal {
 # Standard CoreDNS distributions lack dynamic `dstdomain "/file"` reading.
 # Ensure no leading wildcards in the allow list.
 {{ proxy_whitelist_domains_coredns | join(' ') }} {
-    log # Algorithmically interleaves successful queries into `sandbox-cli logs`
+    log # Log successful queries (visible via `sandbox-cli logs`)
     
-    # IPv6 Complete Algorithmic Elimination
-    # Forces valid IPv4 domain packets to drop their AAAA requests instantly securely natively.
+    # Suppress AAAA (IPv6) answers
+    # Return empty NOERROR for AAAA so clients fall back to IPv4 only.
     template ANY AAAA {
         rcode NOERROR
     }
     
-    # Native DoT Upstreaming perfectly resolving the OpenSpec SSL MITM avoidance mandate natively
-    # KEY DECISION: Maps to the most restrictive Mullvad "All" Anycast array. IPv6 limits structurally 
-    # eliminated. This natively blackholes ads, trackers, malware, gambling at the TCP:853 socket.
+    # DNS-over-TLS upstream (avoids SSL MITM per the OpenSpec mandate).
+    # KEY DECISION: uses Mullvad's "all" blocklist resolver, which filters
+    # ads, trackers, malware, and gambling at the resolver.
     forward . tls://194.242.2.9 {
         tls_servername all.dns.mullvad.net
         health_check 5s
@@ -30,14 +30,13 @@ cluster.local local internal {
     cache 30
 }
 
-# 3. Explicit NXDOMAIN Catch-All (DNS Tunneling Eradication)
-# All stochastic or malicious execution payloads natively collapse here geometrically.
+# 3. NXDOMAIN catch-all (blocks unlisted lookups / DNS tunneling)
+# Any name not matched above resolves to NXDOMAIN here.
 . {
-    log # Triggers explicit forensic log traces for evasion attempts automatically
+    log # Log unmatched queries for auditing
     
-    # KEY DECISION: Exposes the HTTP health check mathematically bound strictly 
-    # to the `127.0.0.1` container loopback interface natively. This completely stops 
-    # lateral network DoS attacks originating from the Agent proxy interface.
+    # KEY DECISION: bind the HTTP health check to the 127.0.0.1 loopback only,
+    # so it is not reachable from the Agent proxy interface or other containers.
     health 127.0.0.1:8080
     
     template ANY ANY . {
