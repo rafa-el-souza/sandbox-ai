@@ -2777,7 +2777,12 @@ def _run_bootstrap_escalation(
     so require passwordless sudo (a ``sudo -n true`` probe) before attempting.
     """
     flags = host_batch.build_bootstrap_argv(items, params)[2:]
-    sub_argv = [_resolve_sandbox_executable(), "_bootstrap-host", *flags]
+    # ``env PYTHONDONTWRITEBYTECODE=1`` so root importing the operator-installed CLI
+    # does not write root-owned ``__pycache__/*.pyc`` into the operator's uv/venv
+    # (the F-021 footgun — a later operator ``uv tool install --force`` / ``uv sync``
+    # would hit EACCES removing it). ``env`` sets it then execs, robust to sudo's
+    # env_reset / the rule's NOSETENV.
+    sub_argv = ["env", "PYTHONDONTWRITEBYTECODE=1", _resolve_sandbox_executable(), "_bootstrap-host", *flags]
     if is_tty:
         return subprocess.run(["sudo", *sub_argv]).returncode == 0
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:

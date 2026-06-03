@@ -394,8 +394,14 @@ def test_escalation_interactive_success() -> None:
             frozenset({BatchItem.SUBID}), _bp(), is_tty=True
         )
     assert ok is True
-    assert run.call_args.args[0][0] == "sudo"
-    assert "-n" not in run.call_args.args[0]  # interactive: no `-n`
+    argv = run.call_args.args[0]
+    assert argv[0] == "sudo"
+    assert "-n" not in argv  # interactive: no `-n`
+    # Finding 8.8: the escalation sets PYTHONDONTWRITEBYTECODE=1 (via `env`) so root
+    # importing the operator-installed CLI writes no root-owned .pyc into the venv.
+    assert argv[1:3] == ["env", "PYTHONDONTWRITEBYTECODE=1"]
+    assert argv[3] == "/usr/bin/sandbox"
+    assert "_bootstrap-host" in argv
 
 
 def test_escalation_interactive_failure() -> None:
