@@ -3197,8 +3197,13 @@ class TestInitHostConfigResolution:
         seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert seeded.exists(), f"output={result.output!r} exit={result.exit_code}"
         body = seeded.read_text()
+        # D10 stopgap: a leading managed-comment header guards the setup-determined
+        # fields against hand-edits (the mode is no longer a toml field at all).
+        assert body.startswith("# sandbox-ai managed —")
+        assert "do not edit (rerun setup to change)" in body.splitlines()[0]
         assert 'docker_unprivileged_user = "sandbox-user"' in body
         assert 'machinectl_authentication = "sudo"' in body
+        assert "docker_execution_mode" not in body
         assert result.exit_code == 0, result.output
 
     def test_init_tty_rejects_empty_user(

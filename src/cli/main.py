@@ -2199,6 +2199,7 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
+        "# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)\n"
         "[host]\n"
         f'docker_unprivileged_user = "{docker_user}"\n'
         f'machinectl_authentication = "{resolved_auth_for_seed.value}"\n'
