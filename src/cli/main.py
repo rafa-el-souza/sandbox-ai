@@ -59,6 +59,7 @@ from core.host_config import (
     minimal_host_config,
     pipe_cmd,
     resolve_daemon_owner,
+    resolve_daemon_owner_settings,
     sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
@@ -1419,7 +1420,7 @@ def _phase_workspace_shared_group(
         WorkspaceBridgeGroupMissingError: if the bridge group is missing.
     """
     bridge_gid = workspace_bridge_gid(host)
-    host_user = host.docker_unprivileged_user
+    host_user = resolve_daemon_owner_settings(host)
 
     if _workspace_needs_recursive_setup(workspace_path, bridge_gid):
         failure_count, sample_paths = _workspace_shared_group_recursive(workspace_path, bridge_gid)
@@ -1616,7 +1617,7 @@ def _phase_compose_up(
     # narrower ctx would force type special-casing the phase loop, the very
     # non-uniformity the render_command contract removed).
     ctx = ActionContext(
-        host_user=host_config.host.docker_unprivileged_user,
+        host_user=resolve_daemon_owner(host_config),
         auth=host_config.host.machinectl_authentication,
         executor=Executor(),
         instance_dir=Path(instance_dir),
@@ -1654,7 +1655,6 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     Returns:
         The argv to pass to :func:`subprocess.run` (no shell needed).
     """
-    sbuser = host_config.host.docker_unprivileged_user
     home = sandbox_ai_home()
     inst_dir = home / "instances" / inst
     secrets = inst_dir / "secrets"
@@ -1698,8 +1698,13 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         "/fwd",
         f"{core_ipc_ip}:9999",
     ]
+    # separate-user crosses into the sandbox user via pipe_cmd; operator-rootless
+    # runs the bare local docker exec (the operator owns dockerd — no crossing, so
+    # docker_unprivileged_user is never read on this path, D7).
     proxy_argv = (
-        docker_exec_argv if is_operator_rootless(host_config) else [*pipe_cmd(sbuser), *docker_exec_argv]
+        docker_exec_argv
+        if is_operator_rootless(host_config)
+        else [*pipe_cmd(host_config.host.docker_unprivileged_user), *docker_exec_argv]
     )
     proxy_command = shlex.join(proxy_argv)
 
@@ -1829,8 +1834,9 @@ def _dry_run_pipeline(inst: str) -> None:
     instance_dir = _lookup_instance_or_exit(inst)
     console.print(f"  Instance: [green]{inst}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
 
     project_name = compose_project_name(inst)
 
@@ -2012,28 +2018,13 @@ def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
     return missing
 
 
-def _resolve_host_config() -> tuple[str, MachinectlAuth]:
-    """Resolve host_user and auth from per-host ``sandbox-ai.toml``.
-
-    Post-init commands SHALL fail when host config is absent — the field
-    no longer exists on the per-instance ``SandboxInstanceSection``.
-    """
-    settings = _resolve_host_settings()
-    return settings.docker_unprivileged_user, settings.machinectl_authentication
-
-
-def _resolve_host_settings() -> HostSettings:
-    """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
-    return _resolve_full_host_config().host
-
-
 def _resolve_full_host_config() -> HostConfig:
-    """Resolve the full ``HostConfig`` from per-host ``sandbox-ai.toml``.
+    """Resolve the full ``HostConfig`` (toml + marker-resolved execution mode).
 
-    Used by ``sandbox attach`` and ``sandbox start``'s handover path —
-    :func:`_build_attach_argv` consumes the full ``HostConfig`` (it reads
-    ``host.docker_unprivileged_user``); other call sites can keep using
-    :func:`_resolve_host_settings` / :func:`_resolve_host_config`.
+    The runtime daemon owner is :func:`core.host_config.resolve_daemon_owner` of
+    this config (the operator in operator-rootless, ``docker_unprivileged_user``
+    in separate-user) — runtime commands MUST resolve the owner through it, never
+    by reading ``docker_unprivileged_user`` directly (D7).
     """
     try:
         host_config = HostConfig.from_toml()
@@ -3140,8 +3131,9 @@ def start(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
 
     # Operator-edited TOML guard: ``instance.name`` should match the registry
@@ -3321,7 +3313,7 @@ def start(
     ws = workspace_names[0]
 
     # Re-resolve the full HostConfig for `_build_attach_argv` (the start
-    # command earlier resolved only HostSettings via `_resolve_host_settings`).
+    # command earlier resolved only the toml-built config).
     host_config = _resolve_full_host_config()
     console.print("→ Handing over to core via ssh-through-admin")
     completed = subprocess.run(_build_attach_argv(inst, ws, host_config), check=False)
@@ -3339,8 +3331,9 @@ def stop(
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
 
     # Warm check
@@ -3411,7 +3404,7 @@ def attach(
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
     host_config = _resolve_full_host_config()
-    host_user = host_config.host.docker_unprivileged_user
+    host_user = resolve_daemon_owner(host_config)
     auth = host_config.host.machinectl_authentication
 
     # Workspace selection per cli-attach spec.
@@ -3527,7 +3520,7 @@ def destroy(
 
     config = _load_config(instance_dir)
     host_config = _resolve_full_host_config()
-    host_user = host_config.host.docker_unprivileged_user
+    host_user = resolve_daemon_owner(host_config)
     auth = host_config.host.machinectl_authentication
     mode = host_config.host.docker_execution_mode
     available = set(config.workspaces.keys())
@@ -3812,8 +3805,9 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     """Render the per-instance detailed panel + workspaces + containers."""
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
 
     # Container status
@@ -3962,8 +3956,9 @@ def _require_instance_stopped(inst: str, instance_dir: str) -> None:
     Workspace mutations (add/remove/rename/restore) require the instance to
     be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
     """
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
     if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(

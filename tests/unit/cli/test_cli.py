@@ -3463,24 +3463,6 @@ class TestInitAuthProbe:
             assert "probe failed" in result.output.lower()
 
 
-class TestResolveHostConfig:
-    """Coverage: _resolve_host_config with HostConfig present."""
-
-    def test_resolve_host_config_from_project_config(self) -> None:
-        """_resolve_host_config returns values from HostConfig when present."""
-        from cli.main import _resolve_host_config
-        from core.host_config import HostConfig, MachinectlAuth
-
-        mock_project_config = HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
-        )
-
-        with patch("cli.main.HostConfig.from_toml", return_value=mock_project_config):
-            user, auth = _resolve_host_config()
-            assert user == "fromtoml"
-            assert auth == MachinectlAuth.POLKIT
-
-
 @pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunExistingInstance:
     """Task 12.1: --dry-run with existing instance."""

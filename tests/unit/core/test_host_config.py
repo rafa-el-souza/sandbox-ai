@@ -326,6 +326,32 @@ class TestResolveDaemonOwner:
         assert resolve_daemon_owner(hc) == "sandbox"
 
 
+class TestResolveDaemonOwnerSettings:
+    """resolve_daemon_owner_settings() — the HostSettings-level owner worker (D7).
+
+    The single owner-resolution worker the HostSettings-only helpers
+    (workspace_bridge_gid, hydration bridge-gid, the workspace shared-group phase)
+    route through; resolve_daemon_owner is the HostConfig-level alias.
+    """
+
+    def test_operator_rootless_is_invoking_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import resolve_daemon_owner_settings
+
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        host = HostSettings(
+            docker_unprivileged_user="the-stale-default",
+            docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        )
+        assert resolve_daemon_owner_settings(host) == "alice"
+
+    def test_separate_user_is_docker_unprivileged_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import resolve_daemon_owner_settings
+
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        host = HostSettings(docker_unprivileged_user="sandbox")
+        assert resolve_daemon_owner_settings(host) == "sandbox"
+
+
 # ─── Task 1.3: machinectl_cmd() ──────────────────────────────────────────────
 
 
@@ -605,6 +631,26 @@ class TestWorkspaceBridgeGid:
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
         with pytest.raises(SubgidOutOfRangeError):
             workspace_bridge_gid(host)
+
+    def test_operator_rootless_validates_against_operator_subgid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """In op-rootless the bridge gid is validated against the OPERATOR's subgid
+        range (D7), not the stale docker_unprivileged_user (which has no entry)."""
+        # Only the operator ("alice") has a subgid range; the stale default does not.
+        _patch_subgid(monkeypatch, tmp_path, "alice:200000:65536\n")
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+
+        class _Gr:
+            gr_gid = 200500
+
+        monkeypatch.setattr("core.host_config.grp.getgrnam", lambda n: _Gr())
+        host = HostSettings(
+            docker_unprivileged_user="the-stale-default",
+            docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        )
+        # Resolves + validates against alice's range (no NoSubgidRangeError).
+        assert workspace_bridge_gid(host) == 200500
 
 
 class TestAutodetectRecommendation:

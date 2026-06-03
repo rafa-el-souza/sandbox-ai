@@ -174,20 +174,31 @@ def is_operator_rootless(host_config: HostConfig) -> bool:
     return host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
 
 
-def resolve_daemon_owner(host_config: HostConfig) -> str:
-    """Resolve the OS user that owns the rootless Docker daemon (design D7).
+def resolve_daemon_owner_settings(host: HostSettings) -> str:
+    """Resolve the rootless-daemon owner from :class:`HostSettings` (design D7).
 
-    In ``separate-user`` mode the owner is the configured
-    ``docker_unprivileged_user``. In ``operator-rootless`` mode the owner is the
-    **invoking user** (the current process owner via :func:`getpass.getuser`) —
-    the daemon runs as the operator's own user. The ``operator-rootless`` branch
-    NEVER reads ``docker_unprivileged_user``: doing so would resolve to the stale
-    default ``"sandbox"`` and silently corrupt on-disk ownership. The runtime
-    parallel of setup's ``daemon_owner_user(ctx)``.
+    ``separate-user`` → the configured ``docker_unprivileged_user``;
+    ``operator-rootless`` → the **invoking user** (:func:`getpass.getuser`), the
+    operator whose own user runs the daemon. The ``operator-rootless`` branch
+    NEVER reads ``docker_unprivileged_user`` (it would resolve to the stale
+    default ``"sandbox"`` and silently corrupt on-disk ownership). This is the
+    single owner-resolution worker — the one sanctioned reader of
+    ``docker_unprivileged_user`` for owner purposes — that the internal helpers
+    holding only ``HostSettings`` (``workspace_bridge_gid``, hydration's
+    bridge-gid translation, the workspace shared-group phase) route through.
     """
-    if is_operator_rootless(host_config):
+    if host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS:
         return getpass.getuser()
-    return host_config.host.docker_unprivileged_user
+    return host.docker_unprivileged_user
+
+
+def resolve_daemon_owner(host_config: HostConfig) -> str:
+    """Resolve the rootless-daemon owner (design D7) — the ``HostConfig`` alias.
+
+    The command-level resolver; delegates to :func:`resolve_daemon_owner_settings`.
+    The runtime parallel of setup's ``daemon_owner_user(ctx)``.
+    """
+    return resolve_daemon_owner_settings(host_config.host)
 
 
 def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
@@ -453,7 +464,7 @@ def workspace_bridge_gid(host: HostSettings) -> int:
             f"group {host.workspace_bridge_group!r} does not exist on this host; "
             f"run `sandbox doctor` for setup commands or override [host].workspace_bridge_group"
         ) from exc
-    in_container_gid_for_host_gid(gid, host.docker_unprivileged_user)
+    in_container_gid_for_host_gid(gid, resolve_daemon_owner_settings(host))
     return gid
 
 

@@ -18,7 +18,12 @@ from typing import Any
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.host_config import HostSettings, in_container_gid_for_host_gid, workspace_bridge_gid
+from core.host_config import (
+    HostSettings,
+    in_container_gid_for_host_gid,
+    resolve_daemon_owner_settings,
+    workspace_bridge_gid,
+)
 from core.ipam import derive_static_ips, derive_subnets
 
 logger = logging.getLogger(__name__)
@@ -323,7 +328,7 @@ def build_jinja_context(
     if host is not None:
         bridge_gid = workspace_bridge_gid(host)
         extra["in_container_workspace_bridge_gid"] = in_container_gid_for_host_gid(
-            bridge_gid, host.docker_unprivileged_user
+            bridge_gid, resolve_daemon_owner_settings(host)
         )
 
     return {
