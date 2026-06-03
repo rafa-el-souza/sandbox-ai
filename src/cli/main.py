@@ -2032,8 +2032,9 @@ def _resolve_full_host_config() -> HostConfig:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
     except ValueError as exc:
-        # The toml set a now-removed field (e.g. docker_execution_mode, D11) —
-        # surface from_toml's directive message cleanly, not as a traceback.
+        # A malformed managed toml — pydantic ValidationError / tomllib
+        # TOMLDecodeError / the D11 removed-field (docker_execution_mode) rejection,
+        # all ValueError subclasses — surfaced cleanly rather than as a traceback.
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
     # The execution mode is no longer a toml field (D11) — resolve it from the
@@ -2982,6 +2983,13 @@ def init(
         project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
+    except ValueError as exc:
+        # A malformed managed toml — pydantic ValidationError / tomllib
+        # TOMLDecodeError / the D11 removed-field rejection (all ValueError) —
+        # is a real error to fix, not "absent" (FileNotFoundError); surface it
+        # cleanly instead of an uncaught traceback.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
     resolved_user: str
     if project_config is not None:
@@ -3730,6 +3738,12 @@ def doctor(
         project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
+    except ValueError as exc:
+        # A malformed managed toml (ValidationError / TOMLDecodeError / the D11
+        # removed-field rejection — all ValueError) is a real error, not "absent";
+        # surface it cleanly rather than as an uncaught traceback.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
     if user is None:
         if project_config is None:

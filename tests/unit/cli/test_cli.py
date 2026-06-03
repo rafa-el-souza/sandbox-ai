@@ -2524,6 +2524,21 @@ class TestDoctorHostConfig:
         assert r.exit_code == 1
         assert "no user specified" in r.output.lower()
 
+    def test_doctor_rejects_malformed_toml(self, runner: CliRunner) -> None:
+        """A malformed managed toml (any ValueError — ValidationError /
+        TOMLDecodeError / the D11 removed-field rejection) surfaces cleanly as
+        exit 1, not an uncaught traceback (finding 9)."""
+        from cli.main import app
+
+        with patch(
+            "cli.main.HostConfig.from_toml",
+            side_effect=ValueError("docker_execution_mode is no longer a sandbox-ai.toml field"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
+        assert r.exit_code == 1
+        assert "docker_execution_mode is no longer" in r.output
+        assert not isinstance(r.exception, ValueError)  # surfaced, not propagated
+
     def test_doctor_invalid_auth_mode_errors(self, runner: CliRunner) -> None:
         from cli.main import app
 
@@ -2576,6 +2591,22 @@ class TestDoctorRunnerInvoked:
 
 class TestInitHappyPath:
     """Task 3.1: sandbox init --user — happy path scaffold."""
+
+    def test_init_rejects_malformed_toml(self, runner: CliRunner) -> None:
+        """A malformed managed toml (any ValueError — ValidationError /
+        TOMLDecodeError / the D11 removed-field rejection) surfaces cleanly as
+        exit 1, not an uncaught traceback (finding 9). init exits at from_toml,
+        before the scaffold steps."""
+        from cli.main import app
+
+        with patch(
+            "cli.main.HostConfig.from_toml",
+            side_effect=ValueError("docker_execution_mode is no longer a sandbox-ai.toml field"),
+        ):
+            result = runner.invoke(app, ["init", "newproject"])
+        assert result.exit_code == 1
+        assert "docker_execution_mode is no longer" in result.output
+        assert not isinstance(result.exception, ValueError)  # surfaced, not propagated
 
     def test_init_creates_instance(self, runner: CliRunner) -> None:
         """init scaffolds a new instance successfully."""
