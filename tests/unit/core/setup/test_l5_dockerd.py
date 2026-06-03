@@ -16,7 +16,11 @@ import subprocess
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l5_dockerd as l5
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -364,3 +368,95 @@ def test_act_raises_when_user_manager_never_ready(
     assert not any(
         "dockerd-rootless-setuptool.sh install" in c for c in world.calls
     )
+
+
+# ── operator-rootless: LOCAL crossing, no machinectl, no linger (§6.2) ────────
+
+
+def _oprootless_ctx() -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser",
+            MachinectlAuth.SUDO,
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        ),
+        operator="alice",
+    )
+
+
+def test_act_operator_rootless_local_no_linger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """op-rootless act installs dockerd LOCAL (no machinectl), no linger/readiness gate.
+
+    Linger is host-root-batch-owned in operator-rootless (the ``LINGER`` item),
+    and setup runs in the operator's own live session — so L5 does NOT
+    ``enable-linger``, does NOT poll ``user@<uid>.service``, and crosses with an
+    empty LOCAL prefix (sentinel off — a local command's exit is not masked).
+    """
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        if "dockerd-rootless-setuptool.sh install" in " ".join(cmd):
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        # docker info: not-up before install (force install), up after.
+        installed = any(
+            "dockerd-rootless-setuptool.sh install" in " ".join(c) for c, _ in seen
+        )
+        if not installed:
+            raise SandboxExecutionError("docker info failed")
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    detail = l5.PHASE.act(_oprootless_ctx())
+
+    joined = [" ".join(c) for c, _ in seen]
+    assert not any("enable-linger" in j for j in joined)
+    assert not any("user@" in j for j in joined)
+    assert not any("machinectl" in j for j in joined)
+    install = [
+        (c, s) for c, s in seen if "dockerd-rootless-setuptool.sh install" in " ".join(c)
+    ]
+    assert len(install) == 1
+    cmd, sentinel = install[0]
+    assert cmd[0] == "/bin/bash"  # empty crossing prefix → bash is argv[0]
+    assert sentinel is False
+    assert "alice" in detail
+
+
+def test_probe_operator_rootless_local_skips_linger_and_pw_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """op-rootless probe checks only LOCAL dockerd reachability (owner = operator).
+
+    The not-yet-created-user guard and the linger check are separate-user-only,
+    so ``pwd.getpwnam`` must NOT be consulted (we make it raise to prove it) and
+    no ``loginctl show-user`` crossing happens.
+    """
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        if "docker info" in " ".join(cmd):
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        raise AssertionError(f"unexpected command: {' '.join(cmd)}")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    def _boom(_n: str) -> object:
+        raise KeyError("pwd.getpwnam must not be called on the op-rootless path")
+
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+
+    result, detail = l5.PHASE.probe(_oprootless_ctx())
+
+    assert result == PhaseResult.ALREADY_CORRECT
+    assert "alice" in detail
+    joined = [" ".join(c) for c, _ in seen]
+    assert all("show-user" not in j for j in joined)
+    assert all("machinectl" not in j for j in joined)
+    assert all(s is False for _, s in seen)

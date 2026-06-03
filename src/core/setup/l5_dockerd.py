@@ -1,6 +1,17 @@
 """L5 — linger + rootless dockerd install (content-aware).
 
-Two mutations, two identities:
+**Mode split (D2/D4 — the daemon owner + crossing differ by execution mode).**
+The daemon owner is :func:`daemon_owner_user` (the dedicated ``sandbox`` user in
+separate-user; the invoking operator in operator-rootless) and the crossing is
+:func:`daemon_owner_crossing` (``machinectl_cmd`` in separate-user; an empty
+LOCAL prefix in operator-rootless, where setup already runs as the operator). In
+**operator-rootless** L5 owns ONLY the rootless dockerd install, run as a plain
+LOCAL subprocess in the operator's own session — **linger is host-root-batch-owned**
+(the ``host_batch`` ``LINGER`` item, since self-linger is polkit-gated on most
+distros) so L5 does not enable it; and there is no machinectl crossing, so the
+exit-recovering sentinel is off (a local command's exit is not masked).
+
+In **separate-user** L5 has two mutations, two identities (byte-unchanged):
 
 1. ``loginctl enable-linger <sandbox-user>`` — runs **inline as ROOT** (the
    ``sudo sandbox setup`` process itself; ``loginctl enable-linger`` is a
@@ -52,23 +63,19 @@ from typing import TYPE_CHECKING
 
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import machinectl_cmd
+from core.host_config import is_operator_rootless
 from core.setup.phase_runner import (
     Identity,
     Phase,
     PhaseResult,
+    daemon_owner_crossing,
+    daemon_owner_user,
     probe_sandbox_pw_or_missing,
     wait_user_manager_ready,
 )
 
 if TYPE_CHECKING:
-    from core.host_config import HostConfig
     from core.setup.phase_runner import SetupContext
-
-
-def _sandbox_user(host_config: HostConfig) -> str:
-    """The unprivileged docker user the rootless daemon runs as."""
-    return host_config.host.docker_unprivileged_user
 
 
 def _linger_enabled(user: str) -> bool:
@@ -91,19 +98,16 @@ def _linger_enabled(user: str) -> bool:
     return "Linger=yes" in (result.stdout or "")
 
 
-def _dockerd_reachable(host_config: HostConfig) -> bool:
-    """``True`` iff ``docker info`` succeeds crossed as the sandbox user."""
-    cmd = [
-        *machinectl_cmd(
-            _sandbox_user(host_config),
-            host_config.host.machinectl_authentication,
-        ),
-        "/bin/bash",
-        "-c",
-        "docker info",
-    ]
+def _dockerd_reachable(ctx: SetupContext) -> bool:
+    """``True`` iff ``docker info`` succeeds as the daemon owner (mode-aware crossing).
+
+    separate-user: crossed via ``machinectl_cmd`` into the sandbox user, sentinel
+    on (``machinectl shell`` masks the inner exit). operator-rootless: a LOCAL
+    subprocess in the operator's session, sentinel off (no exit masking).
+    """
+    cmd = [*daemon_owner_crossing(ctx), "/bin/bash", "-c", "docker info"]
     try:
-        Executor().run(cmd, sentinel=True)
+        Executor().run(cmd, sentinel=not is_operator_rootless(ctx.host_config))
     except SandboxExecutionError:
         return False
     return True
@@ -123,71 +127,90 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     creator) means the user exists. Other L5 errors with the user present
     still propagate (systemic guard → FAIL).
     """
-    pw = probe_sandbox_pw_or_missing(ctx.host_config)
-    if not isinstance(pw, pwd.struct_passwd):
-        result, detail = pw
-        return (
-            result,
-            f"sandbox user {ctx.host_config.host.docker_unprivileged_user!r} "
-            f"does not exist yet (created by L2); dockerd will be installed "
-            f"({detail})",
-        )
-    host_config = ctx.host_config
-    user = _sandbox_user(host_config)
-    if not _linger_enabled(user):
+    op_rootless = is_operator_rootless(ctx.host_config)
+    if not op_rootless:
+        # separate-user: the sandbox user is created by L2, so a fresh-host plan
+        # pass sees it absent — the MISSING signal. operator-rootless's owner is
+        # the invoking operator (always present), so this guard does not apply.
+        pw = probe_sandbox_pw_or_missing(ctx.host_config)
+        if not isinstance(pw, pwd.struct_passwd):
+            result, detail = pw
+            return (
+                result,
+                f"sandbox user {ctx.host_config.host.docker_unprivileged_user!r} "
+                f"does not exist yet (created by L2); dockerd will be installed "
+                f"({detail})",
+            )
+    user = daemon_owner_user(ctx)
+    # Linger is L5's concern only in separate-user; in operator-rootless it is
+    # owned by the host-root batch (``LINGER`` item), so L5 neither checks nor
+    # enables it here.
+    if not op_rootless and not _linger_enabled(user):
         return (
             PhaseResult.MISSING,
             f"linger not enabled for {user!r}; will enable + install dockerd",
         )
-    if not _dockerd_reachable(host_config):
+    if not _dockerd_reachable(ctx):
         return (
             PhaseResult.MISSING,
             f"rootless dockerd not reachable as {user!r}; will install",
         )
     return (
         PhaseResult.ALREADY_CORRECT,
-        f"linger enabled and rootless dockerd reachable for {user!r}",
+        f"rootless dockerd reachable for {user!r}",
     )
 
 
 def _act(ctx: SetupContext) -> str:
-    """Enable linger inline as root, then install rootless dockerd if absent.
+    """Install rootless dockerd if absent; enable linger first in separate-user.
 
     The rootless-install tool is only invoked when ``docker info`` does not
     already succeed (the tool is idempotent, but skipping the multi-step
     install on a converged host keeps the apply pass fast).
+
+    separate-user: enable linger inline as root + the post-linger user-manager
+    readiness gate, then cross into the sandbox user via ``machinectl``.
+    operator-rootless: linger is host-root-batch-owned (not touched here) and the
+    install runs as a LOCAL subprocess in the operator's own (already-live)
+    session — no ``enable-linger``, no readiness gate, no machinectl crossing.
     """
-    host_config = ctx.host_config
-    user = _sandbox_user(host_config)
-    Executor().run(["loginctl", "enable-linger", user])
+    op_rootless = is_operator_rootless(ctx.host_config)
+    user = daemon_owner_user(ctx)
+    if not op_rootless:
+        Executor().run(["loginctl", "enable-linger", user])
+        # Post-linger readiness gate: the per-user systemd manager
+        # (``user@<uid>.service``) takes a moment to come up on a freshly-lingered,
+        # never-logged-in user. Crossing via ``machinectl shell`` before the
+        # manager is ready returns empty stdout (sentinel-not-found fail-closed).
+        # The gate is shared with L6 (post-dockerd-restart) — see
+        # ``phase_runner.wait_user_manager_ready``. operator-rootless runs in the
+        # operator's already-live session, so the gate is unnecessary there.
+        wait_user_manager_ready(user)
 
-    # Post-linger readiness gate: the per-user systemd manager
-    # (``user@<uid>.service``) takes a moment to come up on a freshly-lingered,
-    # never-logged-in user. Crossing via ``machinectl shell`` before the manager
-    # is ready returns empty stdout (sentinel-not-found fail-closed). The gate is
-    # shared with L6 (which needs it post-dockerd-restart) — see
-    # ``phase_runner.wait_user_manager_ready``.
-    wait_user_manager_ready(user)
-
-    if _dockerd_reachable(host_config):
-        return f"linger enabled for {user!r}; rootless dockerd already up"
+    if _dockerd_reachable(ctx):
+        return f"rootless dockerd already up for {user!r}"
 
     cmd = [
-        *machinectl_cmd(user, host_config.host.machinectl_authentication),
+        *daemon_owner_crossing(ctx),
         "/bin/bash",
         "-c",
         "dockerd-rootless-setuptool.sh install",
     ]
-    Executor().run(cmd, sentinel=True)
-    return f"linger enabled for {user!r}; rootless dockerd installed"
+    Executor().run(cmd, sentinel=not op_rootless)
+    return f"rootless dockerd installed for {user!r}"
 
 
 def _reverify(ctx: SetupContext) -> bool:
-    """Confirm linger is enabled and rootless dockerd is reachable."""
-    host_config = ctx.host_config
-    return _linger_enabled(_sandbox_user(host_config)) and _dockerd_reachable(
-        host_config
-    )
+    """Confirm rootless dockerd is reachable (+ linger, in separate-user).
+
+    Linger is L5's concern only in separate-user; in operator-rootless it is
+    host-root-batch-owned, so reverify checks only dockerd reachability there.
+    """
+    if not is_operator_rootless(ctx.host_config) and not _linger_enabled(
+        daemon_owner_user(ctx)
+    ):
+        return False
+    return _dockerd_reachable(ctx)
 
 
 PHASE = Phase(

@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l6_daemon_json as l6
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -343,7 +347,7 @@ def test_daemon_json_path_uses_pwd(
         pw_dir = str(tmp_path / "sbhome")
 
     monkeypatch.setattr(pwd, "getpwnam", lambda _u: _PW())
-    resolved = l6._daemon_json_path(ctx.host_config)
+    resolved = l6._daemon_json_path(ctx)
     assert resolved == tmp_path / "sbhome" / ".config" / "docker" / "daemon.json"
 
 
@@ -386,7 +390,7 @@ class TestRuntimeRegistered:
             )
 
         monkeypatch.setattr("core.executor.Executor.run", fake_run)
-        assert l6._runtime_registered(ctx.host_config) is True
+        assert l6._runtime_registered(ctx) is True
 
     def test_false_when_docker_info_omits_the_runtime(
         self, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
@@ -397,7 +401,7 @@ class TestRuntimeRegistered:
             return subprocess.CompletedProcess(cmd, 0, '{"runc":{}}', "")
 
         monkeypatch.setattr("core.executor.Executor.run", fake_run)
-        assert l6._runtime_registered(ctx.host_config) is False
+        assert l6._runtime_registered(ctx) is False
 
     def test_false_when_crossing_raises(
         self, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
@@ -410,7 +414,75 @@ class TestRuntimeRegistered:
             raise SandboxExecutionError("docker daemon unreachable")
 
         monkeypatch.setattr("core.executor.Executor.run", fake_run)
-        assert l6._runtime_registered(ctx.host_config) is False
+        assert l6._runtime_registered(ctx) is False
+
+
+# ── operator-rootless: LOCAL crossing, operator-home daemon.json (§6.3) ───────
+
+
+def _oprootless_ctx() -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser",
+            MachinectlAuth.SUDO,
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        ),
+        operator="alice",
+    )
+
+
+def test_act_operator_rootless_local_writes_operator_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """op-rootless act writes the OPERATOR's daemon.json and restarts LOCAL.
+
+    The daemon owner is the invoking operator, so the file lives under the
+    operator's home; the restart + readiness poll cross with an empty LOCAL
+    prefix (no ``machinectl``), no ``user@<uid>.service`` readiness gate (the
+    operator's session is already live), and sentinel off.
+    """
+    home = tmp_path / "alice"
+    monkeypatch.setattr("pwd.getpwnam", lambda _u: _fake_pw(str(home)))
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    l6.PHASE.act(_oprootless_ctx())
+
+    daemon_json = home / ".config" / "docker" / "daemon.json"
+    doc = json.loads(daemon_json.read_text())
+    assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
+    joined = [" ".join(c) for c, _ in seen]
+    assert any("restart --no-block docker" in j for j in joined)
+    assert all("machinectl" not in j for j in joined)
+    assert all("is-active user@" not in j for j in joined)
+    assert all(c[0] == "/bin/bash" for c, _ in seen)  # empty crossing prefix
+    assert all(s is False for _, s in seen)
+
+
+def test_runtime_registered_operator_rootless_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """op-rootless ``_runtime_registered`` queries docker LOCAL (no machinectl, sentinel off)."""
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        return subprocess.CompletedProcess(cmd, 0, '{"sandbox-ai-runsc":{"path":"/x"}}', "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    assert l6._runtime_registered(_oprootless_ctx()) is True
+    (cmd, sentinel), = seen
+    assert cmd[0] == "/bin/bash"
+    assert "machinectl" not in " ".join(cmd)
+    assert sentinel is False
 
 
 def test_phase_shape() -> None:

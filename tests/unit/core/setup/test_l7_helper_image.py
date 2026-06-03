@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l7_helper_image as l7
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -117,6 +121,42 @@ def test_content_aware(
         store.refs.add(l7._HELPER_TAGGED)
 
     assert_phase_content_aware(l7.PHASE, ctx, make_stale)
+
+
+# ── operator-rootless: LOCAL docker pull, no machinectl (§6.4) ────────────────
+
+
+def test_act_operator_rootless_local_pull(monkeypatch: pytest.MonkeyPatch) -> None:
+    """op-rootless act pulls the pinned digest LOCAL (no machinectl, sentinel off).
+
+    The daemon owner is the operator, so the pull is a plain local ``docker``
+    subprocess in the operator's session — empty crossing prefix, sentinel off.
+    """
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+    ctx = SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser",
+            MachinectlAuth.SUDO,
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        ),
+        operator="alice",
+    )
+
+    detail = l7.PHASE.act(ctx)
+
+    assert f"docker pull {l7._HELPER_REF}" in detail or "pulled" in detail
+    (cmd, sentinel), = seen
+    assert cmd == ["/bin/bash", "-c", f"docker pull {l7._HELPER_REF}"]  # empty prefix
+    assert "machinectl" not in " ".join(cmd)
+    assert sentinel is False
 
 
 def test_phase_shape() -> None:
