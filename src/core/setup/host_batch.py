@@ -26,7 +26,12 @@ This module is the model of that batch:
 Each applier is a **thin wrapper** over the existing setup helpers (l1's sysctl
 drop-in, l2's subuid/groupadd logic, l2a's Delegate drop-in, l6a/binary_install's
 runsc install, setup_state's marker write); the batch reproduces the proven
-op-rootless recipe via those helpers rather than re-deriving any flag list.
+op-rootless recipe via those helpers rather than re-deriving any flag list. The
+one exception is ``LINGER`` (``loginctl enable-linger <operator>``): linger
+self-service (the operator enabling their own linger) is polkit-gated and works
+only on some distros (validated: Ubuntu yes; Debian/Fedora/Arch need root), so it
+is a host-root batch item rather than operator-space work in L5 — L5's
+operator-rootless path no longer touches linger.
 """
 
 from __future__ import annotations
@@ -72,18 +77,22 @@ class BatchItem(StrEnum):
     SYSCTL = "sysctl"
     NFTABLES = "nftables"
     DELEGATE = "delegate"
+    LINGER = "linger"
     RUNSC = "runsc"
     MARKER = "marker"
 
 
 # THE load-bearing order. Index in this tuple IS the apply order. MARKER LAST so
-# a mid-batch failure can never reach the root-owned mode-marker write.
+# a mid-batch failure can never reach the root-owned mode-marker write. LINGER
+# sits among the pre-dockerd prerequisites (after DELEGATE) — the operator's
+# user manager must persist before L5 installs rootless dockerd into it.
 HOST_ROOT_BATCH: tuple[BatchItem, ...] = (
     BatchItem.SUBID,
     BatchItem.GROUPADD,
     BatchItem.SYSCTL,
     BatchItem.NFTABLES,
     BatchItem.DELEGATE,
+    BatchItem.LINGER,
     BatchItem.RUNSC,
     BatchItem.MARKER,
 )
@@ -275,6 +284,18 @@ def _apply_delegate(params: BatchParams) -> None:
     _run(["systemctl", "daemon-reload"])
 
 
+def _apply_linger(params: BatchParams) -> None:
+    """``loginctl enable-linger <operator>`` (root-side).
+
+    Linger persists the operator's per-user systemd manager so the rootless
+    dockerd L5 installs survives logout. Self-service (the operator enabling
+    their own linger) is polkit-gated and fails on most distros (validated:
+    Ubuntu allows it; Debian/Fedora/Arch need root), so it is applied here as
+    root. Idempotent: ``enable-linger`` on an already-lingering user is a no-op.
+    """
+    _run(["loginctl", "enable-linger", params.operator])
+
+
 def _apply_runsc(params: BatchParams) -> None:
     """Install the pinned runsc root-owned in the reserved dir (l6a/binary_install).
 
@@ -317,6 +338,7 @@ _APPLIERS: dict[BatchItem, Callable[[BatchParams], None]] = {
     BatchItem.SYSCTL: _apply_sysctl,
     BatchItem.NFTABLES: _apply_nftables,
     BatchItem.DELEGATE: _apply_delegate,
+    BatchItem.LINGER: _apply_linger,
     BatchItem.RUNSC: _apply_runsc,
     BatchItem.MARKER: _apply_marker,
 }
@@ -372,6 +394,25 @@ def _runsc_satisfied() -> bool:
     return detect_drift("runsc", _RESERVED_HOST_CONFIG).status == "match"
 
 
+def _linger_satisfied(operator: str) -> bool:
+    """``True`` iff ``loginctl`` reports ``Linger=yes`` for ``operator``.
+
+    Tolerates any ``loginctl show-user`` failure as linger-absent (a
+    never-lingering user is reported "User ID N is not logged in or lingering",
+    exit 1) — mirrors l5's ``_linger_enabled`` fail-safe. Pure read; no mutation.
+    """
+    try:
+        proc = subprocess.run(
+            ["loginctl", "show-user", operator, "--property=Linger"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "Linger=yes" in proc.stdout
+
+
 def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], BatchParams]:
     """Content-aware, unprivileged classifier (no mutation, no sudo).
 
@@ -407,6 +448,8 @@ def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], B
         unsatisfied.add(BatchItem.NFTABLES)
     if not _delegation_present(operator_uid):
         unsatisfied.add(BatchItem.DELEGATE)
+    if not _linger_satisfied(operator):
+        unsatisfied.add(BatchItem.LINGER)
     if not _runsc_satisfied():
         unsatisfied.add(BatchItem.RUNSC)
     if read_mode(operator) != mode:
@@ -503,6 +546,10 @@ def _remediation_delegate(params: BatchParams) -> str:
     return f"sudo install -Dm0644 /dev/stdin {dropin} && sudo systemctl daemon-reload"
 
 
+def _remediation_linger(params: BatchParams) -> str:
+    return f"sudo loginctl enable-linger {params.operator}"
+
+
 def _remediation_runsc(params: BatchParams) -> str:
     del params
     return "sudo sandbox setup --update-runsc  # installs the pinned runsc root-owned"
@@ -518,6 +565,7 @@ _REMEDIATION_LINES: dict[BatchItem, Callable[[BatchParams], str]] = {
     BatchItem.SYSCTL: _remediation_sysctl,
     BatchItem.NFTABLES: _remediation_nftables,
     BatchItem.DELEGATE: _remediation_delegate,
+    BatchItem.LINGER: _remediation_linger,
     BatchItem.RUNSC: _remediation_runsc,
     BatchItem.MARKER: _remediation_marker,
 }

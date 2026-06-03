@@ -84,6 +84,7 @@ def test_canonical_order_exact() -> None:
         BatchItem.SYSCTL,
         BatchItem.NFTABLES,
         BatchItem.DELEGATE,
+        BatchItem.LINGER,
         BatchItem.RUNSC,
         BatchItem.MARKER,
     )
@@ -324,6 +325,15 @@ def test_delegate_applier_reuses_l2a(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert runs == [["systemctl", "daemon-reload"]]
 
 
+def test_linger_applier_enables_linger_for_operator(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    host_batch._apply_linger(_params(operator="alice"))
+
+    assert runs == [["loginctl", "enable-linger", "alice"]]
+
+
 def test_runsc_applier_reuses_install_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, bool]] = []
 
@@ -369,6 +379,7 @@ def _all_satisfied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_batch, "_sysctl_satisfied", lambda: True)
     monkeypatch.setattr(host_batch, "_nftables_satisfied", lambda _f: True)
     monkeypatch.setattr(host_batch, "_delegation_present", lambda _u: True)
+    monkeypatch.setattr(host_batch, "_linger_satisfied", lambda _o: True)
     monkeypatch.setattr(host_batch, "_runsc_satisfied", lambda: True)
     monkeypatch.setattr(host_batch, "read_mode", lambda _o: DockerExecutionMode.OPERATOR_ROOTLESS)
     monkeypatch.setattr(
@@ -404,6 +415,7 @@ def test_classifier_all_satisfied_excludes_everything(monkeypatch: pytest.Monkey
         ("_sysctl_satisfied", lambda: False, BatchItem.SYSCTL),
         ("_nftables_satisfied", lambda _f: False, BatchItem.NFTABLES),
         ("_delegation_present", lambda _u: False, BatchItem.DELEGATE),
+        ("_linger_satisfied", lambda _o: False, BatchItem.LINGER),
         ("_runsc_satisfied", lambda: False, BatchItem.RUNSC),
         ("read_mode", lambda _o: None, BatchItem.MARKER),
     ],
@@ -594,6 +606,32 @@ def test_runsc_satisfied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert host_batch._runsc_satisfied() is True
 
 
+def test_linger_satisfied_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "Linger=yes\n", ""),
+    )
+    assert host_batch._linger_satisfied("alice") is True
+
+
+def test_linger_satisfied_false_when_not_lingering(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "not logged in"),
+    )
+    assert host_batch._linger_satisfied("alice") is False
+
+
+def test_linger_satisfied_false_on_loginctl_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_a: object, **_k: object) -> object:
+        raise OSError("loginctl not found")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert host_batch._linger_satisfied("alice") is False
+
+
 def test_sysctl_satisfied(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     dropin = tmp_path / "sysctl.conf"
     dropin.write_text("BODY\n")
@@ -668,5 +706,6 @@ def test_render_remediation_block_each_item_renders() -> None:
     assert str(l1_kernel._SYSCTL_DROPIN) in block
     assert "modprobe nf_tables ip_tables" in block
     assert "daemon-reload" in block
+    assert "loginctl enable-linger" in block
     assert "--update-runsc" in block
     assert "--docker-execution-mode operator-rootless" in block
