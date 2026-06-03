@@ -434,6 +434,126 @@ def test_machinectl_cmd_deliberate_violation_is_detected(
     assert str(rogue) in detail
 
 
+# ── D7 regression guard: runtime owner resolved via resolve_daemon_owner ──────
+
+# host-config "Daemon Owner Resolution" (design D7): the runtime layer MUST resolve
+# the rootless-daemon owner via ``resolve_daemon_owner`` / ``resolve_daemon_owner_settings``,
+# NEVER by reading ``host.docker_unprivileged_user`` directly — in operator-rootless
+# the owner is the invoking operator, so a direct read resolves to the stale
+# ``"sandbox"`` default and silently corrupts on-disk ownership. The single sanctioned
+# reader (for owner purposes) is the resolver in ``core.host_config``; this guard scopes
+# the *runtime* modules and allowlists the functions that read the field for NON-owner,
+# separate-user-only purposes. A new reader elsewhere (e.g. a lifecycle command binding
+# ``host_user`` from the field) is the regression this catches.
+_DOCKER_USER_READ_ALLOWLIST: dict[str, frozenset[str]] = {
+    "src/cli/main.py": frozenset(
+        {
+            "_build_attach_argv",  # separate-user ProxyCommand pipe_cmd crossing only
+            "init",                # seeds + auth-probes the separate-user dedicated user
+            "doctor",              # separate-user boundary validation (mode-awareness → C-005)
+        }
+    ),
+    "src/core/hydration.py": frozenset(),  # owner via resolve_daemon_owner_settings only
+}
+
+
+def _docker_user_read_functions(tree: ast.AST) -> list[tuple[int, str]]:
+    """Return ``(lineno, enclosing-function-name)`` for each ``.docker_unprivileged_user``
+    attribute read in ``tree`` (AST-only — string literals / comments are never
+    ``ast.Attribute`` nodes, so message text mentioning the field is not flagged)."""
+    funcs = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+
+    def enclosing(lineno: int) -> str:
+        best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        for f in funcs:
+            if f.lineno <= lineno <= (f.end_lineno or f.lineno) and (
+                best is None or f.lineno > best.lineno
+            ):
+                best = f
+        return best.name if best is not None else "<module>"
+
+    return [
+        (node.lineno, enclosing(node.lineno))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "docker_unprivileged_user"
+    ]
+
+
+def _docker_user_owner_violations(
+    files: Iterator[Path], allowlist: dict[str, frozenset[str]]
+) -> list[tuple[Path, list[tuple[int, str]]]]:
+    """Scan the allowlisted runtime modules; return ``(path, [(lineno, func), …])``
+    for every ``.docker_unprivileged_user`` read in a NON-sanctioned function.
+
+    Reusable detector seam (anti-hack rule 5): ``files`` + ``allowlist`` are
+    parameters, so the deliberate-violation regression drives the same predicate."""
+    offenders: list[tuple[Path, list[tuple[int, str]]]] = []
+    for src in files:
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        sanctioned = allowlist.get(rel)
+        if sanctioned is None:
+            continue  # only the enumerated runtime modules are scoped
+        tree = ast.parse(src.read_text(), filename=str(src))
+        bad = [
+            (ln, fn) for ln, fn in _docker_user_read_functions(tree) if fn not in sanctioned
+        ]
+        if bad:
+            offenders.append((src, bad))
+    return offenders
+
+
+def test_no_op_rootless_docker_user_owner_read() -> None:
+    """No runtime owner-resolution reads ``docker_unprivileged_user`` directly (D7).
+
+    The daemon owner MUST flow through ``resolve_daemon_owner(_settings)`` so the
+    operator-rootless owner is the invoking operator, never the stale ``"sandbox"``
+    default. Reads outside the allowlisted (separate-user-only / non-owner) functions
+    fail — route the owner through the resolver instead of broadening the allowlist.
+    """
+    offenders = _docker_user_owner_violations(
+        _python_files(_SRC_ROOT), _DOCKER_USER_READ_ALLOWLIST
+    )
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)}: {[(ln, fn) for ln, fn in bad]}"
+            for p, bad in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} runtime module(s) read host.docker_unprivileged_user "
+            f"in a non-sanctioned function (D7).\n{details}\n\n"
+            "Fix: resolve the daemon owner via core.host_config.resolve_daemon_owner"
+            "(_settings) — in operator-rootless a direct read corrupts ownership "
+            "(stale 'sandbox' default). Do NOT broaden the allowlist without a "
+            "separate-user-only / non-owner justification."
+        )
+
+
+def test_docker_user_owner_guard_detects_violation(tmp_path: Path) -> None:
+    """The D7 detector flags a ``.docker_unprivileged_user`` read in a non-sanctioned
+    function — proving the guard catches the bug class, not just its absence."""
+    rogue = tmp_path / "rogue_command.py"
+    rogue.write_text(
+        "def start(host_config):\n"
+        "    host_user = host_config.host.docker_unprivileged_user\n"
+        "    return host_user\n"
+    )
+    # Map the rogue file into the allowlist with NO sanctioned functions.
+    offenders = _docker_user_owner_violations(
+        iter([rogue]), {rogue.as_posix(): frozenset()}
+    )
+    assert offenders, "deliberate D7 owner-read violation was not detected"
+    assert offenders[0][0] == rogue
+    assert offenders[0][1] == [(2, "start")]
+
+
 def test_every_custom_marker_is_registered() -> None:
     registered = _registered_markers()
     offenders: list[tuple[Path, int, str]] = []
