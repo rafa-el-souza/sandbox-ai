@@ -28,17 +28,20 @@ sandbox attach myproject        # drop into the running agent's environment
 sandbox stop myproject          # tear it down
 ```
 
-> **Status: pre-release.** The orchestrator is feature-complete and tested; the
-> public CI pipeline and packaged release are still landing. Expect sharp edges
-> in setup until then.
+> **Status: pre-release.** The core orchestrator works end-to-end and is
+> well-tested (100% coverage on `core/` and `cli/`). Non-interactive setup, the
+> public CI pipeline, and a packaged release are still landing. Expect sharp
+> edges in setup until then.
 
-## Demos
+<details>
+<summary>Demos</summary>
 
-Asciinema casts (CLI-native, copy-pasteable, no video):
+Coming soon — asciinema casts (CLI-native, copy-pasteable, no video):
 
-- **Zero to agent (≈30s)** — `init` → `start` → an agent working inside the boundary. _(asciinema link — pending)_
-- **The boundary in action (≈60s)** — watch denied operations fail at the edge: the sandbox trying to reach a host path, a secret, the network egress it isn't allowed. _(asciinema link — pending)_
-- **Workspace sharing (≈60s, optional)** — bind a host checkout into the sandbox without handing over ownership. _(asciinema link — pending)_
+- **Zero to agent (≈30s)** — `init` → `start` → an agent working inside the boundary.
+- **The boundary in action (≈60s)** — denied operations failing at the edge: the sandbox reaching for a host path, a secret, or network egress it isn't allowed.
+- **Workspace sharing (≈60s)** — bind a host checkout into the sandbox without handing over ownership.
+</details>
 
 ## Why not just…?
 
@@ -48,14 +51,14 @@ Asciinema casts (CLI-native, copy-pasteable, no video):
 | **Runs on your own host**         | yes            | yes / remote    | cloud-first (self-host available) | yes               | **yes**                               |
 | **Isolation primitive**           | container      | container / VM  | Firecracker microVM        | none                     | **container behind an unprivileged-user boundary** |
 | **Orchestrator holds host-root / Docker access** | yes (you drive Docker) | yes | n/a (remote service) | yes (it's just your shell) | **no — Docker calls cross into an unprivileged user** |
-| **Network egress controlled by default** | no       | no              | yes (remote)               | no                       | **yes (per-instance egress policy)**  |
+| **Network egress controlled by default** | no       | no              | yes (remote)               | no                       | **yes (deny-by-default: allowlisting proxy + filtering DNS)** |
 | **License**                       | MIT            | MPL-2.0         | Apache-2.0                 | —                        | **AGPL-3.0**                          |
 
-The honest framing: Dev Containers and DevPod are excellent **developer**
-environment managers — they were built to make *your* editor reproducible, not
-to contain an untrusted actor that has your credentials. e2b is a strong
-**cloud** runtime for executing AI-generated code in an ephemeral microVM, but
-it lives off your machine and off your existing local workflow. And the most
+The honest framing: Dev Containers and DevPod are **developer** environment
+managers — they were built to make *your* editor reproducible, not to contain an
+untrusted actor that has your credentials. e2b is a **cloud** runtime for
+executing AI-generated code in an ephemeral microVM, but it lives off your
+machine and off your existing local workflow. And the most
 common setup of all — an agent in your plain shell — has no boundary
 whatsoever. `sandbox-ai` is for the case in between: an autonomous agent doing
 real, persistent work **on your own host**, where you want isolation *and* a
@@ -63,8 +66,7 @@ privilege boundary without shipping your code to someone else's cloud.
 
 ## Threat model
 
-A security tool is only as good as the boundary it draws explicitly. Here is
-ours.
+A security tool is only as good as the boundary it draws. Here is ours.
 
 **Assumes:**
 
@@ -81,8 +83,9 @@ ours.
 - An agent escalating to host root through the orchestrator: the orchestrator
   never executes Docker as the operator; the only path to the daemon is the
   unprivileged boundary user.
-- Uncontrolled network egress: each instance gets an explicit egress policy
-  rather than the open internet by default.
+- Uncontrolled network egress: egress is deny-by-default — each instance routes
+  through an allowlisting proxy and a filtering DNS resolver, not the open
+  internet.
 - Cross-project contamination: instances are isolated from one another (separate
   subnets, separate state, separate workspaces).
 
@@ -145,8 +148,9 @@ idea — the privilege boundary. The documentation is split by concern:
 
 - [docs/architecture.md](docs/architecture.md) — project overview and the
   `src/core/` module map.
-- [docs/privilege-boundary.md](docs/privilege-boundary.md) — the load-bearing
-  boundary: how `machinectl shell` crossings work and their PTY/PAM consequences.
+- [docs/privilege-boundary.md](docs/privilege-boundary.md) — the privilege
+  boundary itself: how `machinectl shell` crossings work and their PTY/PAM
+  consequences.
 - [docs/dispatcher.md](docs/dispatcher.md) — the dispatcher op reference and how
   to add a new orchestrator-to-sandbox operation.
 - [docs/configuration.md](docs/configuration.md) — the per-host and per-instance

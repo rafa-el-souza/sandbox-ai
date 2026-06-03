@@ -54,11 +54,11 @@ Before opening a PR, make sure your change:
   is enforced at 100% on `core/` and `cli/`; add tests that assert *behavior*,
   not tests that merely satisfy the metric.
 - **Preserves the privilege boundary.** Any code that shells out must go through
-  the sanctioned execution path; any orchestrator→sandbox operation must cross
-  the boundary via the dispatcher. Never add a path that runs Docker as the
-  operator.
-- **Is focused and immutable in spirit** — small, single-purpose files; prefer
-  returning new values over mutating shared state; handle errors explicitly with
+  the sanctioned execution path (see [docs/privilege-boundary.md](docs/privilege-boundary.md));
+  any orchestrator→sandbox operation must cross the boundary via the dispatcher.
+  Never add a path that runs Docker as the operator.
+- **Is focused and immutable** — small, single-purpose files; prefer returning
+  new values over mutating shared state; handle errors explicitly with
   actionable messages.
 - **Updates docs/specs** when it changes behavior. For spec-level changes, follow
   the OpenSpec workflow in `openspec/`.

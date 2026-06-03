@@ -17,26 +17,20 @@ limitations sections below are load-bearing.
 `sandbox-ai` recognizes four trust zones. The whole design exists to keep the
 agent in the innermost zone from reaching the outermost.
 
-```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ ZONE 0 — Operator / host          (TRUSTED)                       │
-  │   the operator's user account, their keys, their files, root      │
-  │   ┌──────────────────────────────────────────────────────────┐   │
-  │   │ ZONE 1 — Orchestrator         (TRUSTED, runs as operator) │   │
-  │   │   the `sandbox` CLI (Python). Holds NO Docker access.     │   │
-  │   └───────────────┬──────────────────────────────────────────┘   │
-  │                   │  privilege boundary: machinectl shell        │
-  │                   │  (sudo or polkit authorized)                 │
-  │   ┌───────────────▼──────────────────────────────────────────┐   │
-  │   │ ZONE 2 — Unprivileged boundary user   (SEMI-TRUSTED)      │   │
-  │   │   a dedicated systemd user. Owns the Docker socket.       │   │
-  │   │   Cannot read the operator's home, keys, or repos.        │   │
-  │   │   ┌──────────────────────────────────────────────────┐   │   │
-  │   │   │ ZONE 3 — Containers / the agent   (UNTRUSTED)     │   │   │
-  │   │   │   the AI agent + workload. Assumed hostile.       │   │   │
-  │   │   └──────────────────────────────────────────────────┘   │   │
-  │   └──────────────────────────────────────────────────────────┘   │
-  └──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Z0["Zone 0 — Operator / host · TRUSTED (account, keys, files, root)"]
+        subgraph Z1["Zone 1 — Orchestrator · TRUSTED (runs as operator)"]
+            ORCH["sandbox CLI (Python) — holds NO Docker access"]
+        end
+        subgraph Z2["Zone 2 — Unprivileged boundary user · SEMI-TRUSTED"]
+            BU["dedicated systemd user · owns the Docker socket<br/>cannot read operator home, keys, or repos"]
+            subgraph Z3["Zone 3 — Containers / the agent · UNTRUSTED"]
+                AGENT["AI agent + workload — assumed hostile"]
+            end
+        end
+    end
+    Z1 -->|"privilege boundary: machinectl shell (sudo / polkit)"| Z2
 ```
 
 - **Zone 0 (operator/host) — trusted by assumption.** A compromised host or a
@@ -64,18 +58,15 @@ per host config). The operator-side process holds no Docker access of its own.
 
 How a crossing works:
 
-```
-  orchestrator (Zone 1)                       boundary user (Zone 2)
-  ─────────────────────                       ──────────────────────
-  1. validate the op + args   ──┐
-     (Python, before crossing) │
-  2. build argv:               │   machinectl shell <user>@.host
-     machinectl_cmd(...) +      ├────────────────────────────────►  3. dispatcher binary runs
-     "<dispatch> <op> <wire>"  │   (sudo/polkit authorizes)            (root-owned on disk,
-                               │                                        executes as Zone 2 user)
-  5. recover exit via nonce  ◄─┘   stdout (nonce-framed)            4. emits __SANDBOX_BEGIN_<nonce>,
-     sentinel, sanitize output                                         runs op, emits
-                                                                       __SANDBOX_EXIT_<nonce>_<code>
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator — Zone 1 (runs as operator)
+    participant D as Dispatcher — Zone 2 (root-owned binary, runs as unprivileged user)
+    O->>O: validate op + args (Python, before crossing)
+    O->>D: machinectl shell — dispatch op wire (sudo / polkit authorizes)
+    Note over D: emit __SANDBOX_BEGIN_{nonce} · run op · emit __SANDBOX_EXIT_{nonce}_{code}
+    D-->>O: stdout (nonce-framed)
+    O->>O: recover exit via nonce sentinel · sanitize output
 ```
 
 Key properties:
@@ -128,34 +119,25 @@ resolver chain. Nothing is reachable until it is explicitly allowlisted.
 
 ### Network topology
 
-Each instance is assigned five consecutive `/24` subnets; only two services
-(the proxy and CoreDNS) touch the one network that reaches the internet.
+Each instance is assigned five consecutive `/24` subnets (drawn from the
+`10.100.0.0`–`10.255.255.0` range); only two services (the proxy and CoreDNS)
+touch the one network that reaches the internet.
 
-```
-  ┌── agent (core) container ───────────────────────────────┐
-  │  on: isolated_net, core_proxy_net, ipc_net  (internal)  │
-  │  NOT on egress_net → no direct internet path            │
-  │  (optional Postgres + Firecrawl also share isolated_net)│
-  └───────┬──────────────────────────────┬──────────────────┘
-   DNS    │                       HTTP(S) │  via HTTP_PROXY
-          ▼                               ▼
-  ┌── dnsdist ──────────────┐    ┌── squid proxy ─────────────────┐
-  │ isolated + dns_net      │    │ core_proxy_net + egress_net    │
-  │ DNS-exfil: DROP queries │    │ ACL chain (deny-first):        │
-  │  >65B wire or >7 labels │    │  • source-IP bind              │
-  └─────────┬───────────────┘    │  • NCSA auth (bcrypt htpasswd) │
-            ▼                     │  • domain allowlist            │
-  ┌── CoreDNS ──────────────┐    │  • deny RFC1918/loopback/      │
-  │ dns_net + egress_net    │    │    link-local/CGN/IP-literal   │
-  │ allowlist zones;        │    │  • deny IPv6                   │
-  │ DoT → Mullvad;          │    │  • only ports 80/443;          │
-  │ AAAA → NOERROR/NODATA   │    │    CONNECT → 443 only           │
-  │  (no address);          │    │  • write-method deny on        │
-  │ non-allowlisted →       │    │    read-only registries        │
-  │ NXDOMAIN                │    │  • 2 MB body cap, maxconn 50   │
-  └─────────┬───────────────┘    │  • DEFAULT: deny all           │
-            │                    └──────────┬─────────────────────┘
-            └──────► egress_net ◄───────────┘ ──► internet (IPv4 only)
+```mermaid
+flowchart TB
+    agent["agent (core) container<br/>on isolated_net · core_proxy_net · ipc_net (all internal)<br/>NOT on egress_net — no direct internet path"]
+    opt["(optional) Postgres + Firecrawl<br/>also on isolated_net — neither on egress_net"]
+    dnsdist["dnsdist<br/>isolated + dns_net<br/>DNS-exfil: DROP if wire greater-than 65B or labels greater-than 7"]
+    coredns["CoreDNS<br/>dns_net + egress_net<br/>allowlist zones · DoT to Mullvad<br/>AAAA to NOERROR/NODATA (no address) · else NXDOMAIN"]
+    squid["squid proxy · core_proxy_net + egress_net<br/>deny-first ACL chain:<br/>source-IP bind · NCSA auth (bcrypt) · domain allowlist<br/>deny RFC1918/loopback/link-local/CGN/IP-literal · deny IPv6<br/>ports 80/443 only, CONNECT to 443 · write-deny on RO registries<br/>2 MB body · maxconn 50 · DEFAULT deny all"]
+    net(("internet · IPv4 only"))
+
+    agent -. shares isolated_net .- opt
+    agent -->|DNS| dnsdist
+    agent -->|"HTTP(S) via HTTP_PROXY"| squid
+    dnsdist --> coredns
+    coredns -->|egress_net| net
+    squid -->|egress_net| net
 ```
 
 The five subnets: `isolated` (intra-sandbox), `core_proxy` (agent↔proxy),
@@ -233,6 +215,10 @@ caps.
 | **dnsdist** | runsc | `NET_BIND_SERVICE` | pdns:pdns | isolated, dns | mem/cpu capped |
 | **admin** | runsc | none | 65534:65534 | ipc (only) | scratch image; higher resource caps |
 | **helper** (disposable) | **runc** | `CHOWN`, `DAC_OVERRIDE` | 0:0 (userns-mapped) | **none** | `--read-only`, `--rm`, tmpfs `/tmp` only |
+
+The helper is the one container on `runc` rather than gVisor; that is acceptable
+because it has no network (`--network=none`), a read-only rootfs, runs `--rm`,
+and only performs operator-initiated `chown`/`mkdir` operations.
 
 **User-namespace isolation.** Containers run under a userns subuid/subgid
 mapping; the disposable helper deliberately does **not** use `--userns=host`. The

@@ -35,16 +35,16 @@ and an **untrusted agent**, and it defends against the agent:
 - escalating to host root through the orchestrator (the orchestrator never runs
   Docker as the operator — the only path to the daemon is the unprivileged
   boundary user);
-- making uncontrolled network egress (each instance has an explicit egress
-  policy);
+- making uncontrolled network egress (egress is deny-by-default — an
+  allowlisting proxy plus a filtering DNS resolver);
 - contaminating other projects (per-instance isolation of subnets, state, and
   workspaces).
 
 ## Known limitations (out of scope)
 
-These are **deliberate, documented gaps**, not oversights. Each is a defensible
-boundary of the current design, with a "revisit when" condition tracked in the
-project's roadmap.
+These are **deliberate, documented gaps**, not oversights. Each is a boundary of
+the current design; where there is a realistic path to closing it, a
+*Revisit when* condition is noted below.
 
 - **Host kernel / container-runtime 0-day.** Isolation here is shared-kernel
   containers, not a hypervisor. A container-escape via a kernel or runtime
@@ -75,10 +75,10 @@ project's roadmap.
   services to keep the trust surface small; this is a posture choice, not a
   defended boundary.
 
-For the CI pipeline that runs against this repository, the in-scope vs.
-out-of-scope split is owned by the CI design and mirrors the items above
-(per-job ephemeral VMs, no credentials on workers, polling instead of inbound
-webhooks).
+The planned CI pipeline (see Roadmap) will extend this posture to the project's
+own builds — per-job ephemeral VMs, no credentials on workers, and outbound
+polling instead of inbound webhooks — with an in-scope/out-of-scope split that
+mirrors the items above.
 
 ## Roadmap (acknowledged gaps)
 
