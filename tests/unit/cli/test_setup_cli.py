@@ -18,6 +18,7 @@ import pytest
 import typer
 from cli.main import (
     _build_setup_context_with_operator,
+    _guard_setup_flags,
     _host_root_batch_plan_lines,
     _operator_rootless_finalization_lines,
     _refuse_wrong_setup_identity,
@@ -106,6 +107,56 @@ def test_setup_refuses_root_in_operator_rootless(runner: CliRunner) -> None:
         )
     assert result.exit_code == 1
     assert "operator-rootless setup must NOT be run as root" in result.output
+
+
+def test_setup_refuses_root_in_operator_rootless_under_real_sudo(runner: CliRunner) -> None:
+    """Finding 8.7: under real ``sudo`` (``getpass.getuser() == 'root'``) the §8-C
+    entry-identity message wins over §4's generic owner-root refusal.
+
+    The owner resolver returns ``getpass.getuser()`` in op-rootless, so under sudo
+    it resolves to ``root`` — §4's ``_guard_setup_flags`` owner-root check WOULD fire
+    ("the resolved daemon owner is 'root'"). The fix reorders so §8-C runs first; its
+    actionable "run as your own account, without sudo" message is what the operator
+    sees. (The pre-fix ordering surfaced the generic owner-root message instead.)
+    """
+    with (
+        patch("cli.main.os.geteuid", return_value=0),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("core.host_config.getpass.getuser", return_value="root"),
+    ):
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "operator-rootless"]
+        )
+    assert result.exit_code == 1
+    assert "operator-rootless setup must NOT be run as root" in result.output
+    # §4's generic owner-root refusal must NOT be the surfaced message.
+    assert "the resolved daemon owner is 'root'" not in result.output
+
+
+def test_setup_flag_guard_refusal_surfaces_through_command(runner: CliRunner) -> None:
+    """A §4 flag refusal (now run AFTER the identity gate) surfaces via setup()'s
+    handler with exit 1 — a non-root op-rootless invocation with an inapplicable
+    --docker-unprivileged-user passes §8-C, then §4 refuses (finding 8.7 reorder)."""
+    with (
+        patch("cli.main.os.geteuid", return_value=1000),
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "setup",
+                "--docker-execution-mode",
+                "operator-rootless",
+                "--docker-unprivileged-user",
+                "foo",
+            ],
+        )
+    assert result.exit_code == 1
+    assert "--docker-unprivileged-user does not apply in operator-rootless" in result.output
 
 
 # ── _refuse_wrong_setup_identity: the mode-conditional gate, in isolation ──────
@@ -1179,6 +1230,37 @@ def test_invalid_mode_flag_refused(runner: CliRunner) -> None:
     plan_mock.assert_not_called()
 
 
+def _build_and_guard(
+    operator_flag: str | None = None,
+    machinectl_auth_flag: str | None = None,
+    *,
+    mode_flag: str | None = None,
+    docker_unprivileged_user: str = "sandbox",
+    workspace_bridge_group: str = "sb-ws",
+) -> SetupContext:
+    """Mirror ``setup()``'s build→flag-guard sequence (finding 8.7 reorder).
+
+    ``_guard_setup_flags`` moved OUT of ``_build_setup_context_with_operator``
+    (which is now pure resolution) and runs in ``setup()`` AFTER the identity
+    gate; these guard tests exercise it directly on the built context.
+    """
+    ctx = _build_setup_context_with_operator(
+        operator_flag,
+        machinectl_auth_flag,
+        mode_flag=mode_flag,
+        docker_unprivileged_user=docker_unprivileged_user,
+        workspace_bridge_group=workspace_bridge_group,
+    )
+    _guard_setup_flags(
+        ctx.host_config,
+        operator=ctx.operator,
+        operator_flag=operator_flag,
+        machinectl_auth_flag=machinectl_auth_flag,
+        docker_unprivileged_user=docker_unprivileged_user,
+    )
+    return ctx
+
+
 def test_flags_threaded_into_host_config() -> None:
     """--docker-unprivileged-user and --workspace-bridge-group thread into host_config."""
     with (
@@ -1225,7 +1307,7 @@ def test_guard_refuses_docker_unprivileged_user_in_operator_rootless() -> None:
         patch("core.host_config.getpass.getuser", return_value="dev"),
         pytest.raises(_SetupFlagRefused) as exc,
     ):
-        _build_setup_context_with_operator(
+        _build_and_guard(
             None,
             None,
             mode_flag="operator-rootless",
@@ -1245,7 +1327,7 @@ def test_guard_refuses_machinectl_auth_in_operator_rootless() -> None:
         patch("core.host_config.getpass.getuser", return_value="dev"),
         pytest.raises(_SetupFlagRefused) as exc,
     ):
-        _build_setup_context_with_operator(
+        _build_and_guard(
             None,
             "sudo",
             mode_flag="operator-rootless",
@@ -1261,7 +1343,7 @@ def test_guard_refuses_operator_other_than_invoker_in_operator_rootless() -> Non
         patch("cli.main.getpass.getuser", return_value="dev"),
         pytest.raises(_SetupFlagRefused) as exc,
     ):
-        _build_setup_context_with_operator(
+        _build_and_guard(
             "someone-else",
             None,
             mode_flag="operator-rootless",
@@ -1276,7 +1358,7 @@ def test_guard_refuses_root_daemon_owner_separate_user() -> None:
         patch("cli.main.read_mode", return_value=None),
         pytest.raises(_SetupFlagRefused) as exc,
     ):
-        _build_setup_context_with_operator(
+        _build_and_guard(
             None,
             None,
             mode_flag="separate-user",
@@ -1296,7 +1378,7 @@ def test_guard_refuses_root_aliased_daemon_owner() -> None:
         ),
         pytest.raises(_SetupFlagRefused) as exc,
     ):
-        _build_setup_context_with_operator(
+        _build_and_guard(
             None,
             None,
             mode_flag="separate-user",
@@ -1316,7 +1398,7 @@ def test_guard_unknown_daemon_owner_user_not_treated_as_root() -> None:
         patch("cli.main.read_mode", return_value=None),
         patch("cli.main.pwd.getpwnam", side_effect=_missing),
     ):
-        ctx = _build_setup_context_with_operator(
+        ctx = _build_and_guard(
             None,
             None,
             mode_flag="separate-user",

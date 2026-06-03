@@ -2112,8 +2112,10 @@ def _refuse_wrong_setup_identity(ctx: SetupContext) -> None:
       daemon as the wrong user and create ``/root/.sandbox-ai``). A root
       invocation is refused.
 
-    The ``--operator``≠invoker and root-daemon-owner refusals are enforced
-    earlier by :func:`_guard_setup_flags` (§4) during the context build.
+    The ``--operator``≠invoker and root-daemon-owner refusals are enforced by
+    :func:`_guard_setup_flags` (§4), which :func:`setup` runs immediately AFTER
+    this gate — so under ``sudo`` (owner resolves to root) this gate's actionable
+    root-refusal message wins over §4's generic owner-root refusal (finding 8.7).
     """
     if is_operator_rootless(ctx.host_config):
         if os.geteuid() == 0:
@@ -2352,10 +2354,30 @@ def setup(
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
     except (_SetupAuthRefused, _SetupModeConflict, _SetupFlagRefused) as exc:
+        # _SetupFlagRefused here is the invalid-mode-value refusal from
+        # `_parse_mode_flag` (a build-time resolution error); the FLAG guards
+        # (`_guard_setup_flags`) run separately below, after the identity gate.
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
 
+    # Entry-identity gate (§8-C) BEFORE the flag guards (§4): under `sudo` the
+    # daemon owner resolves to root, so running §4 first would shadow §8-C's
+    # actionable "operator-rootless setup must NOT be run as root" with the generic
+    # owner-root refusal (finding 8.7). §8-C owns the euid root-refusal; §4's
+    # owner-root check remains the residual defense for a non-euid-0 owner that
+    # still resolves to root (e.g. an explicit ``--docker-unprivileged-user root``).
     _refuse_wrong_setup_identity(ctx)
+    try:
+        _guard_setup_flags(
+            ctx.host_config,
+            operator=ctx.operator,
+            operator_flag=operator,
+            machinectl_auth_flag=machinectl_auth,
+            docker_unprivileged_user=docker_unprivileged_user,
+        )
+    except _SetupFlagRefused as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
     original_handler = signal.getsignal(signal.SIGINT)
 
@@ -2580,9 +2602,15 @@ def _build_setup_context_with_operator(
     (euid-aware: the canonical root-scoped precedence, with a non-root current-user
     fallback for operator-run op-rootless), threading ``--operator`` (never a toml).
 
-    Refuse-all guards (D9, fail-closed) run BEFORE the context is built: an
-    inapplicable flag in the active mode, or a dangerous resolved owner / cross-
-    operator daemon owner, raise :class:`_SetupFlagRefused` with no mutation.
+    This builder is pure resolution — it mutates nothing and raises only the
+    resolution refusals (:class:`_SetupAuthRefused` POLKIT fence,
+    :class:`_SetupModeConflict` marker mismatch, :class:`OperatorResolutionError`).
+    The refuse-all FLAG guards (D9 — inapplicable flag / dangerous resolved owner /
+    cross-operator owner) are NOT run here: :func:`setup` runs them via
+    :func:`_guard_setup_flags` AFTER the entry-identity gate
+    (:func:`_refuse_wrong_setup_identity`, §8-C), so a root invocation of
+    operator-rootless surfaces the actionable "must NOT be run as root" message
+    rather than the generic owner-root refusal (finding 8.7).
     """
     auth = _resolve_setup_auth(machinectl_auth_flag)
     operator = _resolve_setup_operator(operator_flag)
@@ -2594,14 +2622,6 @@ def _build_setup_context_with_operator(
             docker_execution_mode=mode,
             workspace_bridge_group=workspace_bridge_group,
         )
-    )
-
-    _guard_setup_flags(
-        host_config,
-        operator=operator,
-        operator_flag=operator_flag,
-        machinectl_auth_flag=machinectl_auth_flag,
-        docker_unprivileged_user=docker_unprivileged_user,
     )
     # NOTE: the marker WRITE (persisting `mode` for `operator`) is §8 — this
     # builder only DECIDES the effective mode; it never mutates host state.
@@ -2618,12 +2638,19 @@ def _guard_setup_flags(
 ) -> None:
     """Refuse-all guards for setup flags (D9, fail-closed, pre-mutation).
 
+    :func:`setup` runs this AFTER the entry-identity gate
+    (:func:`_refuse_wrong_setup_identity`, §8-C) so the euid root-refusal surfaces
+    its actionable message before the generic owner-root check here (finding 8.7).
+
     Inapplicable-flag guard: in operator-rootless mode neither a non-default
     ``--docker-unprivileged-user`` nor ``--machinectl-auth`` applies (there is no
     dedicated daemon user and no crossing to authorize). Dangerous-value guard:
-    a resolved daemon owner of ``root`` (or uid 0), or an ``--operator`` naming a
-    user other than the invoker in operator-rootless, is refused. Each refusal
-    raises :class:`_SetupFlagRefused` before any host state is touched.
+    a resolved daemon owner of ``root`` (or uid 0) — the residual root defense for
+    a non-euid-0 owner that still resolves to root (e.g. ``--docker-unprivileged-user
+    root`` in separate-user; the ``sudo`` op-rootless euid case is already refused
+    by §8-C) — or an ``--operator`` naming a user other than the invoker in
+    operator-rootless, is refused. Each refusal raises :class:`_SetupFlagRefused`
+    before any host state is touched.
     """
     if is_operator_rootless(host_config):
         if docker_unprivileged_user != "sandbox":
