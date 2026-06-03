@@ -688,6 +688,67 @@ def test_yes_skips_prompt_and_proceeds(runner: CliRunner) -> None:
     assert "Proceed with apply?" not in result.output
 
 
+# ── separate-user records the mode marker on successful setup (§7.2) ──────────
+
+
+def test_separate_user_apply_success_records_marker(
+    runner: CliRunner, stub_marker_write: Mock
+) -> None:
+    """A successful separate-user apply writes the root-owned marker (D11)."""
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
+    apply_outcomes = [_apply("l5", PhaseResult.ALREADY_CORRECT, reverified=True)]
+    with (
+        _root_ctx(),
+        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
+        patch("cli.main.run_plan_pass", return_value=plan),
+        patch("cli.main._stdin_is_tty", return_value=True),
+        patch("cli.main.run_apply_pass", return_value=apply_outcomes),
+    ):
+        result = runner.invoke(app, ["setup", "--yes"])
+    assert result.exit_code == 0
+    stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
+
+
+def test_separate_user_failed_apply_does_not_record_marker(
+    runner: CliRunner, stub_marker_write: Mock
+) -> None:
+    """A failed apply must NOT write the marker (do not claim provisioned)."""
+    phases = [_phase("l5")]
+    plan = [_plan("l5", PhaseResult.MISSING)]
+    apply_outcomes = [_apply("l5", PhaseResult.FAIL, reverified=False)]
+    with (
+        _root_ctx(),
+        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
+        patch("cli.main.run_plan_pass", return_value=plan),
+        patch("cli.main._stdin_is_tty", return_value=True),
+        patch("cli.main.run_apply_pass", return_value=apply_outcomes),
+    ):
+        result = runner.invoke(app, ["setup", "--yes"])
+    assert result.exit_code == 1
+    stub_marker_write.assert_not_called()
+
+
+def test_separate_user_nothing_to_apply_records_marker(
+    runner: CliRunner, stub_marker_write: Mock
+) -> None:
+    """A converged separate-user host (nothing to apply) still ensures the marker
+    (heals a host provisioned before the marker existed)."""
+    phases = [_phase("l0")]
+    plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
+    with (
+        _root_ctx(),
+        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
+        patch("cli.main.run_plan_pass", return_value=plan),
+        patch("cli.main._stdin_is_tty", return_value=True),
+        patch("cli.main.run_apply_pass") as apply_mock,
+    ):
+        result = runner.invoke(app, ["setup"])
+    assert result.exit_code == 0
+    apply_mock.assert_not_called()
+    stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
+
+
 def test_yes_passes_assume_yes_to_distro_gate(runner: CliRunner) -> None:
     phases = [_phase("l5")]
     plan = [_plan("l5", PhaseResult.MISSING)]

@@ -89,7 +89,7 @@ from core.setup.extras import selected_extras
 from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
 from core.setup.l6a_runsc import set_force_update
 from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
-from core.setup_state import read_mode
+from core.setup_state import read_mode, write_mode_root_owned
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
 from core.workspace_backups import (
@@ -2650,6 +2650,19 @@ def _is_root_user(name: str) -> bool:
         return False
 
 
+def _record_separate_user_mode(ctx: SetupContext) -> None:
+    """Persist the separate-user mode marker (root-owned) on successful setup.
+
+    The runtime resolves its mode from the marker (D11), so a provisioned host
+    MUST carry a marker entry in BOTH modes — op-rootless writes it as the last
+    host-root batch action; separate-user setup runs as root and writes it
+    directly here. Idempotent (a converged re-run rewrites the same entry), so it
+    is safe to call on both the apply-success and the nothing-to-apply paths
+    (the latter also heals a host provisioned before the marker existed).
+    """
+    write_mode_root_owned(ctx.operator, DockerExecutionMode.SEPARATE_USER)
+
+
 def _setup_body(
     ctx: SetupContext,
     *,
@@ -2690,6 +2703,7 @@ def _setup_body(
     )
 
     if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
+        _record_separate_user_mode(ctx)
         console.print("Nothing to apply. Setup is complete.", markup=False)
         return 0
 
@@ -2719,7 +2733,10 @@ def _setup_body(
     apply_outcomes = run_apply_pass(phases, ctx)
     for line in cli_flow.summarize_apply(phases, apply_outcomes):
         console.print(line, markup=False)
-    return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
+    if cli_flow.apply_pass_failed(apply_outcomes):
+        return 1
+    _record_separate_user_mode(ctx)
+    return 0
 
 
 def _resolve_sandbox_executable() -> str:

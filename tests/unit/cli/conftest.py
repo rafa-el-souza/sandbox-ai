@@ -127,6 +127,19 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
 
 
 @pytest.fixture(autouse=True)
+def stub_marker_write() -> object:
+    """Stub the separate-user root-owned marker write.
+
+    ``cli.main._record_separate_user_mode`` calls ``write_mode_root_owned``, which
+    ``chown``s the root-owned ``/usr/local/libexec/sandbox-ai/setup-state.json`` —
+    not writable in a unit test. Patched to a no-op Mock; yielded so the tests
+    that assert the marker was recorded can inspect ``.call_args``.
+    """
+    with patch("cli.main.write_mode_root_owned") as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
 def _pin_console_width() -> object:
     """Pin the CLI's Rich console to a fixed wide, non-terminal width.
 
