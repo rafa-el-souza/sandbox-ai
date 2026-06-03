@@ -1152,6 +1152,23 @@ class TestResolveFullHostConfigOverlaysMarkerMode:
         assert resolved.host.docker_unprivileged_user == "sandbox"
 
     @pytest.mark.no_host_config_mock
+    def test_rejects_toml_with_removed_mode_field(self) -> None:
+        """from_toml's ValueError (a toml that sets the removed mode field, D11)
+        surfaces as a clean exit 1, not an uncaught traceback."""
+        with (
+            patch(
+                "cli.main.HostConfig.from_toml",
+                side_effect=ValueError(
+                    "docker_execution_mode is no longer a sandbox-ai.toml field; "
+                    "it is setup-determined."
+                ),
+            ),
+            pytest.raises(typer.Exit) as exc,
+        ):
+            _cli_main_module._resolve_full_host_config()
+        assert exc.value.exit_code == 1
+
+    @pytest.mark.no_host_config_mock
     def test_fails_closed_when_marker_absent(self) -> None:
         """A missing marker entry fails closed (exit 1) — 'run sudo sandbox setup'."""
         from core.setup_state import ModeMarkerMissing

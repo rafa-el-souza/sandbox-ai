@@ -2031,6 +2031,11 @@ def _resolve_full_host_config() -> HostConfig:
     except FileNotFoundError as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        # The toml set a now-removed field (e.g. docker_execution_mode, D11) —
+        # surface from_toml's directive message cleanly, not as a traceback.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
     # The execution mode is no longer a toml field (D11) — resolve it from the
     # per-operator setup-state marker and overlay it onto the in-memory carrier.
     # Fail closed when the host is not provisioned (no marker entry).
