@@ -2563,11 +2563,16 @@ class TestDoctorHostConfig:
 
     def test_doctor_no_config_no_flag_errors(self, runner: CliRunner) -> None:
         from cli.main import app
+        from core.host_config import DockerExecutionMode
 
-        with patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError):
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
+        ):
             r = runner.invoke(app, ["doctor"])
         assert r.exit_code == 1
         assert "no user specified" in r.output.lower()
+        assert "separate-user mode" in r.output.lower()
 
     def test_doctor_rejects_malformed_toml(self, runner: CliRunner) -> None:
         """A malformed managed toml (any ValueError — ValidationError /
@@ -2652,6 +2657,52 @@ class TestDoctorHostConfig:
             assert r.exit_code == 0
             mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
             mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.SEPARATE_USER)
+
+    def test_doctor_op_rootless_no_toml_no_flag_resolves_operator(self, runner: CliRunner) -> None:
+        """C-005 gap: operator-rootless host that's been ``setup`` but not ``init``'d
+        (so no toml, no --user) must NOT early-exit "No user specified". Doctor
+        resolves the invoking operator as the daemon owner and threads op-rootless
+        mode into the registry + runner — so the op-rootless-only checks run."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor"])
+            assert r.exit_code == 0
+            assert "no user specified" not in r.output.lower()
+            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+
+    def test_doctor_op_rootless_user_flag_overrides(self, runner: CliRunner) -> None:
+        """--user wins even in operator-rootless mode (explicit override)."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "cliuser"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "cliuser", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
 
 class TestDoctorRunnerInvoked:

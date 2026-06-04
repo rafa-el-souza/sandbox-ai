@@ -3770,17 +3770,37 @@ def doctor(
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
 
-    if user is None:
-        if project_config is None:
-            console.print(
-                "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
-                style="red",
-                markup=False,
-            )
-            raise typer.Exit(code=1)
+    # Resolve the active execution mode from the root-owned setup marker (the
+    # single runtime authority, C-004) BEFORE the user, so user resolution can be
+    # mode-aware. The marker read is toml-independent — an un-setup host has no
+    # marker entry → diagnose it as separate-user (the pre-flip default; a future
+    # group flips the broader default). The operator is the current real user,
+    # exactly how the rest of doctor resolves the invoker.
+    try:
+        mode = resolve_execution_mode(getpass.getuser())
+    except ModeMarkerMissing:
+        mode = DockerExecutionMode.SEPARATE_USER
+
+    if user is not None:
+        # Explicit --user wins in both modes.
+        resolved_user = user
+    elif mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        # Operator-rootless: the daemon owner IS the invoking operator, so no toml
+        # / docker_unprivileged_user is needed (this equals resolve_daemon_owner in
+        # op-rootless). Do NOT read host.docker_unprivileged_user here (D7 guard).
+        resolved_user = getpass.getuser()
+    elif project_config is not None:
+        # Separate-user with a toml present: the dedicated daemon user (doctor is
+        # allowlisted for this separate-user read).
         resolved_user = project_config.host.docker_unprivileged_user
     else:
-        resolved_user = user
+        console.print(
+            "No user specified (separate-user mode). Pass --user or create "
+            "sandbox-ai.toml with [host].docker_unprivileged_user.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
 
     if machinectl_auth is not None:
         try:
@@ -3797,16 +3817,6 @@ def doctor(
         resolved_auth = MachinectlAuth.SUDO
 
     console.print(f"Per-user home: {sandbox_ai_home()}")
-
-    # Resolve the active execution mode from the root-owned setup marker (the
-    # single runtime authority, C-004). An un-setup host has no marker entry →
-    # diagnose it as separate-user (the pre-flip default; a future group flips
-    # the broader default). The operator is the current real user, exactly how
-    # the rest of doctor resolves the invoker.
-    try:
-        mode = resolve_execution_mode(getpass.getuser())
-    except ModeMarkerMissing:
-        mode = DockerExecutionMode.SEPARATE_USER
 
     distro = detect_distro()
     checks = build_check_registry(resolved_auth, mode)
