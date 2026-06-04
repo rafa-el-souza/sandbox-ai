@@ -2477,7 +2477,7 @@ class TestDoctorHostConfig:
     def test_doctor_resolves_user_from_host_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import HostConfig, MachinectlAuth
+        from core.host_config import DockerExecutionMode, HostConfig, MachinectlAuth
 
         mock_pc = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
@@ -2486,19 +2486,20 @@ class TestDoctorHostConfig:
         with (
             patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
             patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results"),
         ):
             r = runner.invoke(app, ["doctor"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT)
-            mock_run.assert_called_once_with([], "fromtoml", None)
+            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT, DockerExecutionMode.SEPARATE_USER)
+            mock_run.assert_called_once_with([], "fromtoml", None, DockerExecutionMode.SEPARATE_USER)
 
     def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import HostConfig, MachinectlAuth
+        from core.host_config import DockerExecutionMode, HostConfig, MachinectlAuth
 
         mock_pc = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
@@ -2507,14 +2508,15 @@ class TestDoctorHostConfig:
         with (
             patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
             patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results"),
         ):
             r = runner.invoke(app, ["doctor", "--user", "cliuser", "--machinectl-auth", "polkit"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT)
-            mock_run.assert_called_once_with([], "cliuser", None)
+            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT, DockerExecutionMode.SEPARATE_USER)
+            mock_run.assert_called_once_with([], "cliuser", None, DockerExecutionMode.SEPARATE_USER)
 
     def test_doctor_no_config_no_flag_errors(self, runner: CliRunner) -> None:
         from cli.main import app
@@ -2550,11 +2552,12 @@ class TestDoctorHostConfig:
     def test_doctor_defaults_auth_to_sudo_when_no_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
             patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results),
             patch("cli.main.render_results"),
@@ -2562,7 +2565,50 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.SUDO)
+            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+
+    def test_doctor_threads_marker_resolved_operator_rootless_mode(self, runner: CliRunner) -> None:
+        """C-005 1.4: marker present → the resolved mode is threaded into the
+        registry + runner."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+
+    def test_doctor_falls_back_to_separate_user_when_marker_missing(self, runner: CliRunner) -> None:
+        """C-005 1.4: ``ModeMarkerMissing`` (un-setup host) → diagnose as
+        separate-user (the pre-flip default), no crash."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.setup_state import ModeMarkerMissing
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", side_effect=ModeMarkerMissing("no marker")),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.SEPARATE_USER)
 
 
 class TestDoctorRunnerInvoked:
@@ -2571,10 +2617,12 @@ class TestDoctorRunnerInvoked:
     def test_runner_receives_user_and_distro(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode
 
         results = [CheckResult(status="pass", name="a", detail="ok")]
         with (
             patch("cli.main.detect_distro", return_value="fedora") as mock_distro,
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
             patch("cli.main.build_check_registry", return_value=["check_obj"]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results") as mock_render,
@@ -2582,7 +2630,7 @@ class TestDoctorRunnerInvoked:
             runner.invoke(app, ["doctor", "--user", "testuser"])
             mock_distro.assert_called_once()
             mock_reg.assert_called_once()
-            mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora")
+            mock_run.assert_called_once_with(["check_obj"], "testuser", "fedora", DockerExecutionMode.SEPARATE_USER)
             mock_render.assert_called_once()
 
 

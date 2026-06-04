@@ -3773,9 +3773,19 @@ def doctor(
 
     console.print(f"Per-user home: {sandbox_ai_home()}")
 
+    # Resolve the active execution mode from the root-owned setup marker (the
+    # single runtime authority, C-004). An un-setup host has no marker entry →
+    # diagnose it as separate-user (the pre-flip default; a future group flips
+    # the broader default). The operator is the current real user, exactly how
+    # the rest of doctor resolves the invoker.
+    try:
+        mode = resolve_execution_mode(getpass.getuser())
+    except ModeMarkerMissing:
+        mode = DockerExecutionMode.SEPARATE_USER
+
     distro = detect_distro()
-    checks = build_check_registry(resolved_auth)
-    results = run_checks(checks, resolved_user, distro)
+    checks = build_check_registry(resolved_auth, mode)
+    results = run_checks(checks, resolved_user, distro, mode)
     render_results(results, console=console)
 
     has_failures = any(r.status == "fail" for r in results)

@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.doctor.types import CheckResult
 from core.host_config import (
+    DockerExecutionMode,
     MachinectlAuth,
     minimal_host_config,
     parse_subgid_for_user,
@@ -280,18 +281,29 @@ def _audit_rule_shape_agreement(is_sudo: bool, operator: str, violations: list[s
 
 
 def check_setup_invariants(
-    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+    user: str,
+    distro: str | None,
+    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Read-only steady-state audit of setup's owned-namespace artifacts.
 
     PASS iff every enumerated invariant holds; WARN (never FAIL — drift may be
     operator-intentional / re-runnable) naming each violated invariant.
+
+    Mode-aware (design D2/D5): in ``operator-rootless`` there is no machinectl
+    crossing and no sudoers/polkit privilege-boundary rule, so the drop-in read,
+    the rule-shape-agreement audit, the machinectl-stability audit, the
+    rule-body audit, and the sudo-floor audit are ALL skipped — only the
+    mode-applicable sub-audits (reserved dir + subid/subgid/bridge-group) run.
+    The check itself is NOT mode-skipped (it stays both-mode); it branches
+    internally so its applicable invariants still green in operator-rootless.
     """
     from core.setup import l0_identity as l0
     from core.setup import l3_sudoers_polkit as l3
 
     del distro
-    host_config = minimal_host_config(user, auth_mode)
+    host_config = minimal_host_config(user, auth_mode, mode)
     bridge_group = host_config.host.workspace_bridge_group
     violations: list[str] = []
 
@@ -309,6 +321,26 @@ def check_setup_invariants(
 
     _audit_reserved_dir(violations)
     _audit_subid_and_group(user, operator, bridge_group, violations)
+
+    if mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        # No machinectl crossing / sudoers-or-polkit rule exists in this mode:
+        # the drop-in read + rule/stability/floor audits are not applicable.
+        if not violations:
+            return CheckResult(
+                status="pass",
+                name="setup invariants",
+                detail=(
+                    f"operator-rootless setup invariants hold (operator={operator}); "
+                    f"machinectl-stability + sudoers-rule audits not applicable "
+                    f"(no privilege-boundary crossing in operator-rootless)"
+                ),
+            )
+        return CheckResult(
+            status="warn",
+            name="setup invariants",
+            detail="; ".join(violations),
+            remediation="run 'sudo sandbox setup' to restore canonical setup state",
+        )
 
     drop_in_path = l3._drop_in_path(host_config, operator)
     is_sudo = auth_mode == MachinectlAuth.SUDO

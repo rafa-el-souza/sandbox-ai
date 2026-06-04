@@ -166,6 +166,73 @@ class TestTopLevelVerdicts:
         assert "polkit drop-in" in result.detail
 
 
+class TestOperatorRootlessBranch:
+    """C-005 1.4 / design D2: in operator-rootless the check stays both-mode but
+    skips its machinectl-stability + sudoers-rule-body sub-audits (no crossing /
+    rule exists) and runs ONLY the mode-applicable sub-audits (reserved dir +
+    subid/subgid/bridge-group)."""
+
+    def test_operator_rootless_passes_without_reading_drop_in(self, monkeypatch: Any) -> None:
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
+
+        monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
+        monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
+
+        def must_not_run_machinectl(*a: Any, **k: Any) -> None:
+            raise AssertionError("_audit_machinectl_stability must be skipped in operator-rootless")
+
+        def must_not_run_rule_body(*a: Any, **k: Any) -> None:
+            raise AssertionError("_audit_rule_body must be skipped in operator-rootless")
+
+        def must_not_read(self: Any) -> str:
+            raise AssertionError("the drop-in must not be read in operator-rootless")
+
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", must_not_run_machinectl)
+        monkeypatch.setattr(f"{_MOD}._audit_rule_body", must_not_run_rule_body)
+        monkeypatch.setattr("pathlib.Path.read_text", must_not_read)
+
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert result.status == "pass"
+        assert "operator-rootless setup invariants hold" in result.detail
+        assert "operator=alice" in result.detail
+        assert "not applicable" in result.detail
+
+    def test_operator_rootless_runs_subid_and_reserved_dir_audits(self, monkeypatch: Any) -> None:
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
+
+        ran: list[str] = []
+        monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
+        monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: ran.append("reserved"))
+        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: ran.append("subid"))
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda *a, **k: ran.append("machinectl"))
+        monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda *a, **k: ran.append("rule_body"))
+
+        check_setup_invariants("sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert "reserved" in ran
+        assert "subid" in ran
+        assert "machinectl" not in ran
+        assert "rule_body" not in ran
+
+    def test_operator_rootless_warns_on_subid_violation(self, monkeypatch: Any) -> None:
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
+
+        monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
+        monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
+        monkeypatch.setattr(
+            f"{_MOD}._audit_subid_and_group",
+            lambda u, op, g, v: v.append("bridge group 'sb-ws' absent per /etc/group"),
+        )
+
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert result.status == "warn"
+        assert "sb-ws" in result.detail
+        assert result.remediation == "run 'sudo sandbox setup' to restore canonical setup state"
+
+
 class TestAuditReservedDir:
     def test_missing_dir(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m

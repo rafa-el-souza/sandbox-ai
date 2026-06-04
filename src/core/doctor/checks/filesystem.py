@@ -10,7 +10,7 @@ import tempfile
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import MachinectlAuth, minimal_host_config, sandbox_ai_home
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config, sandbox_ai_home
 
 _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
 
@@ -89,7 +89,10 @@ def _has_acl_exec(directory: str, user: str) -> bool:
 
 
 def check_ancestor_traverse(
-    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+    user: str,
+    distro: str | None,
+    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that all ancestor directories of sandboxes/ are traversable by the sandbox user.
 
@@ -152,20 +155,20 @@ def check_ancestor_traverse(
                 remediation=f"Verify directory exists and is accessible: ls -la {directory}",
             )
 
-        mode = st.st_mode
+        st_mode = st.st_mode
         has_exec = False
         if st.st_uid == target_uid:
-            has_exec = bool(mode & stat.S_IXUSR)
+            has_exec = bool(st_mode & stat.S_IXUSR)
         elif st.st_gid == target_gid:
-            has_exec = bool(mode & stat.S_IXGRP)
+            has_exec = bool(st_mode & stat.S_IXGRP)
         else:
-            has_exec = bool(mode & stat.S_IXOTH)
+            has_exec = bool(st_mode & stat.S_IXOTH)
 
         if not has_exec:
             has_exec = _has_acl_exec(directory, user)
 
         if not has_exec:
-            if _no_sandbox_running(user, auth_mode):
+            if _no_sandbox_running(user, auth_mode, mode):
                 return CheckResult(
                     status="skip",
                     name="ancestor traverse",
@@ -197,7 +200,7 @@ def check_ancestor_traverse(
     )
 
 
-def _no_sandbox_running(user: str, auth_mode: MachinectlAuth) -> bool:
+def _no_sandbox_running(user: str, auth_mode: MachinectlAuth, mode: DockerExecutionMode) -> bool:
     """``True`` iff the sandbox daemon reports zero compose projects.
 
     Distinguishes "no sandbox started yet" (traverse-absent is expected — the
@@ -206,7 +209,7 @@ def _no_sandbox_running(user: str, auth_mode: MachinectlAuth) -> bool:
     (docker down / probe failure / unparseable output), return ``False`` so the
     caller reports the real traverse gap rather than hiding it behind a SKIP.
     """
-    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, auth_mode, mode), timeout=15)
     if not outcome.ok:
         return False
     try:

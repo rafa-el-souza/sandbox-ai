@@ -693,3 +693,75 @@ class TestCheckComposeProjectNameCollision:
         assert out.status == "pass"
         assert captured["op"] == "compose-ls"
         assert captured["timeout"] == 15
+
+
+# ── C-005 1.4: operator-rootless local routing ───────────────────────────────
+
+
+class TestOperatorRootlessLocalRouting:
+    """The docker/runsc/supply/compose checks route LOCALLY in operator-rootless
+    purely by receiving the mode in their ``minimal_host_config(...)`` call —
+    ``dispatch.probe`` takes the local (no-machinectl) branch (C-003)."""
+
+    def test_docker_available_host_config_is_operator_rootless(self, monkeypatch: Any) -> None:
+        from core.doctor import check_docker_available
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+
+        captured: dict[str, Any] = {}
+
+        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["host_config"] = host_config
+            return _ok("24.0.7\n")
+
+        monkeypatch.setattr("core.dispatch.invoke", capture)
+        result = check_docker_available(
+            "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+        assert result.status == "pass"
+        assert captured["host_config"].host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+    def test_probe_takes_local_no_machinectl_path_in_operator_rootless(self, monkeypatch: Any) -> None:
+        """End-to-end through the real ``dispatch.probe`` → ``invoke`` → local
+        branch: assert the argv that reaches the Executor carries NO machinectl
+        crossing and runs ``framed=False`` (the local path)."""
+        from core.doctor import check_docker_available
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+
+        captured: dict[str, Any] = {}
+
+        def fake_run(self: Any, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["argv"] = argv
+            captured["framed"] = kwargs.get("framed")
+            return _ok("24.0.7\n")
+
+        monkeypatch.setattr("core.executor.Executor.run", fake_run)
+        # Silence the journald audit side-effect the local path emits.
+        monkeypatch.setattr("core.dispatch.emit_op_audit", lambda *a, **k: None)
+        result = check_docker_available(
+            "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+        assert result.status == "pass"
+        assert captured["framed"] is False
+        assert "machinectl" not in captured["argv"]
+        assert "shell" not in captured["argv"]
+
+    def test_probe_crosses_machinectl_in_separate_user(self, monkeypatch: Any) -> None:
+        """Regression guard: separate-user still crosses via machinectl
+        (``framed=True``, machinectl in the argv)."""
+        from core.doctor import check_docker_available
+        from core.host_config import DockerExecutionMode, MachinectlAuth
+
+        captured: dict[str, Any] = {}
+
+        def fake_run(self: Any, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured["argv"] = argv
+            captured["framed"] = kwargs.get("framed")
+            return _ok("24.0.7\n")
+
+        monkeypatch.setattr("core.executor.Executor.run", fake_run)
+        result = check_docker_available(
+            "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.SEPARATE_USER
+        )
+        assert result.status == "pass"
+        assert captured["framed"] is True
+        assert "machinectl" in captured["argv"]
