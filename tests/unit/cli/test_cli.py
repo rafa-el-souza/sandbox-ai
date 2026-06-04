@@ -542,6 +542,49 @@ class TestStartDoctorChain1PreFlight:
             # Gate must fire BEFORE warm check
             mock_warm.assert_not_called()
 
+    def test_start_threads_operator_rootless_owner_and_mode_into_preflight(
+        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    ) -> None:
+        """C-005 1.6: in operator-rootless, start's Privilege Boundary pre-flight
+        ``run_check_subset`` receives the OPERATOR owner (``resolve_daemon_owner``
+        → ``getpass.getuser()``) and the OPERATOR_ROOTLESS mode — so the check
+        bodies take the local (no-machinectl) path, not a crossing into the
+        nonexistent dedicated user."""
+        import getpass
+
+        from core.doctor import CheckResult
+
+        inst = "myproject"
+        _register_instance(inst)
+        operator = getpass.getuser()
+
+        from cli.main import app
+
+        captured: dict[str, object] = {}
+
+        def _capture(categories: object, user: object, distro: object, **kw: object) -> list[CheckResult]:
+            captured["user"] = user
+            captured["mode"] = kw.get("mode")
+            # Fail the pre-flight so start exits right after the gate.
+            return [CheckResult(status="fail", name="Privilege Boundary", detail="forced", remediation="")]
+
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.run_check_subset", side_effect=_capture),
+            patch("cli.main.render_results"),
+            patch("cli.main._warm_check") as mock_warm,
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 1
+            assert captured["user"] == operator
+            assert captured["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
+            mock_warm.assert_not_called()
+
 
 class TestStartComposeSpinner:
     """Task 4.6a: console.status() spinner during compose-up phase."""
@@ -3527,6 +3570,112 @@ class TestInitAuthProbe:
             (op, args, host_config), kwargs = mock_probe.call_args
             assert op == "auth-probe"
             assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
+
+    def test_probe_mode_marker_missing_falls_back_to_separate_user(
+        self, runner: CliRunner
+    ) -> None:
+        """C-005 1.6: an un-setup host has no marker entry — ``resolve_execution_mode``
+        raises ``ModeMarkerMissing``, so init's auth-probe diagnoses separate-user
+        (the pre-flip default) and the probe owner stays the configured dedicated
+        user (mirrors the doctor() fallback)."""
+        from cli.main import app
+        from core.host_config import DockerExecutionMode
+        from core.hydration import InstanceConfig
+        from core.setup_state import ModeMarkerMissing
+
+        project_dir = "/home/user/nomarker"
+        mock_config = InstanceConfig.model_validate(
+            {
+                "instance": {"name": "nomarker", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
+        )
+
+        with (
+            patch(
+                "cli.main.resolve_execution_mode",
+                side_effect=ModeMarkerMissing("no marker"),
+            ),
+            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]),
+            patch("cli.main.check_compose_project_name_collision") as mock_collision,
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            mock_collision.return_value.status = "pass"
+            result = runner.invoke(app, ["init", "nomarker"])
+            assert result.exit_code == 0
+            (_op, _args, host_config), _kwargs = mock_probe.call_args
+            # Separate-user fallback: owner is the configured dedicated user.
+            assert host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+            assert host_config.host.docker_unprivileged_user == HOST_USER
+
+    def test_probe_operator_rootless_uses_operator_owner_and_local_mode(
+        self, runner: CliRunner
+    ) -> None:
+        """C-005 1.6: in operator-rootless the auth-probe host_config carries the
+        OPERATOR (``getpass.getuser()``) as owner — NOT the stale dedicated
+        ``docker_unprivileged_user`` — and the OPERATOR_ROOTLESS mode, so
+        ``dispatch.probe`` takes the local (no-machinectl) path. The init/start
+        pre-flight ``run_check_subset`` + collision probe receive the same
+        operator + mode."""
+        import getpass
+
+        from cli.main import app
+        from core.host_config import DockerExecutionMode
+        from core.hydration import InstanceConfig
+
+        project_dir = "/home/user/oprl"
+        mock_config = InstanceConfig.model_validate(
+            {
+                "instance": {"name": "oprl", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
+            }
+        )
+        operator = getpass.getuser()
+
+        with (
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
+            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.run_check_subset", return_value=[]) as mock_subset,
+            patch("cli.main.check_compose_project_name_collision") as mock_collision,
+            patch("cli.main.create_instance_dirs"),
+            patch("cli.main.write_sandbox_toml"),
+            patch("cli.main._load_config", return_value=mock_config),
+            patch("cli.main.create_env_file"),
+            patch("cli.main.apply_default_acls"),
+            patch("cli.main.prompt_secrets"),
+            patch("cli.main.write_initialized_sentinel"),
+        ):
+            mock_collision.return_value.status = "pass"
+            result = runner.invoke(app, ["init", "oprl"])
+            assert result.exit_code == 0
+
+            (op, _args, host_config), _kwargs = mock_probe.call_args
+            assert op == "auth-probe"
+            # Operator owner (NOT the stale dedicated user) + local op-rootless mode.
+            assert host_config.host.docker_unprivileged_user == operator
+            assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+            # The doctor subset pre-flight got the operator + op-rootless mode too.
+            subset_args, subset_kwargs = mock_subset.call_args
+            assert subset_args[1] == operator
+            assert subset_kwargs["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
+
+            # The collision probe got the operator + op-rootless mode too.
+            collision_args, collision_kwargs = mock_collision.call_args
+            assert collision_args[0] == operator
+            assert collision_kwargs["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner) -> None:
         """Polkit probe failure shows polkit-specific remediation."""

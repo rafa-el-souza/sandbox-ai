@@ -445,6 +445,18 @@ def test_machinectl_cmd_deliberate_violation_is_detected(
 # the *runtime* modules and allowlists the functions that read the field for NON-owner,
 # separate-user-only purposes. A new reader elsewhere (e.g. a lifecycle command binding
 # ``host_user`` from the field) is the regression this catches.
+#
+# Scanned-module set (C-005 1.7): the original two runtime modules (``cli/main.py``,
+# ``hydration.py``) PLUS every ``core/doctor/checks/*.py`` module — now that the doctor
+# checks are op-rootless-reachable (the runner threads the active ``mode`` + the operator
+# owner into them, C-005 1.1-1.6), an *unguarded* owner-read of ``docker_unprivileged_user``
+# in a check is exactly the regression this broadening catches. A scanned file with NO
+# allowlist entry is scanned with an empty sanctioned set: ANY read fails the guard.
+_DOCKER_USER_SCANNED_DIRS: tuple[Path, ...] = (_SRC_ROOT / "core" / "doctor" / "checks",)
+_DOCKER_USER_SCANNED_FILES: tuple[Path, ...] = (
+    _SRC_ROOT / "cli" / "main.py",
+    _SRC_ROOT / "core" / "hydration.py",
+)
 _DOCKER_USER_READ_ALLOWLIST: dict[str, frozenset[str]] = {
     "src/cli/main.py": frozenset(
         {
@@ -454,7 +466,25 @@ _DOCKER_USER_READ_ALLOWLIST: dict[str, frozenset[str]] = {
         }
     ),
     "src/core/hydration.py": frozenset(),  # owner via resolve_daemon_owner_settings only
+    # The sudoers-rule body audit re-renders the SUDO rule that enumerates the
+    # dedicated ``sandbox_user``; the whole ``setup_invariants`` check is
+    # ``applies_in=separate-user`` (registry), so this read is correctly
+    # mode-guarded and is NOT an owner-resolution read.
+    "src/core/doctor/checks/setup_invariants.py": frozenset({"_audit_rule_body"}),
 }
+
+
+def _docker_user_scanned_files() -> list[Path]:
+    """The D7-scanned module set: the two runtime files + every doctor-check module.
+
+    Defining the scanned set independently of the allowlist (rather than scanning
+    only allowlist keys) is the load-bearing 1.7 broadening: a brand-new doctor
+    check that reads ``docker_unprivileged_user`` is scanned with an empty
+    sanctioned set and fails the guard, instead of being silently skipped."""
+    files = list(_DOCKER_USER_SCANNED_FILES)
+    for d in _DOCKER_USER_SCANNED_DIRS:
+        files.extend(_python_files(d))
+    return files
 
 
 def _docker_user_read_functions(tree: ast.AST) -> list[tuple[int, str]]:
@@ -486,8 +516,9 @@ def _docker_user_read_functions(tree: ast.AST) -> list[tuple[int, str]]:
 def _docker_user_owner_violations(
     files: Iterator[Path], allowlist: dict[str, frozenset[str]]
 ) -> list[tuple[Path, list[tuple[int, str]]]]:
-    """Scan the allowlisted runtime modules; return ``(path, [(lineno, func), …])``
+    """Scan the given module set; return ``(path, [(lineno, func), …])``
     for every ``.docker_unprivileged_user`` read in a NON-sanctioned function.
+    A scanned file absent from ``allowlist`` defaults to an empty sanctioned set.
 
     Reusable detector seam (anti-hack rule 5): ``files`` + ``allowlist`` are
     parameters, so the deliberate-violation regression drives the same predicate."""
@@ -498,9 +529,9 @@ def _docker_user_owner_violations(
             if src.is_relative_to(_REPO_ROOT)
             else src.as_posix()
         )
-        sanctioned = allowlist.get(rel)
-        if sanctioned is None:
-            continue  # only the enumerated runtime modules are scoped
+        # Every scanned file is in-scope; a file with no allowlist entry has an
+        # empty sanctioned set, so ANY owner-read in it fails the guard.
+        sanctioned = allowlist.get(rel, frozenset())
         tree = ast.parse(src.read_text(), filename=str(src))
         bad = [
             (ln, fn) for ln, fn in _docker_user_read_functions(tree) if fn not in sanctioned
@@ -519,7 +550,7 @@ def test_no_op_rootless_docker_user_owner_read() -> None:
     fail — route the owner through the resolver instead of broadening the allowlist.
     """
     offenders = _docker_user_owner_violations(
-        _python_files(_SRC_ROOT), _DOCKER_USER_READ_ALLOWLIST
+        iter(_docker_user_scanned_files()), _DOCKER_USER_READ_ALLOWLIST
     )
     if offenders:
         details = "\n".join(
@@ -552,6 +583,28 @@ def test_docker_user_owner_guard_detects_violation(tmp_path: Path) -> None:
     assert offenders, "deliberate D7 owner-read violation was not detected"
     assert offenders[0][0] == rogue
     assert offenders[0][1] == [(2, "start")]
+
+
+def test_docker_user_owner_guard_catches_unguarded_doctor_check(tmp_path: Path) -> None:
+    """A NEW doctor check that reads ``docker_unprivileged_user`` for owner purposes
+    fails the broadened guard (C-005 1.7).
+
+    Proves the scanned-set broadening: a check module with NO allowlist entry is
+    scanned with an empty sanctioned set (the ``allowlist.get(rel, frozenset())``
+    default), so an unguarded op-rootless owner-read is flagged rather than silently
+    skipped — mirroring how ``test_docker_user_owner_guard_detects_violation`` proves
+    the catch for the original two-module scope."""
+    rogue_check = tmp_path / "rogue_check.py"
+    rogue_check.write_text(
+        "def check_rogue(user, distro, host_config):\n"
+        "    owner = host_config.host.docker_unprivileged_user\n"
+        "    return owner\n"
+    )
+    # No allowlist entry for the rogue check → empty sanctioned set → any read fails.
+    offenders = _docker_user_owner_violations(iter([rogue_check]), _DOCKER_USER_READ_ALLOWLIST)
+    assert offenders, "broadened D7 guard did not catch the unguarded doctor-check owner-read"
+    assert offenders[0][0] == rogue_check
+    assert offenders[0][1] == [(2, "check_rogue")]
 
 
 def test_every_custom_marker_is_registered() -> None:

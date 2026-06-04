@@ -1,4 +1,4 @@
-"""Filesystem-related doctor checks: setfacl binary, ACL probe, ancestor traverse."""
+"""Filesystem-related doctor checks: setfacl binary, ACL probe, cgroup-v2, ancestor traverse."""
 
 from __future__ import annotations
 
@@ -7,12 +7,18 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config, sandbox_ai_home
 
 _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
+
+# The unified cgroup-v2 hierarchy mounts ``cgroup2`` at ``/sys/fs/cgroup`` and
+# exposes ``cgroup.controllers`` at the root. Same probe basis as setup's L1
+# ``_cgroup_v2_active`` (core.setup.l1_kernel) — kept in parity.
+_CGROUP_V2_CONTROLLERS = Path("/sys/fs/cgroup/cgroup.controllers")
 
 
 def check_setfacl(user: str, distro: str | None) -> CheckResult:
@@ -54,6 +60,30 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
         status="pass",
         name="ACL support",
         detail="Filesystem supports POSIX ACLs",
+    )
+
+
+def check_cgroup_v2(user: str, distro: str | None) -> CheckResult:
+    """Check that the unified cgroup-v2 hierarchy is mounted.
+
+    A genuine runtime prerequisite in BOTH execution modes (rootless dockerd
+    requires the unified hierarchy + delegation). C-004 gated setup's L1 phase
+    — which carries the verify-only cgroup-v2 probe — OUT of operator-rootless
+    setup (its sysctl mutation is host-root-batch-owned), so doctor MUST still
+    surface a missing-cgroup-v2 host in operator-rootless. Pure read; no
+    mutation. Mirrors setup's ``l1_kernel._cgroup_v2_active``.
+    """
+    if _CGROUP_V2_CONTROLLERS.exists():
+        return CheckResult(
+            status="pass",
+            name="cgroup v2",
+            detail="Unified cgroup v2 hierarchy active",
+        )
+    return CheckResult(
+        status="fail",
+        name="cgroup v2",
+        detail=f"Unified cgroup v2 hierarchy not active ({_CGROUP_V2_CONTROLLERS} absent)",
+        remediation="Boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)",
     )
 
 
@@ -222,5 +252,6 @@ def _no_sandbox_running(user: str, auth_mode: MachinectlAuth, mode: DockerExecut
 __all__ = [
     "check_acl_support",
     "check_ancestor_traverse",
+    "check_cgroup_v2",
     "check_setfacl",
 ]

@@ -14,7 +14,12 @@ from collections import defaultdict, deque
 
 from core.doctor.checks.binary_integrity_posture import check_binary_integrity_posture
 from core.doctor.checks.dispatcher_sha_drift import check_dispatcher_sha_drift
-from core.doctor.checks.filesystem import check_acl_support, check_ancestor_traverse, check_setfacl
+from core.doctor.checks.filesystem import (
+    check_acl_support,
+    check_ancestor_traverse,
+    check_cgroup_v2,
+    check_setfacl,
+)
 from core.doctor.checks.per_user_tree import (
     check_legacy_cwd_files,
     check_legacy_registry_shape,
@@ -217,6 +222,18 @@ def build_check_registry(
             category="Filesystem",
             depends_on=["setfacl"],
             run=check_acl_support,
+            remediation="",
+        ),
+        # cgroup-v2 is a genuine runtime prerequisite in BOTH modes (rootless
+        # dockerd needs the unified hierarchy). C-004 gated setup's L1 cgroup-v2
+        # verify OUT of op-rootless setup, so doctor MUST still surface it here
+        # — hence the default both-mode ``applies_in`` (NOT separate-user-only).
+        Check(
+            id="cgroup_v2",
+            name="cgroup v2",
+            category="Filesystem",
+            depends_on=[],
+            run=check_cgroup_v2,
             remediation="",
         ),
         Check(

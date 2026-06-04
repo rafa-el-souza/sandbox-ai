@@ -1,7 +1,7 @@
 """Tests for core.doctor.checks.filesystem.
 
-Covers `check_setfacl`, `check_acl_support`, `check_ancestor_traverse`,
-plus the private `_has_acl_exec` getfacl probe.
+Covers `check_setfacl`, `check_acl_support`, `check_cgroup_v2`,
+`check_ancestor_traverse`, plus the private `_has_acl_exec` getfacl probe.
 """
 
 from __future__ import annotations
@@ -13,12 +13,13 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 
-def test_module_exposes_three_check_functions_and_private_helpers() -> None:
+def test_module_exposes_check_functions_and_private_helpers() -> None:
     from core.doctor.checks import filesystem
 
     assert set(filesystem.__all__) == {
         "check_acl_support",
         "check_ancestor_traverse",
+        "check_cgroup_v2",
         "check_setfacl",
     }
     assert callable(filesystem._has_acl_exec)
@@ -93,6 +94,26 @@ class TestAclSupport:
             mock_tmp.return_value.__exit__ = lambda s, *a: None
             result = check_acl_support("sandbox", None)
             assert result.status == "fail"
+
+
+class TestCgroupV2:
+    def test_cgroup_v2_active_passes(self) -> None:
+        from core.doctor import check_cgroup_v2
+
+        with patch("core.doctor.checks.filesystem._CGROUP_V2_CONTROLLERS") as ctrls:
+            ctrls.exists.return_value = True
+            result = check_cgroup_v2("sandbox", None)
+        assert result.status == "pass"
+        assert result.name == "cgroup v2"
+
+    def test_cgroup_v2_absent_fails(self) -> None:
+        from core.doctor import check_cgroup_v2
+
+        with patch("core.doctor.checks.filesystem._CGROUP_V2_CONTROLLERS") as ctrls:
+            ctrls.exists.return_value = False
+            result = check_cgroup_v2("sandbox", None)
+        assert result.status == "fail"
+        assert result.remediation
 
 
 class TestCheckAncestorTraverse:

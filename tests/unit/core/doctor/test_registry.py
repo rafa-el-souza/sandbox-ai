@@ -38,8 +38,9 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 38
+        assert len(checks) == 39
         ids = [c.id for c in checks]
+        assert "cgroup_v2" in ids
         assert "sudo" in ids
         assert "tlog" in ids
         assert "machinectl_reachable" in ids
@@ -109,7 +110,7 @@ class TestRunCheckSubset:
         from core.doctor import run_check_subset
 
         results = run_check_subset(["Filesystem"], "sandbox", None)
-        assert len(results) == 3
+        assert len(results) == 4
         names = {r.name for r in results}
         assert "setfacl" in names or "setfacl binary" in names
 
@@ -117,7 +118,7 @@ class TestRunCheckSubset:
         from core.doctor import run_check_subset
 
         results = run_check_subset(["Filesystem", "Repo Integrity"], "sandbox", None)
-        assert len(results) == 5
+        assert len(results) == 6
         names = {r.name for r in results}
         assert "tooling plane" in names or "state dir writable" in names
 
@@ -129,7 +130,7 @@ class TestRunCheckSubset:
 
         with patch("core.doctor.registry.check_setfacl", fake_setfacl):
             results = run_check_subset(["Filesystem"], "sandbox", None)
-            assert len(results) == 3
+            assert len(results) == 4
             statuses = {r.name: r.status for r in results}
             assert statuses["setfacl"] == "fail" or statuses["setfacl binary"] == "fail"
             acl_result = next(r for r in results if "ACL" in r.name)
@@ -295,7 +296,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
         assert "sudo" not in ids
-        assert len(checks) == 37
+        assert len(checks) == 38
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
@@ -304,7 +305,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 38
+        assert len(checks) == 39
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
@@ -620,5 +621,85 @@ class TestRunCheckSubsetThreadsMode:
         assert "skipped (separate-user)" not in details
         # The user_exists check actually ran (its result name is "user exists").
         assert any(r.name == "user exists" for r in results)
+
+
+class TestL1PrerequisitesSurfaceInOperatorRootless:
+    """C-005 1.5: C-004 gated setup's L1 phase (sysctl + ACL-FS / cgroup-v2
+    verify) OUT of op-rootless setup, but ACL-FS support and the cgroup-v2
+    unified hierarchy are genuine op-rootless RUNTIME prerequisites. So
+    ``sandbox doctor`` MUST still RUN — and be able to FAIL — these checks in
+    operator-rootless; they must NOT be mode-skipped."""
+
+    def test_cgroup_v2_check_is_both_mode(self) -> None:
+        from core.doctor import build_check_registry
+        from core.host_config import DockerExecutionMode
+
+        checks = {c.id: c for c in build_check_registry()}
+        assert checks["cgroup_v2"].applies_in == frozenset(DockerExecutionMode)
+
+    def test_acl_fs_and_cgroup_v2_fail_surfaces_in_operator_rootless(self) -> None:
+        from core.doctor import CheckResult, run_check_subset
+        from core.host_config import DockerExecutionMode
+
+        def fail_acl(user: str, distro: str | None) -> CheckResult:
+            return CheckResult(status="fail", name="ACL support", detail="no ACLs", category="Filesystem")
+
+        with (
+            patch(
+                "core.doctor.registry.check_setfacl",
+                return_value=CheckResult(
+                    status="pass", name="setfacl binary", detail="ok", category="Filesystem"
+                ),
+            ),
+            patch("core.doctor.registry.check_acl_support", fail_acl),
+            patch("core.doctor.checks.filesystem._CGROUP_V2_CONTROLLERS") as ctrls,
+        ):
+            ctrls.exists.return_value = False
+            results = run_check_subset(
+                ["Filesystem"],
+                "operator",
+                None,
+                exclude_ids={"ancestor_traverse"},
+                mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            )
+
+        by_name = {r.name: r for r in results}
+        # Both prerequisites RAN (status fail, NOT "skip"/"skipped (...)") in op-rootless.
+        assert by_name["ACL support"].status == "fail"
+        assert by_name["cgroup v2"].status == "fail"
+        assert "skipped" not in (by_name["ACL support"].detail or "")
+        assert "skipped" not in (by_name["cgroup v2"].detail or "")
+
+    def test_acl_fs_and_cgroup_v2_pass_in_operator_rootless(self) -> None:
+        from core.doctor import CheckResult, run_check_subset
+        from core.host_config import DockerExecutionMode
+
+        with (
+            patch(
+                "core.doctor.registry.check_setfacl",
+                return_value=CheckResult(
+                    status="pass", name="setfacl binary", detail="ok", category="Filesystem"
+                ),
+            ),
+            patch(
+                "core.doctor.registry.check_acl_support",
+                return_value=CheckResult(
+                    status="pass", name="ACL support", detail="ok", category="Filesystem"
+                ),
+            ),
+            patch("core.doctor.checks.filesystem._CGROUP_V2_CONTROLLERS") as ctrls,
+        ):
+            ctrls.exists.return_value = True
+            results = run_check_subset(
+                ["Filesystem"],
+                "operator",
+                None,
+                exclude_ids={"ancestor_traverse"},
+                mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            )
+
+        by_name = {r.name: r for r in results}
+        assert by_name["ACL support"].status == "pass"
+        assert by_name["cgroup v2"].status == "pass"
 
 

@@ -3,7 +3,7 @@
 Provides 16 diagnostic checks across 4 independent chains:
 - Chain 1 (privilege boundary, 10 checks): sudo -> machinectl -> user -> machined
   -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs -> host_uds
-- Chain 2 (filesystem, 3 checks): setfacl → ACL support → ancestor traverse
+- Chain 2 (filesystem, 4 checks): setfacl → ACL support, cgroup v2, ancestor traverse
 - Chain 3 (repo integrity, 2 checks): tooling plane, state dir (independent)
 - Chain 4 (supply chain, 1 check): image_digests (depends on docker_available)
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from core.doctor.checks.filesystem import check_acl_support as check_acl_support
 from core.doctor.checks.filesystem import check_ancestor_traverse as check_ancestor_traverse
+from core.doctor.checks.filesystem import check_cgroup_v2 as check_cgroup_v2
 from core.doctor.checks.filesystem import check_setfacl as check_setfacl
 from core.doctor.checks.per_user_tree import check_legacy_cwd_files as check_legacy_cwd_files
 from core.doctor.checks.per_user_tree import check_legacy_registry_shape as check_legacy_registry_shape
@@ -90,6 +91,7 @@ __all__ = [
     "check_ancestor_traverse",
     "check_backups_disk_pressure",
     "check_backups_partial_dirs_present",
+    "check_cgroup_v2",
     "check_compose_project_name_collision",
     "check_dev_in_workspace_bridge_group",
     "check_dev_umask_workspace_friendly",

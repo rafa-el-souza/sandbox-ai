@@ -3033,7 +3033,24 @@ def init(
     # wraps both), so ``message`` naturally distinguishes them in the
     # operator-facing detail.
     if not dry_run:
-        probe_host_config = minimal_host_config(resolved_user, resolved_auth)
+        # Resolve the active execution mode from the root-owned setup marker
+        # (the single runtime authority, C-004), mirroring ``doctor``. An
+        # un-setup host has no marker entry → diagnose it as separate-user (the
+        # pre-flip default). In operator-rootless the daemon runs as the
+        # *operator's* own user, so the boundary-crossing owner is
+        # ``resolve_daemon_owner`` of the resolved config — NOT the stale
+        # ``docker_unprivileged_user``, which would cross machinectl into a
+        # nonexistent dedicated user. Threading ``mode`` into
+        # ``minimal_host_config`` makes ``dispatch.probe`` take the local
+        # (no-machinectl) path in op-rootless. Resolved once and reused across
+        # every init pre-flight crossing (auth-probe, the doctor subset, the
+        # collision probe).
+        try:
+            probe_mode = resolve_execution_mode(getpass.getuser())
+        except ModeMarkerMissing:
+            probe_mode = DockerExecutionMode.SEPARATE_USER
+        probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
+        probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
         probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
         if not probe_outcome.ok:
             if probe_outcome.timed_out:
@@ -3042,17 +3059,17 @@ def init(
                 _emit_auth_probe_failure(resolved_auth, resolved_user, probe_outcome.message)
             raise typer.Exit(code=1)
 
-    # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
-    # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
-    # so the ancestor check would always fail on first init (D10).
-    if not dry_run:
+        # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
+        # ancestor_traverse is excluded — ACLs are granted during `start`, not
+        # `init`, so the ancestor check would always fail on first init (D10).
         distro = detect_distro()
         preflight_results = run_check_subset(
             ["Filesystem", "Repo Integrity"],
-            resolved_user,
+            probe_owner,
             distro,
             exclude_ids={"ancestor_traverse"},
             auth_mode=resolved_auth,
+            mode=probe_mode,
         )
         has_failures = any(r.status == "fail" for r in preflight_results)
         if has_failures:
@@ -3064,7 +3081,7 @@ def init(
         # auth probe above proved machinectl_reachable; call the check
         # directly and surface failure.
         collision_result = check_compose_project_name_collision(
-            resolved_user, distro, auth_mode=resolved_auth
+            probe_owner, distro, auth_mode=resolved_auth, mode=probe_mode
         )
         if collision_result.status == "fail":
             render_results([collision_result], console=console)
@@ -3214,7 +3231,13 @@ def start(
 
     # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
     distro = detect_distro()
-    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro, auth_mode=auth)
+    preflight_results = run_check_subset(
+        ["Privilege Boundary"],
+        host_user,
+        distro,
+        auth_mode=auth,
+        mode=host_settings.docker_execution_mode,
+    )
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)
