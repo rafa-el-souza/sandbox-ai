@@ -385,6 +385,52 @@ def test_operator_in_group_primary_lookup_keyerror(
     assert l2_host_prereqs._operator_in_group("ghost", "sb-ws") is False
 
 
+def test_user_admin_groups_supplementary_and_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``alice`` is a supplementary member of ``sudo`` and her primary gid is
+    # ``wheel``'s gid → both surface; ``admin`` is absent from /etc/group.
+    class _Gr:
+        def __init__(self, gid: int, mem: list[str]) -> None:
+            self.gr_gid = gid
+            self.gr_mem = mem
+
+    groups = {"sudo": _Gr(27, ["alice"]), "wheel": _Gr(10, [])}
+
+    def _getgrnam(name: str) -> object:
+        if name not in groups:
+            raise KeyError(name)
+        return groups[name]
+
+    monkeypatch.setattr("grp.getgrnam", _getgrnam)
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: type("P", (), {"pw_gid": 10})())
+    assert l2_host_prereqs._user_admin_groups("alice") == ["sudo", "wheel"]
+
+
+def test_user_admin_groups_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("grp.getgrnam", lambda _n: type("G", (), {"gr_gid": 27, "gr_mem": []})())
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: type("P", (), {"pw_gid": 1000})())
+    assert l2_host_prereqs._user_admin_groups("sandbox") == []
+
+
+def test_user_admin_groups_unknown_user_no_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The user is absent from /etc/passwd (no primary gid) but is listed as a
+    # supplementary member of ``sudo`` — that membership still surfaces.
+    def _getgrnam(name: str) -> object:
+        if name == "sudo":
+            return type("G", (), {"gr_gid": 27, "gr_mem": ["ghost"]})()
+        raise KeyError(name)
+
+    def _boom(_n: str) -> object:
+        raise KeyError(_n)
+
+    monkeypatch.setattr("grp.getgrnam", _getgrnam)
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+    assert l2_host_prereqs._user_admin_groups("ghost") == ["sudo"]
+
+
 def test_machined_active_subprocess_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

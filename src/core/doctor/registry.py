@@ -13,6 +13,7 @@ import functools
 from collections import defaultdict, deque
 
 from core.doctor.checks.binary_integrity_posture import check_binary_integrity_posture
+from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 from core.doctor.checks.dispatcher_sha_drift import check_dispatcher_sha_drift
 from core.doctor.checks.filesystem import (
     check_acl_support,
@@ -66,6 +67,13 @@ from core.host_config import DockerExecutionMode, MachinectlAuth
 # audit). These are gated to ``separate-user`` via ``Check.applies_in`` so the
 # runner emits an explicit mode-skip rather than a false green (design D2).
 _SEPARATE_USER_ONLY = frozenset({DockerExecutionMode.SEPARATE_USER})
+
+# The sudoer-daemon-owner WARN has meaning ONLY in ``operator-rootless`` (where
+# the daemon owner is the invoking operator, who may be a sudoer); in
+# ``separate-user`` the owner is the dedicated dead-end user covered by the
+# no-sudo invariant folded into ``setup_invariants`` (design D4). Gated to
+# ``operator-rootless`` so the runner mode-skips it in ``separate-user``.
+_OPERATOR_ROOTLESS_ONLY = frozenset({DockerExecutionMode.OPERATOR_ROOTLESS})
 
 
 def build_check_registry(
@@ -439,6 +447,15 @@ def build_check_registry(
             depends_on=[],
             run=functools.partial(check_setup_invariants, auth_mode=auth_mode, mode=mode),
             remediation="",
+        ),
+        Check(
+            id="daemon_owner_sudo",
+            name="daemon owner sudo",
+            category="Setup Integrity",
+            depends_on=[],
+            run=functools.partial(check_daemon_owner_sudo, auth_mode=auth_mode, mode=mode),
+            remediation="",
+            applies_in=_OPERATOR_ROOTLESS_ONLY,
         ),
     ]
 

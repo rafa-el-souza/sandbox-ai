@@ -58,6 +58,7 @@ def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
     monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
     monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
+    monkeypatch.setattr(f"{_MOD}._audit_daemon_user_no_admin", lambda hc, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
@@ -323,6 +324,99 @@ class TestAuditSubidAndGroup:
         assert v == []
 
 
+class TestAuditDaemonUserNoAdmin:
+    """C-005 2.1 / design D3: the dedicated daemon user must be in NO admin group
+    (separate-user only). PASS (no violation) when clean; WARN with remediation
+    when the daemon user is in sudo/wheel/admin."""
+
+    def _hc(self) -> Any:
+        from core.host_config import minimal_host_config
+
+        return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+
+    def test_clean_no_violation(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert v == []
+
+    def test_in_admin_groups_warns_with_remediation(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo", "wheel"]
+        )
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert len(v) == 1
+        assert "sandbox" in v[0]
+        assert "sudo, wheel" in v[0]
+        assert "defeats the separate-user blast-radius reduction" in v[0]
+        assert "gpasswd -d" in v[0]
+
+    def test_reads_configured_daemon_user(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+        from core.host_config import minimal_host_config
+
+        seen: list[str] = []
+
+        def _record(u: str) -> list[str]:
+            seen.append(u)
+            return []
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", _record)
+        hc = minimal_host_config("dockerd-svc", MachinectlAuth.SUDO)
+        m._audit_daemon_user_no_admin(hc, [])
+        assert seen == ["dockerd-svc"]
+
+
+class TestDaemonUserNoAdminInCheck:
+    """The folded audit surfaces through the top-level separate-user verdict."""
+
+    def test_separate_user_sudoer_daemon_user_warns(self, monkeypatch: Any) -> None:
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+
+        monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
+        monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
+        monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
+
+        result = check_setup_invariants("sandbox", None)
+        assert result.status == "warn"
+        assert "privilege-granting group(s) sudo" in result.detail
+
+    def test_separate_user_clean_daemon_user_passes(self, monkeypatch: Any) -> None:
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+
+        _patch_all_green(monkeypatch)
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
+        result = check_setup_invariants("sandbox", None)
+        assert result.status == "pass"
+
+    def test_operator_rootless_skips_daemon_user_audit(self, monkeypatch: Any) -> None:
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
+
+        monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
+        monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
+
+        def must_not_run(*a: Any, **k: Any) -> None:
+            raise AssertionError("_audit_daemon_user_no_admin must be skipped in operator-rootless")
+
+        monkeypatch.setattr(f"{_MOD}._audit_daemon_user_no_admin", must_not_run)
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert result.status == "pass"
+
+
 class TestAuditMachinectlStability:
     def _hc(self) -> Any:
         from core.host_config import minimal_host_config
@@ -550,6 +644,7 @@ class TestWarnAggregation:
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: v.append("A bad"))
         monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: v.append("B bad"))
+        monkeypatch.setattr(f"{_MOD}._audit_daemon_user_no_admin", lambda hc, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)

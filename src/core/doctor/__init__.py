@@ -10,6 +10,7 @@ Provides 16 diagnostic checks across 4 independent chains:
 
 from __future__ import annotations
 
+from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo as check_daemon_owner_sudo
 from core.doctor.checks.filesystem import check_acl_support as check_acl_support
 from core.doctor.checks.filesystem import check_ancestor_traverse as check_ancestor_traverse
 from core.doctor.checks.filesystem import check_cgroup_v2 as check_cgroup_v2
@@ -93,6 +94,7 @@ __all__ = [
     "check_backups_partial_dirs_present",
     "check_cgroup_v2",
     "check_compose_project_name_collision",
+    "check_daemon_owner_sudo",
     "check_dev_in_workspace_bridge_group",
     "check_dev_umask_workspace_friendly",
     "check_docker_available",

@@ -123,6 +123,37 @@ def _audit_subid_and_group(
         )
 
 
+def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) -> None:
+    """Dedicated daemon user is a member of NO privilege-granting group (D3).
+
+    Separate-user only (the caller runs this sub-audit only on the separate-user
+    branch — the dedicated user exists only there). The no-privilege property is
+    what makes the separate-user blast-radius reduction load-bearing: a
+    container/runtime escape that reaches the daemon owner lands on a dead-end
+    account only if that account cannot escalate. WARN (never FAIL) — an operator
+    who deliberately privileged the daemon user should be told, not hard-blocked.
+
+    Reuses L2's single-source admin-group resolver ``_user_admin_groups`` (lazy
+    import — see the module-top NOTE on the import-time cycle) so this audit and
+    the operator-rootless sudoer-owner WARN cannot disagree on what counts as an
+    admin group.
+    """
+    from core.setup import l2_host_prereqs as l2
+
+    daemon_user = host_config.host.docker_unprivileged_user
+    admin_groups = l2._user_admin_groups(daemon_user)
+    if not admin_groups:
+        return
+    groups = ", ".join(admin_groups)
+    violations.append(
+        f"dedicated daemon user {daemon_user!r} is a member of privilege-granting "
+        f"group(s) {groups}; a privileged daemon user defeats the separate-user "
+        f"blast-radius reduction (a runtime escape reaching the daemon owner could "
+        f"escalate). Remove the membership: 'sudo gpasswd -d {daemon_user} <group>' "
+        f"(or 'sudo deluser {daemon_user} <group>') for each of: {groups}."
+    )
+
+
 def _audit_machinectl_stability(
     host_config: HostConfig, drop_in_text: str | None, violations: list[str]
 ) -> None:
@@ -369,6 +400,7 @@ def check_setup_invariants(
         drop_in_readable = False
 
     _audit_rule_shape_agreement(is_sudo, operator, violations)
+    _audit_daemon_user_no_admin(host_config, violations)
 
     if is_sudo:
         _audit_machinectl_stability(host_config, drop_in_text, violations)

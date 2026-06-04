@@ -38,8 +38,9 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 39
+        assert len(checks) == 40
         ids = [c.id for c in checks]
+        assert "daemon_owner_sudo" in ids
         assert "cgroup_v2" in ids
         assert "sudo" in ids
         assert "tlog" in ids
@@ -296,7 +297,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
         assert "sudo" not in ids
-        assert len(checks) == 38
+        assert len(checks) == 39
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
@@ -305,7 +306,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 39
+        assert len(checks) == 40
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
@@ -378,10 +379,14 @@ class TestPolkitRegistry:
 
 _CROSSING_ONLY = {"machinectl_reachable", "systemd_machined", "user_exists", "dispatcher_sha_drift"}
 
+# The sudoer-daemon-owner WARN (C-005 3.1 / design D4) is operator-rootless-only.
+_OP_ROOTLESS_ONLY = {"daemon_owner_sudo"}
+
 
 class TestExecutionModeGating:
-    """The five crossing-only checks carry ``applies_in=separate-user``; every
-    other check stays both-mode (design D2)."""
+    """The crossing-only checks carry ``applies_in=separate-user``; the
+    sudoer-owner WARN carries ``applies_in=operator-rootless``; every other check
+    stays both-mode (design D2/D4)."""
 
     def test_crossing_only_checks_gated_to_separate_user(self) -> None:
         from core.doctor import build_check_registry
@@ -391,6 +396,15 @@ class TestExecutionModeGating:
         for cid in _CROSSING_ONLY:
             assert checks[cid].applies_in == frozenset({DockerExecutionMode.SEPARATE_USER}), cid
 
+    def test_sudoer_owner_check_gated_to_operator_rootless(self) -> None:
+        from core.doctor import build_check_registry
+        from core.host_config import DockerExecutionMode
+
+        checks = {c.id: c for c in build_check_registry()}
+        assert checks["daemon_owner_sudo"].applies_in == frozenset(
+            {DockerExecutionMode.OPERATOR_ROOTLESS}
+        )
+
     def test_non_crossing_checks_apply_in_both_modes(self) -> None:
         from core.doctor import build_check_registry
         from core.host_config import DockerExecutionMode
@@ -398,7 +412,7 @@ class TestExecutionModeGating:
         checks = build_check_registry()
         both = frozenset(DockerExecutionMode)
         for c in checks:
-            if c.id not in _CROSSING_ONLY:
+            if c.id not in _CROSSING_ONLY and c.id not in _OP_ROOTLESS_ONLY:
                 assert c.applies_in == both, c.id
 
     def test_setup_invariants_stays_both_mode(self) -> None:

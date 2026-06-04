@@ -97,6 +97,38 @@ def _operator_in_group(operator: str, group: str) -> bool:
         return False
 
 
+# The privilege-granting groups whose membership confers (or gates) sudo-to-root
+# across the supported distro families: ``sudo`` (Debian/Ubuntu), ``wheel``
+# (RHEL/Fedora/Arch), and the legacy ``admin`` group. This is the single source
+# for "what counts as an admin group" — the two C-005 doctor safety nets (the
+# no-sudo daemon-user invariant and the sudoer daemon-owner WARN) both resolve
+# membership through :func:`_user_admin_groups` so they cannot disagree.
+_ADMIN_GROUPS: tuple[str, ...] = ("sudo", "wheel", "admin")
+
+
+def _user_admin_groups(user: str) -> list[str]:
+    """Return the :data:`_ADMIN_GROUPS` the ``user`` is a member of.
+
+    Membership is by supplementary-group listing **or** primary group (same
+    member-or-primary logic as :func:`_operator_in_group`). A user absent from
+    ``/etc/passwd`` (no primary gid to resolve) is treated as in no admin group.
+    Empty list ⇒ the user cannot sudo-to-root via group membership.
+    """
+    try:
+        primary_gid: int | None = pwd.getpwnam(user).pw_gid
+    except KeyError:
+        primary_gid = None
+    found: list[str] = []
+    for group in _ADMIN_GROUPS:
+        try:
+            entry = grp.getgrnam(group)
+        except KeyError:
+            continue
+        if user in entry.gr_mem or entry.gr_gid == primary_gid:
+            found.append(group)
+    return found
+
+
 def _adequate_range(ranges: list[tuple[int, int]]) -> bool:
     """``True`` iff the user's total allocated subid count meets the minimum."""
     return sum(count for _, count in ranges) >= _MIN_SUBID_RANGE
