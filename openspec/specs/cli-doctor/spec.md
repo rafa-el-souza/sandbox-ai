@@ -3,15 +3,19 @@
 This specification defines the `sandbox doctor` diagnostic command, which validates host readiness for sandbox operation by executing a dependency-ordered check pipeline covering binary availability, user existence, service state, Docker configuration, filesystem capabilities, and tooling plane integrity.
 ## Requirements
 ### Requirement: Doctor Command Interface
-The system SHALL provide a `sandbox doctor --user <name>` command that validates host readiness for sandbox operation. The `--user` parameter SHALL be mandatory with no default value. The doctor module SHALL also expose a programmatic subset API for use by other commands.
+The system SHALL provide a `sandbox doctor [--user <name>]` command that validates host readiness for sandbox operation. The execution mode is resolved first (the marker; see "Execution-Mode-Aware Doctor Checks"), then the user to validate: an explicit `--user` always wins; otherwise in **`separate-user`** mode `--user` is **mandatory** (else the dedicated `docker_unprivileged_user` from the toml, else an error), while in **`operator-rootless`** mode `--user` is **optional** — when omitted, doctor resolves the daemon owner as the invoking operator (`resolve_daemon_owner` = the current user) **toml-free**, reading neither the toml nor `docker_unprivileged_user`. The doctor module SHALL also expose a programmatic subset API for use by other commands.
 
 #### Scenario: Doctor invoked with user parameter
 - **WHEN** the operator runs `sandbox doctor --user sandbox`
-- **THEN** the system executes all 15 diagnostic checks and reports results grouped by category
+- **THEN** the system executes the mode-applicable diagnostic checks and reports results grouped by category
 
-#### Scenario: Doctor invoked without user parameter
-- **WHEN** the operator runs `sandbox doctor` without `--user`
-- **THEN** the CLI exits with an error indicating that `--user` is required
+#### Scenario: separate-user doctor without `--user` and no toml errors
+- **WHEN** the operator runs `sandbox doctor` without `--user` in `separate-user` mode with no toml present
+- **THEN** the CLI exits with an error indicating that `--user` is required (or a toml with `[host].docker_unprivileged_user`)
+
+#### Scenario: operator-rootless doctor without `--user` resolves the operator toml-free
+- **WHEN** the operator runs `sandbox doctor` without `--user` on an `operator-rootless` host (no toml present)
+- **THEN** doctor resolves the daemon owner as the invoking operator and runs the mode-applicable checks — it does NOT error, and does NOT read the toml / `docker_unprivileged_user`
 
 ### Requirement: Binary Availability Checks
 The system SHALL verify that `sudo`, `machinectl`, and `setfacl` are present on the host PATH. These are root checks with no dependencies.
@@ -784,7 +788,7 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 
 ### Requirement: Execution-Mode-Aware Doctor Checks
 
-`sandbox doctor` SHALL honor the active execution mode, which is the **marker-resolved** value (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector" requirement) overlaid onto `host_config.host.docker_execution_mode` — it is NOT a toml field, and the doctor runner's callers (including `sandbox init`'s and `sandbox start`'s pre-flight `run_check_subset`) SHALL thread the resolved mode and the `resolve_daemon_owner` owner so the checks evaluate against the real mode rather than a defaulted/mode-less config. In `operator-rootless` mode it SHALL skip the checks that only make sense for the `machinectl` crossing — machinectl Shell Reachability, systemd-machined Service Check, Unprivileged User Existence (the dedicated daemon user), and the dispatcher-integrity checks (dispatcher-sha drift / the setup-invariants machinectl-stability + sudoers-rule-body audit) — and SHALL run the docker/runsc/supply-chain/compose-collision checks **locally** (these route through `core.dispatch.probe`, which takes the local path in `operator-rootless`). In `separate-user` mode every check SHALL behave exactly as before. A check that does not apply in the active mode SHALL report an explicit mode-skip status; it SHALL NOT report PASS (no false green).
+`sandbox doctor` SHALL honor the active execution mode, which is the **marker-resolved** value (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector" requirement) overlaid onto `host_config.host.docker_execution_mode` — it is NOT a toml field, and the doctor runner's callers (including `sandbox init`'s and `sandbox start`'s pre-flight `run_check_subset`) SHALL thread the resolved mode and the `resolve_daemon_owner` owner so the checks evaluate against the real mode rather than a defaulted/mode-less config. In `operator-rootless` mode `sandbox doctor` itself SHALL resolve the daemon owner as the invoking operator (`resolve_daemon_owner`) **toml-free** — reading neither the toml nor `docker_unprivileged_user` (the D7 owner-read discipline) — so a missing toml is not an error in operator-rootless. In `operator-rootless` mode it SHALL skip the checks that only make sense for the `machinectl` crossing — machinectl Shell Reachability, systemd-machined Service Check, Unprivileged User Existence (the dedicated daemon user), and the dispatcher-integrity checks (dispatcher-sha drift / the setup-invariants machinectl-stability + sudoers-rule-body audit) — and SHALL run the docker/runsc/supply-chain/compose-collision checks **locally** (these route through `core.dispatch.probe`, which takes the local path in `operator-rootless`). In `separate-user` mode every check SHALL behave exactly as before. A check that does not apply in the active mode SHALL report an explicit mode-skip status; it SHALL NOT report PASS (no false green).
 
 #### Scenario: crossing checks skipped in operator-rootless
 
@@ -798,29 +802,39 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 
 ### Requirement: Daemon User Privilege Invariant (separate-user)
 
-In `separate-user` mode, `sandbox doctor` SHALL verify that the dedicated daemon user (`docker_unprivileged_user`) is a member of **no** privilege-granting group (`sudo`, `wheel`, or other admin group). This no-privilege property is what makes the separate-user blast-radius reduction load-bearing: a container/runtime escape that reaches the daemon owner lands on a dead-end account only if that account cannot escalate. The check SHALL be WARN severity (an operator who deliberately privileged the daemon user should be told, not hard-blocked). It MAY be implemented as a standalone check or folded into the existing `setup_invariants` check.
+In `separate-user` mode, `sandbox doctor` SHALL verify that the dedicated daemon user (`docker_unprivileged_user`) has **no path to root via sudo** — neither (a) membership in a privilege-granting group (`sudo`, `wheel`, or other admin group) NOR (b) a sudoers-**policy** grant (an `/etc/sudoers.d/` drop-in or a `NOPASSWD` rule), detected by parsing `sudo -n -l -U <user>`. This no-privilege property is what makes the separate-user blast-radius reduction load-bearing: a container/runtime escape that reaches the daemon owner lands on a dead-end account only if that account cannot escalate. The sudoers-policy query (`-U <user>`) requires root; under a non-root `sandbox doctor` it is **not determinable**, so the check falls back to group membership only and notes that the full audit needs `sudo sandbox doctor` — it SHALL NOT emit a false WARN on the indeterminate case. The check SHALL be WARN severity (an operator who deliberately privileged the daemon user should be told, not hard-blocked). It MAY be implemented as a standalone check or folded into the existing `setup_invariants` check.
 
-#### Scenario: daemon user with no admin group passes
+#### Scenario: daemon user with no sudo path passes
 
-- **WHEN** `sandbox doctor` runs in `separate-user` mode and the daemon user is in no `sudo`/`wheel`/admin group
+- **WHEN** `sandbox doctor` runs in `separate-user` mode and the daemon user is in no `sudo`/`wheel`/admin group and (where determinable) the sudoers policy grants it no sudo
 - **THEN** the invariant check passes
 
-#### Scenario: daemon user in an admin group warns
+#### Scenario: daemon user with a group OR policy sudo grant warns
 
-- **WHEN** the dedicated daemon user is a member of `sudo` (or `wheel`/admin)
-- **THEN** the check emits a WARN explaining that a privileged daemon user defeats the separate-user blast-radius reduction, and how to remove the membership
+- **WHEN** the dedicated daemon user is a member of `sudo` (or `wheel`/admin), OR the sudoers policy grants it sudo (a drop-in / NOPASSWD rule)
+- **THEN** the check emits a WARN explaining that a privileged daemon user defeats the separate-user blast-radius reduction, and how to remove the grant
+
+#### Scenario: non-root doctor cannot query another user's sudoers policy
+
+- **WHEN** `sandbox doctor` runs as a non-root user (so `sudo -n -l -U <daemon-user>` is not permitted) and the daemon user is in no admin group
+- **THEN** the check passes on the group evidence and notes that the sudoers-policy audit was not checked (run `sudo sandbox doctor` for the full audit) — it does NOT emit a false WARN
 
 ### Requirement: Sudoer Daemon-Owner Warning (operator-rootless)
 
-In `operator-rootless` mode, `sandbox doctor` SHALL WARN when the operator account that owns rootless Docker is a sudoer (a member of `sudo`/`wheel`/admin). The WARN SHALL explain that, because the daemon owner can `sudo`, a (rare, gVisor-fronted) escape reaching the daemon owner could escalate to root, and SHALL point to two remedies: run sandboxes as a dedicated **non-sudo** operator account, or set `docker_execution_mode = separate-user`. This SHALL be WARN severity, never FAIL — it is an informed-tradeoff signal, not a misconfiguration.
+In `operator-rootless` mode, `sandbox doctor` SHALL WARN when the operator account that owns rootless Docker is a sudoer — detected by **either** (a) membership in `sudo`/`wheel`/admin, **or** (b) a sudoers-**policy** grant (an `/etc/sudoers.d/` drop-in or `NOPASSWD` rule), determined by parsing `sudo -n -l` for the invoking operator (a self-query needing no root). NOPASSWD is the instant-escalation, common cloud-VM / cloud-init case, so it MUST be detected even when the operator is in no admin group. The WARN SHALL name the detected path (admin group(s), and/or passwordless-via-the-sudoers-policy / drop-in), explain that because the daemon owner can `sudo` a (rare, gVisor-fronted) escape reaching it could escalate to root, and point to two remedies: run sandboxes as a dedicated **non-sudo** operator account, or set `docker_execution_mode = separate-user`. This SHALL be WARN severity, never FAIL — it is an informed-tradeoff signal, not a misconfiguration.
 
-#### Scenario: sudoer operator owner warns
+#### Scenario: group-sudoer operator owner warns
 
 - **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is a member of `sudo`/`wheel`/admin
 - **THEN** a WARN is emitted naming the escalation tradeoff and the two remedies (dedicated non-sudo operator, or `separate-user` mode)
 
+#### Scenario: drop-in / NOPASSWD operator owner warns (no admin group)
+
+- **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is in **no** admin group but the sudoers policy grants it sudo via an `/etc/sudoers.d/` drop-in or NOPASSWD rule
+- **THEN** a WARN is emitted naming the passwordless-sudo-via-the-sudoers-policy path and the two remedies
+
 #### Scenario: non-sudo operator owner is clean
 
-- **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is in no `sudo`/`wheel`/admin group
+- **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is in no `sudo`/`wheel`/admin group **and** the sudoers policy grants it no sudo
 - **THEN** no sudoer-owner WARN is emitted
 
