@@ -52,7 +52,7 @@ The system SHALL provide a `sandbox status [<inst>]` command that displays the c
 - **THEN** the system displays a summary table of all entries in `instances.json`, each row showing name, state (running/stopped), workspace count, and IPAM slot
 
 ### Requirement: Container Health Display
-The system SHALL query per-container health via `docker compose ps --format json` through machinectl using the configured authentication mode and display results in a Rich Table.
+The system SHALL query per-container health via `docker compose ps --format json` through machinectl using the configured authentication mode **in separate-user mode** and display results in a Rich Table. In operator-rootless mode the container-status probe runs locally with no machinectl crossing, per the "Container-Status Probe Honors Execution Mode" requirement.
 
 #### Scenario: All containers healthy
 - **WHEN** all containers with healthchecks report "healthy" and all containers are in "running" state
@@ -62,11 +62,11 @@ The system SHALL query per-container health via `docker compose ps --format json
 - **WHEN** one or more containers report "unhealthy" or are not running
 - **THEN** the Panel header includes "⚠ degraded" and the Panel border is yellow, and unhealthy containers are highlighted with `✗` in the Table
 
-#### Scenario: Container health query via machinectl (sudo mode)
+#### Scenario: Container health query via machinectl (sudo mode) (separate-user mode)
 - **WHEN** the status command queries container state and `machinectl_authentication` is `"sudo"`
 - **THEN** it invokes `docker compose ps --format json` via `sudo machinectl shell <user>@.host /bin/bash -c "<command>"`
 
-#### Scenario: Container health query via machinectl (polkit mode)
+#### Scenario: Container health query via machinectl (polkit mode) (separate-user mode)
 - **WHEN** the status command queries container state and `machinectl_authentication` is `"polkit"`
 - **THEN** it invokes `docker compose ps --format json` via `machinectl shell <user>@.host /bin/bash -c "<command>"` without `sudo` prefix
 

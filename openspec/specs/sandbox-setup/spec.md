@@ -662,12 +662,19 @@ On `sandbox setup`: when the marker has no entry for the operator, setup SHALL p
 
 `sandbox setup` SHALL build its `host_config` exclusively from command-line flags and documented defaults, and SHALL NOT read `<sandbox_ai_home()>/config/sandbox-ai.toml` (`HostConfig.from_toml`) on the setup path — so setup never reads or depends on `/root/.sandbox-ai`. The operator is resolved by the existing precedence (`--operator` → `$SUDO_USER` → `$PKEXEC_UID`), never from a toml.
 
-Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}` (the default applies only when the flag is absent and the marker has no entry), `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only), and `--workspace-bridge-group <name>` (default `sb-ws`). A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` or `--machinectl-auth` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
+Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}`, which **defaults to `operator-rootless`** when the flag is absent and the marker has no entry for the operator — operator-rootless is the default execution mode for a fresh host, and `separate-user` is the opt-in hardened posture (multi-tenant / adversarial-agent hosts). Setup SHALL also accept `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only), and `--workspace-bridge-group <name>` (default `sb-ws`). A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` or `--machinectl-auth` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
+
+> Note (delta sequencing): the `--docker-execution-mode` flag + the execution-mode marker are introduced by change `operator-rootless-setup` (C-004) with the setup-time default `separate-user`; the present change (C-005) flips that default to `operator-rootless`. This is the single default-bearing edit. The default applies **only at setup time** when neither the flag nor a marker entry is present — the runtime still resolves the mode from the marker and **fails closed** (`ModeMarkerMissing`) when it is absent, per the `host-config` capability's "Docker Execution Mode Selector" requirement; there is no runtime default, and the mode is never a toml field.
 
 #### Scenario: setup does not read the operator toml
 
 - **WHEN** `sandbox setup` runs on a host with an operator `sandbox-ai.toml` present
 - **THEN** setup builds its configuration from flags + defaults only and does not read the toml (its mode comes from the flag/marker, not the file)
+
+#### Scenario: default mode is operator-rootless when no flag and no marker entry
+
+- **WHEN** `sandbox setup` runs with no `--docker-execution-mode` flag and the marker has no entry for the operator
+- **THEN** setup provisions `operator-rootless` (the default) and records it in the marker
 
 #### Scenario: inapplicable flag refused
 

@@ -44,9 +44,9 @@ The system SHALL verify that the sandbox's containers are running before attempt
 - **THEN** the CLI exits with: "Sandbox '<inst>' is not running. Use 'sandbox start <inst>' to launch."
 
 ### Requirement: PTY Handover Without Re-Hydration
-The system SHALL hand the operator's terminal over to **core** (as `agent`) via a host-side ssh client wrapped in `tlog-rec`, using a `ProxyCommand` that crosses the privilege boundary into the unprivileged docker user via `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) and execs `/fwd` inside admin to forward stdio↔TCP to `core_ipc_ip:9999`. The handover SHALL NOT re-run hydration, credential generation, or IPAM allocation.
+The system SHALL hand the operator's terminal over to **core** (as `agent`) via a host-side ssh client wrapped in `tlog-rec`, using a `ProxyCommand` that **in separate-user mode** crosses the privilege boundary into the unprivileged docker user via `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) and execs `/fwd` inside admin to forward stdio↔TCP to `core_ipc_ip:9999`. The handover SHALL NOT re-run hydration, credential generation, or IPAM allocation. In operator-rootless mode the handover uses the operator-local ProxyCommand path with no privilege-boundary crossing, per the "Attach ProxyCommand in Operator-Rootless Mode" requirement.
 
-The `ProxyCommand` SHALL use `pipe_cmd` (polkit-authenticated via the `manage-units` action) regardless of the `machinectl_authentication` mode configured in host config; the `sudo`/`polkit` setting in host config governs `machinectl_cmd` (used by other handover paths) and does NOT prefix the `ProxyCommand` with `sudo` in either mode.
+**In separate-user mode** the `ProxyCommand` SHALL use `pipe_cmd` (polkit-authenticated via the `manage-units` action) regardless of the `machinectl_authentication` mode configured in host config; the `sudo`/`polkit` setting in host config governs `machinectl_cmd` (used by other handover paths) and does NOT prefix the `ProxyCommand` with `sudo` in either mode.
 
 The in-container working directory SHALL be selected via the ssh remote command suffix `'cd /workspaces/<ws> && exec bash -l'` (per design D9), not via a `docker exec -w` flag.
 
@@ -54,7 +54,7 @@ The in-container working directory SHALL be selected via the ssh remote command 
 - **WHEN** `sandbox attach <inst>` completes its warm state check successfully
 - **THEN** no Jinja2 templates are rendered, no `.htpasswd` is regenerated, and no IPAM ledger is read or modified
 
-#### Scenario: Terminal handed to core via ssh-through-admin
+#### Scenario: Terminal handed to core via ssh-through-admin (separate-user mode)
 - **WHEN** containers are confirmed running, `state.lock` is released, and workspace `<ws>` is resolved (this scenario applies regardless of whether `machinectl_authentication` is `"sudo"` or `"polkit"` — the `ProxyCommand` uses `pipe_cmd` in both modes and is never prefixed with `sudo`)
 - **THEN** the system invokes `tlog-rec --writer=file --file-path=<host-side log path> -- ssh -i <inst_dir>/secrets/ipc_ssh_key -o UserKnownHostsFile=<inst_dir>/secrets/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand="systemd-run -q --pipe --uid=<docker_unprivileged_user> /usr/bin/docker exec -i <inst>-admin-1 /fwd <core_ipc_ip>:9999" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
 
