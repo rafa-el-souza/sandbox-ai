@@ -47,6 +47,7 @@ from core.doctor import (
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
     HostConfig,
     HostSettings,
@@ -2518,8 +2519,9 @@ def resolve_effective_mode(
 
     Single-mode-per-operator policy:
 
-    - **No marker entry**: use ``mode_flag`` when given, else the default
-      (:attr:`DockerExecutionMode.SEPARATE_USER`).
+    - **No marker entry**: use ``mode_flag`` when given, else the provisioning
+      default (:data:`core.host_config.DEFAULT_PROVISIONING_MODE` =
+      ``OPERATOR_ROOTLESS``); `separate-user` is the opt-in hardened posture.
     - **Entry present, no flag**: use the recorded mode (robust idempotent
       re-run — no flag needed).
     - **Entry present, conflicting flag**: refuse with :class:`_SetupModeConflict`
@@ -2530,7 +2532,7 @@ def resolve_effective_mode(
     """
     recorded = read_mode(operator)
     if recorded is None:
-        return mode_flag if mode_flag is not None else DockerExecutionMode.SEPARATE_USER
+        return mode_flag if mode_flag is not None else DEFAULT_PROVISIONING_MODE
     if mode_flag is not None and mode_flag is not recorded:
         raise _SetupModeConflict(
             f"operator '{operator}' is provisioned as {recorded.value}; "

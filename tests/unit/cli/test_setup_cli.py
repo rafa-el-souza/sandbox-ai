@@ -85,7 +85,9 @@ def test_refuses_non_root(runner: CliRunner) -> None:
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.read_mode", return_value=None),
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 1
     assert (
         "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup"
@@ -626,6 +628,39 @@ def test_setup_operator_rootless_bare_invocation_converges(
     assert "Setup complete." in result.output
 
 
+def test_setup_no_flag_no_marker_provisions_operator_rootless(
+    runner: CliRunner,
+) -> None:
+    # C-005 §4.3: the flipped provisioning default. A no-flag invocation with no
+    # marker entry (read_mode → None) now resolves to operator-rootless — the same
+    # end-to-end path the bare op-rootless test exercises, but WITHOUT the explicit
+    # --docker-execution-mode flag. As operator-rootless, setup runs as the operator
+    # (geteuid != 0) and converges; were the default still separate-user, this
+    # non-root invocation would be refused with the "must be run as root" message.
+    with (
+        patch("cli.main.os.geteuid", return_value=1000),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        patch(
+            "cli.main.resolve_operator",
+            side_effect=OperatorResolutionError("no $SUDO_USER"),
+        ),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.emit_distro_gate"),
+        patch("cli.main.run_plan_pass", return_value=[]),
+        patch(
+            "cli.main.host_batch.classify_host_root_batch",
+            return_value=(frozenset({BatchItem.SUBID}), _bp()),
+        ),
+        patch("cli.main._run_bootstrap_escalation", return_value=True),
+        patch("cli.main.run_apply_pass", return_value=[]),
+        patch("cli.main._stdin_is_tty", return_value=True),
+    ):
+        result = runner.invoke(app, ["setup", "--yes"])
+    assert result.exit_code == 0
+    assert "Setup complete." in result.output
+
+
 # ── operator resolution error surfacing ──────────────────────────────────────
 
 
@@ -670,7 +705,9 @@ def test_zero_mutations_no_prompt_exit_0(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 0
     assert "Nothing to apply. Setup is complete." in result.output
     assert (
@@ -693,7 +730,9 @@ def test_refusal_no_prompt_exit_nonzero(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 1
     assert "Setup will not enter the apply pass." in result.output
     assert "0 already correct, 0 will mutate, 0 blocked, 1 refused" in result.output
@@ -713,7 +752,9 @@ def test_non_tty_without_yes_refuses(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=False),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 1
     assert (
         "non-interactive context requires --yes flag to apply mutations"
@@ -737,7 +778,11 @@ def test_tty_prompt_affirmative_proceeds(runner: CliRunner, answer: str) -> None
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup"], input=f"{answer}\n")
+        result = runner.invoke(
+            app,
+            ["setup", "--docker-execution-mode", "separate-user"],
+            input=f"{answer}\n",
+        )
     assert result.exit_code == 0
     assert "Proceed with apply? [y/N]: " in result.output
     assert "Summary: 0 already correct, 1 applied" in result.output
@@ -756,7 +801,11 @@ def test_tty_prompt_negative_aborts_exit_0(
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup"], input=f"{answer}\n")
+        result = runner.invoke(
+            app,
+            ["setup", "--docker-execution-mode", "separate-user"],
+            input=f"{answer}\n",
+        )
     assert result.exit_code == 0
     assert "aborted by operator (n). No mutations applied." in result.output
     apply_mock.assert_not_called()
@@ -776,7 +825,9 @@ def test_yes_skips_prompt_and_proceeds(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup", "--yes"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
+        )
     assert result.exit_code == 0
     assert "Proceed with apply?" not in result.output
 
@@ -798,7 +849,9 @@ def test_separate_user_apply_success_records_marker(
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup", "--yes"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
+        )
     assert result.exit_code == 0
     stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
 
@@ -817,7 +870,9 @@ def test_separate_user_failed_apply_does_not_record_marker(
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup", "--yes"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
+        )
     assert result.exit_code == 1
     stub_marker_write.assert_not_called()
 
@@ -836,7 +891,9 @@ def test_separate_user_nothing_to_apply_records_marker(
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 0
     apply_mock.assert_not_called()
     stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
@@ -856,7 +913,9 @@ def test_yes_passes_assume_yes_to_distro_gate(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=False),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup", "--yes"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
+        )
     assert result.exit_code == 0
     # --yes must reach emit_distro_gate so it skips the untested-distro prompt
     # while still emitting the warning.
@@ -878,7 +937,9 @@ def test_apply_failure_exits_nonzero(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=False),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup", "--yes"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
+        )
     assert result.exit_code == 1
     assert "Remediation:" in result.output
 
@@ -896,7 +957,9 @@ def test_dry_run_runs_plan_only(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup", "--dry-run"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--dry-run"]
+        )
     assert result.exit_code == 0
     assert "0 already correct, 1 will mutate, 0 blocked, 0 refused" in result.output
     assert "Proceed with apply?" not in result.output
@@ -916,7 +979,9 @@ def test_dry_run_with_conflict_plan_still_exits_0(runner: CliRunner) -> None:
         patch("cli.main._stdin_is_tty", return_value=True),
         patch("cli.main.run_apply_pass") as apply_mock,
     ):
-        result = runner.invoke(app, ["setup", "--dry-run"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user", "--dry-run"]
+        )
     assert result.exit_code == 0
     assert "Proceed with apply?" not in result.output
     apply_mock.assert_not_called()
@@ -943,7 +1008,10 @@ def test_update_runsc_runs_only_l6a_with_force(runner: CliRunner) -> None:
         ) as apply_mock,
         patch("cli.main.emit_distro_gate") as gate_mock,
     ):
-        result = runner.invoke(app, ["setup", "--update-runsc"])
+        result = runner.invoke(
+            app,
+            ["setup", "--docker-execution-mode", "separate-user", "--update-runsc"],
+        )
     assert result.exit_code == 0
     force_mock.assert_called_once_with(True)
     # The --update-runsc fast path emits the same spec-exact Summary: line
@@ -979,7 +1047,10 @@ def test_update_runsc_nonzero_on_apply_failure(runner: CliRunner) -> None:
         patch("cli.main.run_plan_pass", return_value=plan),
         patch("cli.main.run_apply_pass", return_value=apply_outcomes),
     ):
-        result = runner.invoke(app, ["setup", "--update-runsc"])
+        result = runner.invoke(
+            app,
+            ["setup", "--docker-execution-mode", "separate-user", "--update-runsc"],
+        )
     assert result.exit_code == 1
 
 
@@ -993,7 +1064,9 @@ def test_sigint_during_ceremony_exits_130(runner: CliRunner) -> None:
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
         patch("cli.main.run_plan_pass", side_effect=_SetupAborted),
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 130
     assert (
         "aborted by operator (SIGINT). No mutations applied." in result.output
@@ -1020,7 +1093,9 @@ def test_sigint_handler_installed_then_restored(runner: CliRunner) -> None:
         patch("cli.main.run_plan_pass", side_effect=_capture_plan),
         patch("cli.main._stdin_is_tty", return_value=True),
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 0
     # A custom handler is installed while the ceremony runs ...
     assert captured["during"] is not before
@@ -1048,7 +1123,7 @@ def test_sigint_handler_callback_raises_setup_aborted(
         patch("cli.main.run_plan_pass", side_effect=_grab),
         patch("cli.main._stdin_is_tty", return_value=True),
     ):
-        runner.invoke(app, ["setup"])
+        runner.invoke(app, ["setup", "--docker-execution-mode", "separate-user"])
     handler = holder["handler"]
     assert callable(handler)
     with pytest.raises(_SetupAborted):
@@ -1091,7 +1166,9 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
         patch("cli.main.run_plan_pass", side_effect=_capture),
         patch("cli.main._stdin_is_tty", return_value=True),
     ):
-        result = runner.invoke(app, ["setup"])
+        result = runner.invoke(
+            app, ["setup", "--docker-execution-mode", "separate-user"]
+        )
     assert result.exit_code == 0
     ctx = captured[0]
     # Defaults-based config: docker_unprivileged_user defaults to "sandbox"
@@ -1125,7 +1202,16 @@ def test_machinectl_auth_sudo_flag_accepted(runner: CliRunner) -> None:
         patch("cli.main.run_plan_pass", side_effect=_capture),
         patch("cli.main._stdin_is_tty", return_value=True),
     ):
-        result = runner.invoke(app, ["setup", "--machinectl-auth", "sudo"])
+        result = runner.invoke(
+            app,
+            [
+                "setup",
+                "--docker-execution-mode",
+                "separate-user",
+                "--machinectl-auth",
+                "sudo",
+            ],
+        )
     assert result.exit_code == 0
     assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
@@ -1181,6 +1267,8 @@ def test_extras_flags_passed_to_selected_extras(runner: CliRunner) -> None:
             app,
             [
                 "setup",
+                "--docker-execution-mode",
+                "separate-user",
                 "--enable-fapolicyd-integration",
                 "--enable-aide-integration",
             ],
@@ -1194,11 +1282,13 @@ def test_extras_flags_passed_to_selected_extras(runner: CliRunner) -> None:
 # ── C-004 §4.2: resolve_effective_mode (marker decision + conflict refuse) ───
 
 
-def test_resolve_effective_mode_no_entry_no_flag_defaults_separate_user() -> None:
-    """No marker entry + no flag → default SEPARATE_USER (D6)."""
+def test_resolve_effective_mode_no_entry_no_flag_defaults_operator_rootless() -> None:
+    """No marker entry + no flag → default OPERATOR_ROOTLESS (C-005 §4: the
+    provisioning default flipped from separate-user to operator-rootless)."""
     with patch("cli.main.read_mode", return_value=None):
         assert (
-            resolve_effective_mode("alice", None) is DockerExecutionMode.SEPARATE_USER
+            resolve_effective_mode("alice", None)
+            is DockerExecutionMode.OPERATOR_ROOTLESS
         )
 
 

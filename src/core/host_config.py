@@ -96,6 +96,16 @@ class DockerExecutionMode(StrEnum):
     OPERATOR_ROOTLESS = "operator-rootless"
 
 
+# The PROVISIONING default: the mode `sandbox setup` provisions when the operator
+# passes no `--docker-execution-mode` flag and the marker has no entry — the single,
+# user-facing default (referenced, never re-literalised; see finding F-051). It is
+# DISTINCT from the in-memory fallback on `HostSettings.docker_execution_mode` and
+# `minimal_host_config` below (intentionally kept `SEPARATE_USER`): the runtime never
+# acts on that fallback because `_resolve_full_host_config` always overlays the
+# marker-resolved mode, so it is moot, and keeping it avoids a no-benefit re-pin sweep.
+DEFAULT_PROVISIONING_MODE = DockerExecutionMode.OPERATOR_ROOTLESS
+
+
 class HostSettings(BaseModel):
     """[host] section of sandbox-ai.toml.
 
