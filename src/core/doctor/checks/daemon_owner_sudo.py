@@ -50,32 +50,53 @@ def check_daemon_owner_sudo(
     host_config = minimal_host_config(user, auth_mode, mode)
     owner = resolve_daemon_owner(host_config)
     admin_groups = l2._user_admin_groups(owner)
+    # The owner IS the invoking operator (the current process user) in
+    # operator-rootless, so query their OWN sudo privileges — self_query=True
+    # uses ``sudo -n -l`` (no root, no ``-U``). This catches the policy-grant
+    # path (``/etc/sudoers.d/`` drop-ins + ``NOPASSWD``) that group membership
+    # alone misses (the cloud-VM / dev-box false-PASS that motivated C-005).
+    policy = l2._user_sudoers_grant(owner, self_query=True)
 
-    if not admin_groups:
+    if not admin_groups and not policy.granted:
         return CheckResult(
             status="pass",
             name="daemon owner sudo",
             detail=(
                 f"operator-rootless daemon owner {owner!r} is in no "
-                f"sudo/wheel/admin group; an escape reaching the daemon owner "
-                f"cannot escalate via group-based sudo"
+                f"sudo/wheel/admin group and the sudoers policy grants no sudo; "
+                f"an escape reaching the daemon owner cannot escalate to root"
             ),
         )
 
-    groups = ", ".join(admin_groups)
+    # Name BOTH escalation paths the owner actually has, so the operator knows
+    # which to close. The stable substring "is a sudoer" is preserved.
+    paths: list[str] = []
+    if admin_groups:
+        paths.append(f"member of sudo/wheel/admin: {', '.join(admin_groups)}")
+    if policy.granted:
+        if policy.nopasswd:
+            paths.append(
+                "passwordless sudo via the sudoers policy "
+                "(e.g. a /etc/sudoers.d/ drop-in)"
+            )
+        else:
+            paths.append("sudo via the sudoers policy")
+    via = "; ".join(paths)
+    remedy_groups = ", ".join(admin_groups) if admin_groups else "sudo/wheel/admin"
     return CheckResult(
         status="warn",
         name="daemon owner sudo",
         detail=(
-            f"operator-rootless daemon owner {owner!r} is a sudoer (member of "
-            f"{groups}); because the daemon owner can sudo, a (rare, gVisor-fronted) "
-            f"escape reaching the daemon owner could escalate to root — re-enlarging "
-            f"the blast radius the separate-user dead-end account shrinks"
+            f"operator-rootless daemon owner {owner!r} is a sudoer ({via}); "
+            f"because the daemon owner can sudo, a (rare, gVisor-fronted) escape "
+            f"reaching the daemon owner could escalate to root — re-enlarging the "
+            f"blast radius the separate-user dead-end account shrinks"
         ),
         remediation=(
             "this is an informed-tradeoff signal (WARN, never FAIL). To shrink the "
             "blast radius, either (a) run sandboxes as a dedicated non-sudo operator "
-            f"account (one in no {groups} group), or (b) set "
+            f"account (one in no {remedy_groups} group and with no sudoers-policy "
+            "grant), or (b) set "
             "docker_execution_mode = separate-user to run the daemon as a dedicated "
             "dead-end user behind the machinectl crossing"
         ),

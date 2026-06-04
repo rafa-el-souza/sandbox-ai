@@ -35,6 +35,7 @@ from __future__ import annotations
 import grp
 import pwd
 import subprocess
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.host_config import (
@@ -127,6 +128,99 @@ def _user_admin_groups(user: str) -> list[str]:
         if user in entry.gr_mem or entry.gr_gid == primary_gid:
             found.append(group)
     return found
+
+
+@dataclass(frozen=True)
+class SudoersGrant:
+    """Whether the **sudoers policy** grants a user sudo (drop-ins + NOPASSWD).
+
+    The companion to :func:`_user_admin_groups`: group membership is only one of
+    two ways a user reaches root. The sudoers *policy* — a ``/etc/sudoers.d/``
+    drop-in (cloud-init's ``90-cloud-init-users``, the common cloud-VM / dev-box
+    pattern) or an inline ``NOPASSWD`` rule — confers sudo independently of any
+    ``sudo``/``wheel``/``admin`` group, so a group-only check misses it.
+
+    Fields:
+
+    - ``granted`` — the sudoers policy grants this user sudo (NOPASSWD or
+      password-gated alike). A password-gated grant is still a grant: the user
+      *can* reach root.
+    - ``nopasswd`` — at least one grant is ``NOPASSWD`` (instant, unprompted
+      escalation — the sharpest blast-radius signal).
+    - ``determinable`` — ``False`` when the query could not be performed (e.g.
+      ``-U <other-user>`` needs root and we are not root). Indeterminate is NOT
+      a grant: never false-WARN on it.
+    """
+
+    granted: bool
+    nopasswd: bool
+    determinable: bool
+
+
+# Version-tolerant markers in ``sudo -l`` output (combined stdout+stderr,
+# case-folded before matching so distro/version casing differences are moot).
+_SUDO_NOT_ALLOWED = "not allowed to run sudo"
+_SUDO_MAY_NOT_LIST = "may not list"
+_SUDO_RUNNABLE_MARKERS = (
+    "may run the following commands",
+    "may run the following command",
+)
+
+
+def _user_sudoers_grant(user: str, *, self_query: bool) -> SudoersGrant:
+    """Detect whether the **sudoers policy** grants ``user`` sudo.
+
+    Complements :func:`_user_admin_groups` (group membership) with the
+    policy-grant path: ``/etc/sudoers.d/`` drop-ins and inline ``NOPASSWD``
+    rules. Runs ``sudo -n -l`` non-interactively and parses the captured output
+    version-tolerantly.
+
+    - ``self_query=True`` (operator-rootless: the daemon owner IS the current
+      process user) → ``sudo -n -l`` queries the *current* user's own
+      privileges, needs no root. ``-U`` is rejected for non-root even for self,
+      so it is deliberately NOT used here.
+    - ``self_query=False`` (separate-user: the owner is a *different*, dedicated
+      account) → ``sudo -n -l -U <user>`` lists another user's privileges, which
+      requires root. When not root, sudo refuses ("may not list" / errors) →
+      ``determinable=False`` (we did not learn anything; do NOT infer a grant).
+
+    Parsing (case-folded combined output):
+
+    - contains "not allowed to run sudo" → ``granted=False`` (clean no-priv).
+    - contains a "may run the following command(s)" marker → ``granted=True``.
+    - contains "NOPASSWD" → ``nopasswd=True`` (only meaningful when granted).
+    - a non-zero exit whose output asks for a password (no "not allowed", no
+      runnable listing — the ``-n`` non-interactive run that would otherwise
+      prompt) still means the user CAN sudo, password-gated →
+      ``granted=True, nopasswd=False``.
+    - "may not list" (the non-root ``-U`` refusal) → ``determinable=False``.
+    - ``OSError`` (sudo absent) or genuinely unparseable output →
+      ``determinable=False`` (never a false WARN).
+    """
+    argv = ["sudo", "-n", "-l"]
+    if not self_query:
+        argv += ["-U", user]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError:
+        return SudoersGrant(granted=False, nopasswd=False, determinable=False)
+
+    combined = f"{proc.stdout}\n{proc.stderr}".casefold()
+    nopasswd = "nopasswd" in combined
+
+    if _SUDO_NOT_ALLOWED in combined:
+        return SudoersGrant(granted=False, nopasswd=False, determinable=True)
+    if any(marker in combined for marker in _SUDO_RUNNABLE_MARKERS):
+        return SudoersGrant(granted=True, nopasswd=nopasswd, determinable=True)
+    if _SUDO_MAY_NOT_LIST in combined:
+        # Non-root ``-U <other-user>`` refusal — we could not query. Never infer.
+        return SudoersGrant(granted=False, nopasswd=False, determinable=False)
+    if proc.returncode != 0:
+        # ``-n`` refused to prompt for a password the user WOULD be asked for:
+        # the user can sudo, but it is password-gated (no NOPASSWD listing seen).
+        return SudoersGrant(granted=True, nopasswd=False, determinable=True)
+    # Clean exit with no recognizable marker — unparseable; do not guess.
+    return SudoersGrant(granted=False, nopasswd=False, determinable=False)
 
 
 def _adequate_range(ranges: list[tuple[int, int]]) -> bool:

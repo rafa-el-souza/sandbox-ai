@@ -142,15 +142,43 @@ def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) 
 
     daemon_user = host_config.host.docker_unprivileged_user
     admin_groups = l2._user_admin_groups(daemon_user)
-    if not admin_groups:
+    # The owner here is a *different* user (the dedicated daemon account), so the
+    # policy query is ``sudo -n -l -U <daemon_user>`` — which needs root.
+    # setup_invariants may run as the operator (plain ``sandbox doctor``) or as
+    # root (``sudo sandbox doctor``); when not root the ``-U`` query is
+    # indeterminate. Best-effort: WARN on a determinable grant, otherwise fall
+    # back to group-only and note the gap — NEVER false-WARN on indeterminate.
+    policy = l2._user_sudoers_grant(daemon_user, self_query=False)
+
+    if not admin_groups and not (policy.determinable and policy.granted):
+        if not policy.determinable:
+            violations.append(
+                f"dedicated daemon user {daemon_user!r} is in no privilege-granting "
+                f"group (sudoers-policy not checked — run 'sudo sandbox doctor' for "
+                f"the full audit)"
+            )
         return
-    groups = ", ".join(admin_groups)
+
+    paths: list[str] = []
+    if admin_groups:
+        groups = ", ".join(admin_groups)
+        paths.append(f"is a member of privilege-granting group(s) {groups}")
+    if policy.determinable and policy.granted:
+        if policy.nopasswd:
+            paths.append(
+                "is granted passwordless sudo by the sudoers policy "
+                "(e.g. a /etc/sudoers.d/ drop-in)"
+            )
+        else:
+            paths.append("is granted sudo by the sudoers policy")
+    remedy_groups = ", ".join(admin_groups) if admin_groups else "<group>"
     violations.append(
-        f"dedicated daemon user {daemon_user!r} is a member of privilege-granting "
-        f"group(s) {groups}; a privileged daemon user defeats the separate-user "
-        f"blast-radius reduction (a runtime escape reaching the daemon owner could "
-        f"escalate). Remove the membership: 'sudo gpasswd -d {daemon_user} <group>' "
-        f"(or 'sudo deluser {daemon_user} <group>') for each of: {groups}."
+        f"dedicated daemon user {daemon_user!r} {' and '.join(paths)}; a privileged "
+        f"daemon user defeats the separate-user blast-radius reduction (a runtime "
+        f"escape reaching the daemon owner could escalate). Remove the membership: "
+        f"'sudo gpasswd -d {daemon_user} {remedy_groups}' (or 'sudo deluser "
+        f"{daemon_user} <group>'), and revoke any /etc/sudoers.d/ grant for "
+        f"{daemon_user!r}."
     )
 
 

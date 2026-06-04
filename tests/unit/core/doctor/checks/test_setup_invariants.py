@@ -52,6 +52,13 @@ def test_reuses_l0_l3_l2_single_source() -> None:
     assert callable(l2_host_prereqs._subid_status)
 
 
+def _grant(*, granted: bool, nopasswd: bool, determinable: bool) -> Any:
+    """Build a :class:`core.setup.l2_host_prereqs.SudoersGrant` for stubbing."""
+    from core.setup.l2_host_prereqs import SudoersGrant
+
+    return SudoersGrant(granted=granted, nopasswd=nopasswd, determinable=determinable)
+
+
 def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
     """Stub every audit helper to its all-invariants-hold outcome."""
     monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: operator)
@@ -334,10 +341,19 @@ class TestAuditDaemonUserNoAdmin:
 
         return minimal_host_config("sandbox", MachinectlAuth.SUDO)
 
+    _grant = staticmethod(_grant)
+
     def test_clean_no_violation(self, monkeypatch: Any) -> None:
+        """No admin group AND a determinable no-grant from the sudoers policy."""
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=False, nopasswd=False, determinable=True
+            ),
+        )
         v: list[str] = []
         m._audit_daemon_user_no_admin(self._hc(), v)
         assert v == []
@@ -348,28 +364,132 @@ class TestAuditDaemonUserNoAdmin:
         monkeypatch.setattr(
             "core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo", "wheel"]
         )
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=False, nopasswd=False, determinable=True
+            ),
+        )
         v: list[str] = []
         m._audit_daemon_user_no_admin(self._hc(), v)
         assert len(v) == 1
         assert "sandbox" in v[0]
-        assert "sudo, wheel" in v[0]
+        assert "is a member of privilege-granting group(s) sudo, wheel" in v[0]
         assert "defeats the separate-user blast-radius reduction" in v[0]
         assert "gpasswd -d" in v[0]
+
+    def test_nopasswd_policy_grant_warns(self, monkeypatch: Any) -> None:
+        """No admin group, but the sudoers policy grants passwordless sudo (the
+        cloud-init drop-in pattern that group-only detection missed)."""
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=True, nopasswd=True, determinable=True
+            ),
+        )
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert len(v) == 1
+        assert "passwordless sudo by the sudoers policy" in v[0]
+        assert "/etc/sudoers.d/" in v[0]
+        assert "defeats the separate-user blast-radius reduction" in v[0]
+
+    def test_password_gated_policy_grant_warns_not_nopasswd(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=True, nopasswd=False, determinable=True
+            ),
+        )
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert len(v) == 1
+        assert "is granted sudo by the sudoers policy" in v[0]
+        assert "passwordless" not in v[0]
+
+    def test_group_and_policy_grant_both_named(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=True, nopasswd=True, determinable=True
+            ),
+        )
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert len(v) == 1
+        assert "is a member of privilege-granting group(s) sudo" in v[0]
+        assert "passwordless sudo by the sudoers policy" in v[0]
+
+    def test_indeterminate_policy_falls_back_to_group_only_note(self, monkeypatch: Any) -> None:
+        """Non-root ``-U`` query → determinable=False → no false WARN; group-only
+        + a note pointing at 'sudo sandbox doctor'."""
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=False, nopasswd=False, determinable=False
+            ),
+        )
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert len(v) == 1
+        assert "sudoers-policy not checked" in v[0]
+        assert "sudo sandbox doctor" in v[0]
+        assert "defeats" not in v[0]
+
+    def test_indeterminate_with_group_still_warns(self, monkeypatch: Any) -> None:
+        """A group membership is a determinable grant even when the policy query
+        is indeterminate — WARN on the group, no spurious note."""
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["wheel"])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: self._grant(
+                granted=False, nopasswd=False, determinable=False
+            ),
+        )
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(self._hc(), v)
+        assert len(v) == 1
+        assert "is a member of privilege-granting group(s) wheel" in v[0]
+        assert "sudoers-policy not checked" not in v[0]
 
     def test_reads_configured_daemon_user(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
         from core.host_config import minimal_host_config
 
         seen: list[str] = []
+        seen_policy: list[tuple[str, bool]] = []
 
         def _record(u: str) -> list[str]:
             seen.append(u)
             return []
 
+        def _record_policy(u: str, *, self_query: bool) -> Any:
+            seen_policy.append((u, self_query))
+            return self._grant(granted=False, nopasswd=False, determinable=True)
+
         monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", _record)
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant", _record_policy
+        )
         hc = minimal_host_config("dockerd-svc", MachinectlAuth.SUDO)
         m._audit_daemon_user_no_admin(hc, [])
         assert seen == ["dockerd-svc"]
+        # Separate-user owner is a DIFFERENT user → self_query=False (needs root).
+        assert seen_policy == [("dockerd-svc", False)]
 
 
 class TestDaemonUserNoAdminInCheck:
@@ -386,17 +506,48 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
         monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: _grant(granted=False, nopasswd=False, determinable=True),
+        )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
 
         result = check_setup_invariants("sandbox", None)
         assert result.status == "warn"
         assert "privilege-granting group(s) sudo" in result.detail
 
+    def test_separate_user_policy_grant_daemon_user_warns(self, monkeypatch: Any) -> None:
+        """C-005 product gap: a daemon user with a NOPASSWD drop-in but NO admin
+        group still surfaces as a WARN through the top-level verdict."""
+        from core.doctor.checks.setup_invariants import check_setup_invariants
+
+        monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
+        monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
+        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: _grant(granted=True, nopasswd=True, determinable=True),
+        )
+        monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
+
+        result = check_setup_invariants("sandbox", None)
+        assert result.status == "warn"
+        assert "passwordless sudo by the sudoers policy" in result.detail
+
     def test_separate_user_clean_daemon_user_passes(self, monkeypatch: Any) -> None:
         from core.doctor.checks.setup_invariants import check_setup_invariants
 
         _patch_all_green(monkeypatch)
         monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr(
+            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            lambda u, *, self_query: _grant(granted=False, nopasswd=False, determinable=True),
+        )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
         result = check_setup_invariants("sandbox", None)
         assert result.status == "pass"
