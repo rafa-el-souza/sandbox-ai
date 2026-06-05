@@ -497,3 +497,11 @@ def test_phase_shape() -> None:
     assert l6.PHASE.id == "l6"
     assert l6.PHASE.depends_on == ("l5",)
     assert l6.PHASE.identity == Identity.ROOT
+
+
+def test_expected_runtime_args_include_ignore_cgroups() -> None:
+    """The L6 target carries --ignore-cgroups (F-057): rootless runsc cannot create
+    its systemd cgroup scope on the user bus, so it must skip systemd cgroup setup
+    or `sandbox start` fails at OCI task-create. Locks the runtimeArgs contract."""
+    assert l6._EXPECTED_RUNTIME["path"] == "/usr/local/libexec/sandbox-ai/runsc"
+    assert l6._EXPECTED_RUNTIME["runtimeArgs"] == ["--oci-seccomp", "--ignore-cgroups"]

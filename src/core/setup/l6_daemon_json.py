@@ -23,7 +23,9 @@ surprised by a rename.
 Content-aware probe (design D10): a deep-equal comparison of the *observed*
 ``runtimes["sandbox-ai-runsc"]`` value against the *expected* one
 (``{"path": "/usr/local/libexec/sandbox-ai/runsc", "runtimeArgs":
-["--oci-seccomp"]}``). key (or file) absent → ``MISSING``; present + differing
+["--oci-seccomp", "--ignore-cgroups"]}`` — see ``_EXPECTED_RUNTIME`` for why
+``--ignore-cgroups`` is required under rootless). key (or file) absent →
+``MISSING``; present + differing
 → ``DRIFT``; present + deep-equal **but the daemon has not loaded the runtime**
 → ``DRIFT`` (will restart); present + deep-equal **and loaded** →
 ``ALREADY_CORRECT``. The probe/reverify are **runtime-aware** (F-023): they
@@ -64,9 +66,20 @@ if TYPE_CHECKING:
 # equal what we register here) and re-exported under the private name so the
 # `cli-doctor` checks keep importing it from this module unchanged.
 _RESERVED_RUNTIME_KEY = RESERVED_RUNTIME_KEY
+# `--ignore-cgroups` is load-bearing under operator-rootless (F-057): rootless
+# docker runs the `systemd` cgroup driver, so it passes `--systemd-cgroup` to the
+# runtime. runsc's systemd-cgroup manager is NOT rootless-aware — it asks the
+# *system* systemd (over the system D-Bus) to create the container's transient
+# `docker-<id>.scope` under `user.slice`, which an unprivileged user may not do
+# (→ "systemd error: Interactive authentication required" / "Permission denied" at
+# OCI task-create). Plain runc sidesteps this because it routes to the user manager
+# when rootless; runsc has no such path, so we tell it to skip systemd cgroup setup
+# entirely. Cost: runsc no longer enforces the OCI cgroup CPU/memory limits (the
+# C-008 clamp becomes render-time-only for gVisor containers) — restoring runtime
+# enforcement via the rootless `cgroupfs` driver is a tracked follow-up (F-057).
 _EXPECTED_RUNTIME: dict[str, object] = {
     "path": "/usr/local/libexec/sandbox-ai/runsc",
-    "runtimeArgs": ["--oci-seccomp"],
+    "runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"],
 }
 
 

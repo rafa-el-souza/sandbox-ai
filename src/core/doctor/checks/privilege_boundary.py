@@ -19,7 +19,7 @@ from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_c
 # phase that registers them (L6) rather than hardcoding (F-024 — the doctor
 # previously looked up the wrong literal "runsc"; and hardcoded a runtimeArgs
 # wishlist [--oci-seccomp, --debug-log] that diverged from what L6 actually
-# configures [--oci-seccomp], producing a permanent false "Missing --debug-log"
+# configures [--oci-seccomp, --ignore-cgroups], producing a permanent false "Missing --debug-log"
 # WARN). Deriving expected from l6._EXPECTED_RUNTIME makes the two single-source:
 # whatever L6 configures is exactly what doctor expects, so they cannot drift
 # (and a future opt-in that adds --debug-log to _EXPECTED_RUNTIME is followed
@@ -243,9 +243,9 @@ def check_runsc_runtimeargs(
 
     The expected args are read from ``l6._EXPECTED_RUNTIME["runtimeArgs"]`` — NOT
     hardcoded — so doctor expects exactly what setup configures and the two
-    cannot drift (F-024 pattern). Today that is ``["--oci-seccomp"]``; if a
-    future opt-in adds ``--debug-log=<path>`` to the L6 target, this check
-    follows automatically. WARN (not fail) when an expected arg is absent — this
+    cannot drift (F-024 pattern). Today that is ``["--oci-seccomp",
+    "--ignore-cgroups"]``; if a future opt-in adds ``--debug-log=<path>`` to the
+    L6 target, this check follows automatically. WARN (not fail) when an expected arg is absent — this
     is a defense-in-depth advisory.
     """
     outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)

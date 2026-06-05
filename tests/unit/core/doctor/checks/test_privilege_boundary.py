@@ -359,15 +359,16 @@ class TestRunscJsonDecodeError:
 
 class TestCheckRunscRuntimeArgs:
     def test_expected_arg_present_passes_extra_args_ok(self, monkeypatch: Any) -> None:
-        # Expected args are single-sourced from l6._EXPECTED_RUNTIME (["--oci-seccomp"]);
-        # an extra --debug-log on disk is fine — only the expected set must be present.
+        # Expected args are single-sourced from l6._EXPECTED_RUNTIME
+        # (["--oci-seccomp", "--ignore-cgroups"]); an extra --debug-log on disk is
+        # fine — only the expected set must be present.
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
             {
                 _RUNSC: {
                     "path": "/usr/local/bin/runsc",
-                    "runtimeArgs": ["--oci-seccomp", "--debug-log=/var/log/runsc/%ID%/"],
+                    "runtimeArgs": ["--oci-seccomp", "--ignore-cgroups", "--debug-log=/var/log/runsc/%ID%/"],
                 }
             }
         )
@@ -403,10 +404,29 @@ class TestCheckRunscRuntimeArgs:
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
 
-    def test_debug_log_not_expected_oci_seccomp_only_passes(self, monkeypatch: Any) -> None:
+    def test_debug_log_not_expected_default_set_passes(self, monkeypatch: Any) -> None:
         # --debug-log is NOT in l6._EXPECTED_RUNTIME (it is a deferred opt-in), so
-        # the default config of just --oci-seccomp satisfies the check (no false
-        # "Missing --debug-log" WARN — the F-024-pattern single-source fix).
+        # the default L6 config (--oci-seccomp + --ignore-cgroups) satisfies the
+        # check (no false "Missing --debug-log" WARN — the F-024-pattern single-source fix).
+        from core.doctor import check_runsc_runtimeargs
+
+        docker_info = json.dumps(
+            {
+                _RUNSC: {
+                    "path": "/usr/local/bin/runsc",
+                    "runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"],
+                }
+            }
+        )
+        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        result = check_runsc_runtimeargs("sandbox", None)
+        assert result.status == "pass"
+        assert "--oci-seccomp" in result.detail
+        assert "--debug-log" not in result.detail
+
+    def test_missing_ignore_cgroups_warn(self, monkeypatch: Any) -> None:
+        # --ignore-cgroups is required under rootless (F-057); a config carrying only
+        # --oci-seccomp is now incomplete and must WARN (locks the L6 target change).
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps(
@@ -419,9 +439,8 @@ class TestCheckRunscRuntimeArgs:
         )
         monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
-        assert result.status == "pass"
-        assert "--oci-seccomp" in result.detail
-        assert "--debug-log" not in result.detail
+        assert result.status == "warn"
+        assert "--ignore-cgroups" in result.detail
 
     def test_empty_runtime_args_warn(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_runtimeargs
