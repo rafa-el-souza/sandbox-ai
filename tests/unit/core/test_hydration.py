@@ -1,5 +1,6 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
+import base64
 import os
 import re
 from pathlib import Path
@@ -1051,6 +1052,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         **ips,
         "proxy_password": "testpass",
         "proxy_url_core": "http://proxyuser:testpass@proxy:3128",
+        "dnsdist_console_key": "dGVzdC1kbnNkaXN0LWNvbnNvbGUta2V5LTAwMDAwMDA=",
         "core_base_image": "cgr.dev/chainguard/wolfi-base:latest",
         "core_distro_family": "wolfi",
         "host_uid": "1000",
@@ -1841,6 +1843,60 @@ def _render_extras(tmp_path: Path, filename: str) -> str:
         undefined=jinja2.StrictUndefined,
     )
     return env.from_string(template_content).render(ctx)
+
+
+def _render_dnsdist_conf(tmp_path: Path) -> str:
+    """Render config/dnsdist/dnsdist.conf through Jinja2 with StrictUndefined."""
+    import jinja2
+
+    ctx = _build_test_context(str(tmp_path / "inst"))
+    template_content = (
+        Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+    ).read_text()
+    env = jinja2.Environment(loader=jinja2.BaseLoader(), undefined=jinja2.StrictUndefined)
+    return env.from_string(template_content).render(ctx)
+
+
+class TestDnsdistGvisorOprootlessFixes:
+    """dnsdist under operator-rootless gVisor: seccomp opt-out + console-key healthcheck.
+
+    F-057-class follow-up. Under gVisor with --oci-seccomp, dnsdist dies at startup
+    ('Operation not permitted' — the OCI-seccomp layer EPERMs its clone3 thread spawn),
+    and its `dnsdist -e` healthcheck cannot pass without a console key. Both are fixed:
+    the dnsdist container opts out of the OCI seccomp profile (gVisor Sentry still
+    confines it), and dnsdist.conf sets a per-hydration console key.
+    """
+
+    def test_console_key_in_context_is_valid_base64_32_bytes(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="p", instance_dir=str(tmp_path))
+        key = ctx["dnsdist_console_key"]
+        assert isinstance(key, str) and key
+        assert len(base64.b64decode(key)) == 32
+
+    def test_console_key_is_per_hydration_unique(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        a = build_jinja_context(config=config, base_index=0, proxy_password="p", instance_dir=str(tmp_path))
+        b = build_jinja_context(config=config, base_index=0, proxy_password="p", instance_dir=str(tmp_path))
+        assert a["dnsdist_console_key"] != b["dnsdist_console_key"]
+
+    def test_dnsdist_conf_renders_setkey(self, tmp_path: Path) -> None:
+        rendered = _render_dnsdist_conf(tmp_path)
+        # the test context's console key, interpolated into setKey(...)
+        assert 'setKey("dGVzdC1kbnNkaXN0LWNvbnNvbGUta2V5LTAwMDAwMDA=")' in rendered
+        assert 'controlSocket("127.0.0.1:5199")' in rendered
+
+    def test_dnsdist_service_opts_out_of_oci_seccomp(self, tmp_path: Path) -> None:
+        rendered = _render_compose(tmp_path)
+        # isolate the dnsdist service block (up to the next top-level service)
+        dnsdist_block = rendered.split("\n  dnsdist:\n", 1)[1].split("\n  proxy:\n", 1)[0]
+        assert "seccomp:unconfined" in dnsdist_block
+        # no-new-privileges is preserved (the override re-states it)
+        assert "no-new-privileges:true" in dnsdist_block
 
 
 class TestComposeSecurityBaseline:

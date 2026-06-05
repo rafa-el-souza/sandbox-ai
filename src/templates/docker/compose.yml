@@ -98,6 +98,17 @@ services:
 
   dnsdist:
     <<: *security-baseline
+    # F-057-class follow-up: under operator-rootless gVisor with --oci-seccomp,
+    # dnsdist dies at startup ('Fatal error: Operation not permitted') because
+    # gVisor's OCI-seccomp enforcement EPERMs dnsdist's thread-creation syscall
+    # (clone3) — where runc allows it. dnsdist is the one sidecar intolerant of
+    # this (coredns/proxy share the runtime and tolerate it). Opt this container
+    # out of the OCI seccomp profile: gVisor's Sentry still fully confines it
+    # (the runtime keeps --oci-seccomp for every other container). Overrides the
+    # anchor's security_opt, so no-new-privileges is re-stated here.
+    security_opt:
+      - "no-new-privileges:true"
+      - "seccomp:unconfined"
     image: "{{ dnsdist_image }}"
     cap_add:
       - NET_BIND_SERVICE

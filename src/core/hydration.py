@@ -6,9 +6,11 @@ Implements the PHASE 4 (HYDRATION) from the orchestrator design:
 3. Render templates from tooling plane → instance directory
 """
 
+import base64
 import json
 import logging
 import os
+import secrets
 import tomllib
 from dataclasses import dataclass as _dataclass
 from enum import StrEnum
@@ -345,6 +347,23 @@ def _read_optional_file(path: str) -> str:
     return ""
 
 
+def _dnsdist_console_key() -> str:
+    """A base64-encoded 32-byte key for dnsdist's localhost-only management console.
+
+    dnsdist refuses every console connection unless ``setKey()`` is configured, and
+    the ``dnsdist -e 'showServers()'`` healthcheck connects to that console — so
+    without a key the healthcheck always fails and dnsdist never reports healthy
+    (blocking ``core``, which ``depends_on`` it). The console binds 127.0.0.1 inside
+    the container's isolated network namespace (console ACL 127.0.0.0/8), so this is
+    not an external trust boundary; it satisfies dnsdist's "console requires a key"
+    contract so the healthcheck can run. Generated per hydration — the server and the
+    healthcheck client both read the same rendered ``dnsdist.conf``, so they always
+    agree. Standard base64 (not ``token_urlsafe``'s URL-safe alphabet), which
+    dnsdist's key decoder accepts.
+    """
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
 def build_jinja_context(
     config: InstanceConfig,
     base_index: int,
@@ -399,6 +418,9 @@ def build_jinja_context(
         # Credentials
         "proxy_password": proxy_password,
         "proxy_url_core": f"http://proxyuser:{proxy_password}@proxy:3128",
+        # dnsdist console key — enables the localhost-only console so its
+        # healthcheck (`dnsdist -e`) can connect (see `_dnsdist_console_key`).
+        "dnsdist_console_key": _dnsdist_console_key(),
         # Paths
         "instance_dir": instance_dir,
         "workspaces": [
