@@ -838,3 +838,45 @@ In `operator-rootless` mode, `sandbox doctor` SHALL WARN when the operator accou
 - **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is in no `sudo`/`wheel`/admin group **and** the sudoers policy grants it no sudo
 - **THEN** no sudoer-owner WARN is emitted
 
+### Requirement: Host CPU Capacity Check
+
+`sandbox doctor` SHALL include a check that, for each registered instance with a rendered `compose.yml`, compares every service's `cpus` limit against the host's CPU count (obtained as in the `hydration-pipeline` capability) and emits a WARN-severity status when any rendered `cpus` exceeds the host count. The check SHALL source the limits from the instance's rendered `compose.yml` (the authoritative artifact), not from re-spelled constants. The warning SHALL name the offending service, its `cpus` value, and the host CPU count, so the operator sees an actionable message in place of Docker's `range of CPUs is from 0.01 to N.NN` error. Instances without a rendered `compose.yml` SHALL be skipped.
+
+Because hydration clamps CPU limits at render, this check primarily guards on-disk divergence — compose rendered before host-aware clamping existed, rendered on a larger host and relocated, or hand-edited.
+
+#### Scenario: Rendered CPU limit exceeds host count
+
+- **WHEN** an instance's rendered `compose.yml` requests `cpus: "4.0"` for a service and the host has 2 CPUs
+- **THEN** `sandbox doctor` reports a WARN naming the service, `4.0`, and the host's `2`
+
+#### Scenario: Rendered CPU limits fit the host
+
+- **WHEN** every service's rendered `cpus` is at or below the host CPU count
+- **THEN** the check reports OK (no warning)
+
+#### Scenario: Instance without rendered compose is skipped
+
+- **WHEN** a registered instance has no rendered `compose.yml`
+- **THEN** the CPU capacity check skips that instance without error
+
+### Requirement: Instance Memory Over-Commit Check
+
+`sandbox doctor` SHALL include a check that, for each registered instance with a rendered `compose.yml`, sums the services' `mem_limit` values and emits a WARN-severity status when the total exceeds the host's physical RAM. Host RAM SHALL be read locally (e.g. `os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")`). The limits SHALL be sourced from the rendered `compose.yml`, parsed from Docker size strings (e.g. `"8gb"`, `"512m"`) to bytes. The warning SHALL name the summed request, the host RAM, and the consequence (containers may be OOM-killed under memory pressure). This is advisory only — a WARN does not, by itself, flip the doctor exit contract to failure. Instances without a rendered `compose.yml` SHALL be skipped.
+
+Memory limits are not clamped (a `mem_limit` above host RAM over-commits rather than failing `start`); this check provides visibility only.
+
+#### Scenario: Summed memory request exceeds host RAM
+
+- **WHEN** an instance's rendered services sum to a `mem_limit` total greater than the host's physical RAM
+- **THEN** `sandbox doctor` reports a WARN naming the summed request, the host RAM, and the OOM-under-pressure consequence
+
+#### Scenario: Summed memory request fits host RAM
+
+- **WHEN** the summed `mem_limit` total is at or below the host's physical RAM
+- **THEN** the check reports OK (no warning)
+
+#### Scenario: Over-commit warning is advisory
+
+- **WHEN** the memory over-commit check emits a WARN
+- **THEN** the WARN alone does not change the doctor exit code to a failure (consistent with the existing Warn Severity Status contract)
+
