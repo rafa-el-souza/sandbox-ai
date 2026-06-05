@@ -15,6 +15,10 @@ from core.doctor.checks.filesystem import check_acl_support as check_acl_support
 from core.doctor.checks.filesystem import check_ancestor_traverse as check_ancestor_traverse
 from core.doctor.checks.filesystem import check_cgroup_v2 as check_cgroup_v2
 from core.doctor.checks.filesystem import check_setfacl as check_setfacl
+from core.doctor.checks.instance_resources import check_host_cpu_capacity as check_host_cpu_capacity
+from core.doctor.checks.instance_resources import (
+    check_instance_memory_overcommit as check_instance_memory_overcommit,
+)
 from core.doctor.checks.per_user_tree import check_legacy_cwd_files as check_legacy_cwd_files
 from core.doctor.checks.per_user_tree import check_legacy_registry_shape as check_legacy_registry_shape
 from core.doctor.checks.per_user_tree import (
@@ -99,8 +103,10 @@ __all__ = [
     "check_dev_umask_workspace_friendly",
     "check_docker_available",
     "check_docker_rootless",
+    "check_host_cpu_capacity",
     "check_host_uds",
     "check_image_digests",
+    "check_instance_memory_overcommit",
     "check_legacy_cwd_files",
     "check_legacy_registry_shape",
     "check_legacy_sandboxes_dir_detected",

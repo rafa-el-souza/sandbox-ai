@@ -21,6 +21,10 @@ from core.doctor.checks.filesystem import (
     check_cgroup_v2,
     check_setfacl,
 )
+from core.doctor.checks.instance_resources import (
+    check_host_cpu_capacity,
+    check_instance_memory_overcommit,
+)
 from core.doctor.checks.per_user_tree import (
     check_legacy_cwd_files,
     check_legacy_registry_shape,
@@ -406,6 +410,25 @@ def build_check_registry(
             category="Per-User Tree",
             depends_on=[],
             run=check_legacy_registry_shape,
+            remediation="",
+        ),
+        # Chain 6.5: per-instance host-resource capacity (advisory WARN-only).
+        # Both-mode + dependency-free: each scans the registry and reads the
+        # rendered compose.yml, which is install-mode independent.
+        Check(
+            id="host_cpu_capacity",
+            name="host CPU capacity",
+            category="Instance Resources",
+            depends_on=[],
+            run=check_host_cpu_capacity,
+            remediation="",
+        ),
+        Check(
+            id="instance_memory_overcommit",
+            name="instance memory over-commit",
+            category="Instance Resources",
+            depends_on=[],
+            run=check_instance_memory_overcommit,
             remediation="",
         ),
         # Chain 7: setup integrity (sandbox-setup Group 9).

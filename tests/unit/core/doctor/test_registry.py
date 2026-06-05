@@ -38,8 +38,10 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 40
+        assert len(checks) == 42
         ids = [c.id for c in checks]
+        assert "host_cpu_capacity" in ids
+        assert "instance_memory_overcommit" in ids
         assert "daemon_owner_sudo" in ids
         assert "cgroup_v2" in ids
         assert "sudo" in ids
@@ -297,7 +299,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.POLKIT)
         ids = [c.id for c in checks]
         assert "sudo" not in ids
-        assert len(checks) == 39
+        assert len(checks) == 41
 
     def test_sudo_check_present_in_sudo_mode(self) -> None:
         from core.doctor import build_check_registry
@@ -306,7 +308,7 @@ class TestPolkitRegistry:
         checks = build_check_registry(MachinectlAuth.SUDO)
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 40
+        assert len(checks) == 42
 
     def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
         from core.doctor import build_check_registry
