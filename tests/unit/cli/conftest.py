@@ -14,6 +14,9 @@ Provides:
   every fixture-built instance automatically).
 - ``_stop_warm_check`` (autouse) — patches ``cli.main._warm_check`` to
   return False; opt-out via ``@pytest.mark.no_warm_mock``.
+- ``_manager_ready_noop`` (autouse) — patches
+  ``cli.main._ensure_user_manager_ready`` to a no-op (no real
+  ``systemctl is-active``); opt-out via ``@pytest.mark.no_manager_ready_mock``.
 - ``_resolve_host_config_default`` (autouse) — patches
   ``cli.main.HostConfig.from_toml``; opt-out via
   ``@pytest.mark.no_host_config_mock``.
@@ -106,6 +109,22 @@ def _stop_warm_check(request: pytest.FixtureRequest) -> object:
         yield
         return
     with patch("cli.main._warm_check", return_value=False):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _manager_ready_noop(request: pytest.FixtureRequest) -> object:
+    """Default: the manager-readiness gate is a no-op (the manager is "ready").
+
+    ``cli.main._ensure_user_manager_ready`` would otherwise run a real
+    ``systemctl is-active`` subprocess against the host. Tests that exercise the
+    gate directly mark themselves with ``@pytest.mark.no_manager_ready_mock`` to
+    bypass this autouse patch.
+    """
+    if "no_manager_ready_mock" in request.keywords:
+        yield
+        return
+    with patch("cli.main._ensure_user_manager_ready"):
         yield
 
 
