@@ -98,14 +98,21 @@ services:
 
   dnsdist:
     <<: *security-baseline
-    # F-057-class follow-up: under operator-rootless gVisor with --oci-seccomp,
-    # dnsdist dies at startup ('Fatal error: Operation not permitted') because
-    # gVisor's OCI-seccomp enforcement EPERMs dnsdist's thread-creation syscall
-    # (clone3) — where runc allows it. dnsdist is the one sidecar intolerant of
-    # this (coredns/proxy share the runtime and tolerate it). Opt this container
-    # out of the OCI seccomp profile: gVisor's Sentry still fully confines it
-    # (the runtime keeps --oci-seccomp for every other container). Overrides the
-    # anchor's security_opt, so no-new-privileges is re-stated here.
+    # dnsdist under operator-rootless gVisor: opt this container out of the OCI
+    # seccomp profile. Under gVisor with --oci-seccomp, dnsdist aborts at startup
+    # ('Fatal error: Operation not permitted') — gVisor denies clone3 (syscall 435,
+    # "denied by seccomp") because it does NOT honor the profile's errnoRet=ENOSYS
+    # that Docker's default policy uses for clone3 (moby#42681 / runtime-spec#1087),
+    # so glibc's clone3->clone fallback (which fires on ENOSYS, not EPERM) never
+    # triggers. dnsdist is the one sidecar that aborts on it; coredns/proxy tolerate
+    # their own seccomp EPERMs. seccomp:unconfined here is NOT a meaningful
+    # reduction: under gVisor the container OCI profile is a redundant inner layer
+    # — the Sentry intercepts every guest syscall in userspace, and gVisor's own
+    # seccomp (which guards the Sentry->host boundary, always on) is the real
+    # filter. Vendoring Docker's ~900-line default profile to preserve the inner
+    # layer was rejected as disproportionate (drift-prone maintenance for a
+    # redundant layer) — and it might not even work, since gVisor ignores errnoRet.
+    # Overrides the anchor's security_opt, so no-new-privileges is re-stated.
     security_opt:
       - "no-new-privileges:true"
       - "seccomp:unconfined"
