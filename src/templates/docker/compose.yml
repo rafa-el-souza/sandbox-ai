@@ -290,7 +290,7 @@ services:
     pids_limit: 400
     mem_limit: "8gb"
     memswap_limit: "8gb"
-    cpus: "4.0"
+    cpus: "{{ admin_cpus }}"
     ulimits:
       core:
         soft: 0

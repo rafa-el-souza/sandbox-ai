@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import is_operator_rootless
+from core.hydration import RESERVED_RUNTIME_KEY
 from core.setup.phase_runner import (
     Identity,
     Phase,
@@ -58,8 +59,11 @@ from core.setup.phase_runner import (
 if TYPE_CHECKING:
     from core.setup.phase_runner import SetupContext
 
-# The single reserved key + its expected value (the content-aware target).
-_RESERVED_RUNTIME_KEY = "sandbox-ai-runsc"
+# The single reserved key + its expected value (the content-aware target). The
+# key is single-sourced from `core.hydration` (the compose `runtime` value must
+# equal what we register here) and re-exported under the private name so the
+# `cli-doctor` checks keep importing it from this module unchanged.
+_RESERVED_RUNTIME_KEY = RESERVED_RUNTIME_KEY
 _EXPECTED_RUNTIME: dict[str, object] = {
     "path": "/usr/local/libexec/sandbox-ai/runsc",
     "runtimeArgs": ["--oci-seccomp"],
