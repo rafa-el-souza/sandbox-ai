@@ -38,8 +38,10 @@ from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
-    check_compose_project_name_collision,
     detect_distro,
+    interpret_compose_collision_segment,
+    interpret_preflight_bundle,
+    interpret_preflight_reachability,
     render_results,
     run_check_subset,
     run_checks,
@@ -3045,25 +3047,43 @@ def init(
         # nonexistent dedicated user. Threading ``mode`` into
         # ``minimal_host_config`` makes ``dispatch.probe`` take the local
         # (no-machinectl) path in op-rootless. Resolved once and reused across
-        # every init pre-flight crossing (auth-probe, the doctor subset, the
-        # collision probe).
+        # the init pre-flight crossing (the single ``preflight`` op) and the
+        # local doctor subset.
         try:
             probe_mode = resolve_execution_mode(getpass.getuser())
         except ModeMarkerMissing:
             probe_mode = DockerExecutionMode.SEPARATE_USER
         probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
         probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
-        probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
-        if not probe_outcome.ok:
+
+        # One ``preflight`` crossing replaces the separate explicit ``auth-probe``
+        # probe (the crossing succeeding IS the reachability signal — C-009 D6,
+        # dropping the init-only redundancy with ``machinectl_reachable``). Its
+        # bundled ``compose-ls`` segment feeds the compose-project-name collision
+        # pre-flight, so init no longer fires a second ``compose-ls`` crossing.
+        probe_outcome = dispatch.probe("preflight", [], probe_host_config, timeout=15)
+        init_segments = dispatch.parse_preflight_outcome(probe_outcome)
+        auth_probe_segment = init_segments.get("auth-probe")
+        crossing_reachable = (
+            not probe_outcome.timed_out
+            and probe_outcome.ok
+            and auth_probe_segment is not None
+            and auth_probe_segment.ok
+        )
+        if not crossing_reachable:
             if probe_outcome.timed_out:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
+                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 15 seconds")
             else:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, probe_outcome.message)
+                detail = probe_outcome.message or (
+                    auth_probe_segment.message if auth_probe_segment is not None else "preflight crossing failed"
+                )
+                _emit_auth_probe_failure(resolved_auth, resolved_user, detail)
             raise typer.Exit(code=1)
 
         # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
         # ancestor_traverse is excluded — ACLs are granted during `start`, not
         # `init`, so the ancestor check would always fail on first init (D10).
+        # These are local checks (no boundary crossing).
         distro = detect_distro()
         preflight_results = run_check_subset(
             ["Filesystem", "Repo Integrity"],
@@ -3079,12 +3099,9 @@ def init(
             raise typer.Exit(code=1)
 
         # Compose-project-name collision pre-flight (per cli-doctor's
-        # "Init pre-flight includes compose_project_name_collision"). The
-        # auth probe above proved machinectl_reachable; call the check
-        # directly and surface failure.
-        collision_result = check_compose_project_name_collision(
-            probe_owner, distro, auth_mode=resolved_auth, mode=probe_mode
-        )
+        # "Init pre-flight includes compose_project_name_collision"), fed by the
+        # bundled ``compose-ls`` segment of the preflight crossing above.
+        collision_result = interpret_compose_collision_segment(init_segments.get("compose-ls"))
         if collision_result.status == "fail":
             render_results([collision_result], console=console)
             raise typer.Exit(code=1)
@@ -3231,15 +3248,49 @@ def start(
         )
         raise typer.Exit(code=1)
 
-    # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
-    distro = detect_distro()
-    preflight_results = run_check_subset(
-        ["Privilege Boundary"],
-        host_user,
-        distro,
-        auth_mode=auth,
-        mode=host_settings.docker_execution_mode,
+    # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check).
+    #
+    # The seven instance-agnostic read-only privilege-boundary checks
+    # (machinectl_reachable, docker_available, docker_rootless, runsc,
+    # runsc_runtimeargs, host_uds, compose_project_name_collision) collapse into
+    # ONE ``preflight``-op crossing (C-009 D6): the bundle is parsed
+    # orchestrator-side and each existing interpret fn produces its verdict, so
+    # the set of checks is unchanged and only the crossing count drops. The
+    # ``compose-ps`` warm-check below stays its own (instance-stateful) crossing
+    # → start's read-only preflight is two crossings, not eight.
+    preflight_host_config = minimal_host_config(host_user, auth, host_settings.docker_execution_mode)
+    preflight_outcome = dispatch.probe("preflight", [], preflight_host_config, timeout=15)
+
+    # Crossing-as-reachability gate (D6): the preflight crossing itself failing
+    # — a timeout, a non-zero op exit, or an unparseable bundle whose
+    # ``auth-probe`` segment is absent — IS "boundary unreachable" (the old
+    # ``machinectl_reachable`` FAIL). Abort with that reachability diagnostic and
+    # do NOT interpret the downstream checks: they have no meaningful data, which
+    # is how the old ``depends_on`` short-circuit is preserved without a
+    # BLOCKED-BY cascade.
+    auth_probe_segment = dispatch.parse_preflight_outcome(preflight_outcome).get("auth-probe")
+    crossing_reachable = (
+        not preflight_outcome.timed_out
+        and preflight_outcome.ok
+        and auth_probe_segment is not None
+        and auth_probe_segment.ok
     )
+    if not crossing_reachable:
+        # Feed the reachability interpret fn the most specific failing outcome:
+        # the whole-crossing outcome (carries the timeout / op-failure message)
+        # when the crossing itself failed, else the parsed (not-ok or absent)
+        # ``auth-probe`` segment.
+        reach_outcome = preflight_outcome if (preflight_outcome.timed_out or not preflight_outcome.ok) else (
+            auth_probe_segment if auth_probe_segment is not None else preflight_outcome
+        )
+        reachability = interpret_preflight_reachability(reach_outcome, host_user, auth)
+        render_results([reachability], console=console)
+        raise typer.Exit(code=1)
+
+    # The crossing succeeded → split the bundle and produce all seven verdicts
+    # (the single ``docker-info-runtimes`` segment feeds the three
+    # runsc/host-uds checks — the intrinsic dedup).
+    preflight_results = interpret_preflight_bundle(preflight_outcome, host_user, auth)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)

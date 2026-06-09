@@ -650,6 +650,71 @@ def _build_preflight(args: Sequence[str], host_config: HostConfig) -> list[str]:
     return _bash_c(_preflight_inner())
 
 
+def parse_preflight_outcome(outcome: ProbeOutcome) -> dict[str, ProbeOutcome]:
+    """Split a ``preflight`` bundle :class:`ProbeOutcome` into per-query outcomes.
+
+    The ``preflight`` op (C-009 D6) bundles the distinct read-only health queries
+    into ONE crossing; its ``stdout`` is the ``;``-sequenced, per-query-attributed
+    blob built by :func:`_preflight_inner`:
+
+        ``__PREFLIGHT_Q_<name>__\\n<segment, stderr-merged>\\n__PREFLIGHT_RC_<name>_<rc>__``
+
+    This is the orchestrator-side inverse: it returns, per query *name* (the wire
+    identity from :func:`_preflight_query_segments`), a :class:`ProbeOutcome` whose
+
+    - ``ok`` is ``True`` iff that query's recovered exit code ``<rc>`` was ``0``,
+    - ``stdout`` is the stripped segment between the query's begin marker and its
+      RC marker (the query's own stdout + merged stderr),
+    - ``timed_out`` mirrors the WHOLE crossing's ``outcome.timed_out`` (a
+      per-query timeout is not meaningful inside a single bundled crossing), and
+    - ``message`` is ``""`` on success, else a short diagnostic naming the query
+      and its recovered exit code (or that its segment was missing/garbled).
+
+    The markers are derived from the :data:`_PREFLIGHT_QUERY_MARKER_PREFIX` /
+    :data:`_PREFLIGHT_RC_MARKER_PREFIX` constants (SSOT for the bundle format —
+    never hand-typed). A query whose begin marker, RC marker, or exit code is
+    absent or unparseable is returned as a not-ok outcome with an empty
+    ``stdout`` so each interpret fn sees a clean failure rather than partial
+    data.
+    """
+    text = outcome.stdout
+    result: dict[str, ProbeOutcome] = {}
+    for name, _inner in _preflight_query_segments():
+        q_marker = f"{_PREFLIGHT_QUERY_MARKER_PREFIX}{name}__"
+        rc_prefix = f"{_PREFLIGHT_RC_MARKER_PREFIX}{name}_"
+        q_idx = text.find(q_marker)
+        rc_idx = text.find(rc_prefix, q_idx + len(q_marker)) if q_idx != -1 else -1
+        if q_idx == -1 or rc_idx == -1:
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} segment missing from bundle",
+            )
+            continue
+        segment = text[q_idx + len(q_marker) : rc_idx].strip()
+        rc_tail = text[rc_idx + len(rc_prefix) :]
+        rc_token = rc_tail.split("__", 1)[0].strip()
+        try:
+            rc = int(rc_token)
+        except ValueError:
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} exit code unparseable ({rc_token!r})",
+            )
+            continue
+        ok = rc == 0
+        result[name] = ProbeOutcome(
+            ok=ok,
+            timed_out=outcome.timed_out,
+            stdout=segment if ok else "",
+            message="" if ok else f"preflight query {name!r} exited {rc}: {segment}",
+        )
+    return result
+
+
 def _build_docker_manifest_inspect(args: Sequence[str], host_config: HostConfig) -> list[str]:
     return _bash_c(f"docker manifest inspect {args[0]}")
 

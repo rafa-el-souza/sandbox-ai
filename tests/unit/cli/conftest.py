@@ -110,6 +110,43 @@ def _stop_warm_check(request: pytest.FixtureRequest) -> object:
 
 
 @pytest.fixture(autouse=True)
+def _preflight_pass_default(request: pytest.FixtureRequest) -> object:
+    """Default: the ``start``/``init`` ``preflight`` crossing passes cleanly.
+
+    ``start``/``init`` collapse their privilege-boundary preflight into ONE
+    ``dispatch.probe("preflight", ...)`` crossing whose bundle is parsed and
+    interpreted orchestrator-side (C-009 D6). Most CLI tests don't exercise the
+    preflight itself — they want it to pass so the rest of the command runs — so
+    this autouse fixture stubs the crossing to a healthy bundle and the
+    interpret seams to clean verdicts. Tests that exercise the preflight gate
+    directly mark themselves with ``@pytest.mark.no_preflight_mock``.
+    """
+    if "no_preflight_mock" in request.keywords:
+        yield
+        return
+    from core.dispatch import ProbeOutcome
+
+    healthy = ProbeOutcome(
+        ok=True,
+        timed_out=False,
+        stdout="__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_0__",
+        message="",
+    )
+    with (
+        patch("cli.main.dispatch.probe", return_value=healthy),
+        patch("cli.main.interpret_preflight_bundle", return_value=[]),
+        patch("cli.main.interpret_compose_collision_segment", return_value=_pass_check("compose")),
+    ):
+        yield
+
+
+def _pass_check(name: str) -> object:
+    from core.doctor.types import CheckResult
+
+    return CheckResult(status="pass", name=name, detail="ok")
+
+
+@pytest.fixture(autouse=True)
 def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
     """Tests that exercise ``HostConfig.from_toml`` directly mark themselves
     with ``@pytest.mark.no_host_config_mock`` to bypass this autouse patch.

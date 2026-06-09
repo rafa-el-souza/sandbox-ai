@@ -42,7 +42,7 @@ def _exec_error(*, timeout: bool = False) -> SandboxExecutionError:
     return err
 
 
-def test_module_exposes_twelve_check_functions() -> None:
+def test_module_exposes_check_and_interpret_functions() -> None:
     from core.doctor.checks import privilege_boundary
 
     expected = {
@@ -58,6 +58,10 @@ def test_module_exposes_twelve_check_functions() -> None:
         "check_systemd_machined",
         "check_tlog",
         "check_user_exists",
+        # C-009 D6: the preflight-bundle interpret seams used by cli-start/init.
+        "interpret_compose_collision_segment",
+        "interpret_preflight_bundle",
+        "interpret_preflight_reachability",
     }
     assert expected.issubset(set(dir(privilege_boundary)))
     assert set(privilege_boundary.__all__) == expected
@@ -1023,3 +1027,138 @@ class TestInterpretComposeProjectNameCollision:
         result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout="[]"))
         assert result.status == "pass"
         assert "registered instance" in result.detail
+
+
+# ─── preflight-bundle interpret seams (C-009 D6 — cli-start / init wiring) ────
+
+
+def _bundle_outcome(segments: dict[str, tuple[str, int]], *, ok: bool = True) -> Any:
+    """A ``preflight``-bundle :class:`ProbeOutcome` from {name: (stdout, rc)}.
+
+    Mirrors ``core.dispatch._preflight_inner``'s on-the-wire marker shape so the
+    seam fns exercise the real :func:`core.dispatch.parse_preflight_outcome`
+    split (not a stubbed dict).
+    """
+    from core.dispatch import ProbeOutcome
+
+    parts = [f"__PREFLIGHT_Q_{name}__\n{body}\n__PREFLIGHT_RC_{name}_{rc}__" for name, (body, rc) in segments.items()]
+    return ProbeOutcome(ok=ok, timed_out=False, stdout="\n".join(parts), message="")
+
+
+_ALL_OK_SEGMENTS = {
+    "auth-probe": ("ok", 0),
+    "docker-version": ("29.5.3", 0),
+    "docker-info-security-options": ("[name=rootless]", 0),
+    "docker-info-runtimes": (json.dumps({_RUNSC: {"runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"]}}), 0),
+    "compose-ls": ("[]", 0),
+}
+
+
+class TestInterpretPreflightReachability:
+    def test_pass_outcome_passes(self) -> None:
+        from core.doctor import interpret_preflight_reachability
+        from core.host_config import MachinectlAuth
+
+        result = interpret_preflight_reachability(_outcome(ok=True), "sandbox", MachinectlAuth.SUDO)
+        assert result.status == "pass"
+        assert result.name == "machinectl reachable"
+
+    def test_failed_outcome_fails_with_reachability_message(self) -> None:
+        from core.doctor import interpret_preflight_reachability
+        from core.host_config import MachinectlAuth
+
+        result = interpret_preflight_reachability(
+            _outcome(ok=False, message="boom"), "sandbox", MachinectlAuth.SUDO
+        )
+        assert result.status == "fail"
+        assert "boom" in result.detail
+
+    def test_timeout_outcome_fails(self) -> None:
+        from core.doctor import interpret_preflight_reachability
+        from core.host_config import MachinectlAuth
+
+        result = interpret_preflight_reachability(
+            _outcome(timed_out=True), "sandbox", MachinectlAuth.POLKIT
+        )
+        assert result.status == "fail"
+        assert "polkit" in (result.remediation or "").lower() or "timed out" in result.detail.lower()
+
+
+class TestInterpretComposeCollisionSegment:
+    def test_ok_segment_delegates(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import interpret_compose_collision_segment
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = interpret_compose_collision_segment(_outcome(ok=True, stdout="[]"))
+        assert result.status == "pass"
+
+    def test_none_segment_skips_gracefully(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import interpret_compose_collision_segment
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = interpret_compose_collision_segment(None)
+        assert result.status == "skip"
+
+
+class TestInterpretPreflightBundle:
+    def test_all_ok_produces_seven_verdicts_in_chain_order(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor import interpret_preflight_bundle
+        from core.host_config import MachinectlAuth
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text("{}")
+        results = interpret_preflight_bundle(_bundle_outcome(_ALL_OK_SEGMENTS), "sandbox", MachinectlAuth.SUDO)
+        names = [r.name for r in results]
+        assert names == [
+            "machinectl reachable",
+            "Docker available",
+            "Docker rootless",
+            "gVisor runsc",
+            "runsc runtimeArgs",
+            "--host-uds=none",
+            "compose project name collision",
+        ]
+        assert all(r.status in ("pass", "warn") for r in results)
+
+    def test_runtimes_segment_feeds_three_checks(self, isolated_sandbox_ai_home: Any) -> None:
+        # A runtimes segment WITHOUT the reserved key fails runsc-registered and
+        # warns the two derived checks — proving all three derive from the single
+        # deduped segment.
+        from core.doctor import interpret_preflight_bundle
+        from core.host_config import MachinectlAuth
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text("{}")
+        segments = dict(_ALL_OK_SEGMENTS)
+        segments["docker-info-runtimes"] = (json.dumps({"runc": {}}), 0)
+        results = interpret_preflight_bundle(_bundle_outcome(segments), "sandbox", MachinectlAuth.SUDO)
+        by_name = {r.name: r for r in results}
+        assert by_name["gVisor runsc"].status == "fail"
+        # runtimeArgs + host-uds derive from the same segment (no reserved key →
+        # empty args): host-uds passes (no --host-uds=all), runtimeArgs warns.
+        assert by_name["runsc runtimeArgs"].status == "warn"
+        assert by_name["--host-uds=none"].status == "pass"
+
+    def test_single_failing_segment_surfaces_its_own_verdict(self, isolated_sandbox_ai_home: Any) -> None:
+        # The docker-version query fails (rc!=0) → "Docker available" fails with
+        # ITS specific diagnostic, not a generic bundle failure.
+        from core.doctor import interpret_preflight_bundle
+        from core.host_config import MachinectlAuth
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text("{}")
+        segments = dict(_ALL_OK_SEGMENTS)
+        segments["docker-version"] = ("Cannot connect to the Docker daemon", 1)
+        results = interpret_preflight_bundle(_bundle_outcome(segments), "sandbox", MachinectlAuth.SUDO)
+        by_name = {r.name: r for r in results}
+        assert by_name["Docker available"].status == "fail"
+        assert "Docker not accessible" in by_name["Docker available"].detail
+        # the reachability segment was fine, so machinectl-reachable still passes
+        assert by_name["machinectl reachable"].status == "pass"

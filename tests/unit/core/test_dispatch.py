@@ -27,11 +27,13 @@ from core.dispatch import (
     OpSpec,
     ProbeOutcome,
     _expand_compose_wire,
+    _preflight_inner,
     build_invocation,
     build_target_argv,
     compile_dispatcher,
     dispatch_payload,
     invoke,
+    parse_preflight_outcome,
     probe,
     sudo_pipe_crossing_argv,
     validate_args,
@@ -2091,3 +2093,126 @@ class TestCompileDispatcher:
         assert "sentinel" not in kwargs
         assert kwargs.get("sentinel", False) is False
         assert cast("tuple[object, ...]", captured["args"]) == ()
+
+
+# ─── parse_preflight_outcome (C-009 4.5a) ────────────────────────────────────
+
+
+def _synthetic_bundle(segments: list[tuple[str, str, int]]) -> str:
+    """Build a preflight-bundle stdout from (name, segment-stdout, rc) triples.
+
+    Mirrors ``_preflight_inner``'s on-the-wire shape EXACTLY: per query a begin
+    marker line, the (stderr-merged) segment, then the per-query RC marker.
+    """
+    parts = []
+    for name, body, rc in segments:
+        parts.append(f"__PREFLIGHT_Q_{name}__\n{body}\n__PREFLIGHT_RC_{name}_{rc}__")
+    return "\n".join(parts)
+
+
+class TestParsePreflightOutcome:
+    def test_all_ok_splits_each_segment(self) -> None:
+        bundle = _synthetic_bundle(
+            [
+                ("auth-probe", "ok", 0),
+                ("docker-version", "29.5.3", 0),
+                ("docker-info-security-options", "[name=rootless]", 0),
+                ("docker-info-runtimes", '{"sandbox-ai-runsc": {}}', 0),
+                ("compose-ls", "[]", 0),
+            ]
+        )
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
+        per = parse_preflight_outcome(outcome)
+        assert set(per) == {
+            "auth-probe",
+            "docker-version",
+            "docker-info-security-options",
+            "docker-info-runtimes",
+            "compose-ls",
+        }
+        assert all(o.ok for o in per.values())
+        assert per["docker-version"].stdout == "29.5.3"
+        assert per["docker-info-runtimes"].stdout == '{"sandbox-ai-runsc": {}}'
+        assert all(o.message == "" for o in per.values())
+
+    def test_one_query_nonzero_rc_is_not_ok(self) -> None:
+        bundle = _synthetic_bundle(
+            [
+                ("auth-probe", "ok", 0),
+                ("docker-version", "29.5.3", 0),
+                ("docker-info-security-options", "[name=rootless]", 0),
+                ("docker-info-runtimes", "Cannot connect to the Docker daemon", 1),
+                ("compose-ls", "[]", 0),
+            ]
+        )
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
+        per = parse_preflight_outcome(outcome)
+        failed = per["docker-info-runtimes"]
+        assert failed.ok is False
+        assert failed.stdout == ""  # not-ok segments surface no stdout
+        assert "docker-info-runtimes" in failed.message
+        assert "1" in failed.message
+        # the other segments are unaffected (`;`-isolation)
+        assert per["auth-probe"].ok is True
+        assert per["compose-ls"].ok is True
+
+    def test_missing_segment_is_not_ok(self) -> None:
+        # ``compose-ls`` segment entirely absent (a truncated / garbled bundle).
+        bundle = _synthetic_bundle(
+            [
+                ("auth-probe", "ok", 0),
+                ("docker-version", "29.5.3", 0),
+                ("docker-info-security-options", "[name=rootless]", 0),
+                ("docker-info-runtimes", "{}", 0),
+            ]
+        )
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
+        per = parse_preflight_outcome(outcome)
+        assert per["compose-ls"].ok is False
+        assert per["compose-ls"].stdout == ""
+        assert "compose-ls" in per["compose-ls"].message
+        assert "missing" in per["compose-ls"].message
+
+    def test_garbled_rc_token_is_not_ok(self) -> None:
+        # RC marker present but the recovered exit code is not an int.
+        bundle = "__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_X__"
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
+        per = parse_preflight_outcome(outcome)
+        assert per["auth-probe"].ok is False
+        assert "unparseable" in per["auth-probe"].message
+
+    def test_timed_out_propagates_to_every_segment(self) -> None:
+        # A whole-crossing timeout has no bundle; every segment is missing AND
+        # carries the whole-crossing timed_out flag (per-query timeout is not
+        # meaningful in a bundle).
+        outcome = ProbeOutcome(ok=False, timed_out=True, stdout="", message="timed out")
+        per = parse_preflight_outcome(outcome)
+        assert all(o.timed_out for o in per.values())
+        assert all(not o.ok for o in per.values())
+
+    def test_uses_real_inner_marker_format(self) -> None:
+        # Guard the SSOT contract: a bundle built by interpolating the REAL
+        # ``_preflight_inner`` marker positions parses cleanly. We render the
+        # inner, locate its echo markers, and confirm the parser's marker
+        # derivation matches what the op emits (no hand-typed marker drift).
+        inner = _preflight_inner()
+        # the inner contains begin+rc echo commands per query; assert the parser
+        # finds every query the inner names.
+        for name in (
+            "auth-probe",
+            "docker-version",
+            "docker-info-security-options",
+            "docker-info-runtimes",
+            "compose-ls",
+        ):
+            assert f"echo __PREFLIGHT_Q_{name}__" in inner
+        bundle = _synthetic_bundle([(name, "x", 0) for name in (
+            "auth-probe",
+            "docker-version",
+            "docker-info-security-options",
+            "docker-info-runtimes",
+            "compose-ls",
+        )])
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
+        per = parse_preflight_outcome(outcome)
+        assert all(o.ok for o in per.values())

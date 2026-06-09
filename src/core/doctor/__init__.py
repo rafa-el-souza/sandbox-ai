@@ -43,6 +43,11 @@ from core.doctor.checks.privilege_boundary import check_sudo as check_sudo
 from core.doctor.checks.privilege_boundary import check_systemd_machined as check_systemd_machined
 from core.doctor.checks.privilege_boundary import check_tlog as check_tlog
 from core.doctor.checks.privilege_boundary import check_user_exists as check_user_exists
+from core.doctor.checks.privilege_boundary import (
+    interpret_compose_collision_segment as interpret_compose_collision_segment,
+)
+from core.doctor.checks.privilege_boundary import interpret_preflight_bundle as interpret_preflight_bundle
+from core.doctor.checks.privilege_boundary import interpret_preflight_reachability as interpret_preflight_reachability
 from core.doctor.checks.repo_integrity import check_state_dir_writable as check_state_dir_writable
 from core.doctor.checks.repo_integrity import check_tooling_plane as check_tooling_plane
 from core.doctor.checks.supply_chain import check_image_digests as check_image_digests
@@ -132,6 +137,9 @@ __all__ = [
     "check_workspace_path_in_walker_boundary",
     "detect_distro",
     "get_install_cmd",
+    "interpret_compose_collision_segment",
+    "interpret_preflight_bundle",
+    "interpret_preflight_reachability",
     "render_results",
     "run_check_subset",
     "run_checks",

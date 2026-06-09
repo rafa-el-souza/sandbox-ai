@@ -514,42 +514,142 @@ class TestStartSecretCompletenessGate:
             mock_lock.assert_not_called()
 
 
+def _healthy_preflight_outcome() -> object:
+    """An ``ok`` preflight bundle outcome whose ``auth-probe`` segment passes."""
+    from core.dispatch import ProbeOutcome
+
+    return ProbeOutcome(
+        ok=True,
+        timed_out=False,
+        stdout="__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_0__",
+        message="",
+    )
+
+
+@pytest.mark.no_preflight_mock
 class TestStartDoctorChain1PreFlight:
-    """Task 4.5a: doctor Chain 1 (Privilege Boundary) pre-flight in start."""
+    """C-009 4.5b/4.6/4.7: the collapsed single-crossing Privilege-Boundary preflight in start."""
 
     def test_start_exits_on_doctor_chain1_failure(self, runner: CliRunner) -> None:
-        """start exits code 1 when run_check_subset returns fail for Privilege Boundary."""
+        """start exits 1 when an interpreted bundle check FAILS, with THAT check's message."""
         from core.doctor import CheckResult
 
         inst = "myproject"
         _register_instance(inst)
 
         failed_results = [
-            CheckResult(status="fail", name="machinectl", detail="not configured", remediation="fix sudoers"),
+            CheckResult(status="pass", name="machinectl reachable", detail="ok"),
+            CheckResult(status="fail", name="Docker rootless", detail="Docker is NOT running in rootless mode"),
         ]
 
         from cli.main import app
 
         with (
             patch("cli.main._check_secrets", return_value=[]),
-            patch("cli.main.run_check_subset", return_value=failed_results),
+            patch("cli.main.dispatch.probe", return_value=_healthy_preflight_outcome()),
+            patch("cli.main.interpret_preflight_bundle", return_value=failed_results),
             patch("cli.main.render_results") as mock_render,
             patch("cli.main._warm_check") as mock_warm,
         ):
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
             mock_render.assert_called_once()
+            # The specific failing check is what gets rendered (not a generic msg).
+            rendered = mock_render.call_args.args[0]
+            assert any(r.status == "fail" and r.name == "Docker rootless" for r in rendered)
             # Gate must fire BEFORE warm check
             mock_warm.assert_not_called()
+
+    def test_start_exits_when_crossing_unreachable(self, runner: CliRunner) -> None:
+        """A failed preflight crossing IS 'boundary unreachable' → abort before interpreting downstream."""
+        from core.dispatch import ProbeOutcome
+
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        timed_out = ProbeOutcome(ok=False, timed_out=True, stdout="", message="timed out")
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.dispatch.probe", return_value=timed_out),
+            patch("cli.main.interpret_preflight_bundle") as mock_bundle,
+            patch("cli.main.render_results") as mock_render,
+            patch("cli.main._warm_check") as mock_warm,
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 1
+            # Downstream checks are NOT interpreted on an unreachable crossing.
+            mock_bundle.assert_not_called()
+            reachability = mock_render.call_args.args[0][0]
+            assert reachability.name == "machinectl reachable"
+            assert reachability.status == "fail"
+            mock_warm.assert_not_called()
+
+    @pytest.mark.no_warm_mock
+    def test_start_preflight_is_exactly_two_readonly_crossings(self, runner: CliRunner) -> None:
+        """4.7: the read-only preflight is ONE ``preflight`` op + ONE ``compose-ps`` warm-check, not 8."""
+        from core.dispatch import ProbeOutcome
+
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam(inst, 0)
+        # The real ``_warm_check`` only crosses (``compose-ps``) when the hydrated
+        # compose file exists; create it so the warm-check reaches its one crossing.
+        (instance_dir / "docker" / "compose.yml").write_text("services: {}\n")
+
+        from cli.main import app
+
+        probe_ops: list[str] = []
+
+        def _record(op: object, args: object, host_config: object, **kw: object) -> object:
+            probe_ops.append(str(op))
+            if str(op) == "compose-ps":
+                # warm-check: no running containers (empty output) so start proceeds.
+                return ProbeOutcome(ok=True, timed_out=False, stdout="", message="")
+            return _healthy_preflight_outcome()
+
+        with (
+            patch("cli.main._check_secrets", return_value=[]),
+            patch("cli.main.dispatch.probe", side_effect=_record),
+            patch("cli.main.interpret_preflight_bundle", return_value=[]),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._phase_ipam", return_value=0),
+            patch("cli.main._phase_credentials", return_value="proxypass123"),
+            patch("cli.main._phase_hydrate"),
+            patch("cli.main._phase_acl_grant"),
+            patch("cli.main._phase_helper_cp_chown_ro_files"),
+            patch("cli.main._phase_workspace_shared_group"),
+            patch("cli.main._phase_helper_mkdir_chown_cache_log"),
+            patch("cli.main._phase_grant_post_hydrate_daemon_read"),
+            patch("cli.main._phase_compose_up"),
+            patch("cli.main._build_attach_argv", return_value=["/bin/true"]),
+            patch(
+                "cli.main.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=["/bin/true"], returncode=0),
+            ),
+            patch("cli.main._release_lock"),
+            patch("cli.main._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(app, ["start", inst])
+            assert result.exit_code == 0, result.output
+        # The read-only preflight + warm-check crossings: exactly preflight + compose-ps.
+        readonly = [op for op in probe_ops if op in {"preflight", "compose-ps"}]
+        assert readonly == ["preflight", "compose-ps"]
+        # No per-check read-only crossings leaked in.
+        assert "auth-probe" not in probe_ops
+        assert "docker-version" not in probe_ops
+        assert "docker-info" not in probe_ops
+        assert "compose-ls" not in probe_ops
 
     def test_start_threads_operator_rootless_owner_and_mode_into_preflight(
         self, runner: CliRunner, mock_sandbox_ai_home: Path
     ) -> None:
-        """C-005 1.6: in operator-rootless, start's Privilege Boundary pre-flight
-        ``run_check_subset`` receives the OPERATOR owner (``resolve_daemon_owner``
-        → ``getpass.getuser()``) and the OPERATOR_ROOTLESS mode — so the check
-        bodies take the local (no-machinectl) path, not a crossing into the
-        nonexistent dedicated user."""
+        """C-005 1.6 (re-expressed for the collapsed crossing): in operator-rootless,
+        start's preflight ``dispatch.probe`` receives a host_config carrying the
+        OPERATOR owner (``resolve_daemon_owner`` → ``getpass.getuser()``) and the
+        OPERATOR_ROOTLESS mode — so the crossing takes the local (no-machinectl)
+        path, not a crossing into the nonexistent dedicated user."""
         import getpass
 
         from core.doctor import CheckResult
@@ -562,11 +662,11 @@ class TestStartDoctorChain1PreFlight:
 
         captured: dict[str, object] = {}
 
-        def _capture(categories: object, user: object, distro: object, **kw: object) -> list[CheckResult]:
-            captured["user"] = user
-            captured["mode"] = kw.get("mode")
-            # Fail the pre-flight so start exits right after the gate.
-            return [CheckResult(status="fail", name="Privilege Boundary", detail="forced", remediation="")]
+        def _capture(op: object, args: object, host_config: HostConfig, **kw: object) -> object:
+            captured["op"] = str(op)
+            captured["user"] = host_config.host.docker_unprivileged_user
+            captured["mode"] = host_config.host.docker_execution_mode
+            return _healthy_preflight_outcome()
 
         with (
             patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
@@ -575,12 +675,20 @@ class TestStartDoctorChain1PreFlight:
                 return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
             ),
             patch("cli.main._check_secrets", return_value=[]),
-            patch("cli.main.run_check_subset", side_effect=_capture),
+            patch("cli.main.dispatch.probe", side_effect=_capture),
+            # Fail the interpreted bundle so start exits right after the gate.
+            patch(
+                "cli.main.interpret_preflight_bundle",
+                return_value=[CheckResult(status="fail", name="Docker available", detail="forced")],
+            ),
             patch("cli.main.render_results"),
             patch("cli.main._warm_check") as mock_warm,
         ):
+            from core.doctor import CheckResult
+
             result = runner.invoke(app, ["start", inst])
             assert result.exit_code == 1
+            assert captured["op"] == "preflight"
             assert captured["user"] == operator
             assert captured["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
             mock_warm.assert_not_called()
@@ -2989,7 +3097,7 @@ class TestInitDoctorPreFlightFailure:
         with (
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.check_compose_project_name_collision", return_value=collision),
+            patch("cli.main.interpret_compose_collision_segment", return_value=collision),
             patch("cli.main.render_results"),
         ):
             result = runner.invoke(app, ["init", "newproject"])
@@ -3009,7 +3117,7 @@ class TestInitDoctorPreFlightFailure:
         with (
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.check_compose_project_name_collision", return_value=ok),
+            patch("cli.main.interpret_compose_collision_segment", return_value=ok),
         ):
             result = runner.invoke(app, ["init", "newinst"])
             # Init proceeds past pre-flight (may fail later for other reasons,
@@ -3524,12 +3632,24 @@ class TestInitAuthProbe:
     def _ok(self) -> ProbeOutcome:
         from core.dispatch import ProbeOutcome
 
-        return ProbeOutcome(ok=True, timed_out=False, stdout="ok\n", message="")
+        # init collapses its reachability probe into the ``preflight`` op
+        # (C-009 D6): a healthy crossing whose ``auth-probe`` segment passes.
+        return ProbeOutcome(
+            ok=True,
+            timed_out=False,
+            stdout="__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_0__",
+            message="",
+        )
 
     def _fail(self, *, timed_out: bool = False, message: str = "[FATAL] probe failed") -> ProbeOutcome:
         from core.dispatch import ProbeOutcome
 
         return ProbeOutcome(ok=False, timed_out=timed_out, stdout="", message=message)
+
+    def _collision_pass(self) -> object:
+        from core.doctor import CheckResult
+
+        return CheckResult(status="pass", name="compose project name collision", detail="ok")
 
     def test_probe_success_sudo(self, runner: CliRunner) -> None:
         """Probe succeeds with sudo mode — init proceeds; the probe's
@@ -3550,7 +3670,7 @@ class TestInitAuthProbe:
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.check_compose_project_name_collision") as mock_collision,
+            patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3559,13 +3679,14 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 0
+            # The separate ``auth-probe`` crossing collapsed into the ``preflight``
+            # op (C-009 D6) — one crossing, the crossing's success is reachability.
             (op, args, host_config), kwargs = mock_probe.call_args
-            assert op == "auth-probe"
+            assert op == "preflight"
             assert args == []
-            assert kwargs["timeout"] == 5
+            assert kwargs["timeout"] == 15
             assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_probe_failure_exits_with_remediation(self, runner: CliRunner) -> None:
@@ -3582,14 +3703,14 @@ class TestInitAuthProbe:
             assert "boom: exit status 1" in result.output
 
     def test_probe_timeout_exits_with_error(self, runner: CliRunner) -> None:
-        """Probe timeout (timed_out=True) exits with the exact original
-        'probe timed out after 5 seconds' message."""
+        """Probe timeout (timed_out=True) exits with the 'probe timed out after
+        15 seconds' message (the collapsed ``preflight`` crossing's timeout)."""
         from cli.main import app
 
         with patch("cli.main.dispatch.probe", return_value=self._fail(timed_out=True)):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
-            assert "probe timed out after 5 seconds" in result.output.lower()
+            assert "probe timed out after 15 seconds" in result.output.lower()
 
     def test_probe_polkit_mode_no_sudo(self, runner: CliRunner) -> None:
         """Polkit mode probe — host_config carries POLKIT auth."""
@@ -3609,7 +3730,7 @@ class TestInitAuthProbe:
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.check_compose_project_name_collision") as mock_collision,
+            patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3618,11 +3739,10 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
             assert result.exit_code == 0
             (op, args, host_config), kwargs = mock_probe.call_args
-            assert op == "auth-probe"
+            assert op == "preflight"
             assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
     def test_probe_mode_marker_missing_falls_back_to_separate_user(
@@ -3653,7 +3773,7 @@ class TestInitAuthProbe:
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.check_compose_project_name_collision") as mock_collision,
+            patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3662,7 +3782,6 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "nomarker"])
             assert result.exit_code == 0
             (_op, _args, host_config), _kwargs = mock_probe.call_args
@@ -3673,12 +3792,11 @@ class TestInitAuthProbe:
     def test_probe_operator_rootless_uses_operator_owner_and_local_mode(
         self, runner: CliRunner
     ) -> None:
-        """C-005 1.6: in operator-rootless the auth-probe host_config carries the
+        """C-005 1.6: in operator-rootless the preflight host_config carries the
         OPERATOR (``getpass.getuser()``) as owner — NOT the stale dedicated
         ``docker_unprivileged_user`` — and the OPERATOR_ROOTLESS mode, so
-        ``dispatch.probe`` takes the local (no-machinectl) path. The init/start
-        pre-flight ``run_check_subset`` + collision probe receive the same
-        operator + mode."""
+        ``dispatch.probe`` takes the local (no-machinectl) path. The init
+        pre-flight ``run_check_subset`` receives the same operator + mode."""
         import getpass
 
         from cli.main import app
@@ -3702,7 +3820,7 @@ class TestInitAuthProbe:
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]) as mock_subset,
-            patch("cli.main.check_compose_project_name_collision") as mock_collision,
+            patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
             patch("cli.main._load_config", return_value=mock_config),
@@ -3711,12 +3829,11 @@ class TestInitAuthProbe:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            mock_collision.return_value.status = "pass"
             result = runner.invoke(app, ["init", "oprl"])
             assert result.exit_code == 0
 
             (op, _args, host_config), _kwargs = mock_probe.call_args
-            assert op == "auth-probe"
+            assert op == "preflight"
             # Operator owner (NOT the stale dedicated user) + local op-rootless mode.
             assert host_config.host.docker_unprivileged_user == operator
             assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
@@ -3725,11 +3842,6 @@ class TestInitAuthProbe:
             subset_args, subset_kwargs = mock_subset.call_args
             assert subset_args[1] == operator
             assert subset_kwargs["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
-
-            # The collision probe got the operator + op-rootless mode too.
-            collision_args, collision_kwargs = mock_collision.call_args
-            assert collision_args[0] == operator
-            assert collision_kwargs["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner) -> None:
         """Polkit probe failure shows polkit-specific remediation."""

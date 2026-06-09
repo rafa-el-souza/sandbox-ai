@@ -476,6 +476,80 @@ def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) ->
     )
 
 
+def interpret_compose_collision_segment(segment: dispatch.ProbeOutcome | None) -> CheckResult:
+    """Interpret a preflight bundle's ``compose-ls`` segment for the collision check.
+
+    Used by ``sandbox init``'s preflight, which collapses its formerly-separate
+    ``auth-probe`` + ``compose-ls`` crossings into the one ``preflight`` op
+    (C-009 D6). An absent segment (``None`` — a garbled/missing bundle) is
+    treated as a not-ok ``compose-ls`` outcome so the underlying
+    :func:`_interpret_compose_project_name_collision` skips gracefully rather
+    than crashing on partial data.
+    """
+    if segment is None:
+        segment = dispatch.ProbeOutcome(
+            ok=False,
+            timed_out=False,
+            stdout="",
+            message="preflight compose-ls segment missing from bundle",
+        )
+    return _interpret_compose_project_name_collision(segment)
+
+
+def interpret_preflight_reachability(
+    outcome: dispatch.ProbeOutcome,
+    user: str,
+    auth_mode: MachinectlAuth,
+) -> CheckResult:
+    """Render the boundary-reachability verdict for ``sandbox start``'s preflight gate.
+
+    The ``preflight`` crossing itself succeeding IS the reachability signal (the
+    old ``machinectl_reachable`` check — C-009 D6). When the crossing fails — a
+    timeout, a non-zero op exit, or an absent/garbled ``auth-probe`` segment —
+    ``start`` aborts before interpreting the downstream checks (preserving the
+    old ``depends_on`` short-circuit). The caller passes the most specific
+    failing :class:`~core.dispatch.ProbeOutcome` (the whole-crossing outcome on a
+    crossing failure, else the parsed ``auth-probe`` segment); this reuses the
+    existing :func:`_interpret_machinectl_reachable` so the diagnostic is
+    byte-identical to the per-crossing chain's reachability FAIL.
+    """
+    return _interpret_machinectl_reachable(outcome, user, auth_mode)
+
+
+def interpret_preflight_bundle(
+    outcome: dispatch.ProbeOutcome,
+    user: str,
+    auth_mode: MachinectlAuth,
+) -> list[CheckResult]:
+    """Map a single ``preflight``-op bundle to the seven privilege-boundary verdicts.
+
+    ``sandbox start``'s preflight collapses the seven instance-agnostic
+    read-only crossings into ONE ``preflight``-op crossing (C-009 D6). The caller
+    has already established boundary reachability (the crossing itself
+    succeeding is the reachability signal — the old ``machinectl_reachable``
+    role) before calling this; here the bundle is split per query via
+    :func:`dispatch.parse_preflight_outcome` and each existing interpret fn is
+    applied to its own segment, preserving every check's individual pass/fail +
+    specific diagnostic.
+
+    The single ``docker-info-runtimes`` segment feeds three checks
+    (``runsc_registered`` / ``runsc_runtimeargs`` / ``host_uds``) — the intrinsic
+    dedup. Results are returned in the doctor-chain order so the operator sees
+    the same sequence as the per-crossing chain.
+    """
+    per_op = dispatch.parse_preflight_outcome(outcome)
+    runtimes = per_op["docker-info-runtimes"]
+    return [
+        _interpret_machinectl_reachable(per_op["auth-probe"], user, auth_mode),
+        _interpret_docker_available(per_op["docker-version"], user),
+        _interpret_docker_rootless(per_op["docker-info-security-options"], user),
+        _interpret_runsc_registered(runtimes),
+        _interpret_runsc_runtimeargs(runtimes, user),
+        _interpret_host_uds(runtimes, user),
+        _interpret_compose_project_name_collision(per_op["compose-ls"]),
+    ]
+
+
 __all__ = [
     "check_compose_project_name_collision",
     "check_docker_available",
@@ -489,4 +563,7 @@ __all__ = [
     "check_systemd_machined",
     "check_tlog",
     "check_user_exists",
+    "interpret_compose_collision_segment",
+    "interpret_preflight_bundle",
+    "interpret_preflight_reachability",
 ]
