@@ -195,7 +195,7 @@
     "expected_target_argv": [
       "/bin/bash",
       "-c",
-      "echo __PREFLIGHT_Q_auth-probe__; echo ok ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}' ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all"
+      "echo __PREFLIGHT_Q_auth-probe__; echo ok 2>&1; echo __PREFLIGHT_RC_auth-probe_$?__ ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}' 2>&1; echo __PREFLIGHT_RC_docker-version_$?__ ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' 2>&1; echo __PREFLIGHT_RC_docker-info-security-options_$?__ ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' 2>&1; echo __PREFLIGHT_RC_docker-info-runtimes_$?__ ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all 2>&1; echo __PREFLIGHT_RC_compose-ls_$?__"
     ]
   }
 ]

@@ -77,11 +77,11 @@ var validOps = []string{
 // (C-009 D6). It is necessarily a second spelling; the shared fixture
 // (target_argv_cases.json, TestTargetArgvFixtureParity) pins it equal to the
 // Python builder's output, so a drift fails ``go test`` -> the compile.
-const preflightInner = "echo __PREFLIGHT_Q_auth-probe__; echo ok" +
-	" ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}'" +
-	" ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}'" +
-	" ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}'" +
-	" ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all"
+const preflightInner = "echo __PREFLIGHT_Q_auth-probe__; echo ok 2>&1; echo __PREFLIGHT_RC_auth-probe_$?__" +
+	" ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}' 2>&1; echo __PREFLIGHT_RC_docker-version_$?__" +
+	" ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' 2>&1; echo __PREFLIGHT_RC_docker-info-security-options_$?__" +
+	" ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' 2>&1; echo __PREFLIGHT_RC_docker-info-runtimes_$?__" +
+	" ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all 2>&1; echo __PREFLIGHT_RC_compose-ls_$?__"
 
 // composeVerb is the op-hardcoded compose verb. It is NEVER taken from the
 // wire; --volumes only flips compose-down to "down -v" (handled below). This

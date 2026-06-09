@@ -605,15 +605,24 @@ def _build_docker_info(args: Sequence[str], host_config: HostConfig) -> list[str
 # privilege-boundary preflight, run ONCE EACH in one crossing. ``;``-sequenced
 # (NOT ``&&``/``set -e``): one query's failure must neither abort the others nor
 # forge their success (F-065). Each query is prefixed with a per-query begin
-# marker (``__PREFLIGHT_Q_<name>__``) on its own line so the orchestrator
-# (M4b cli-start) can split the bundled stdout and attribute each segment to its
-# check. The ``docker info`` runtimes query appears ONCE — the intrinsic dedup
-# feeding the runsc / runsc-runtimeArgs / host-uds checks.
+# marker (``__PREFLIGHT_Q_<name>__``) on its own line, has its stderr merged
+# (``2>&1``) into the attributed segment, and is followed by a per-query exit
+# marker (``__PREFLIGHT_RC_<name>_$?__`` — ``$?`` is the query's own exit,
+# unaffected by the redirection; the trailing RC echo still runs because
+# segments are ``;``-joined). So the orchestrator (M4b cli-start) can split the
+# bundled output and reconstruct each segment's stdout, merged stderr, and
+# exit code per check. The ``docker info`` runtimes query appears ONCE — the
+# intrinsic dedup feeding the runsc / runsc-runtimeArgs / host-uds checks.
 #
 # Ordered list of (attribution-marker query name, bare inner) — the marker name
 # is the wire identity of the query, NOT necessarily an op name (the two
 # ``docker-info`` presets share the op but are distinct queries).
 _PREFLIGHT_QUERY_MARKER_PREFIX = "__PREFLIGHT_Q_"
+# Per-query trailing exit-code marker prefix. Each query is followed by
+# ``echo __PREFLIGHT_RC_<name>_$?__`` so the orchestrator can recover each
+# query's exit code (the ``;``-joiner keeps ``$?`` the query's own exit, and the
+# trailing RC echo still runs even when the query failed — F-065).
+_PREFLIGHT_RC_MARKER_PREFIX = "__PREFLIGHT_RC_"
 
 
 def _preflight_query_segments() -> list[tuple[str, str]]:
@@ -630,7 +639,8 @@ def _preflight_query_segments() -> list[tuple[str, str]]:
 def _preflight_inner() -> str:
     """Build the ``;``-sequenced, per-query-attributed preflight bundle inner."""
     parts = [
-        f"echo {_PREFLIGHT_QUERY_MARKER_PREFIX}{name}__; {inner}"
+        f"echo {_PREFLIGHT_QUERY_MARKER_PREFIX}{name}__; {inner} 2>&1; "
+        f"echo {_PREFLIGHT_RC_MARKER_PREFIX}{name}_$?__"
         for name, inner in _preflight_query_segments()
     ]
     return " ; ".join(parts)

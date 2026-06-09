@@ -533,8 +533,10 @@ class TestTargetArgvFixture:
     def test_preflight_each_query_individually_attributable(
         self, host_config: HostConfig
     ) -> None:
-        # Each query is preceded by a per-query begin marker on its own echo so
-        # M4b (cli-start) can split + map each segment to its check.
+        # Each query is preceded by a per-query begin marker on its own echo and
+        # followed by a per-query exit marker (``__PREFLIGHT_RC_<name>_$?__``),
+        # with stderr merged (``2>&1``), so M4b (cli-start) can split + map each
+        # segment to its check and reconstruct stdout + exit + merged stderr.
         inner = build_target_argv("preflight", [], host_config)[2]
         for name in (
             "auth-probe",
@@ -544,6 +546,20 @@ class TestTargetArgvFixture:
             "compose-ls",
         ):
             assert f"echo __PREFLIGHT_Q_{name}__" in inner
+            assert f"echo __PREFLIGHT_RC_{name}_$?__" in inner
+
+    def test_preflight_each_query_merges_stderr_and_carries_exit(
+        self, host_config: HostConfig
+    ) -> None:
+        # Per query: ``<inner> 2>&1`` (stderr merged into the attributed segment)
+        # immediately followed by the RC marker. Count parity proves every query
+        # got both — and that ``2>&1`` is paired with an RC echo.
+        inner = build_target_argv("preflight", [], host_config)[2]
+        n_queries = 5
+        assert inner.count(" 2>&1; echo __PREFLIGHT_RC_") == n_queries
+        assert inner.count("__PREFLIGHT_Q_") == n_queries
+        assert inner.count("__PREFLIGHT_RC_") == n_queries
+        assert inner.count("_$?__") == n_queries
 
     def test_helper_chown_files_byte_faithful_to_hardened_helper(
         self, host_config: HostConfig
