@@ -301,6 +301,11 @@ def _load_config(instance_dir: str) -> InstanceConfig:
 
 # ─── Warm state check ───────────────────────────────────────────────────────
 
+# Defense-in-depth parse ceiling for the untrusted ``compose-ps`` NDJSON (M-2).
+# The daemon's self-reported container status is parsed line-by-line; reject an
+# oversized blob before ``json.loads`` rather than parse an unbounded payload.
+_MAX_COMPOSE_PS_BYTES = 256 * 1024
+
 
 def _container_status(
     instance_dir: str,
@@ -336,24 +341,31 @@ def _container_status(
         return []
 
     containers: list[ContainerInfo] = []
-    if outcome.stdout:
+    # Size-bound the untrusted NDJSON blob before parsing (M-2): an oversized
+    # daemon report fails closed to an empty list, never an unbounded parse.
+    if outcome.stdout and len(outcome.stdout.encode("utf-8", errors="ignore")) <= _MAX_COMPOSE_PS_BYTES:
         for line in outcome.stdout.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
                 data = _json.loads(line)
-                containers.append(
-                    ContainerInfo(
-                        name=data.get("Name", ""),
-                        service=data.get("Service", ""),
-                        state=data.get("State", ""),
-                        health=data.get("Health", None) or None,
-                        status=data.get("Status", ""),
-                    )
-                )
             except _json.JSONDecodeError:
                 continue
+            # Strict shape: each NDJSON record must be a JSON object. A
+            # non-dict line (array, scalar, malformed shape) is skipped — never
+            # coerced into a ContainerInfo.
+            if not isinstance(data, dict):
+                continue
+            containers.append(
+                ContainerInfo(
+                    name=data.get("Name", ""),
+                    service=data.get("Service", ""),
+                    state=data.get("State", ""),
+                    health=data.get("Health", None) or None,
+                    status=data.get("Status", ""),
+                )
+            )
     return containers
 
 

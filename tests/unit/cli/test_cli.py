@@ -4275,6 +4275,42 @@ class TestContainerStatus:
 
         assert warm is False
 
+    def test_oversized_ndjson_fails_closed_empty(self, tmp_path: Path) -> None:
+        """M-2: an oversized ``compose-ps`` blob is rejected before parse → []."""
+        from cli.main import _MAX_COMPOSE_PS_BYTES, _container_status
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        # A single well-formed NDJSON line whose total size exceeds the ceiling.
+        big = '{"Name":"' + "x" * (_MAX_COMPOSE_PS_BYTES + 10) + '","State":"running"}'
+        assert len(big.encode()) > _MAX_COMPOSE_PS_BYTES
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout=big)):
+            containers = _container_status(str(tmp_path), "s", self._config())
+
+        assert containers == []
+
+    def test_non_dict_ndjson_line_skipped(self, tmp_path: Path) -> None:
+        """M-2 strict shape: a non-object NDJSON line is skipped, not coerced."""
+        from cli.main import _container_status
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        # One valid object line + one JSON array line (wrong shape) + one scalar.
+        ndjson = (
+            '{"Name":"t-core-1","Service":"core","State":"running","Status":"Up"}\n'
+            '["not", "an", "object"]\n'
+            '"a-bare-string"\n'
+        )
+        with patch("cli.main.dispatch.probe", return_value=self._outcome(ok=True, stdout=ndjson)):
+            containers = _container_status(str(tmp_path), "s", self._config())
+
+        assert len(containers) == 1
+        assert containers[0].name == "t-core-1"
+
 
 # ── Status Command ───────────────────────────────────────────────────────────
 

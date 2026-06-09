@@ -279,7 +279,7 @@ class TestDockerChecks:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _okn("[rootless, cgroupns]")
+            return _okn("[name=seccomp,profile=builtin name=rootless name=cgroupns]")
 
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_docker_rootless("sandbox", None)
@@ -1061,6 +1061,169 @@ class TestInterpretComposeProjectNameCollision:
         result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout="[]"))
         assert result.status == "pass"
         assert "registered instance" in result.detail
+
+
+# ─── content-trust hardening (C-009 Pass 2 — M-2 size-bound + strict shape) ───
+
+
+class TestSafeLoadJson:
+    """The shared size-bound + strict-shape defensive parse helper (M-2)."""
+
+    def test_oversized_dict_fails_closed(self) -> None:
+        from core.doctor.checks.privilege_boundary import _MAX_DAEMON_JSON_BYTES, _safe_load_json
+
+        # A well-formed JSON object that exceeds the byte ceiling → None (never parsed).
+        big = json.dumps({_RUNSC: {"runtimeArgs": ["x" * (_MAX_DAEMON_JSON_BYTES + 10)]}})
+        assert len(big.encode()) > _MAX_DAEMON_JSON_BYTES
+        assert _safe_load_json(big, dict) is None
+
+    def test_oversized_list_fails_closed(self) -> None:
+        from core.doctor.checks.privilege_boundary import _MAX_DAEMON_JSON_BYTES, _safe_load_json
+
+        big = json.dumps([{"Name": "p" * (_MAX_DAEMON_JSON_BYTES + 10)}])
+        assert _safe_load_json(big, list) is None
+
+    def test_wrong_type_fails_closed(self) -> None:
+        from core.doctor.checks.privilege_boundary import _safe_load_json
+
+        # A valid JSON list when a dict is expected (and vice-versa) → None.
+        assert _safe_load_json("[]", dict) is None
+        assert _safe_load_json("{}", list) is None
+
+    def test_malformed_fails_closed(self) -> None:
+        from core.doctor.checks.privilege_boundary import _safe_load_json
+
+        assert _safe_load_json("not-json", dict) is None
+
+    def test_well_formed_returns_value(self) -> None:
+        from core.doctor.checks.privilege_boundary import _safe_load_json
+
+        assert _safe_load_json('{"a": 1}', dict) == {"a": 1}
+        assert _safe_load_json("[1, 2]", list) == [1, 2]
+
+
+class TestContentTrustFailClosed:
+    """Each untrusted-daemon-JSON site fails closed on oversized / wrong-shape."""
+
+    def test_rootless_substring_does_not_falsely_pass(self) -> None:
+        """L-1: a non-``name=rootless`` security-options string that merely
+        *contains* the substring ``rootless`` (e.g. a ``rootlesskit`` mention or
+        a path) must NOT falsely PASS — only the structural ``name=rootless``
+        token does.
+
+        Pre-fix verification protocol (CLAUDE.md): against the pre-change
+        ``"rootless" in outcome.stdout`` substring test this assertion was RED —
+        the forged ``[name=seccomp,profile=/run/rootlesskit/builtin …]`` string
+        falsely returned ``status == "pass"`` (observed: ``assert 'pass' ==
+        'fail'``). The structural ``name=rootless`` token match makes it fail
+        closed, proving the test catches the spoofed-PASS vector.
+        """
+        from core.doctor.checks.privilege_boundary import _interpret_docker_rootless
+
+        # name=seccomp (no rootless option) plus a stray ``rootlesskit`` substring.
+        stdout = "[name=seccomp,profile=/run/rootlesskit/builtin name=cgroupns]"
+        result = _interpret_docker_rootless(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "fail"
+
+    def test_rootless_structural_token_passes(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_rootless
+
+        stdout = "[name=seccomp,profile=builtin name=rootless name=cgroupns]"
+        result = _interpret_docker_rootless(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "pass"
+
+    def _oversized_runtimes(self) -> str:
+        from core.doctor.checks.privilege_boundary import _MAX_DAEMON_JSON_BYTES
+
+        return json.dumps({_RUNSC: {"runtimeArgs": ["x" * (_MAX_DAEMON_JSON_BYTES + 10)]}})
+
+    def test_runsc_registered_oversized_fails_closed(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        result = _interpret_runsc_registered(_outcome(ok=True, stdout=self._oversized_runtimes()))
+        assert result.status == "fail"
+
+    def test_runsc_registered_non_dict_entry_fails(self) -> None:
+        """A ``name=rootless``-shaped forgery where the runsc value is not a dict
+        (e.g. a bare string) must NOT pass — PASS requires a well-formed entry."""
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        stdout = json.dumps({_RUNSC: "forged"})
+        result = _interpret_runsc_registered(_outcome(ok=True, stdout=stdout))
+        assert result.status == "fail"
+
+    def test_runsc_registered_list_shape_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        result = _interpret_runsc_registered(_outcome(ok=True, stdout="[]"))
+        assert result.status == "fail"
+
+    def test_runtimeargs_oversized_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        result = _interpret_runsc_runtimeargs(_outcome(ok=True, stdout=self._oversized_runtimes()), "sandbox")
+        assert result.status == "warn"
+        assert "parse" in result.detail
+
+    def test_runtimeargs_list_shape_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        result = _interpret_runsc_runtimeargs(_outcome(ok=True, stdout="[]"), "sandbox")
+        assert result.status == "warn"
+
+    def test_runtimeargs_non_dict_entry_warns_missing(self) -> None:
+        """A non-dict runsc entry yields empty args → the expected args are missing → WARN."""
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        stdout = json.dumps({_RUNSC: "forged"})
+        result = _interpret_runsc_runtimeargs(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "warn"
+
+    def test_host_uds_oversized_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        result = _interpret_host_uds(_outcome(ok=True, stdout=self._oversized_runtimes()), "sandbox")
+        assert result.status == "warn"
+        assert "parse" in result.detail
+
+    def test_host_uds_list_shape_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        result = _interpret_host_uds(_outcome(ok=True, stdout="[]"), "sandbox")
+        assert result.status == "warn"
+
+    def test_host_uds_non_dict_entry_passes_default(self) -> None:
+        """A non-dict runsc entry → empty args → ``--host-uds=all`` absent → PASS (default none)."""
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        stdout = json.dumps({_RUNSC: "forged"})
+        result = _interpret_host_uds(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "pass"
+
+    def test_compose_collision_oversized_skips(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor.checks.privilege_boundary import (
+            _MAX_DAEMON_JSON_BYTES,
+            _interpret_compose_project_name_collision,
+        )
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        big = json.dumps([{"Name": "p" * (_MAX_DAEMON_JSON_BYTES + 10)}])
+        result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout=big))
+        assert result.status == "skip"
+        assert "parse" in result.detail
+
+    def test_compose_collision_dict_shape_skips(self, isolated_sandbox_ai_home: Any) -> None:
+        """A JSON object where a list was expected → fail closed (skip)."""
+        from core.doctor.checks.privilege_boundary import _interpret_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout="{}"))
+        assert result.status == "skip"
+        assert "parse" in result.detail
 
 
 # ─── preflight-bundle interpret seams (C-009 D6 — cli-start / init wiring) ────

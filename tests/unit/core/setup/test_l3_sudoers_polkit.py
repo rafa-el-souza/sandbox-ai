@@ -337,6 +337,21 @@ def test_render_refuses_bad_op_name(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "bad_user",
+    ["", "has space", "UPPER", "a;b", "--property=x", "user!", "a" * 33],
+)
+def test_render_refuses_bad_sandbox_user(bad_user: str) -> None:
+    """M-1: a ``sandbox_user`` not matching the POSIX grammar MUST raise.
+
+    This is the render-time fail-closed guard (mirrors the op-name gate): a
+    space/metacharacter in the ``--uid=<user>`` operand would corrupt the
+    rendered rule, even if the ``HostSettings`` field validator were bypassed.
+    """
+    with pytest.raises(RuleRenderError, match="valid POSIX username"):
+        render_sudoers_rule("/usr/bin/systemd-run", "alice", "testhost", bad_user)
+
+
 # ── POLKIT branch ────────────────────────────────────────────────────────────
 
 

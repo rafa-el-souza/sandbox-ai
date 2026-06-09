@@ -159,6 +159,28 @@ class TestHostConfigFromToml:
         with pytest.raises(ValidationError):
             HostConfig.from_toml()
 
+    @pytest.mark.parametrize(
+        "good_user",
+        ["sandbox", "_svc", "a", "user-1", "claude_sandbox", "x" * 32],
+    )
+    def test_valid_docker_unprivileged_user_accepted(self, good_user: str) -> None:
+        """M-1: POSIX-conformant usernames pass the field validator."""
+        settings = HostSettings(docker_unprivileged_user=good_user)
+        assert settings.docker_unprivileged_user == good_user
+
+    @pytest.mark.parametrize(
+        "bad_user",
+        ["", "has space", "UPPER", "a;b", "--property=x", "1abc", "user!", "x" * 33],
+    )
+    def test_invalid_docker_unprivileged_user_rejected(self, bad_user: str) -> None:
+        """M-1: empty / spaces / uppercase / metacharacters fail the validator.
+
+        The value reaches the ``--uid=<user>`` crossing operand and the sudoers
+        ``Cmnd_Spec``; reject it at the Pydantic boundary, fail-closed.
+        """
+        with pytest.raises(ValidationError, match="valid POSIX username"):
+            HostSettings(docker_unprivileged_user=bad_user)
+
     def test_default_auth_mode_is_sudo(self, isolated_sandbox_ai_home: Path) -> None:
         """Omitted machinectl_authentication defaults to 'sudo'."""
         _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML_NO_AUTH)

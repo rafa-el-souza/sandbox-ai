@@ -13,13 +13,23 @@ import getpass
 import grp
 import os
 import pwd
+import re
 import tomllib
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from core.exceptions import SandboxExecutionError
+
+# POSIX-portable username grammar (M-1). ``docker_unprivileged_user`` reaches the
+# ``--uid={user}`` operand of ``systemd-run``/``pipe_cmd`` and the rendered
+# sudoers ``Cmnd_Spec``, so a value carrying a space, an uppercase letter, or a
+# sudoers/shell metacharacter (``;``, ``--property=…``) could corrupt the
+# emitted rule or the crossing argv. Reject any non-conforming value at the
+# Pydantic boundary: lowercase initial letter or underscore, then up to 31 more
+# of ``[a-z0-9_-]`` (32-char useradd ceiling).
+_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def sandbox_ai_home() -> Path:
@@ -118,6 +128,24 @@ class HostSettings(BaseModel):
 
     docker_unprivileged_user: str
     machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
+
+    @field_validator("docker_unprivileged_user")
+    @classmethod
+    def _validate_docker_unprivileged_user(cls, value: str) -> str:
+        """Enforce the POSIX-portable username grammar (M-1).
+
+        The value flows into the ``--uid={user}`` crossing operand and the
+        sudoers ``Cmnd_Spec``; reject empty / spaces / uppercase / shell- or
+        sudoers-metacharacters before it can corrupt a rendered rule.
+        """
+        if _USERNAME_RE.match(value) is None:
+            raise ValueError(
+                f"docker_unprivileged_user {value!r} is not a valid POSIX username "
+                f"(must match {_USERNAME_RE.pattern}: lowercase/underscore start, "
+                f"then [a-z0-9_-], max 32 chars — no spaces, uppercase, or "
+                f"shell/sudoers metacharacters)"
+            )
+        return value
     # In-memory carrier ONLY (D11): the execution mode is NOT a user-editable toml
     # field — it is setup-determined and resolved at runtime from the per-operator
     # marker (``core.setup_state.resolve_execution_mode``). ``from_toml`` rejects a

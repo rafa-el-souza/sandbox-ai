@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING
 # :func:`core.dispatch.dispatch_payload` — never hand-retyped here. ``Op`` is the
 # single source of truth for the enumerated ops.
 from core.dispatch import Op, dispatch_payload, sudo_pipe_crossing_argv
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import _USERNAME_RE, DockerExecutionMode, MachinectlAuth
 from core.setup.l0_identity import resolve_systemd_run_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
@@ -182,7 +182,20 @@ def render_sudoers_rule(
     Asserts the F-004 zero-``"`` invariant across every ``Cmnd_Spec`` body at
     render time — BEFORE the staged file is written and ``visudo -cf`` is
     invoked. Raises :class:`RuleRenderError` on any violation.
+
+    Also re-asserts the POSIX username grammar on ``sandbox_user`` before it is
+    interpolated into the ``--uid=<user>`` operand of every ``Cmnd_Spec`` (M-1):
+    a typo / space / metacharacter would corrupt the rendered rule. This mirrors
+    the ``_OP_NAME_RE`` op-name gate above and is the render-time fail-closed
+    guard — defense-in-depth even if the ``HostSettings`` field validator was
+    somehow bypassed.
     """
+    if _USERNAME_RE.match(sandbox_user) is None:
+        raise RuleRenderError(
+            f"sandbox_user {sandbox_user!r} is not a valid POSIX username "
+            f"(must match {_USERNAME_RE.pattern}); refusing to render the "
+            f"sudoers Cmnd_Spec (a space/metacharacter would corrupt the rule)"
+        )
     specs = [
         spec
         for op in Op

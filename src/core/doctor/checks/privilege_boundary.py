@@ -7,9 +7,10 @@ trust chain plus the daemon-side compose project name collision check.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
-from typing import cast
+from typing import Any, cast, overload
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
@@ -25,6 +26,45 @@ from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_c
 # (and a future opt-in that adds --debug-log to _EXPECTED_RUNTIME is followed
 # automatically). Precedent: dispatcher_sha_drift reusing l65's single source.
 from core.setup.l6_daemon_json import _EXPECTED_RUNTIME, _RESERVED_RUNTIME_KEY
+
+# Defense-in-depth parse ceiling for untrusted daemon stdout (M-2). Ops 4-8
+# reach a verdict by parsing the daemon's self-reported ``docker info`` /
+# ``compose ls`` JSON. A daemon-health check inherently trusts that self-report
+# (agents have no daemon access in any mode), but the parsing must be strict +
+# fail-closed: a malformed / oversized / unexpected-shape segment degrades to
+# WARN/skip/not-ok, never a spoofed PASS. ``json.loads`` on an unbounded blob is
+# a DoS vector, so reject any segment larger than this before parsing.
+_MAX_DAEMON_JSON_BYTES = 256 * 1024
+
+
+@overload
+def _safe_load_json(stdout: str, expected_type: type[dict[str, Any]]) -> dict[str, Any] | None: ...
+
+
+@overload
+def _safe_load_json(stdout: str, expected_type: type[list[Any]]) -> list[Any] | None: ...
+
+
+def _safe_load_json(
+    stdout: str, expected_type: type[dict[str, Any]] | type[list[Any]]
+) -> dict[str, Any] | list[Any] | None:
+    """Size-bound + strict-shape parse of untrusted daemon stdout (M-2).
+
+    Returns the parsed value ONLY when it is well-formed AND an instance of
+    ``expected_type``; returns ``None`` (the fail-closed sentinel) when the
+    segment exceeds :data:`_MAX_DAEMON_JSON_BYTES`, is not valid JSON, or is not
+    the expected container type. Callers MUST treat ``None`` as a not-ok / WARN
+    verdict — never reach a PASS on the absence of a parse error.
+    """
+    if len(stdout.encode("utf-8", errors="ignore")) > _MAX_DAEMON_JSON_BYTES:
+        return None
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, expected_type):
+        return None
+    return parsed
 
 
 def check_sudo(user: str, distro: str | None) -> CheckResult:
@@ -204,9 +244,25 @@ def check_docker_rootless(
     return _interpret_docker_rootless(outcome, user)
 
 
+def _security_options_have_rootless(stdout: str) -> bool:
+    """``True`` iff the security-options report carries the ``name=rootless`` token (L-1).
+
+    ``docker info --format '{{.SecurityOptions}}'`` emits a Go-slice rendering of
+    ``name=<opt>,<k>=<v>,…`` token groups (e.g.
+    ``[name=seccomp,profile=builtin name=rootless name=cgroupns]``). Match the
+    structural ``name=rootless`` token specifically — NOT a bare ``"rootless" in
+    stdout`` substring — so a daemon string that merely *contains* the substring
+    ``rootless`` elsewhere (a path, a label, a ``rootlesskit`` mention) does not
+    falsely PASS. The output is bracket/space/comma-delimited; split on those and
+    require an exact ``name=rootless`` element.
+    """
+    tokens = re.split(r"[\[\]\s,]+", stdout)
+    return "name=rootless" in tokens
+
+
 def _interpret_docker_rootless(outcome: dispatch.ProbeOutcome, user: str) -> CheckResult:
     """Interpret the ``docker-info ["security-options"]`` outcome."""
-    if outcome.ok and "rootless" in outcome.stdout:
+    if outcome.ok and _security_options_have_rootless(outcome.stdout):
         return CheckResult(
             status="pass",
             name="Docker rootless",
@@ -237,16 +293,13 @@ def check_runsc_registered(
 def _interpret_runsc_registered(outcome: dispatch.ProbeOutcome) -> CheckResult:
     """Interpret the ``docker-info ["runtimes"]`` outcome for runsc registration."""
     if outcome.ok:
-        try:
-            runtimes = json.loads(outcome.stdout.strip())
-            if _RESERVED_RUNTIME_KEY in runtimes:
-                return CheckResult(
-                    status="pass",
-                    name="gVisor runsc",
-                    detail=f"{_RESERVED_RUNTIME_KEY} runtime registered in Docker",
-                )
-        except json.JSONDecodeError:
-            pass
+        runtimes = _safe_load_json(outcome.stdout.strip(), dict)
+        if runtimes is not None and isinstance(runtimes.get(_RESERVED_RUNTIME_KEY), dict):
+            return CheckResult(
+                status="pass",
+                name="gVisor runsc",
+                detail=f"{_RESERVED_RUNTIME_KEY} runtime registered in Docker",
+            )
 
     return CheckResult(
         status="fail",
@@ -286,9 +339,8 @@ def _interpret_runsc_runtimeargs(outcome: dispatch.ProbeOutcome, user: str) -> C
             remediation=(f"Verify Docker is accessible for user '{user}' and check ~{user}/.config/docker/daemon.json"),
         )
 
-    try:
-        runtimes = json.loads(outcome.stdout.strip())
-    except json.JSONDecodeError:
+    runtimes = _safe_load_json(outcome.stdout.strip(), dict)
+    if runtimes is None:
         return CheckResult(
             status="warn",
             name="runsc runtimeArgs",
@@ -297,7 +349,9 @@ def _interpret_runsc_runtimeargs(outcome: dispatch.ProbeOutcome, user: str) -> C
         )
 
     runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
-    runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
+    runsc_entry = runsc_entry if isinstance(runsc_entry, dict) else {}
+    raw_args = runsc_entry.get("runtimeArgs", [])
+    runtime_args: list[str] = [a for a in raw_args if isinstance(a, str)] if isinstance(raw_args, list) else []
 
     expected_args = cast("list[str]", _EXPECTED_RUNTIME["runtimeArgs"])
     missing = [exp for exp in expected_args if not _runtime_arg_present(exp, runtime_args)]
@@ -353,9 +407,8 @@ def _interpret_host_uds(outcome: dispatch.ProbeOutcome, user: str) -> CheckResul
             remediation=(f"Verify Docker is accessible for user '{user}' and check ~{user}/.config/docker/daemon.json"),
         )
 
-    try:
-        runtimes = json.loads(outcome.stdout.strip())
-    except json.JSONDecodeError:
+    runtimes = _safe_load_json(outcome.stdout.strip(), dict)
+    if runtimes is None:
         return CheckResult(
             status="warn",
             name="--host-uds=none",
@@ -364,7 +417,9 @@ def _interpret_host_uds(outcome: dispatch.ProbeOutcome, user: str) -> CheckResul
         )
 
     runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
-    runtime_args: list[str] = runsc_entry.get("runtimeArgs", [])
+    runsc_entry = runsc_entry if isinstance(runsc_entry, dict) else {}
+    raw_args = runsc_entry.get("runtimeArgs", [])
+    runtime_args: list[str] = [a for a in raw_args if isinstance(a, str)] if isinstance(raw_args, list) else []
 
     has_host_uds_all = any(arg == "--host-uds=all" for arg in runtime_args)
 
@@ -449,9 +504,8 @@ def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) ->
             detail=f"docker compose ls failed: {outcome.message}",
             category="Privilege Boundary",
         )
-    try:
-        projects = json.loads(outcome.stdout or "[]")
-    except json.JSONDecodeError:
+    projects = _safe_load_json(outcome.stdout or "[]", list)
+    if projects is None:
         return CheckResult(
             status="skip",
             name="compose project name collision",
