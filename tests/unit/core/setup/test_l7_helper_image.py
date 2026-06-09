@@ -96,6 +96,42 @@ def test_act_pulls_pinned_digest(store: _Store, ctx: SetupContext) -> None:
     assert "pulled" in detail
 
 
+def test_act_separate_user_pull_crosses_via_machinectl_sentinel(
+    monkeypatch: pytest.MonkeyPatch, ctx: SetupContext
+) -> None:
+    """C-009 §3.7 guard: the L7 ROOT crossing stays machinectl + ``sentinel=True``.
+
+    L7 runs as root BEFORE the operator sudoers rule exists, crossing into the
+    sandbox user via ``daemon_owner_crossing`` (``machinectl_cmd`` in
+    separate-user) with the orchestrator-injected sentinel ON. It neither uses
+    nor depends on the operator pipe ``Cmnd_Spec`` (L3a/L8's ``framed=True``
+    pipe path), so it MUST NOT be touched.
+    """
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        inner = cmd[-1]
+        if inner.startswith("docker image inspect "):
+            raise SandboxExecutionError("no such image")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    l7.PHASE.act(ctx)
+
+    pulls = [
+        (c, s) for c, s in seen if c[-1].startswith("docker pull ")
+    ]
+    assert len(pulls) == 1
+    cmd, sentinel = pulls[0]
+    assert "machinectl" in cmd
+    assert sentinel is True
+    assert "systemd-run" not in cmd
+
+
 def test_reverify_true_after_pull(store: _Store, ctx: SetupContext) -> None:
     l7.PHASE.act(ctx)
     assert l7.PHASE.reverify(ctx) is True

@@ -2,9 +2,10 @@
 
 Covers: the always-MISSING verification probe; the ``id -G`` bridge-gid
 membership check (present -> pass; absent -> FAIL); the end-to-end
-machinectl-reachable check recovering the inner exit via the dispatcher's
-begin/exit framing (``framed=True``); the bridge-group-missing refusal; PHASE
-wiring (no rollback — verification mutates nothing).
+dispatcher-reachable check crossing via the PIPE (C-009 D4 — the machinectl
+operator spec was removed in M3-i) and recovering the inner exit via the
+dispatcher's begin/exit framing (``framed=True``); the bridge-group-missing
+refusal; PHASE wiring (no rollback — verification mutates nothing).
 """
 
 from __future__ import annotations
@@ -44,17 +45,17 @@ def _ctx() -> SetupContext:
 
 
 class _FakeExecutor:
-    """Stand-in: ``id -G`` returns ``id_gids``; the machinectl probe matches
-    unless ``machinectl_error`` is set (the sentinel non-zero-inner signal).
+    """Stand-in: ``id -G`` returns ``id_gids``; the dispatcher probe matches
+    unless ``dispatcher_error`` is set (the framed non-zero-inner signal).
     """
 
     def __init__(
         self,
         id_gids: str = "1000 4242 27",
-        machinectl_error: SandboxExecutionError | None = None,
+        dispatcher_error: SandboxExecutionError | None = None,
     ):
         self._id_gids = id_gids
-        self._machinectl_error = machinectl_error
+        self._dispatcher_error = dispatcher_error
         self.calls: list[list[str]] = []
         self.framed_flags: list[bool] = []
 
@@ -65,12 +66,12 @@ class _FakeExecutor:
         self.framed_flags.append(bool(kwargs.get("framed")))
         if "id" in cmd and "-G" in cmd:
             return subprocess.CompletedProcess(cmd, 0, self._id_gids, "")
-        # The machinectl auth-probe path runs with framed=True (the dispatcher
+        # The dispatcher auth-probe path runs with framed=True (the dispatcher
         # emits the begin/exit framing; the crossed payload stays bare so the
         # per-op rule matches — F-018, NOT a sentinel=True wrap).
         assert kwargs.get("framed") is True
-        if self._machinectl_error is not None:
-            raise self._machinectl_error
+        if self._dispatcher_error is not None:
+            raise self._dispatcher_error
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
 
@@ -90,44 +91,66 @@ def test_probe_always_missing() -> None:
     assert "no idempotent skip" in detail
 
 
-# ── happy path: group set + machinectl reachable ─────────────────────────────
+# ── happy path: group set + dispatcher reachable ─────────────────────────────
 
 
-def test_verify_passes_when_group_and_machinectl_ok(
+def test_verify_passes_when_group_and_dispatcher_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _install(monkeypatch, _FakeExecutor())
     detail = l8._act(_ctx())
     assert "fresh-session verified" in detail
     # First call is `id -G` via pipe_cmd (not framed); second is the
-    # framed-recovered machinectl auth-probe (the dispatcher emits the framing).
+    # framed-recovered dispatcher auth-probe (the dispatcher emits the framing).
     assert "id" in fake.calls[0]
     assert fake.framed_flags[0] is False
     assert fake.framed_flags[1] is True
 
 
-def test_group_check_uses_pipe_cmd_machinectl_uses_sudo_u(
+def test_group_check_uses_pipe_cmd_dispatcher_crosses_via_pipe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """G1/F-016: the two checks use different operator-drop primitives.
+    """The two checks: group via pipe_cmd; reachability via the operator pipe.
 
     The ``id -G`` group check is a plain binary → ``pipe_cmd`` (systemd-run
-    --uid) is correct. The machinectl-reachability check runs setuid ``sudo``,
-    which a systemd-run --uid transient unit cannot exec (EXIT_EXEC 203 — the
-    same F-016 defect fixed in L3a), so it MUST drop via ``sudo_as_operator``
-    (``sudo -u``). Round-5 fedora 12.4 hit the empty-sentinel here. The argv
-    captured is the real L8 output (only the boundary call is faked).
+    --uid) is correct. The dispatcher-reachability check crosses via the PIPE
+    (C-009 D4 — the machinectl operator ``Cmnd_Spec`` was REMOVED in M3-i; only
+    the pipe spec remains, so a machinectl crossing would be unauthorized and
+    would false-FAIL the freshly-installed rule). Root drops to the operator via
+    ``sudo_as_operator`` (``sudo -u``) because the operator-side command is the
+    setuid ``sudo`` (a systemd-run --uid drop EXIT_EXECs on setuid — F-016); the
+    authorized inner is the relative ``systemd-run`` ``pipe_cmd`` builds. The
+    argv captured is the real L8 output (only the boundary call is faked).
     """
     fake = _install(monkeypatch, _FakeExecutor())
     l8._act(_ctx())
-    # calls[0] = id -G via pipe_cmd (systemd-run --uid); calls[1] = machinectl
-    # via sudo_as_operator.
-    group_argv, machinectl_argv = fake.calls[0], fake.calls[1]
+    # calls[0] = id -G via pipe_cmd (systemd-run --uid); calls[1] = the operator
+    # pipe crossing: sudo -u alice → sudo -n → systemd-run -q --pipe --uid=… .
+    group_argv, dispatcher_argv = fake.calls[0], fake.calls[1]
     assert group_argv[0] == "systemd-run"
     assert "id" in group_argv and "-G" in group_argv
-    assert machinectl_argv[:3] == ["sudo", "-u", "alice"]
-    assert "systemd-run" not in machinectl_argv
-    assert not any(a.startswith("--uid=") for a in machinectl_argv)
+    assert dispatcher_argv[:5] == [
+        "sudo",
+        "-u",
+        "alice",
+        "sudo",
+        "-n",
+    ]
+    # The authorized crossing is the relative systemd-run pipe (pipe_cmd),
+    # matching the rendered pipe Cmnd_Spec — NOT machinectl.
+    assert dispatcher_argv[5:9] == [
+        "systemd-run",
+        "-q",
+        "--pipe",
+        "--uid=sandbox",
+    ]
+    assert "machinectl" not in dispatcher_argv
+    # The inner payload is the bare dispatch auth-probe (so it matches the rule).
+    assert dispatcher_argv[-3:] == [
+        "/bin/bash",
+        "-c",
+        "/usr/local/libexec/sandbox-ai/dispatch auth-probe",
+    ]
 
 
 def test_reverify_true_when_clean(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,16 +185,16 @@ def test_fail_when_id_command_errors(
         l8._act(_ctx())
 
 
-# ── machinectl not reachable through the new rule ────────────────────────────
+# ── dispatcher not reachable through the new rule ────────────────────────────
 
 
-def test_fail_when_machinectl_unreachable(
+def test_fail_when_dispatcher_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     err = SandboxExecutionError(
         "[FATAL] Inner command failed with exit status 2."
     )
-    _install(monkeypatch, _FakeExecutor(machinectl_error=err))
+    _install(monkeypatch, _FakeExecutor(dispatcher_error=err))
     with pytest.raises(FreshSessionError, match="NOT reachable end-to-end"):
         l8._act(_ctx())
 

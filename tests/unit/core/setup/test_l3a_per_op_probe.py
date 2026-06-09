@@ -14,8 +14,8 @@ payload stays the bare ``<dispatch> <op> --check`` the per-op rule matches —
 F-018, NOT the pre-fix ``sentinel=True`` wrap). The tests mock ``Executor`` and
 exercise the branch logic on that recovered signal — NOT on a raw outer exit —
 while the captured argv is the real ``_probe_argv`` output (so the operator-drop
-shape is asserted for real; see ``test_probe_argv_drops_via_sudo_u_not_systemd_run``,
-F-016).
+shape AND the pipe crossing are asserted for real; see
+``test_probe_argv_crosses_via_pipe_under_sudo_u``, C-009 D4 / F-016).
 """
 
 from __future__ import annotations
@@ -44,9 +44,9 @@ from core.setup.phase_runner import (
 
 
 @pytest.fixture(autouse=True)
-def _stable_machinectl(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stable_systemd_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        l3a, "resolve_machinectl_path", lambda _hc: "/usr/bin/machinectl"
+        l3a, "resolve_systemd_run_path", lambda _hc: "/usr/bin/systemd-run"
     )
 
 
@@ -122,40 +122,54 @@ def test_sweep_all_match(monkeypatch: pytest.MonkeyPatch) -> None:
     assert probed == [op.value for op in Op]
 
 
-def test_probe_argv_is_relative_machinectl(
+def test_probe_argv_is_relative_systemd_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _install_executor(monkeypatch, {})
     l3a._act(_ctx())
     argv = fake.calls[0]
-    # `sudo -n machinectl` (relative, B-3) — NOT an absolute /usr/bin/machinectl.
-    # The inner sudo is the one after the operator-drop prefix.
+    # `sudo -n systemd-run` (relative, B-3) — NOT an absolute
+    # /usr/bin/systemd-run. The inner sudo is the one after the operator drop.
     inner_sudo = argv.index("sudo", argv.index("alice"))
     assert argv[inner_sudo + 1] == "-n"
-    assert argv[inner_sudo + 2] == "machinectl"
-    assert "/usr/bin/machinectl" not in argv
+    assert argv[inner_sudo + 2] == "systemd-run"
+    assert "/usr/bin/systemd-run" not in argv
+    # The M3-i rule renders ONLY the pipe Cmnd_Spec — machinectl is gone.
+    assert "machinectl" not in argv
 
 
-def test_probe_argv_drops_via_sudo_u_not_systemd_run(
+def test_probe_argv_crosses_via_pipe_under_sudo_u(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The operator drop MUST be ``sudo -u <operator>``, never systemd-run.
+    """The probe crosses via the PIPE, dropped under ``sudo -u <operator>``.
 
-    F-016 regression: the original ``pipe_cmd`` (``systemd-run --uid``) drop
-    cannot exec the setuid ``sudo`` that follows — it EXIT_EXECs (203) on a real
-    host, so the probe got empty output → "sentinel not found" → FAIL → rolled
-    back a correct rule. Mock-hidden for the whole change. The argv built here
-    is the real ``_probe_argv`` output (only the boundary call is faked), so
-    this asserts the construction that actually broke.
+    C-009 D4: the machinectl operator ``Cmnd_Spec`` was REMOVED in M3-i, so the
+    probe MUST cross via ``pipe_cmd`` (the relative ``systemd-run -q --pipe
+    --uid=<user>``) to match the freshly-installed rule — a machinectl probe
+    would be unauthorized and would roll back a correct rule ("stranding").
+
+    F-016: root drops to the operator via ``sudo_as_operator`` (``sudo -u``)
+    because the operator-side command is the setuid ``sudo``; that ``sudo``
+    cannot exec inside a ``pipe_cmd`` ``--uid`` transient unit (EXIT_EXEC 203).
+    The authorized inner is the relative ``systemd-run`` ``pipe_cmd`` builds,
+    whose ``--uid`` unit execs ``/bin/bash`` → dispatch (non-setuid), so F-016
+    does not block the inner. The argv built here is the real ``_probe_argv``
+    output (only the boundary call is faked).
     """
     fake = _install_executor(monkeypatch, {})
     l3a._act(_ctx())
     argv = fake.calls[0]
-    # Normal-process operator drop, byte-for-byte.
-    assert argv[:3] == ["sudo", "-u", "alice"]
-    # The transient-unit primitive must be entirely absent.
-    assert "systemd-run" not in argv
-    assert not any(a.startswith("--uid=") for a in argv)
+    # Normal-process operator drop, then the operator's own `sudo -n`.
+    assert argv[:5] == ["sudo", "-u", "alice", "sudo", "-n"]
+    # The authorized crossing is the relative systemd-run pipe (pipe_cmd) —
+    # byte-identical to the rendered pipe Cmnd_Spec launcher prefix.
+    assert argv[5:9] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]
+    # The inner payload is the bare `<dispatch> <op> --check` the rule matches.
+    assert argv[-3:] == [
+        "/bin/bash",
+        "-c",
+        f"/usr/local/libexec/sandbox-ai/dispatch {Op.AUTH_PROBE.value} --check",
+    ]
 
 
 # ── password-required branch (F-004 / MACHINECTL_PATH drift) ─────────────────
@@ -174,8 +188,8 @@ def test_password_required_classifies_as_grant_failure(
     msg = str(exc.value)
     assert "compose-up" in msg
     assert "missed backslash-escape (F-004)" in msg
-    assert "MACHINECTL_PATH drift" in msg
-    assert "/usr/bin/machinectl" in msg
+    assert "SYSTEMD_RUN_PATH drift" in msg
+    assert "/usr/bin/systemd-run" in msg
 
 
 # ── generic non-zero (incl. dispatcher reject exit 2) ────────────────────────

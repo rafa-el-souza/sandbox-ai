@@ -185,6 +185,61 @@ def test_act_enables_linger_and_installs_dockerd(
     assert any("dockerd-rootless-setuptool.sh install" in c for c in world.calls)
 
 
+def test_act_separate_user_install_crosses_via_machinectl_sentinel(
+    monkeypatch: pytest.MonkeyPatch, ctx: SetupContext
+) -> None:
+    """C-009 §3.7 guard: the L5 ROOT crossing stays machinectl + ``sentinel=True``.
+
+    L5 runs as root BEFORE the operator sudoers rule exists, so it crosses into
+    the sandbox user via ``daemon_owner_crossing`` (``machinectl_cmd`` in
+    separate-user) with the orchestrator-injected sentinel ON (``machinectl
+    shell`` masks the inner exit) — NOT the operator pipe / ``framed=True`` path
+    L3a/L8 switched to. It neither uses nor depends on the operator pipe
+    ``Cmnd_Spec``, so it MUST NOT be touched.
+    """
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _present_pw())
+    seen: list[tuple[list[str], object]] = []
+    installed = False
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal installed
+        joined = " ".join(cmd)
+        seen.append((cmd, kw.get("sentinel")))
+        if "show-user" in cmd and "--property=Linger" in joined:
+            return subprocess.CompletedProcess(cmd, 0, "Linger=yes\n", "")
+        if "enable-linger" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "systemctl is-active user@" in joined:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "docker info" in joined:
+            if not installed:
+                raise SandboxExecutionError("docker info failed")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        if "dockerd-rootless-setuptool.sh install" in joined:
+            installed = True
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected command: {joined}")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    l5.PHASE.act(ctx)
+
+    install = [
+        (c, s)
+        for c, s in seen
+        if "dockerd-rootless-setuptool.sh install" in " ".join(c)
+    ]
+    assert len(install) == 1
+    cmd, sentinel = install[0]
+    # ROOT machinectl crossing into the sandbox user, sentinel ON.
+    assert "machinectl" in cmd
+    assert sentinel is True
+    # NOT the operator pipe path (L3a/L8 own that, not the root phases).
+    assert "systemd-run" not in cmd
+
+
 def test_act_skips_install_when_dockerd_already_up(
     world: _World, ctx: SetupContext
 ) -> None:

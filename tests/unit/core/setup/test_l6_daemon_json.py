@@ -200,6 +200,40 @@ def test_act_creates_and_merges_preserving_operator_runtimes(
     assert any("restart --no-block docker" in r for r in restarts)
 
 
+def test_act_separate_user_restart_crosses_via_machinectl_sentinel(
+    daemon_json: Path, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-009 §3.7 guard: the L6 ROOT crossing stays machinectl + ``sentinel=True``.
+
+    L6 runs as root BEFORE the operator sudoers rule exists, crossing into the
+    sandbox user via ``daemon_owner_crossing`` (``machinectl_cmd`` in
+    separate-user) with the orchestrator-injected sentinel ON. It neither uses
+    nor depends on the operator pipe ``Cmnd_Spec`` (L3a/L8's ``framed=True``
+    pipe path), so it MUST NOT be touched.
+    """
+    _write(daemon_json, {})
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    l6.PHASE.act(ctx)
+
+    restart = [
+        (c, s) for c, s in seen if "restart --no-block docker" in c[-1]
+    ]
+    assert len(restart) == 1
+    cmd, sentinel = restart[0]
+    assert "machinectl" in cmd
+    assert sentinel is True
+    assert "systemd-run" not in cmd
+
+
 def test_act_settle_gate_runs_before_restart_crossing(
     daemon_json: Path, ctx: SetupContext, restarts: list[str]
 ) -> None:
