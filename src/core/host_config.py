@@ -260,6 +260,39 @@ def pipe_cmd(user: str) -> list[str]:
     return ["systemd-run", "-q", "--pipe", f"--uid={user}"]
 
 
+def sudo_pipe_cmd(user: str) -> list[str]:
+    """Build the *privileged* byte-pipe primitive: ``["sudo", *pipe_cmd(user)]``.
+
+    The per-op-sudoers-authorized sibling of :func:`pipe_cmd`. Where ``pipe_cmd``
+    crosses into ``user`` as an already-privileged caller (root setup phases, the
+    SSH ``ProxyCommand`` path), ``sudo_pipe_cmd`` prepends ``sudo`` so an
+    unprivileged operator can cross via a per-op sudoers rule that authorizes
+    exactly this argv (separate-user + SUDO dispatch routing — design D2).
+
+    It **delegates** to :func:`pipe_cmd` and never re-spells the transient-unit
+    literal — ``pipe_cmd`` remains the single sanctioned home for that literal
+    (design D1, single source of truth), so the convention guard
+    ``test_no_raw_systemd_run_outside_pipe_cmd`` needs no extension.
+
+    Takes only ``user`` — there is NO ``auth`` argument: the per-op sudoers rule
+    is the sole authorization layer (the per-host ``machinectl_authentication``
+    setting does not apply, exactly as for ``pipe_cmd``).
+
+    It MUST never append ``--unit``/``--description``: the rendered argv has to
+    stay byte-identical to the per-op sudoers ``Cmnd_Spec`` derived from this same
+    function, or sudo will refuse the crossing.
+
+    PAM-skip carries over from :func:`pipe_cmd`: the transient-unit launcher does
+    not invoke PAM, so ``pam_limits.conf`` and similar policies do not apply to
+    processes started this way (operator-signed-off — design D7).
+
+    Returns:
+        ``["sudo", *pipe_cmd(user)]`` — i.e. ``pipe_cmd``'s argv prefixed with
+        ``"sudo"``.
+    """
+    return ["sudo", *pipe_cmd(user)]
+
+
 def sudo_as_operator(operator: str) -> list[str]:
     """Build a NORMAL-PROCESS drop into ``operator`` (not a transient unit).
 

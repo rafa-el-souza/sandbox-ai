@@ -31,6 +31,7 @@ from core.host_config import (
     resolve_daemon_owner,
     sandbox_ai_home,
     sudo_as_operator,
+    sudo_pipe_cmd,
     workspace_bridge_gid,
 )
 from pydantic import ValidationError
@@ -399,6 +400,41 @@ class TestPipeCmd:
         """
         assert set(inspect.signature(pipe_cmd).parameters) == {"user"}
         assert set(inspect.signature(machinectl_cmd).parameters) == {"user", "auth"}
+
+
+# ─── sudo_pipe_cmd() privileged byte-pipe primitive ──────────────────────────
+
+
+class TestSudoPipeCmd:
+    """sudo_pipe_cmd() — the per-op-sudoers-authorized sibling of pipe_cmd (D1)."""
+
+    def test_is_sudo_prefixed_pipe_cmd(self) -> None:
+        """Canonical shape: ['sudo', *pipe_cmd(user)] — delegates, never re-spells."""
+        assert sudo_pipe_cmd("claude-sandbox") == ["sudo", *pipe_cmd("claude-sandbox")]
+        assert sudo_pipe_cmd("claude-sandbox") == [
+            "sudo",
+            "systemd-run",
+            "-q",
+            "--pipe",
+            "--uid=claude-sandbox",
+        ]
+
+    def test_signature_takes_only_user(self) -> None:
+        """No ``auth`` argument: the per-op sudoers rule is the sole authz layer."""
+        assert set(inspect.signature(sudo_pipe_cmd).parameters) == {"user"}
+
+    def test_no_unit_or_description_token(self) -> None:
+        """Argv must stay byte-identical to the per-op sudoers Cmnd_Spec."""
+        argv = sudo_pipe_cmd("claude-sandbox")
+        assert not any(a == "--unit" or a.startswith("--unit=") for a in argv)
+        assert not any(a == "--description" or a.startswith("--description=") for a in argv)
+
+    def test_distinct_from_pipe_cmd_by_sudo_prefix(self) -> None:
+        """Distinct from pipe_cmd: the sole difference is the leading ``sudo``."""
+        argv = sudo_pipe_cmd("claude-sandbox")
+        assert argv != pipe_cmd("claude-sandbox")
+        assert argv[0] == "sudo"
+        assert argv[1:] == pipe_cmd("claude-sandbox")
 
 
 # ─── sudo_as_operator() setuid-safe operator drop ────────────────────────────
