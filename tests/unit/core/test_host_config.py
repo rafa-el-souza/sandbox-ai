@@ -409,15 +409,13 @@ class TestSudoPipeCmd:
     """sudo_pipe_cmd() — the per-op-sudoers-authorized sibling of pipe_cmd (D1)."""
 
     def test_is_sudo_prefixed_pipe_cmd(self) -> None:
-        """Canonical shape: ['sudo', *pipe_cmd(user)] — delegates, never re-spells."""
+        """Canonical shape: ['sudo', *pipe_cmd(user)] — delegates, never re-spells.
+
+        Asserts the delegation contract only; pipe_cmd's concrete argv is owned
+        and pinned by pipe_cmd's own test — re-pinning the expanded literal here
+        would duplicate that constant (anti-hack rule 4, single source of truth).
+        """
         assert sudo_pipe_cmd("claude-sandbox") == ["sudo", *pipe_cmd("claude-sandbox")]
-        assert sudo_pipe_cmd("claude-sandbox") == [
-            "sudo",
-            "systemd-run",
-            "-q",
-            "--pipe",
-            "--uid=claude-sandbox",
-        ]
 
     def test_signature_takes_only_user(self) -> None:
         """No ``auth`` argument: the per-op sudoers rule is the sole authz layer."""
