@@ -90,12 +90,7 @@ from core.setup import cli_flow, host_batch
 from core.setup.extras import selected_extras
 from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
 from core.setup.l6a_runsc import set_force_update
-from core.setup.phase_runner import (
-    SetupContext,
-    run_apply_pass,
-    run_plan_pass,
-    wait_user_manager_ready,
-)
+from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
 from core.setup_state import (
     ModeMarkerMissing,
     read_mode,
@@ -376,32 +371,6 @@ def _warm_check(
 
     config = _load_config(instance_dir)
     return bool(_container_status(instance_dir, host_user, config, auth, mode))
-
-
-def _ensure_user_manager_ready(user: str) -> None:
-    """Best-effort wait for ``user``'s systemd manager before an operator-side crossing.
-
-    The lifecycle commands cross ``machinectl shell`` into ``user@<uid>.service`` for their
-    preflight (``machinectl reachable``) and warm-check (``compose-ps``) probes. A crossing
-    into a not-yet-ready manager connects and terminates with empty output → the executor's
-    sentinel-not-found fail-closed fires, which the preflight reads as "unreachable" and the
-    warm-check reads as "not running" — aborting ``start`` or no-opping ``stop`` on a host
-    that is actually fine (F-055 / F-061). Setup's L5/L6 already gate this race via
-    :func:`wait_user_manager_ready`; the operator-side lifecycle crossings must too.
-
-    This is that same crossing-free ``systemctl is-active user@<uid>.service`` gate, run
-    BEFORE the first crossing. It no-ops within milliseconds when the manager is already
-    active (the common case) and is mode-agnostic (in operator-rootless ``user`` is the
-    operator, whose own manager is trivially active). A persistent not-ready (the bounded
-    wait elapses) or an unknown ``user`` is swallowed deliberately: the subsequent probe then
-    surfaces the canonical, operator-facing failure with its remediation, rather than this
-    readiness gate raising a less specific error. ``doctor``/``status`` intentionally do NOT
-    call this — they must report state promptly, not wait.
-    """
-    try:
-        wait_user_manager_ready(user)
-    except (SandboxExecutionError, KeyError):
-        return
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -3084,8 +3053,6 @@ def init(
             probe_mode = DockerExecutionMode.SEPARATE_USER
         probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
         probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
-        # F-055/F-061: gate manager readiness before the auth-probe crossing.
-        _ensure_user_manager_ready(probe_owner)
         probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
         if not probe_outcome.ok:
             if probe_outcome.timed_out:
@@ -3263,10 +3230,6 @@ def start(
             style="red",
         )
         raise typer.Exit(code=1)
-
-    # F-055/F-061: gate on the sandbox user's manager readiness before the first crossing,
-    # so a not-yet-ready manager can't make the preflight misread the host as unreachable.
-    _ensure_user_manager_ready(host_user)
 
     # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
     distro = detect_distro()
@@ -3450,10 +3413,6 @@ def stop(
     host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
 
-    # F-061: gate manager readiness before the warm-check crossing, else a not-yet-ready
-    # manager makes ``compose-ps`` return empty → "not running" → a silent no-op teardown.
-    _ensure_user_manager_ready(host_user)
-
     # Warm check
     if not _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
@@ -3543,9 +3502,6 @@ def attach(
             style="red",
         )
         raise typer.Exit(code=1)
-
-    # F-061: gate manager readiness before the warm-check crossing (see ``stop``).
-    _ensure_user_manager_ready(host_user)
 
     # Warm check — reject if cold
     if not _warm_check(instance_dir, host_user, auth, host_config.host.docker_execution_mode):
@@ -3645,10 +3601,6 @@ def destroy(
     auth = host_config.host.machinectl_authentication
     mode = host_config.host.docker_execution_mode
     available = set(config.workspaces.keys())
-
-    # F-055/F-061: gate manager readiness before the teardown crossing, so a not-yet-ready
-    # manager doesn't fail the ``compose-down`` crossing on an otherwise-healthy host.
-    _ensure_user_manager_ready(host_user)
 
     # D1: Confirmation + backup-set selection.
     if not force:

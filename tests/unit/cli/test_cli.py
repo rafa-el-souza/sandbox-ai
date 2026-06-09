@@ -1611,40 +1611,6 @@ class TestWarmCheckDirect:
             assert _warm_check(str(tmp_path), "sandbox") is False
 
 
-@pytest.mark.no_manager_ready_mock
-class TestEnsureUserManagerReady:
-    """Direct tests for _ensure_user_manager_ready — the F-055/F-061 readiness gate.
-
-    Marked ``no_manager_ready_mock`` so the cli/conftest.py autouse fixture's
-    global no-op patch is skipped — these exercise the real gate, with
-    ``wait_user_manager_ready`` itself patched so no real subprocess runs.
-    """
-
-    def test_ready_delegates_to_wait(self) -> None:
-        from cli.main import _ensure_user_manager_ready
-
-        with patch("cli.main.wait_user_manager_ready") as mock_wait:
-            _ensure_user_manager_ready("sandbox")
-        mock_wait.assert_called_once_with("sandbox")
-
-    def test_swallows_execution_error(self) -> None:
-        # The bounded wait elapsing must NOT raise — the downstream probe then
-        # surfaces the canonical, operator-facing failure with its remediation.
-        from cli.main import _ensure_user_manager_ready
-        from core.exceptions import SandboxExecutionError
-
-        with patch("cli.main.wait_user_manager_ready", side_effect=SandboxExecutionError("not active")):
-            _ensure_user_manager_ready("sandbox")  # no raise
-
-    def test_swallows_unknown_user(self) -> None:
-        # An unknown user (pwd.getpwnam KeyError inside wait_user_manager_ready)
-        # must also fall through to the canonical downstream probe failure.
-        from cli.main import _ensure_user_manager_ready
-
-        with patch("cli.main.wait_user_manager_ready", side_effect=KeyError("name not found: sandbox")):
-            _ensure_user_manager_ready("sandbox")  # no raise
-
-
 class TestLockingDirect:
     """Direct tests for _acquire_state_lock and _release_lock."""
 
