@@ -1041,11 +1041,11 @@ def test_real_crossing_only_phases_run_in_separate_user_plan(
     Their probes run (deterministically MISSING on a fresh tree: absent drop-in
     / absent dispatcher manifest / verification-only l3a/l8) — the point is that
     none come back SKIPPED, i.e. the mode gate is inactive in separate-user.
-    ``resolve_machinectl_path`` is pinned so l3's probe is host-independent.
+    ``resolve_systemd_run_path`` is pinned so l3's probe is host-independent.
     """
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit.resolve_machinectl_path",
-        lambda _hc: "/usr/bin/machinectl",
+        "core.setup.l3_sudoers_polkit.resolve_systemd_run_path",
+        lambda _hc: "/usr/bin/systemd-run",
     )
     phases = _real_crossing_only_phases()
     out = {

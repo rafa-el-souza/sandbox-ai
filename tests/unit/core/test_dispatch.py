@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from core.dispatch import (
+    _DISPATCH_BINARY,
     OP_SPECS,
     DispatchValidationError,
     Op,
@@ -29,8 +30,10 @@ from core.dispatch import (
     build_invocation,
     build_target_argv,
     compile_dispatcher,
+    dispatch_payload,
     invoke,
     probe,
+    sudo_pipe_crossing_argv,
     validate_args,
 )
 from core.exceptions import SandboxExecutionError
@@ -1081,6 +1084,43 @@ class TestBuildInvocation:
 
 # ─── C-009 §2: SUDO separate-user dispatch rides the privileged byte-pipe ────
 #
+# ─── SSOT crossing primitives (C-009 design D4) ─────────────────────────────
+#
+# ``dispatch_payload`` + ``sudo_pipe_crossing_argv`` are the single source the
+# L3 sudoers ``Cmnd_Spec`` renderer AND ``build_invocation`` both derive from,
+# so the authorized grant cannot drift from the actual crossing.
+
+
+class TestSsotCrossingPrimitives:
+    def test_dispatch_payload_no_wire(self) -> None:
+        assert (
+            dispatch_payload("auth-probe", [])
+            == f"{_DISPATCH_BINARY} auth-probe"
+        )
+
+    def test_dispatch_payload_with_wire(self) -> None:
+        assert (
+            dispatch_payload("docker-info", ["runtimes"])
+            == f"{_DISPATCH_BINARY} docker-info runtimes"
+        )
+
+    def test_sudo_pipe_crossing_argv_drops_sudo_and_abspaths_launcher(
+        self,
+    ) -> None:
+        from core.host_config import sudo_pipe_cmd
+
+        argv = sudo_pipe_crossing_argv("/usr/bin/systemd-run", "sandbox")
+        # Leading ``sudo`` dropped; relative launcher (index 1) abspath'd;
+        # every other token byte-identical to ``sudo_pipe_cmd``.
+        assert argv == ["/usr/bin/systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert argv[1:] == sudo_pipe_cmd("sandbox")[2:]
+
+    def test_build_invocation_inner_is_dispatch_payload(self) -> None:
+        # build_invocation's inner uses dispatch_payload — the SSOT seam.
+        argv = build_invocation("auth-probe", [], _sudo_hc())
+        assert argv[-1] == dispatch_payload("auth-probe", [])
+
+
 # build_invocation splits the separate-user branch by auth mode (design D2):
 # SUDO → ``sudo_pipe_cmd(user)`` prefix (the privileged byte-pipe); POLKIT →
 # ``machinectl_cmd(user, POLKIT)`` (UNCHANGED). The inner ``dispatch <op>

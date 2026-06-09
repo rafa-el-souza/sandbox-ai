@@ -627,9 +627,9 @@ class TestAuditRuleBody:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
-        body = render_sudoers_rule("/usr/bin/machinectl", "alice", socket.gethostname(), "sandbox")
+        body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", body, v)
         assert v == []
@@ -638,9 +638,9 @@ class TestAuditRuleBody:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
-        body = render_sudoers_rule("/usr/bin/machinectl", "alice", socket.gethostname(), "sandbox")
+        body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         tampered = body.replace("auth-probe", 'auth-"probe')
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", tampered, v)
@@ -650,9 +650,9 @@ class TestAuditRuleBody:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
-        body = render_sudoers_rule("/usr/bin/machinectl", "alice", socket.gethostname(), "sandbox")
+        body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         first_op = next(iter(Op)).value
         stale = "\n".join(
             line for line in body.splitlines() if f"{_DISPATCH_BINARY}\\ {first_op}" not in line
@@ -664,12 +664,12 @@ class TestAuditRuleBody:
 
     def test_resolution_error_skips_body(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
-        from core.setup.l0_identity import MachinectlResolutionError
+        from core.setup.l0_identity import SystemdRunResolutionError
 
         def boom(hc: Any) -> str:
-            raise MachinectlResolutionError("zero machinectl")
+            raise SystemdRunResolutionError("zero launcher")
 
-        monkeypatch.setattr("core.setup.l0_identity.resolve_machinectl_path", boom)
+        monkeypatch.setattr("core.setup.l0_identity.resolve_systemd_run_path", boom)
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", "irrelevant", v)
         assert v == []  # body comparison skipped; stability audit owns the resolution error
@@ -678,7 +678,7 @@ class TestAuditRuleBody:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
 
         from core.setup.l3_sudoers_polkit import RuleRenderError
@@ -695,12 +695,52 @@ class TestAuditRuleBody:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
-        body = render_sudoers_rule("/usr/bin/machinectl", "alice", socket.gethostname(), "sandbox")
+        body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", body + "\n# stray comment\n", v)
         assert any("installed body differs" in x for x in v)
+
+    def test_body_audit_keys_on_systemd_run_not_machinectl_path(self, monkeypatch: Any) -> None:
+        """Regression (signature-change orphan): the body audit renders against
+        ``resolve_systemd_run_path``, NOT ``resolve_machinectl_path``.
+
+        With the two resolvers mocked to DIFFERENT paths (every real host:
+        ``/usr/bin/machinectl`` != ``/usr/bin/systemd-run``) the installed rule
+        is the systemd-run-keyed pipe spec (L3 → ``resolve_systemd_run_path``).
+        The audit must render its expected body from the SAME systemd-run path
+        and report NO drift. The prior bug passed ``machinectl_path``
+        positionally into the launcher slot, so the expected body was keyed on
+        the machinectl abspath and the audit false-flagged drift on every host.
+        The single-mocked-path test could not catch it (F-014: a mock can't see
+        what it erases).
+        """
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr(
+            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+        )
+        monkeypatch.setattr(
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
+        )
+        # The INSTALLED rule is the systemd-run-keyed pipe spec (what L3 writes).
+        installed = render_sudoers_rule(
+            "/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox"
+        )
+        v: list[str] = []
+        m._audit_rule_body(self._hc(), "alice", installed, v)
+        assert v == []  # audit keys on the systemd-run path → no false drift
+
+        # A rule keyed on the MACHINECTL path as launcher (the buggy expected
+        # body the orphaned positional arg produced) WOULD be flagged as drift.
+        machinectl_keyed = render_sudoers_rule(
+            "/usr/bin/machinectl", "alice", socket.gethostname(), "sandbox"
+        )
+        assert machinectl_keyed != installed
+        v2: list[str] = []
+        m._audit_rule_body(self._hc(), "alice", machinectl_keyed, v2)
+        assert any("installed body differs" in x for x in v2)
 
 
 class TestAuditSudoFloor:

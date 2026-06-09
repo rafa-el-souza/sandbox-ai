@@ -16,10 +16,12 @@ from core.setup.l0_identity import (
     PHASE,
     MachinectlResolutionError,
     OperatorResolutionError,
+    SystemdRunResolutionError,
     classify_distro,
     missing_binaries,
     resolve_machinectl_path,
     resolve_operator,
+    resolve_systemd_run_path,
     sudo_floor_warning,
     unsupported_distro_refusal,
     untested_distro_warning,
@@ -486,6 +488,86 @@ def test_resolve_machinectl_sole_non_canonical(
         match="only outside a canonical",
     ):
         resolve_machinectl_path(_ctx().host_config)
+
+
+# ── systemd-run path resolution (C-009 design D5 — mirrors machinectl) ───────
+
+
+def test_resolve_systemd_run_exactly_one_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: p == "/usr/bin/systemd-run")
+    _stub_stat(monkeypatch, {"/usr/bin/systemd-run": (1, 200)})
+    assert (
+        resolve_systemd_run_path(_ctx().host_config) == "/usr/bin/systemd-run"
+    )
+
+
+def test_resolve_systemd_run_usrmerge_same_inode_no_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """usrmerged host: 4 secure_path aliases of ONE inode → canonical, no raise.
+
+    Mirrors ``test_resolve_machinectl_usrmerge_same_inode_no_refusal``: the four
+    usrmerge aliases ``os.stat`` to the SAME ``(st_dev, st_ino)`` and collapse to
+    a single binary resolving to the canonical ``/usr/bin/systemd-run``.
+    """
+    _stub_secure_path(monkeypatch, ["/usr/sbin", "/usr/bin", "/sbin", "/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    one_inode = (66, 77000)
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/sbin/systemd-run": one_inode,
+            "/usr/bin/systemd-run": one_inode,
+            "/sbin/systemd-run": one_inode,
+            "/bin/systemd-run": one_inode,
+        },
+    )
+    assert (
+        resolve_systemd_run_path(_ctx().host_config) == "/usr/bin/systemd-run"
+    )
+
+
+def test_resolve_systemd_run_more_than_one_distinct_inode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two GENUINELY DISTINCT launchers (different inodes) → F-005 shadow refusal."""
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/local/bin/systemd-run": (1, 9999),  # attacker shadow inode
+            "/usr/bin/systemd-run": (1, 200),  # the genuine systemd binary
+        },
+    )
+    with pytest.raises(
+        SystemdRunResolutionError, match="genuinely distinct binaries"
+    ):
+        resolve_systemd_run_path(_ctx().host_config)
+
+
+def test_resolve_systemd_run_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_secure_path(monkeypatch, ["/usr/bin", "/sbin"])
+    monkeypatch.setattr("os.access", lambda p, m: False)
+    with pytest.raises(SystemdRunResolutionError, match="no executable"):
+        resolve_systemd_run_path(_ctx().host_config)
+
+
+def test_resolve_systemd_run_sole_non_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/sbin"])
+    monkeypatch.setattr(
+        "os.access", lambda p, m: p == "/usr/local/bin/systemd-run"
+    )
+    _stub_stat(monkeypatch, {"/usr/local/bin/systemd-run": (1, 200)})
+    with pytest.raises(
+        SystemdRunResolutionError, match="only outside a canonical"
+    ):
+        resolve_systemd_run_path(_ctx().host_config)
 
 
 # ── _secure_path_dirs parsing branches ───────────────────────────────────────

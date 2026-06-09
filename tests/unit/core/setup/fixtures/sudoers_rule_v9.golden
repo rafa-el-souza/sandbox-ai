@@ -1,16 +1,16 @@
 # sandbox-ai managed — do not edit; rerun 'sudo sandbox setup'
 Defaults fast_glob
 alice testhost=(root) NOPASSWD: NOSETENV: \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ auth-probe, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ auth-probe\ --check, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-up\ *, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-down\ *, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ps\ *, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ls, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ls\ --check, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-version, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-version\ --check, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-info\ *, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-manifest-inspect\ *, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-chown-files\ *, \
-    /usr/bin/machinectl shell sandbox@.host /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-mkdir-chown-dirs\ *
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ auth-probe, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ auth-probe\ --check, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-up\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-down\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ps\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ls, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ compose-ls\ --check, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-version, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-version\ --check, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-info\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-manifest-inspect\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-chown-files\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-mkdir-chown-dirs\ *

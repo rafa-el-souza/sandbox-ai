@@ -710,6 +710,38 @@ def build_target_argv(op: Op | str, args: Sequence[str], host_config: HostConfig
     return OP_SPECS[resolved].build_target_argv(args, host_config)
 
 
+def dispatch_payload(op_value: str, wire_args: Sequence[str]) -> str:
+    """Build the bare ``<dispatch-binary> <op> <wire…>`` payload string.
+
+    The single source of truth for the ``/bin/bash -c <payload>`` inner the
+    privilege boundary crosses (C-009 design D4). It is consumed by BOTH
+    :func:`build_invocation` (the runtime crossing) and the L3 sudoers renderer
+    (the per-op ``Cmnd_Spec`` derivation), so the authorized grant and the
+    actual invocation are built from ONE construction and provably cannot drift.
+    ``wire_args`` is empty for the L3 grant derivation (the rule appends the
+    F-004-escaped ``\\ *`` / exact shape itself) and the expanded Q6 wire form at
+    runtime; both share this prefix.
+    """
+    return f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+
+
+def sudo_pipe_crossing_argv(launcher_path: str, user: str) -> list[str]:
+    """The post-``sudo`` byte-pipe crossing argv with an absolute launcher.
+
+    Derived from :func:`core.host_config.sudo_pipe_cmd` (NOT a re-typed literal)
+    so the runtime crossing prefix and the L3 ``Cmnd_Spec`` share one source
+    (C-009 design D4 SSOT). ``sudo_pipe_cmd(user)`` is
+    ``["sudo", <launcher>, "-q", "--pipe", f"--uid={user}"]``; sudo matches the
+    argv *after* ``sudo`` and resolves the relative launcher to an absolute path
+    via ``secure_path``, so the rule's ``Cmnd_Spec`` must name that absolute
+    path. This drops the leading ``"sudo"`` (index 0) and substitutes the
+    L0-resolved absolute ``launcher_path`` for the relative launcher (index 1)
+    **by list position** — exactly as the machinectl rule abspaths its launcher.
+    """
+    post_sudo = sudo_pipe_cmd(user)[1:]
+    return [launcher_path, *post_sudo[1:]]
+
+
 def build_invocation(
     op: Op | str,
     args: Sequence[str],
@@ -766,7 +798,7 @@ def build_invocation(
     )
     if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
-    inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+    inner = dispatch_payload(op_value, wire_args)
     user = host_config.host.docker_unprivileged_user
     auth = host_config.host.machinectl_authentication
     # SUDO crossings ride the privileged byte-pipe (design D2); POLKIT keeps

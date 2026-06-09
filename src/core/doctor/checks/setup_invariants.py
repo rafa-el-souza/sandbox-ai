@@ -223,23 +223,29 @@ def _audit_rule_body(
     (c) op-name segment shape (the L3 renderer raises ``RuleRenderError`` on a
     non-conforming op — surfaced as a WARN, not an exception).
 
-    Reuses L0's ``resolve_machinectl_path`` + L3's ``render_sudoers_rule``
-    (lazy import — see the module-top NOTE on the import-time cycle).
+    The L3 rule body now renders the per-op byte-pipe ``Cmnd_Spec`` keyed on the
+    transient-unit launcher path (the ``sudo_pipe_cmd`` crossing — C-009 D4), so
+    the expected body is rendered against L0's ``resolve_systemd_run_path``, NOT
+    ``resolve_machinectl_path``. (The machinectl-path *stability* audit is a
+    separate check — the root L5/L6/L7 crossings still use machinectl — and is
+    unchanged.) Reuses L3's ``render_sudoers_rule`` (lazy import — see the
+    module-top NOTE on the import-time cycle).
     """
     from core.setup import l0_identity as l0
     from core.setup import l3_sudoers_polkit as l3
 
     sandbox_user = host_config.host.docker_unprivileged_user
     try:
-        machinectl_path = l0.resolve_machinectl_path(host_config)
-    except l0.MachinectlResolutionError:
-        # Stability audit already recorded the resolution failure; without a
-        # resolvable path we cannot re-render, so skip the body comparison.
+        systemd_run_path = l0.resolve_systemd_run_path(host_config)
+    except l0.SystemdRunResolutionError:
+        # Without a resolvable launcher path we cannot re-render the pipe rule
+        # body, so skip the body comparison (same guard as the machinectl-path
+        # resolution failure the stability audit records separately).
         return
 
     try:
         expected = l3.render_sudoers_rule(
-            machinectl_path, operator, socket.gethostname(), sandbox_user
+            systemd_run_path, operator, socket.gethostname(), sandbox_user
         )
     except l3.RuleRenderError as exc:
         violations.append(
