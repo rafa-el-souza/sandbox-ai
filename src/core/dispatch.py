@@ -94,12 +94,14 @@ _COMPILE_INNER = (
 
 
 class Op(StrEnum):
-    """The ten typed ops the dispatcher accepts as ``argv[1]``.
+    """The eleven typed ops the dispatcher accepts as ``argv[1]``.
 
     The enum *value* is the wire name (hyphenated) passed to the dispatcher
     binary; the member identifier is the Python-legal upper-snake form. The
     surface is byte-faithful to the existing ``machinectl_cmd(...)`` callsites
-    it replaces (spec "Typed Op Surface").
+    it replaces (spec "Typed Op Surface") — with the one exception of
+    ``preflight``, a read-only *bundle* of the ``start`` privilege-boundary
+    preflight queries (C-009 D6) rather than a single-callsite enumeration.
     """
 
     AUTH_PROBE = "auth-probe"
@@ -112,6 +114,7 @@ class Op(StrEnum):
     DOCKER_MANIFEST_INSPECT = "docker-manifest-inspect"
     HELPER_CHOWN_FILES = "helper-chown-files"
     HELPER_MKDIR_CHOWN_DIRS = "helper-mkdir-chown-dirs"
+    PREFLIGHT = "preflight"
 
 
 # A validator inspects the op's args and raises on malformed input; it returns
@@ -419,7 +422,8 @@ def _resolve_compose_state(inst: str) -> tuple[str, list[str], str]:
 #
 # Q6 splits the compose path so compose target-argv is a *pure function of the
 # wire inputs* (and therefore lives in the one shared fixture alongside the
-# seven deterministic ops):
+# eight non-compose deterministic ops, incl. the read-only ``preflight``
+# bundle):
 #
 #   (a) ``_expand_compose_wire`` — the wire-expansion *producer*. It takes the
 #       typed args ``[<inst>]`` (+ ``["--volumes"]`` for a compose-down
@@ -560,21 +564,80 @@ def _bash_c(inner: str) -> list[str]:
     return ["/bin/bash", "-c", inner]
 
 
+# ─── Read-only op bare-inner SSOT ────────────────────────────────────────────
+#
+# The bare ``/bin/bash -c`` inner string of each read-only op is factored into
+# one of these helpers/constants. BOTH the individual op builder AND the
+# ``preflight`` bundle (:func:`_build_preflight`) consume them, so the bundled
+# inner can never re-spell a query string that has drifted from its individual
+# op. The ``docker info`` formats come from ``_DOCKER_INFO_PRESETS`` (already
+# the single source for the preset → Go-template-format mapping).
+
+_AUTH_PROBE_INNER = "echo ok"
+_COMPOSE_LS_INNER = "docker compose ls --format json --all"
+_DOCKER_VERSION_INNER = "docker version --format '{{.Server.Version}}'"
+
+
+def _docker_info_inner(preset: str) -> str:
+    """Bare inner for the ``docker-info`` op at ``preset`` (SSOT for the format)."""
+    return f"docker info --format '{_DOCKER_INFO_PRESETS[preset]}'"
+
+
 def _build_auth_probe(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    return _bash_c("echo ok")
+    return _bash_c(_AUTH_PROBE_INNER)
 
 
 def _build_compose_ls(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    return _bash_c("docker compose ls --format json --all")
+    return _bash_c(_COMPOSE_LS_INNER)
 
 
 def _build_docker_version(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    return _bash_c("docker version --format '{{.Server.Version}}'")
+    return _bash_c(_DOCKER_VERSION_INNER)
 
 
 def _build_docker_info(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    fmt = _DOCKER_INFO_PRESETS[args[0]]
-    return _bash_c(f"docker info --format '{fmt}'")
+    return _bash_c(_docker_info_inner(args[0]))
+
+
+# ─── preflight: the burst-collapse read-only bundle (C-009 D6, F-065) ────────
+#
+# The DISTINCT read-only health queries backing ``sandbox start``'s
+# privilege-boundary preflight, run ONCE EACH in one crossing. ``;``-sequenced
+# (NOT ``&&``/``set -e``): one query's failure must neither abort the others nor
+# forge their success (F-065). Each query is prefixed with a per-query begin
+# marker (``__PREFLIGHT_Q_<name>__``) on its own line so the orchestrator
+# (M4b cli-start) can split the bundled stdout and attribute each segment to its
+# check. The ``docker info`` runtimes query appears ONCE — the intrinsic dedup
+# feeding the runsc / runsc-runtimeArgs / host-uds checks.
+#
+# Ordered list of (attribution-marker query name, bare inner) — the marker name
+# is the wire identity of the query, NOT necessarily an op name (the two
+# ``docker-info`` presets share the op but are distinct queries).
+_PREFLIGHT_QUERY_MARKER_PREFIX = "__PREFLIGHT_Q_"
+
+
+def _preflight_query_segments() -> list[tuple[str, str]]:
+    """The ordered (marker-name, bare-inner) preflight queries (SSOT-sourced)."""
+    return [
+        (Op.AUTH_PROBE.value, _AUTH_PROBE_INNER),
+        (Op.DOCKER_VERSION.value, _DOCKER_VERSION_INNER),
+        ("docker-info-security-options", _docker_info_inner("security-options")),
+        ("docker-info-runtimes", _docker_info_inner("runtimes")),
+        (Op.COMPOSE_LS.value, _COMPOSE_LS_INNER),
+    ]
+
+
+def _preflight_inner() -> str:
+    """Build the ``;``-sequenced, per-query-attributed preflight bundle inner."""
+    parts = [
+        f"echo {_PREFLIGHT_QUERY_MARKER_PREFIX}{name}__; {inner}"
+        for name, inner in _preflight_query_segments()
+    ]
+    return " ; ".join(parts)
+
+
+def _build_preflight(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    return _bash_c(_preflight_inner())
 
 
 def _build_docker_manifest_inspect(args: Sequence[str], host_config: HostConfig) -> list[str]:
@@ -681,6 +744,13 @@ OP_SPECS: dict[Op, OpSpec] = {
         max_args=None,
         validate=_validate_helper_mkdir_chown_dirs,
         build_target_argv=_build_helper_mkdir_chown_dirs,
+    ),
+    Op.PREFLIGHT: OpSpec(
+        name=Op.PREFLIGHT.value,
+        min_args=0,
+        max_args=0,
+        validate=_validate_nullary,
+        build_target_argv=_build_preflight,
     ),
 }
 

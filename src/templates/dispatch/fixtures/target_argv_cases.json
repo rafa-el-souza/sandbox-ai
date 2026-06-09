@@ -188,5 +188,14 @@
       "-c",
       "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=op-myinst docker compose -f /home/op/.sandbox-ai/instances/myinst/docker/compose.yml --env-file /home/op/.sandbox-ai/instances/myinst/.sandbox.env --ansi never ps --format json"
     ]
+  },
+  {
+    "op": "preflight",
+    "args": [],
+    "expected_target_argv": [
+      "/bin/bash",
+      "-c",
+      "echo __PREFLIGHT_Q_auth-probe__; echo ok ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}' ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all"
+    ]
   }
 ]

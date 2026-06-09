@@ -13,4 +13,6 @@ alice testhost=(root) NOPASSWD: NOSETENV: \
     /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-info\ *, \
     /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ docker-manifest-inspect\ *, \
     /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-chown-files\ *, \
-    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-mkdir-chown-dirs\ *
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ helper-mkdir-chown-dirs\ *, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ preflight, \
+    /usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c /usr/local/libexec/sandbox-ai/dispatch\ preflight\ --check

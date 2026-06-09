@@ -10,7 +10,7 @@
 //	    "/usr/local/libexec/sandbox-ai/dispatch <op> <args...>"
 //
 // Responsibilities (design D4):
-//   - parse argv[1] as the op; reject any op outside the static 10-op table;
+//   - parse argv[1] as the op; reject any op outside the static 11-op table;
 //   - honor the `<op> --check` lone-arg short-circuit (sister-change L3a probe);
 //   - write one structured journald entry before the spawn;
 //   - construct the per-op target argv (deterministic ops: pure function of
@@ -55,7 +55,7 @@ const dispatchBinary = "/usr/local/libexec/sandbox-ai/dispatch"
 // from the typed wire args is byte-identical to the Python builder's output.
 const busyboxPinned = "busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
 
-// validOps is the static op table (spec "Typed Op Surface", 10 ops). Order is
+// validOps is the static op table (spec "Typed Op Surface", 11 ops). Order is
 // fixed so the "unknown op" diagnostic lists them deterministically.
 var validOps = []string{
 	"auth-probe",
@@ -68,7 +68,20 @@ var validOps = []string{
 	"docker-manifest-inspect",
 	"helper-chown-files",
 	"helper-mkdir-chown-dirs",
+	"preflight",
 }
+
+// preflightInner is the byte-identical Go spelling of core.dispatch's
+// _preflight_inner() — the ``;``-sequenced, per-query-attributed read-only
+// health bundle backing ``sandbox start``'s privilege-boundary preflight
+// (C-009 D6). It is necessarily a second spelling; the shared fixture
+// (target_argv_cases.json, TestTargetArgvFixtureParity) pins it equal to the
+// Python builder's output, so a drift fails ``go test`` -> the compile.
+const preflightInner = "echo __PREFLIGHT_Q_auth-probe__; echo ok" +
+	" ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}'" +
+	" ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}'" +
+	" ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}'" +
+	" ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all"
 
 // composeVerb is the op-hardcoded compose verb. It is NEVER taken from the
 // wire; --volumes only flips compose-down to "down -v" (handled below). This
@@ -236,7 +249,7 @@ func bashC(inner string) []string {
 }
 
 // buildTargetArgv returns (targetArgv, instance, error). instance is the
-// compose instance token (for journald), empty for the seven deterministic ops.
+// compose instance token (for journald), empty for the eight non-compose ops.
 func buildTargetArgv(op string, args []string) ([]string, string, error) {
 	switch op {
 	case "auth-probe":
@@ -245,6 +258,8 @@ func buildTargetArgv(op string, args []string) ([]string, string, error) {
 		return bashC("docker compose ls --format json --all"), "", nil
 	case "docker-version":
 		return bashC("docker version --format '{{.Server.Version}}'"), "", nil
+	case "preflight":
+		return bashC(preflightInner), "", nil
 	case "docker-info":
 		if len(args) != 1 {
 			return nil, "", fmt.Errorf("docker-info: expected exactly one preset arg")

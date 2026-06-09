@@ -62,6 +62,7 @@ EXPECTED_OP_VALUES = {
     "docker-manifest-inspect",
     "helper-chown-files",
     "helper-mkdir-chown-dirs",
+    "preflight",
 }
 
 _BUSYBOX_REF = "busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
@@ -83,8 +84,8 @@ def host_config() -> HostConfig:
 
 
 class TestOpEnum:
-    def test_op_enum_has_exactly_ten_members(self) -> None:
-        assert len(list(Op)) == 10
+    def test_op_enum_has_exactly_eleven_members(self) -> None:
+        assert len(list(Op)) == 11
 
     def test_op_enum_values_match_expected_wire_names(self) -> None:
         assert {op.value for op in Op} == EXPECTED_OP_VALUES
@@ -127,6 +128,7 @@ class TestOpEnum:
             Op.DOCKER_MANIFEST_INSPECT: (1, 1),
             Op.HELPER_CHOWN_FILES: (5, None),
             Op.HELPER_MKDIR_CHOWN_DIRS: (4, None),
+            Op.PREFLIGHT: (0, 0),
         }
 
 
@@ -156,17 +158,20 @@ class TestInvokeSignature:
 # ─── Per-Op Argument Validation ─────────────────────────────────────────────
 
 
+_NULLARY_OPS = ["auth-probe", "compose-ls", "docker-version", "preflight"]
+
+
 class TestValidatorsNullary:
-    @pytest.mark.parametrize("op", ["auth-probe", "compose-ls", "docker-version"])
+    @pytest.mark.parametrize("op", _NULLARY_OPS)
     def test_accepts_no_args(self, op: str) -> None:
         validate_args(op, [])
 
-    @pytest.mark.parametrize("op", ["auth-probe", "compose-ls", "docker-version"])
+    @pytest.mark.parametrize("op", _NULLARY_OPS)
     def test_rejects_any_args(self, op: str) -> None:
         with pytest.raises(DispatchValidationError, match="no arguments"):
             validate_args(op, ["unexpected"])
 
-    @pytest.mark.parametrize("op", ["auth-probe", "compose-ls", "docker-version"])
+    @pytest.mark.parametrize("op", _NULLARY_OPS)
     def test_rejects_multiple_args(self, op: str) -> None:
         with pytest.raises(DispatchValidationError):
             validate_args(op, ["a", "b"])
@@ -438,14 +443,15 @@ class TestValidateArgsUnknownOp:
 
 
 class TestTargetArgvFixture:
-    def test_fixture_covers_all_ten_ops(self) -> None:
-        # Q6 (3.3b): the fixture is keyed on each op's WIRE form. For the seven
-        # deterministic ops that is the typed args; for the three compose ops
-        # it is the post-expansion named-flag form. Keyed this way every op's
-        # target argv is a pure function of its wire inputs, so all ten ops
-        # live in the one shared fixture and the Python<->Go lockstep covers
-        # compose. (The operator-side <inst>-><operands> resolution stays
-        # dynamically tested below — it depends on a seeded instance.)
+    def test_fixture_covers_all_ops(self) -> None:
+        # Q6 (3.3b): the fixture is keyed on each op's WIRE form. For the
+        # deterministic ops (incl. the read-only preflight bundle) that is the
+        # typed args; for the three compose ops it is the post-expansion
+        # named-flag form. Keyed this way every op's target argv is a pure
+        # function of its wire inputs, so all eleven ops live in the one shared
+        # fixture and the Python<->Go lockstep covers compose. (The
+        # operator-side <inst>-><operands> resolution stays dynamically tested
+        # below — it depends on a seeded instance.)
         ops_in_fixture = {cast("str", c["op"]) for c in _load_fixture()}
         assert ops_in_fixture == EXPECTED_OP_VALUES
 
@@ -481,6 +487,63 @@ class TestTargetArgvFixture:
             "-c",
             "docker info --format '{{.SecurityOptions}}'",
         ]
+
+    def test_preflight_inner_is_bash_c(self, host_config: HostConfig) -> None:
+        argv = build_target_argv("preflight", [], host_config)
+        assert argv[:2] == ["/bin/bash", "-c"]
+        assert len(argv) == 3
+
+    def test_preflight_semicolon_sequenced_not_set_e_or_andand(
+        self, host_config: HostConfig
+    ) -> None:
+        # F-065: ``;``-sequenced so one query's failure neither aborts the
+        # others nor forges their success. NOT ``&&`` / ``set -e``.
+        inner = build_target_argv("preflight", [], host_config)[2]
+        assert " ; " in inner
+        assert "&&" not in inner
+        assert "set -e" not in inner
+
+    def test_preflight_runtimes_query_appears_once_deduped(
+        self, host_config: HostConfig
+    ) -> None:
+        # The runsc / runsc-runtimeArgs / host-uds checks all derive from a
+        # SINGLE ``docker info --format '{{json .Runtimes}}'`` query.
+        inner = build_target_argv("preflight", [], host_config)[2]
+        assert inner.count("docker info --format '{{json .Runtimes}}'") == 1
+
+    def test_preflight_bundle_reuses_each_contributing_builder_inner(
+        self, host_config: HostConfig
+    ) -> None:
+        # SSOT meta-test (C-009 4.2): the bundled inner CONTAINS each
+        # contributing read-only op's individual builder inner VERBATIM. A
+        # future edit to any single builder (e.g. a docker-version flag change)
+        # is reflected here automatically, or this test fails — proving the
+        # bundle never re-spells a query string that has drifted from its op.
+        inner = build_target_argv("preflight", [], host_config)[2]
+        contributing = [
+            build_target_argv("auth-probe", [], host_config)[2],
+            build_target_argv("docker-version", [], host_config)[2],
+            build_target_argv("docker-info", ["security-options"], host_config)[2],
+            build_target_argv("docker-info", ["runtimes"], host_config)[2],
+            build_target_argv("compose-ls", [], host_config)[2],
+        ]
+        for op_inner in contributing:
+            assert op_inner in inner, op_inner
+
+    def test_preflight_each_query_individually_attributable(
+        self, host_config: HostConfig
+    ) -> None:
+        # Each query is preceded by a per-query begin marker on its own echo so
+        # M4b (cli-start) can split + map each segment to its check.
+        inner = build_target_argv("preflight", [], host_config)[2]
+        for name in (
+            "auth-probe",
+            "docker-version",
+            "docker-info-security-options",
+            "docker-info-runtimes",
+            "compose-ls",
+        ):
+            assert f"echo __PREFLIGHT_Q_{name}__" in inner
 
     def test_helper_chown_files_byte_faithful_to_hardened_helper(
         self, host_config: HostConfig
@@ -1142,8 +1205,7 @@ def _polkit_hc() -> HostConfig:
     return cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
 
 
-# Representative valid typed args for every one of the ten current ops (a
-# ``preflight`` op is added by a LATER milestone — deliberately absent here).
+# Representative valid typed args for every one of the eleven current ops.
 # The two compose ops with state and docker-manifest-inspect resolve their
 # args lazily so the registry/instance fixtures are honored at call time.
 def _valid_args_for(op: str) -> list[str]:
@@ -1159,23 +1221,24 @@ def _valid_args_for(op: str) -> list[str]:
         "docker-manifest-inspect": [busybox],
         "helper-chown-files": ["/srv/cache", "0644", "1000", "1000", "f1"],
         "helper-mkdir-chown-dirs": ["/srv/cache", "1000", "1000", "d1"],
+        "preflight": [],
     }
     return table[op]
 
 
 _COMPOSE_OPS = {"compose-up", "compose-down", "compose-ps"}
-_ALL_TEN_OPS = sorted(op.value for op in Op)
+_ALL_OPS = sorted(op.value for op in Op)
 
 
 class TestSudoSeparateUserRidesPipe:
-    def test_exactly_ten_ops_exercised(self) -> None:
-        # Guard the milestone scope: exactly the ten current ops, no more (the
-        # later-milestone ``preflight`` op must not have crept in), and every
-        # one has representative valid args wired into _valid_args_for.
-        assert len(_ALL_TEN_OPS) == 10
-        assert all(isinstance(_valid_args_for(op), list) for op in _ALL_TEN_OPS)
+    def test_exactly_eleven_ops_exercised(self) -> None:
+        # Guard the op surface: exactly the eleven current ops (incl. the
+        # read-only ``preflight`` bundle), and every one has representative
+        # valid args wired into _valid_args_for.
+        assert len(_ALL_OPS) == 11
+        assert all(isinstance(_valid_args_for(op), list) for op in _ALL_OPS)
 
-    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    @pytest.mark.parametrize("op", _ALL_OPS)
     def test_sudo_emits_sudo_pipe_cmd_prefixed_argv(
         self, op: str, isolated_sandbox_ai_home: Path
     ) -> None:
@@ -1189,7 +1252,7 @@ class TestSudoSeparateUserRidesPipe:
         assert argv[7].startswith(f"/usr/local/libexec/sandbox-ai/dispatch {op}")
         assert "machinectl" not in argv
 
-    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    @pytest.mark.parametrize("op", _ALL_OPS)
     def test_inner_payload_byte_identical_to_machinectl_payload(
         self, op: str, isolated_sandbox_ai_home: Path
     ) -> None:
@@ -1208,7 +1271,7 @@ class TestSudoSeparateUserRidesPipe:
         assert sudo_argv[-3:-1] == ["/bin/bash", "-c"]
         assert polkit_argv[-3:-1] == ["/bin/bash", "-c"]
 
-    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    @pytest.mark.parametrize("op", _ALL_OPS)
     def test_polkit_argv_unchanged_machinectl_crossing(
         self, op: str, isolated_sandbox_ai_home: Path
     ) -> None:
@@ -1221,7 +1284,7 @@ class TestSudoSeparateUserRidesPipe:
         assert "systemd-run" not in argv
         assert "sudo" not in argv
 
-    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    @pytest.mark.parametrize("op", _ALL_OPS)
     def test_operator_rootless_argv_unchanged(
         self, op: str, isolated_sandbox_ai_home: Path
     ) -> None:

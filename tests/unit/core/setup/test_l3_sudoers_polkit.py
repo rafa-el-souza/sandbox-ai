@@ -117,7 +117,7 @@ def test_no_arg_ops_also_grant_exact_check_probe_shape() -> None:
     rendered = render_sudoers_rule(
         "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
-    for no_arg in ("auth-probe", "compose-ls", "docker-version"):
+    for no_arg in ("auth-probe", "compose-ls", "docker-version", "preflight"):
         assert f"dispatch\\ {no_arg}," in rendered  # exact runtime shape
         assert f"dispatch\\ {no_arg}\\ --check" in rendered  # exact probe shape
         assert f"dispatch\\ {no_arg}\\ *" not in rendered  # never a wildcard

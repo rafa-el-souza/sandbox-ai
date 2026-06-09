@@ -94,7 +94,12 @@ _OP_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 # arg-bearing ``\ *`` shape (the safe direction). Derived from the canonical
 # ``Op`` enum so a wire-name rename there is a single-point change here.
 _NO_ARG_OP_NAMES: frozenset[str] = frozenset(
-    {Op.AUTH_PROBE.value, Op.COMPOSE_LS.value, Op.DOCKER_VERSION.value}
+    {
+        Op.AUTH_PROBE.value,
+        Op.COMPOSE_LS.value,
+        Op.DOCKER_VERSION.value,
+        Op.PREFLIGHT.value,
+    }
 )
 
 
