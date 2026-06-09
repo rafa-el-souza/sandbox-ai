@@ -2023,7 +2023,10 @@ class TestPhaseComposeUpDirect:
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         _phase_compose_up("t", str(inst_dir), cast("HostConfig", _FakeHostConfig()))
         cmd = cast("list[str]", captured["cmd"])
-        assert "machinectl" in cmd
+        # SUDO separate-user rides the privileged byte-pipe (C-009 D2), NOT
+        # machinectl shell — the dispatcher payload is unchanged.
+        assert "machinectl" not in cmd
+        assert cmd[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
         assert cmd[-1].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up t")
 
 
@@ -6563,7 +6566,10 @@ class TestDryRunAuthModePreview:
             result = runner.invoke(app, ["start", inst, "--dry-run"])
 
         assert result.exit_code == 0
-        assert "sudo machinectl shell sandbox@.host" in result.output
+        # SUDO separate-user crossings ride the privileged byte-pipe (C-009 D2),
+        # NOT machinectl shell — the preview shows the sudo_pipe_cmd prefix.
+        assert "sudo systemd-run -q --pipe --uid=sandbox" in result.output
+        assert "machinectl" not in result.output
 
 
 class TestPolkitEndToEnd:

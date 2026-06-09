@@ -874,9 +874,11 @@ class TestInvoke:
         result = invoke("docker-info", ["runtimes"], self._fake_hc(), timeout=15)
         assert result.returncode == 0
         cmd = cast("list[str]", captured["cmd"])
-        assert cmd[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
-        assert cmd[4:6] == ["/bin/bash", "-c"]
-        assert cmd[6] == (
+        # SUDO separate-user rides the privileged byte-pipe (C-009 D2), NOT
+        # machinectl shell — the prefix is sudo_pipe_cmd(user).
+        assert cmd[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert cmd[5:7] == ["/bin/bash", "-c"]
+        assert cmd[7] == (
             "/usr/local/libexec/sandbox-ai/dispatch docker-info runtimes"
         )
         assert cast("dict[str, object]", captured["kwargs"])["timeout"] == 15
@@ -897,7 +899,7 @@ class TestInvoke:
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         invoke(Op.AUTH_PROBE, [], self._fake_hc())
         cmd = cast("list[str]", captured["cmd"])
-        assert cmd[6] == "/usr/local/libexec/sandbox-ai/dispatch auth-probe"
+        assert cmd[7] == "/usr/local/libexec/sandbox-ai/dispatch auth-probe"
 
     def test_compose_op_expands_wire_form_internally(
         self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -922,7 +924,8 @@ class TestInvoke:
         cmd = cast("list[str]", captured["cmd"])
         # The Q6 expansion is INTERNAL to invoke(); the caller passed only
         # ["demo"]. The crossed inner string carries the named-flag wire form.
-        assert cmd[6] == (
+        # (SUDO rides the byte-pipe, so the inner payload is at index 7.)
+        assert cmd[7] == (
             f"/usr/local/libexec/sandbox-ai/dispatch compose-up demo "
             f"--project {proj} "
             f"--env-file {inst_dir / '.sandbox.env'} "
@@ -946,7 +949,7 @@ class TestInvoke:
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
         invoke("compose-down", ["demo", "--volumes"], self._fake_hc())
         cmd = cast("list[str]", captured["cmd"])
-        assert cmd[6].endswith(" --volumes")
+        assert cmd[7].endswith(" --volumes")
 
     def test_polkit_auth_drops_sudo_prefix(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1016,9 +1019,10 @@ class TestBuildInvocation:
 
         monkeypatch.setattr("core.dispatch.Executor.run", boom)
         argv = build_invocation("docker-info", ["runtimes"], self._fake_hc())
-        assert argv[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
-        assert argv[4:6] == ["/bin/bash", "-c"]
-        assert argv[6] == "/usr/local/libexec/sandbox-ai/dispatch docker-info runtimes"
+        # SUDO separate-user rides the privileged byte-pipe (C-009 D2).
+        assert argv[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert argv[5:7] == ["/bin/bash", "-c"]
+        assert argv[7] == "/usr/local/libexec/sandbox-ai/dispatch docker-info runtimes"
 
     def test_validates_before_building(self) -> None:
         with pytest.raises(DispatchValidationError):
@@ -1037,7 +1041,7 @@ class TestBuildInvocation:
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
         argv = build_invocation("compose-up", ["demo"], self._fake_hc())
-        assert argv[6] == (
+        assert argv[7] == (
             f"/usr/local/libexec/sandbox-ai/dispatch compose-up demo "
             f"--project {proj} "
             f"--env-file {inst_dir / '.sandbox.env'} "
@@ -1073,6 +1077,225 @@ class TestBuildInvocation:
             "framed": True,
             "timeout": 15,
         }
+
+
+# ─── C-009 §2: SUDO separate-user dispatch rides the privileged byte-pipe ────
+#
+# build_invocation splits the separate-user branch by auth mode (design D2):
+# SUDO → ``sudo_pipe_cmd(user)`` prefix (the privileged byte-pipe); POLKIT →
+# ``machinectl_cmd(user, POLKIT)`` (UNCHANGED). The inner ``dispatch <op>
+# <wire>`` payload is byte-identical across the swap, and the
+# operator-rootless branch is untouched. The pipe path keeps ``framed=True``
+# (design D3 / F-064): the inner exit is recovered from the dispatcher's
+# ``__SANDBOX_EXIT_<nonce>`` frame, NOT the native ``--pipe`` exit.
+
+
+def _sudo_hc() -> HostConfig:
+    from core.host_config import MachinectlAuth
+
+    return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+
+
+def _polkit_hc() -> HostConfig:
+    from core.host_config import MachinectlAuth
+
+    return cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
+
+
+# Representative valid typed args for every one of the ten current ops (a
+# ``preflight`` op is added by a LATER milestone — deliberately absent here).
+# The two compose ops with state and docker-manifest-inspect resolve their
+# args lazily so the registry/instance fixtures are honored at call time.
+def _valid_args_for(op: str) -> list[str]:
+    busybox = IMAGE_REGISTRY["busybox_musl"].pinned
+    table: dict[str, list[str]] = {
+        "auth-probe": [],
+        "compose-up": ["demo"],
+        "compose-down": ["demo", "--volumes"],
+        "compose-ps": ["demo"],
+        "compose-ls": [],
+        "docker-version": [],
+        "docker-info": ["runtimes"],
+        "docker-manifest-inspect": [busybox],
+        "helper-chown-files": ["/srv/cache", "0644", "1000", "1000", "f1"],
+        "helper-mkdir-chown-dirs": ["/srv/cache", "1000", "1000", "d1"],
+    }
+    return table[op]
+
+
+_COMPOSE_OPS = {"compose-up", "compose-down", "compose-ps"}
+_ALL_TEN_OPS = sorted(op.value for op in Op)
+
+
+class TestSudoSeparateUserRidesPipe:
+    def test_exactly_ten_ops_exercised(self) -> None:
+        # Guard the milestone scope: exactly the ten current ops, no more (the
+        # later-milestone ``preflight`` op must not have crept in), and every
+        # one has representative valid args wired into _valid_args_for.
+        assert len(_ALL_TEN_OPS) == 10
+        assert all(isinstance(_valid_args_for(op), list) for op in _ALL_TEN_OPS)
+
+    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    def test_sudo_emits_sudo_pipe_cmd_prefixed_argv(
+        self, op: str, isolated_sandbox_ai_home: Path
+    ) -> None:
+        if op in _COMPOSE_OPS:
+            _seed_instance(isolated_sandbox_ai_home, "demo")
+        argv = build_invocation(op, _valid_args_for(op), _sudo_hc())
+        # The crossing is the privileged byte-pipe (sudo_pipe_cmd), NOT
+        # machinectl shell. Prefix is the 5-token ``sudo systemd-run --pipe``.
+        assert argv[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert argv[5:7] == ["/bin/bash", "-c"]
+        assert argv[7].startswith(f"/usr/local/libexec/sandbox-ai/dispatch {op}")
+        assert "machinectl" not in argv
+
+    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    def test_inner_payload_byte_identical_to_machinectl_payload(
+        self, op: str, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # The bare ``dispatch <op> <wire>`` inner string is byte-identical
+        # between the SUDO-pipe path and the POLKIT-machinectl path it replaced
+        # (only the crossing prefix differs). Exercises the Q6 compose wire
+        # expansion for the compose ops.
+        if op in _COMPOSE_OPS:
+            _seed_instance(isolated_sandbox_ai_home, "demo")
+        args = _valid_args_for(op)
+        sudo_argv = build_invocation(op, args, _sudo_hc())
+        polkit_argv = build_invocation(op, args, _polkit_hc())
+        # Inner payload is the LAST argv element on both paths.
+        assert sudo_argv[-1] == polkit_argv[-1]
+        # And the bash-c wrapper token immediately precedes it on both.
+        assert sudo_argv[-3:-1] == ["/bin/bash", "-c"]
+        assert polkit_argv[-3:-1] == ["/bin/bash", "-c"]
+
+    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    def test_polkit_argv_unchanged_machinectl_crossing(
+        self, op: str, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # POLKIT keeps the machinectl shell crossing verbatim (no sudo_pipe_cmd).
+        if op in _COMPOSE_OPS:
+            _seed_instance(isolated_sandbox_ai_home, "demo")
+        argv = build_invocation(op, _valid_args_for(op), _polkit_hc())
+        assert argv[:3] == ["machinectl", "shell", "sandbox@.host"]
+        assert argv[3:5] == ["/bin/bash", "-c"]
+        assert "systemd-run" not in argv
+        assert "sudo" not in argv
+
+    @pytest.mark.parametrize("op", _ALL_TEN_OPS)
+    def test_operator_rootless_argv_unchanged(
+        self, op: str, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # operator-rootless bypasses the dispatcher entirely: the bare op
+        # target-argv with NO crossing prefix and NO dispatcher indirection —
+        # untouched by the SUDO routing split.
+        if op in _COMPOSE_OPS:
+            _seed_instance(isolated_sandbox_ai_home, "demo")
+        rootless = _rootless_hc()
+        args = _valid_args_for(op)
+        argv = build_invocation(op, args, rootless)
+        wire = _expand_compose_wire(op, args) if op in _COMPOSE_OPS else args
+        assert argv == build_target_argv(op, wire, rootless)
+        for token in argv:
+            assert "sudo" not in token
+            assert "systemd-run" not in token
+            assert "machinectl" not in token
+            assert "/usr/local/libexec/sandbox-ai/dispatch" not in token
+
+    def test_compose_op_wire_expansion_survives_the_pipe_swap(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # Explicit Q6 wire-flag expansion check on the SUDO-pipe path: the
+        # inner payload carries the named-flag wire form (the compose op is the
+        # one path that expands typed args before crossing).
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
+        argv = build_invocation("compose-up", ["demo"], _sudo_hc())
+        assert argv[7] == (
+            f"/usr/local/libexec/sandbox-ai/dispatch compose-up demo "
+            f"--project {proj} "
+            f"--env-file {inst_dir / '.sandbox.env'} "
+            f"--compose-file {inst_dir / 'docker' / 'compose.yml'}"
+        )
+
+
+class TestSudoPipePathKeepsFramedTrue:
+    """invoke()/probe() keep ``framed=True`` on the SUDO byte-pipe path (D3)."""
+
+    def test_invoke_runs_framed_true_on_sudo_pipe_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            self: object, cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        hc = _sudo_hc()
+        invoke("auth-probe", [], hc, timeout=15)
+        # The SUDO crossing rides sudo_pipe_cmd …
+        cmd = cast("list[str]", captured["cmd"])
+        assert cmd[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        # … and STILL runs framed=True (the inner exit is recovered from the
+        # dispatcher frame, not the native --pipe exit — F-064/D3).
+        assert cast("dict[str, object]", captured["kwargs"]) == {
+            "framed": True,
+            "timeout": 15,
+        }
+
+    def test_recovered_nonzero_exit_surfaces_and_stdout_is_marker_free(
+        self,
+    ) -> None:
+        # Observable framing contract the SUDO-pipe path inherits (it runs the
+        # SAME Executor.run(..., framed=True)): a local argv that simulates the
+        # dispatcher emitting a begin/exit frame around real op output is run
+        # through the real Executor. A non-zero recovered exit must RAISE, and
+        # the returned/raised stdout must be free of the __SANDBOX_BEGIN_ /
+        # __SANDBOX_EXIT_ framing markers.
+        from core.executor import Executor
+
+        nonce = "deadbeefcafef00d"
+        script = (
+            f"echo __SANDBOX_BEGIN_{nonce}; "
+            "echo real-op-line; "
+            f"echo __SANDBOX_EXIT_{nonce}_7"
+        )
+        with pytest.raises(SandboxExecutionError) as excinfo:
+            Executor().run(["/bin/bash", "-c", script], framed=True)
+        msg = str(excinfo.value)
+        # The recovered non-zero exit (7) surfaces in the fault message …
+        assert "exit status 7" in msg
+        # … the genuine op output is preserved …
+        assert "real-op-line" in msg
+        # … and the framing markers are stripped from the surfaced output.
+        assert "__SANDBOX_BEGIN_" not in msg
+        assert "__SANDBOX_EXIT_" not in msg
+
+    def test_recovered_zero_exit_returns_marker_free_stdout(self) -> None:
+        # The success arm of the same observable contract: a framed exit 0
+        # returns CompletedProcess whose stdout carries the op output WITHOUT
+        # the begin/exit markers.
+        from core.executor import Executor
+
+        nonce = "0123456789abcdef"
+        script = (
+            f"echo __SANDBOX_BEGIN_{nonce}; "
+            "echo hello-from-op; "
+            f"echo __SANDBOX_EXIT_{nonce}_0"
+        )
+        cp = Executor().run(["/bin/bash", "-c", script], framed=True)
+        assert cp.returncode == 0
+        assert "hello-from-op" in cp.stdout
+        assert "__SANDBOX_BEGIN_" not in cp.stdout
+        assert "__SANDBOX_EXIT_" not in cp.stdout
 
 
 # ─── probe(): typed non-raising wrapper (Q8) ────────────────────────────────
@@ -1212,16 +1435,18 @@ class TestOperatorRootlessBuildInvocation:
         assert argv[2].startswith("TERM=dumb NO_COLOR=1")
         assert " up -d --build --wait" in argv[2]
 
-    def test_separate_user_build_invocation_unchanged(
+    def test_separate_user_build_invocation_crosses_dispatcher(
         self, isolated_sandbox_ai_home: Path
     ) -> None:
-        # Same compose op in separate-user mode still yields the machinectl
-        # crossing + bare `dispatch <op>` payload.
+        # Same compose op in separate-user mode still routes through the Go
+        # dispatcher with a bare `dispatch <op>` payload. _separate_hc() is
+        # SUDO, so the crossing rides the privileged byte-pipe (C-009 D2),
+        # NOT machinectl shell.
         _seed_instance(isolated_sandbox_ai_home, "demo")
         argv = build_invocation("compose-up", ["demo"], _separate_hc())
-        assert argv[:4] == ["sudo", "machinectl", "shell", "sandbox@.host"]
-        assert argv[4:6] == ["/bin/bash", "-c"]
-        assert argv[6].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up demo")
+        assert argv[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert argv[5:7] == ["/bin/bash", "-c"]
+        assert argv[7].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up demo")
 
 
 class TestOperatorRootlessInvoke:

@@ -764,9 +764,11 @@ class TestOperatorRootlessLocalRouting:
         assert "machinectl" not in captured["argv"]
         assert "shell" not in captured["argv"]
 
-    def test_probe_crosses_machinectl_in_separate_user(self, monkeypatch: Any) -> None:
-        """Regression guard: separate-user still crosses via machinectl
-        (``framed=True``, machinectl in the argv)."""
+    def test_probe_crosses_dispatcher_framed_in_separate_user_sudo(self, monkeypatch: Any) -> None:
+        """Regression guard: SUDO separate-user crosses via the dispatcher with
+        ``framed=True``. Post-C-009 the SUDO crossing rides the privileged
+        byte-pipe (``sudo systemd-run --pipe``), NOT machinectl shell — but the
+        exit is still recovered from the dispatcher frame (framed=True, D3)."""
         from core.doctor import check_docker_available
         from core.host_config import DockerExecutionMode, MachinectlAuth
 
@@ -783,4 +785,5 @@ class TestOperatorRootlessLocalRouting:
         )
         assert result.status == "pass"
         assert captured["framed"] is True
-        assert "machinectl" in captured["argv"]
+        assert "machinectl" not in captured["argv"]
+        assert captured["argv"][:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]

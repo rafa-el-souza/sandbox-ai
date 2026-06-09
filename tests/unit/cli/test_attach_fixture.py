@@ -34,6 +34,7 @@ Regenerating the fixtures::
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -226,6 +227,30 @@ class TestAttachArgvStructural:
         proxy = next(a for a in argv if a.startswith("ProxyCommand="))
         assert "systemd-run" in proxy
         assert "sudo" not in proxy
+
+    def test_argv_proxy_command_uses_unprivileged_pipe_cmd_not_sudo_pipe_cmd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # C-009 routed SUDO separate-user *dispatch* crossings onto the
+        # privileged byte-pipe (``sudo_pipe_cmd`` = ``["sudo", *pipe_cmd]``),
+        # but attach's ProxyCommand is UNTOUCHED: it crosses via the
+        # unprivileged ``pipe_cmd`` (polkit ``manage-units``), so its
+        # ProxyCommand begins with a bare ``systemd-run --pipe --uid=`` and
+        # never the ``sudo``-prefixed ``sudo_pipe_cmd`` form. Asserted in SUDO
+        # mode — the auth mode where the dispatch path *does* add ``sudo`` —
+        # to prove attach does not share that routing.
+        from core.host_config import pipe_cmd, sudo_pipe_cmd
+
+        argv = self._argv(monkeypatch, tmp_path)
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        proxy_value = proxy[len("ProxyCommand=") :]
+        proxy_tokens = shlex.split(proxy_value)
+        unpriv = pipe_cmd(_STABLE_SBUSER)
+        priv = sudo_pipe_cmd(_STABLE_SBUSER)
+        # The unprivileged prefix leads the ProxyCommand verbatim …
+        assert proxy_tokens[: len(unpriv)] == unpriv
+        # … and the privileged ``sudo``-prefixed prefix does NOT.
+        assert proxy_tokens[: len(priv)] != priv
 
     def test_argv_target_port_is_9999(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

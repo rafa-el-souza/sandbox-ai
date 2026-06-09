@@ -105,8 +105,11 @@ def test_render_command_emits_q6_wire_form(isolated_sandbox_ai_home: Path) -> No
     proj = compose_project_name("demo")
     inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
     rendered = ComposeUpAction(instance_name="demo").render_command(_hc())
-    assert "sudo machinectl shell sandbox@.host" not in rendered  # user is claude-sandbox
-    assert "machinectl shell claude-sandbox@.host /bin/bash -c" in rendered
+    # SUDO separate-user crossings now ride the privileged byte-pipe (C-009 D2),
+    # NOT machinectl shell — the rendered command carries the sudo_pipe_cmd
+    # prefix and no machinectl token.
+    assert "machinectl" not in rendered
+    assert "sudo systemd-run -q --pipe --uid=claude-sandbox /bin/bash -c" in rendered
     assert (
         f"/usr/local/libexec/sandbox-ai/dispatch compose-up demo "
         f"--project {proj} "

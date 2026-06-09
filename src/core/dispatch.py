@@ -52,7 +52,13 @@ from core.compose import compose_project_name
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor, normalize_captured_output
 from core.helper_container import _hardened_docker_run
-from core.host_config import is_operator_rootless, machinectl_cmd, pipe_cmd
+from core.host_config import (
+    MachinectlAuth,
+    is_operator_rootless,
+    machinectl_cmd,
+    pipe_cmd,
+    sudo_pipe_cmd,
+)
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
 from core.journal_audit import emit_op_audit
 from core.registry import InstanceRegistry
@@ -721,14 +727,24 @@ def build_invocation(
     command from this same function so no parallel argv/inner construction
     exists anywhere.
 
-    The validation + wire-expansion pipeline is shared across both execution
+    The validation + wire-expansion pipeline is shared across all execution
     modes (C-003 design D1/D4); ONLY the crossing prefix differs:
 
-    - ``separate-user`` (default): returns ``[*machinectl_cmd(user, auth),
-      "/bin/bash", "-c", "<dispatch-binary> <op> <shlex.join(wire_args)>"]``
-      (design D2 — the outer argv shape is preserved so operators' existing
-      sudoers rule still matches, and the bare ``dispatch <op>`` payload is what
-      the per-op ``Cmnd_Spec`` matches).
+    - ``separate-user`` + SUDO (C-009 design D2): returns
+      ``[*sudo_pipe_cmd(user), "/bin/bash", "-c",
+      "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` — the crossing rides
+      the privileged byte-pipe (``sudo_pipe_cmd``) rather than ``machinectl``
+      shell, because the byte-pipe reliably delivers stdout on every distro
+      (the ``machinectl`` PTY path does not on the Debian family — F-063). The
+      bare ``dispatch <op>`` payload is byte-identical to the ``machinectl``
+      path's, so the per-op sudoers ``Cmnd_Spec`` (derived from this same
+      ``sudo_pipe_cmd`` prefix) still matches; no ``--unit``/``--description``
+      is added.
+    - ``separate-user`` + POLKIT (UNCHANGED): returns
+      ``[*machinectl_cmd(user, POLKIT), "/bin/bash", "-c",
+      "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` — the POLKIT
+      action-level grant cannot inspect argv, so the ``machinectl`` crossing
+      is retained as-is.
     - ``operator-rootless``: returns the op's target-argv **directly** (the same
       ``["/bin/bash", "-c", "<inner>"]`` / hardened ``docker run`` the per-op
       builder produces) with NO ``machinectl_cmd`` prefix and NO
@@ -751,11 +767,18 @@ def build_invocation(
     if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
     inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+    user = host_config.host.docker_unprivileged_user
+    auth = host_config.host.machinectl_authentication
+    # SUDO crossings ride the privileged byte-pipe (design D2); POLKIT keeps
+    # the machinectl shell crossing. The inner payload is byte-identical in
+    # both — only the prefix differs.
+    crossing = (
+        sudo_pipe_cmd(user)
+        if auth == MachinectlAuth.SUDO
+        else machinectl_cmd(user, auth)
+    )
     return [
-        *machinectl_cmd(
-            host_config.host.docker_unprivileged_user,
-            host_config.host.machinectl_authentication,
-        ),
+        *crossing,
         "/bin/bash",
         "-c",
         inner,
@@ -811,6 +834,18 @@ def invoke(
     learn the nonce. :func:`probe` (which wraps :func:`invoke` and catches the
     error) and the doctor verdicts depend on the recovered inner exit being
     faithful.
+
+    ``framed=True`` is REQUIRED on the privileged-byte-pipe path too (C-009
+    design D3): the inner op's exit is recovered from the dispatcher's
+    ``__SANDBOX_EXIT_<nonce>`` frame, NOT from the privileged byte-pipe's native
+    exit — F-064 ground-truthed that the native exit is unreliable (a failing op
+    surfaced native ``0`` while its dispatcher frame correctly carried ``_1``).
+    The frame is authoritative, so a native-exit recovery path would be a
+    correctness bug. This needs no executor/dispatcher change: the byte-pipe
+    forwards the dispatcher's stdout faithfully, so the same
+    ``__SANDBOX_BEGIN_``/``__SANDBOX_EXIT_`` framing rides the pipe and the
+    existing recovery strips + recovers it exactly as on the ``machinectl``
+    path.
 
     Flow (Q6):
 
