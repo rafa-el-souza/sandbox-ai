@@ -77,11 +77,19 @@ var validOps = []string{
 // (C-009 D6). It is necessarily a second spelling; the shared fixture
 // (target_argv_cases.json, TestTargetArgvFixtureParity) pins it equal to the
 // Python builder's output, so a drift fails ``go test`` -> the compile.
-const preflightInner = "echo __PREFLIGHT_Q_auth-probe__; echo ok 2>&1; echo __PREFLIGHT_RC_auth-probe_$?__" +
-	" ; echo __PREFLIGHT_Q_docker-version__; docker version --format '{{.Server.Version}}' 2>&1; echo __PREFLIGHT_RC_docker-version_$?__" +
-	" ; echo __PREFLIGHT_Q_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' 2>&1; echo __PREFLIGHT_RC_docker-info-security-options_$?__" +
-	" ; echo __PREFLIGHT_Q_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' 2>&1; echo __PREFLIGHT_RC_docker-info-runtimes_$?__" +
-	" ; echo __PREFLIGHT_Q_compose-ls__; docker compose ls --format json --all 2>&1; echo __PREFLIGHT_RC_compose-ls_$?__"
+//
+// Each marker is bound to the ${__PFNONCE} shell variable (H-1): wrapSentinel
+// assigns __PFNONCE=<nonce> (the same nonce as the BEGIN/EXIT frame) before the
+// subshell runs, so at shell-expansion time every marker carries the
+// per-crossing nonce — untrusted op output cannot forge a verdict by echoing a
+// byte-perfect marker copy because it cannot learn the nonce. The const itself
+// is byte-static (the literal ${__PFNONCE} token), so the shared fixture stays
+// Python↔Go byte-identical.
+const preflightInner = "echo __PREFLIGHT_Q_${__PFNONCE}_auth-probe__; echo ok 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_auth-probe_$?__" +
+	" ; echo __PREFLIGHT_Q_${__PFNONCE}_docker-version__; docker version --format '{{.Server.Version}}' 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_docker-version_$?__" +
+	" ; echo __PREFLIGHT_Q_${__PFNONCE}_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_docker-info-security-options_$?__" +
+	" ; echo __PREFLIGHT_Q_${__PFNONCE}_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_docker-info-runtimes_$?__" +
+	" ; echo __PREFLIGHT_Q_${__PFNONCE}_compose-ls__; docker compose ls --format json --all 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_compose-ls_$?__"
 
 // composeVerb is the op-hardcoded compose verb. It is NEVER taken from the
 // wire; --volumes only flips compose-down to "down -v" (handled below). This
@@ -134,8 +142,17 @@ func genNonce() (string, error) {
 // the two wraps are kept in parity). This is the same recovery the Executor
 // used to inject into the CROSSED payload — relocated here, post-authorization,
 // so the sentinel never appears in the sudo/polkit-authorized command (F-018).
+//
+// It also assigns __PFNONCE=<nonce> (the SAME nonce as the BEGIN/EXIT frame)
+// OUTSIDE the subshell, uniformly for every op (H-1). The preflight bundle's
+// markers reference ${__PFNONCE}, so they expand to the per-crossing nonce;
+// untrusted op output cannot forge a verdict because it cannot learn it. The
+// assignment is branch-free (harmless for non-preflight ops, which never
+// reference __PFNONCE), emits no stdout, and runs before the subshell — so
+// F-023 is preserved (the subshell ``( … )`` is unchanged and still captures an
+// inner ``exit`` without swallowing the trailer).
 func wrapSentinel(inner, nonce string) string {
-	return fmt.Sprintf("( %s ); echo __SANDBOX_EXIT_%s_$?", inner, nonce)
+	return fmt.Sprintf("__PFNONCE=%s; ( %s ); echo __SANDBOX_EXIT_%s_$?", nonce, inner, nonce)
 }
 
 // dispatch is main's testable core. It generates the nonce, announces it on

@@ -518,11 +518,13 @@ def _healthy_preflight_outcome() -> object:
     """An ``ok`` preflight bundle outcome whose ``auth-probe`` segment passes."""
     from core.dispatch import ProbeOutcome
 
+    nonce = "feedface00c0ffee"
     return ProbeOutcome(
         ok=True,
         timed_out=False,
-        stdout="__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_0__",
+        stdout=f"__PREFLIGHT_Q_{nonce}_auth-probe__\nok\n__PREFLIGHT_RC_{nonce}_auth-probe_0__",
         message="",
+        preflight_nonce=nonce,
     )
 
 
@@ -3634,11 +3636,13 @@ class TestInitAuthProbe:
 
         # init collapses its reachability probe into the ``preflight`` op
         # (C-009 D6): a healthy crossing whose ``auth-probe`` segment passes.
+        nonce = "feedface00c0ffee"
         return ProbeOutcome(
             ok=True,
             timed_out=False,
-            stdout="__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_0__",
+            stdout=f"__PREFLIGHT_Q_{nonce}_auth-probe__\nok\n__PREFLIGHT_RC_{nonce}_auth-probe_0__",
             message="",
+            preflight_nonce=nonce,
         )
 
     def _fail(self, *, timed_out: bool = False, message: str = "[FATAL] probe failed") -> ProbeOutcome:

@@ -27,6 +27,7 @@ from core.dispatch import (
     OpSpec,
     ProbeOutcome,
     _expand_compose_wire,
+    _invoke_with_nonce,
     _preflight_inner,
     build_invocation,
     build_target_argv,
@@ -547,8 +548,20 @@ class TestTargetArgvFixture:
             "docker-info-runtimes",
             "compose-ls",
         ):
-            assert f"echo __PREFLIGHT_Q_{name}__" in inner
-            assert f"echo __PREFLIGHT_RC_{name}_$?__" in inner
+            assert f"echo __PREFLIGHT_Q_${{__PFNONCE}}_{name}__" in inner
+            assert f"echo __PREFLIGHT_RC_${{__PFNONCE}}_{name}_$?__" in inner
+
+    def test_preflight_markers_reference_the_pfnonce_shell_var(
+        self, host_config: HostConfig
+    ) -> None:
+        # H-1: the bundle inner is byte-static (the literal ``${__PFNONCE}``
+        # token, NOT a concrete nonce) so the Python↔Go fixture stays identical;
+        # the per-crossing nonce is supplied at shell-expansion time by
+        # wrapSentinel (framed) or core.dispatch (operator-rootless local).
+        inner = build_target_argv("preflight", [], host_config)[2]
+        assert "${__PFNONCE}" in inner
+        # No concrete hex nonce baked into the template.
+        assert "__PREFLIGHT_Q_${__PFNONCE}_auth-probe__" in inner
 
     def test_preflight_each_query_merges_stderr_and_carries_exit(
         self, host_config: HostConfig
@@ -1767,6 +1780,105 @@ class TestOperatorRootlessAudit:
         emit_mock.assert_not_called()
 
 
+class TestOperatorRootlessPreflightNonce:
+    """H-1 local path: on operator-rootless there is no dispatcher to mint the
+    nonce, so ``_invoke_with_nonce`` mints one locally and injects
+    ``__PFNONCE=<nonce>; `` onto the bundle inner — AFTER the clean-argv audit —
+    then surfaces it so the parser can bind the markers."""
+
+    def test_preflight_mints_and_injects_pfnonce_onto_inner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import re as _re
+        import subprocess
+
+        captured: dict[str, object] = {}
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured["argv"] = list(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", lambda *a, **k: None)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        cp, nonce = _invoke_with_nonce("preflight", [], _rootless_hc())
+        assert cp.returncode == 0
+        # A 16-hex-char nonce was minted and surfaced.
+        assert nonce is not None and _re.fullmatch(r"[0-9a-f]{16}", nonce)
+        # The bash inner (argv[-1]) was prefixed with ``__PFNONCE=<nonce>; `` so
+        # the ${__PFNONCE} markers expand to it at shell time.
+        inner = cast("list[str]", captured["argv"])[-1]
+        assert inner.startswith(f"__PFNONCE={nonce}; ")
+        assert "${__PFNONCE}" in inner  # the template token is still present pre-expansion
+
+    def test_clean_argv_audited_before_nonce_injection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        audited: dict[str, object] = {}
+
+        def fake_emit(op: str, args: object, target_argv: object, instance: str) -> None:
+            audited["argv"] = list(cast("list[str]", target_argv))
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", fake_emit)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        _invoke_with_nonce("preflight", [], _rootless_hc())
+        # journald logged the CLEAN argv — no minted nonce leaked into the audit.
+        audited_inner = cast("list[str]", audited["argv"])[-1]
+        assert "__PFNONCE=" not in audited_inner
+
+    def test_non_preflight_op_mints_no_nonce(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", lambda *a, **k: None)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        _cp, nonce = _invoke_with_nonce("auth-probe", [], _rootless_hc())
+        assert nonce is None
+
+    def test_healthy_local_preflight_parses_all_five_segments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # OP-ROOTLESS 5-SEGMENT REGRESSION GUARD: a healthy local preflight (the
+        # Python-minted nonce path) parses all five segments ok, so start does
+        # NOT false-abort on the 64/64-green operator-rootless path. We simulate
+        # the shell by expanding ${__PFNONCE} against the injected assignment.
+        import re as _re
+        import subprocess
+
+        def fake_run(self: object, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            inner = cmd[-1]
+            m = _re.match(r"__PFNONCE=([0-9a-f]{16}); ", inner)
+            assert m is not None
+            n = m.group(1)
+            names = (
+                "auth-probe",
+                "docker-version",
+                "docker-info-security-options",
+                "docker-info-runtimes",
+                "compose-ls",
+            )
+            stdout = "\n".join(
+                f"__PREFLIGHT_Q_{n}_{name}__\nbody-{name}\n__PREFLIGHT_RC_{n}_{name}_0__" for name in names
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+        monkeypatch.setattr("core.dispatch.emit_op_audit", lambda *a, **k: None)
+        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
+        outcome = probe("preflight", [], _rootless_hc())
+        per = parse_preflight_outcome(outcome)
+        assert len(per) == 5
+        assert all(o.ok for o in per.values())
+        assert per["compose-ls"].stdout == "body-compose-ls"
+
+
 # ─── compile_dispatcher(): offline reproducible compile recipe ──────────────
 
 
@@ -2098,21 +2210,34 @@ class TestCompileDispatcher:
 # ─── parse_preflight_outcome (C-009 4.5a) ────────────────────────────────────
 
 
-def _synthetic_bundle(segments: list[tuple[str, str, int]]) -> str:
+_TEST_PFNONCE = "feedface00c0ffee"
+
+
+def _synthetic_bundle(segments: list[tuple[str, str, int]], *, nonce: str = _TEST_PFNONCE) -> str:
     """Build a preflight-bundle stdout from (name, segment-stdout, rc) triples.
 
     Mirrors ``_preflight_inner``'s on-the-wire shape EXACTLY: per query a begin
-    marker line, the (stderr-merged) segment, then the per-query RC marker.
+    marker line, the (stderr-merged) segment, then the per-query RC marker, with
+    every marker bound to ``nonce`` (H-1) — the same nonce the caller sets on the
+    synthetic outcome's ``preflight_nonce`` so :func:`parse_preflight_outcome`
+    can verify it.
     """
     parts = []
     for name, body, rc in segments:
-        parts.append(f"__PREFLIGHT_Q_{name}__\n{body}\n__PREFLIGHT_RC_{name}_{rc}__")
+        parts.append(f"__PREFLIGHT_Q_{nonce}_{name}__\n{body}\n__PREFLIGHT_RC_{nonce}_{name}_{rc}__")
     return "\n".join(parts)
+
+
+def _bundle_outcome(segments: list[tuple[str, str, int]], *, nonce: str = _TEST_PFNONCE) -> ProbeOutcome:
+    """A healthy-crossing preflight :class:`ProbeOutcome` carrying ``nonce``."""
+    return ProbeOutcome(
+        ok=True, timed_out=False, stdout=_synthetic_bundle(segments, nonce=nonce), message="", preflight_nonce=nonce
+    )
 
 
 class TestParsePreflightOutcome:
     def test_all_ok_splits_each_segment(self) -> None:
-        bundle = _synthetic_bundle(
+        outcome = _bundle_outcome(
             [
                 ("auth-probe", "ok", 0),
                 ("docker-version", "29.5.3", 0),
@@ -2121,7 +2246,6 @@ class TestParsePreflightOutcome:
                 ("compose-ls", "[]", 0),
             ]
         )
-        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
         per = parse_preflight_outcome(outcome)
         assert set(per) == {
             "auth-probe",
@@ -2136,7 +2260,7 @@ class TestParsePreflightOutcome:
         assert all(o.message == "" for o in per.values())
 
     def test_one_query_nonzero_rc_is_not_ok(self) -> None:
-        bundle = _synthetic_bundle(
+        outcome = _bundle_outcome(
             [
                 ("auth-probe", "ok", 0),
                 ("docker-version", "29.5.3", 0),
@@ -2145,7 +2269,6 @@ class TestParsePreflightOutcome:
                 ("compose-ls", "[]", 0),
             ]
         )
-        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
         per = parse_preflight_outcome(outcome)
         failed = per["docker-info-runtimes"]
         assert failed.ok is False
@@ -2158,7 +2281,7 @@ class TestParsePreflightOutcome:
 
     def test_missing_segment_is_not_ok(self) -> None:
         # ``compose-ls`` segment entirely absent (a truncated / garbled bundle).
-        bundle = _synthetic_bundle(
+        outcome = _bundle_outcome(
             [
                 ("auth-probe", "ok", 0),
                 ("docker-version", "29.5.3", 0),
@@ -2166,7 +2289,6 @@ class TestParsePreflightOutcome:
                 ("docker-info-runtimes", "{}", 0),
             ]
         )
-        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
         per = parse_preflight_outcome(outcome)
         assert per["compose-ls"].ok is False
         assert per["compose-ls"].stdout == ""
@@ -2175,8 +2297,8 @@ class TestParsePreflightOutcome:
 
     def test_garbled_rc_token_is_not_ok(self) -> None:
         # RC marker present but the recovered exit code is not an int.
-        bundle = "__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_X__"
-        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
+        bundle = f"__PREFLIGHT_Q_{_TEST_PFNONCE}_auth-probe__\nok\n__PREFLIGHT_RC_{_TEST_PFNONCE}_auth-probe_X__"
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="", preflight_nonce=_TEST_PFNONCE)
         per = parse_preflight_outcome(outcome)
         assert per["auth-probe"].ok is False
         assert "unparseable" in per["auth-probe"].message
@@ -2205,14 +2327,112 @@ class TestParsePreflightOutcome:
             "docker-info-runtimes",
             "compose-ls",
         ):
-            assert f"echo __PREFLIGHT_Q_{name}__" in inner
-        bundle = _synthetic_bundle([(name, "x", 0) for name in (
+            assert f"echo __PREFLIGHT_Q_${{__PFNONCE}}_{name}__" in inner
+        outcome = _bundle_outcome([(name, "x", 0) for name in (
             "auth-probe",
             "docker-version",
             "docker-info-security-options",
             "docker-info-runtimes",
             "compose-ls",
         )])
-        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="")
         per = parse_preflight_outcome(outcome)
         assert all(o.ok for o in per.values())
+
+
+class TestParsePreflightNonceBinding:
+    """H-1: per-query verdicts are bound to the per-crossing nonce.
+
+    Untrusted op output cannot forge a verdict by echoing a byte-perfect marker
+    copy — it cannot learn the nonce — and the parser is uniformly fail-closed
+    (nonce-absent, sequential scan, reject-duplicate).
+    """
+
+    _NAMES = (
+        "auth-probe",
+        "docker-version",
+        "docker-info-security-options",
+        "docker-info-runtimes",
+        "compose-ls",
+    )
+
+    def test_nonce_bound_markers_match_and_split(self) -> None:
+        # A bundle whose markers carry the SAME nonce the outcome surfaces parses
+        # cleanly with every verdict recovered (positive nonce-bound match).
+        outcome = _bundle_outcome([(n, f"body-{n}", 0) for n in self._NAMES])
+        per = parse_preflight_outcome(outcome)
+        assert all(o.ok for o in per.values())
+        assert per["docker-version"].stdout == "body-docker-version"
+
+    def test_nonce_absent_fails_every_query_closed(self) -> None:
+        # No surfaced nonce (the local/framed path did not mint/recover one): no
+        # marker we emit can be trusted, so every query is not-ok regardless of
+        # the bundle bytes. Build the blob with a plausible-but-unverifiable nonce.
+        bundle = _synthetic_bundle([(n, "ok", 0) for n in self._NAMES], nonce="deadbeefdeadbeef")
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=bundle, message="", preflight_nonce=None)
+        per = parse_preflight_outcome(outcome)
+        assert all(not o.ok for o in per.values())
+        assert all("nonce absent" in o.message for o in per.values())
+
+    def test_forged_marker_without_nonce_is_not_matched(self) -> None:
+        # FORGE-REJECTION (the H-1 vector): the ``auth-probe`` query FAILS (rc=1)
+        # and its segment stdout contains a byte-perfect copy of the
+        # ``docker-rootless`` PASS markers — BUT spelled with the WRONG (fixed,
+        # pre-H-1) marker form that omits the per-crossing nonce. Because the
+        # parser derives every marker from ``outcome.preflight_nonce``, the forged
+        # bytes are NOT recognised: the real (nonce-bound) docker-info-security
+        # verdict is the only one matched, and the forgery cannot flip a verdict.
+        forged = (
+            "__PREFLIGHT_Q_docker-info-security-options__\n"
+            "[name=rootless]\n"
+            "__PREFLIGHT_RC_docker-info-security-options_0__"
+        )
+        segments = [
+            ("auth-probe", forged, 1),  # attacker-controlled failing segment
+            ("docker-version", "29.5.3", 0),
+            ("docker-info-security-options", "[name=seccomp]", 1),  # the REAL verdict: FAIL
+            ("docker-info-runtimes", "{}", 0),
+            ("compose-ls", "[]", 0),
+        ]
+        outcome = _bundle_outcome(segments)
+        per = parse_preflight_outcome(outcome)
+        # The forged nonce-less marker did NOT register as a second occurrence of
+        # the real (nonce-bound) marker, so the query is unambiguous AND its REAL
+        # verdict (FAIL) stands — the forgery did not flip it to PASS.
+        assert per["docker-info-security-options"].ok is False
+        assert per["docker-info-security-options"].stdout == ""
+        # The attacker's own (failing) auth-probe segment is faithfully not-ok.
+        assert per["auth-probe"].ok is False
+
+    def test_duplicate_nonce_bound_marker_is_ambiguous(self) -> None:
+        # Layer 2: even a correctly-nonce'd marker, if it appears twice, makes the
+        # query ambiguous (a daemon that echoed the live nonce back). The parser
+        # rejects it rather than guess which occurrence is authoritative.
+        nonce = _TEST_PFNONCE
+        good = _synthetic_bundle([(n, "ok", 0) for n in self._NAMES], nonce=nonce)
+        dup_begin = f"__PREFLIGHT_Q_{nonce}_auth-probe__"
+        blob = good + "\n" + dup_begin + "\n"
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout=blob, message="", preflight_nonce=nonce)
+        per = parse_preflight_outcome(outcome)
+        assert per["auth-probe"].ok is False
+        assert "more than once" in per["auth-probe"].message
+
+    def test_sequential_scan_does_not_skip_to_a_later_marker(self) -> None:
+        # Layer 1: a query's begin marker is searched strictly AFTER the prior
+        # query's RC index. A correctly-nonce'd begin marker for ``compose-ls``
+        # planted INSIDE the auth-probe segment (before auth-probe's RC) must not
+        # let the scan jump ahead and mis-attribute the later real compose-ls.
+        nonce = _TEST_PFNONCE
+        planted = f"__PREFLIGHT_Q_{nonce}_compose-ls__\nSPOOFED\n__PREFLIGHT_RC_{nonce}_compose-ls_0__"
+        segments = [
+            ("auth-probe", planted, 0),
+            ("docker-version", "29.5.3", 0),
+            ("docker-info-security-options", "[name=rootless]", 0),
+            ("docker-info-runtimes", "{}", 0),
+            ("compose-ls", "REAL", 0),
+        ]
+        outcome = _bundle_outcome(segments)
+        per = parse_preflight_outcome(outcome)
+        # The planted compose-ls marker is a SECOND occurrence ⇒ Layer 2 flags the
+        # query ambiguous rather than letting the spoof win.
+        assert per["compose-ls"].ok is False
+        assert "more than once" in per["compose-ls"].message

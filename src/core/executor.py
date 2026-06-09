@@ -46,6 +46,14 @@ class Executor:
     Strips environments and correctly channels I/O.
     """
 
+    # The begin nonce recovered from the most recent ``framed=True`` crossing
+    # (the dispatcher's ``__SANDBOX_BEGIN_<nonce>`` line), or ``None`` if no
+    # framed crossing has recovered one on this instance. ``core.dispatch``'s
+    # preflight nonce-binding (H-1) reads this to bind the bundle markers to the
+    # same nonce the frame used; ``run``'s public ``CompletedProcess`` contract
+    # is unchanged, so every other caller is unaffected.
+    _last_frame_nonce: str | None = None
+
     @staticmethod
     def _sanitize_pty_output(raw: str) -> str:
         """Strip PTY artifacts from captured non-interactive output.
@@ -189,6 +197,10 @@ class Executor:
             if begin is None:
                 self._raise_sentinel_not_found(stdout, result.stderr)
             expected = begin.group(1)
+            # Surface the frame's nonce so core.dispatch can bind the preflight
+            # bundle markers to it (H-1). Stash before any further fail-closed
+            # branch so it reflects the begin line we actually recovered.
+            self._last_frame_nonce = expected
             spans.append((begin.start(), begin.end()))
         else:
             expected = injected_token

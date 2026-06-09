@@ -22,10 +22,22 @@ _RUNSC = _RESERVED_RUNTIME_KEY
 
 
 def _ok(stdout: str = "") -> subprocess.CompletedProcess[str]:
-    """A successful ``core.dispatch.invoke`` return (returncode 0 always — a
+    """A successful boundary-crossing CompletedProcess (returncode 0 always — a
     non-zero inner exit surfaces as ``SandboxExecutionError`` from the sterile
-    Executor, never as a returncode-bearing CompletedProcess)."""
+    Executor, never as a returncode-bearing CompletedProcess). Used both as a
+    patched ``Executor.run`` return and, wrapped by :func:`_okn`, as the
+    ``_invoke_with_nonce`` ``(cp, nonce)`` return."""
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _okn(stdout: str = "") -> tuple[subprocess.CompletedProcess[str], None]:
+    """A successful ``core.dispatch._invoke_with_nonce`` return.
+
+    Doctor checks reach the boundary through ``dispatch.probe`` →
+    :func:`core.dispatch._invoke_with_nonce`, which returns ``(cp, nonce)`` — the
+    per-crossing preflight nonce, ``None`` for these single-op (non-preflight)
+    checks (H-1)."""
+    return _ok(stdout), None
 
 
 def _exec_error(*, timeout: bool = False) -> SandboxExecutionError:
@@ -177,13 +189,15 @@ class TestMachinectlReachable:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok("ok\n")
+            return _okn("ok\n")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_machinectl_reachable("sandbox", None)
         assert result.status == "pass"
         assert captured["op"] == "auth-probe"
@@ -196,7 +210,7 @@ class TestMachinectlReachable:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error(timeout=True)
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_machinectl_reachable("sandbox", None)
         assert result.status == "fail"
         assert "timeout" in result.detail.lower() or "sudoers" in (result.remediation or "").lower()
@@ -207,7 +221,7 @@ class TestMachinectlReachable:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_machinectl_reachable("sandbox", None)
         assert result.status == "fail"
         # Restored pre-refactor wording: the failure context (now sourced
@@ -221,13 +235,15 @@ class TestDockerChecks:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok("24.0.7\n")
+            return _okn("24.0.7\n")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_docker_available("sandbox", None)
         assert result.status == "pass"
         assert "24.0.7" in result.detail
@@ -241,14 +257,14 @@ class TestDockerChecks:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_docker_available("sandbox", None)
         assert result.status == "fail"
 
     def test_docker_available_empty_stdout_fail(self, monkeypatch: Any) -> None:
         from core.doctor import check_docker_available
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(""))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(""))
         result = check_docker_available("sandbox", None)
         assert result.status == "fail"
 
@@ -257,13 +273,15 @@ class TestDockerChecks:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok("[rootless, cgroupns]")
+            return _okn("[rootless, cgroupns]")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_docker_rootless("sandbox", None)
         assert result.status == "pass"
         assert captured["op"] == "docker-info"
@@ -273,7 +291,7 @@ class TestDockerChecks:
     def test_docker_rootless_system_docker(self, monkeypatch: Any) -> None:
         from core.doctor import check_docker_rootless
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok("[apparmor, seccomp]"))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn("[apparmor, seccomp]"))
         result = check_docker_rootless("sandbox", None)
         assert result.status == "fail"
         assert "rootless" in (result.remediation or "").lower()
@@ -284,7 +302,7 @@ class TestDockerChecks:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_docker_rootless("sandbox", None)
         assert result.status == "fail"
 
@@ -293,13 +311,15 @@ class TestDockerChecks:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok(json.dumps({_RUNSC: {}, "runc": {}}))
+            return _okn(json.dumps({_RUNSC: {}, "runc": {}}))
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_runsc_registered("sandbox", None)
         assert result.status == "pass"
         assert captured["op"] == "docker-info"
@@ -309,7 +329,7 @@ class TestDockerChecks:
     def test_runsc_not_registered(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_registered
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok('{"runc": {}}'))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn('{"runc": {}}'))
         result = check_runsc_registered("sandbox", None)
         assert result.status == "fail"
 
@@ -325,7 +345,7 @@ class TestDockerChecks:
 
         assert _RUNSC == "sandbox-ai-runsc"
         monkeypatch.setattr(
-            "core.dispatch.invoke", lambda *a, **k: _ok(json.dumps({"runsc": {}, "runc": {}}))
+            "core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(json.dumps({"runsc": {}, "runc": {}}))
         )
         result = check_runsc_registered("sandbox", None)
         assert result.status == "fail"
@@ -336,7 +356,7 @@ class TestDockerChecks:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_runsc_registered("sandbox", None)
         assert result.status == "fail"
 
@@ -356,7 +376,7 @@ class TestRunscJsonDecodeError:
     def test_runsc_bad_json_output(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_registered
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok("NOT-VALID-JSON{{{"))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn("NOT-VALID-JSON{{{"))
         result = check_runsc_registered("sandbox", None)
         assert result.status == "fail"
 
@@ -378,13 +398,15 @@ class TestCheckRunscRuntimeArgs:
         )
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok(docker_info)
+            return _okn(docker_info)
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "pass"
         assert "--oci-seccomp" in result.detail
@@ -403,7 +425,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
@@ -422,7 +444,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "pass"
         assert "--oci-seccomp" in result.detail
@@ -441,7 +463,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "--ignore-cgroups" in result.detail
@@ -456,7 +478,7 @@ class TestCheckRunscRuntimeArgs:
                 }
             }
         )
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "--oci-seccomp" in result.detail
@@ -465,7 +487,7 @@ class TestCheckRunscRuntimeArgs:
         from core.doctor import check_runsc_runtimeargs
 
         docker_info = json.dumps({_RUNSC: {"path": "/usr/local/bin/runsc"}})
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(docker_info))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.remediation is not None
         assert "~sandbox/.config/docker/daemon.json" in result.remediation
@@ -485,13 +507,15 @@ class TestCheckHostUds:
         )
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["args"] = args
             captured["timeout"] = kwargs.get("timeout")
-            return _ok(docker_info)
+            return _okn(docker_info)
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_host_uds("sandbox", None)
         assert result.status == "pass"
         assert captured["op"] == "docker-info"
@@ -509,7 +533,7 @@ class TestCheckHostUds:
                 }
             }
         )
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok(docker_info))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn(docker_info))
         result = check_host_uds("sandbox", None)
         assert result.status == "warn"
         assert "daemon.json" in (result.remediation or "")
@@ -520,7 +544,7 @@ class TestCheckHostUds:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_host_uds("sandbox", None)
         assert result.status == "warn"
         assert "daemon.json" in (result.remediation or "")
@@ -528,7 +552,7 @@ class TestCheckHostUds:
     def test_check_host_uds_json_parse_failure(self, monkeypatch: Any) -> None:
         from core.doctor import check_host_uds
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok("NOT-JSON{{{"))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn("NOT-JSON{{{"))
         result = check_host_uds("sandbox", None)
         assert result.status == "warn"
         assert "daemon.json" in (result.remediation or "")
@@ -541,7 +565,7 @@ class TestRunscRuntimeArgsEdgeCases:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "Could not query" in result.detail
@@ -549,7 +573,7 @@ class TestRunscRuntimeArgsEdgeCases:
     def test_json_decode_error_returns_warn(self, monkeypatch: Any) -> None:
         from core.doctor import check_runsc_runtimeargs
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok("{{INVALID}}"))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn("{{INVALID}}"))
         result = check_runsc_runtimeargs("sandbox", None)
         assert result.status == "warn"
         assert "parse" in result.detail.lower()
@@ -567,13 +591,15 @@ class TestAuthModeThreadedToDispatch:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["host_config"] = host_config
             captured["timeout"] = kwargs.get("timeout")
-            return _ok("ok\n")
+            return _okn("ok\n")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
         assert result.status == "pass"
@@ -588,11 +614,13 @@ class TestAuthModeThreadedToDispatch:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["host_config"] = host_config
-            return _ok("ok\n")
+            return _okn("ok\n")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
 
         assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
@@ -604,7 +632,7 @@ class TestAuthModeThreadedToDispatch:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error(timeout=True)
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
         assert result.status == "fail"
@@ -618,7 +646,7 @@ class TestAuthModeThreadedToDispatch:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error(timeout=True)
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
 
         assert result.status == "fail"
@@ -630,11 +658,13 @@ class TestAuthModeThreadedToDispatch:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["host_config"] = host_config
-            return _ok("24.0.7\n")
+            return _okn("24.0.7\n")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         check_docker_available("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
 
         assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
@@ -661,7 +691,7 @@ class TestCheckComposeProjectNameCollision:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error(timeout=True)
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         result = check_compose_project_name_collision("u", None)
         assert result.status == "skip"
         assert "timed out" in result.detail
@@ -676,7 +706,7 @@ class TestCheckComposeProjectNameCollision:
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error()
 
-        monkeypatch.setattr("core.dispatch.invoke", boom)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
         # Restored pre-refactor wording with the failure context from
@@ -690,7 +720,7 @@ class TestCheckComposeProjectNameCollision:
         state.mkdir(parents=True)
         (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
 
-        monkeypatch.setattr("core.dispatch.invoke", lambda *a, **k: _ok("not-json"))
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn("not-json"))
         out = check_compose_project_name_collision("u", None)
         assert out.status == "skip"
         assert "parse" in out.detail
@@ -706,12 +736,14 @@ class TestCheckComposeProjectNameCollision:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["op"] = op
             captured["timeout"] = kwargs.get("timeout")
-            return _ok("[]")
+            return _okn("[]")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         out = check_compose_project_name_collision("u", None)
         assert out.status == "pass"
         assert captured["op"] == "compose-ls"
@@ -732,11 +764,13 @@ class TestOperatorRootlessLocalRouting:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["host_config"] = host_config
-            return _ok("24.0.7\n")
+            return _okn("24.0.7\n")
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_docker_available(
             "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.OPERATOR_ROOTLESS
         )
@@ -1041,8 +1075,12 @@ def _bundle_outcome(segments: dict[str, tuple[str, int]], *, ok: bool = True) ->
     """
     from core.dispatch import ProbeOutcome
 
-    parts = [f"__PREFLIGHT_Q_{name}__\n{body}\n__PREFLIGHT_RC_{name}_{rc}__" for name, (body, rc) in segments.items()]
-    return ProbeOutcome(ok=ok, timed_out=False, stdout="\n".join(parts), message="")
+    nonce = "feedface00c0ffee"
+    parts = [
+        f"__PREFLIGHT_Q_{nonce}_{name}__\n{body}\n__PREFLIGHT_RC_{nonce}_{name}_{rc}__"
+        for name, (body, rc) in segments.items()
+    ]
+    return ProbeOutcome(ok=ok, timed_out=False, stdout="\n".join(parts), message="", preflight_nonce=nonce)
 
 
 _ALL_OK_SEGMENTS = {

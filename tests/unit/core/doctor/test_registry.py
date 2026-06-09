@@ -573,11 +573,13 @@ class TestRegistryThreadsMode:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["host_config"] = host_config
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="24.0.7\n", stderr="")
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="24.0.7\n", stderr=""), None
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         checks = {c.id: c for c in build_check_registry(mode=DockerExecutionMode.OPERATOR_ROOTLESS)}
         result = checks["docker_available"].run("sandbox", None)
         assert result.status == "pass"
@@ -591,11 +593,13 @@ class TestRegistryThreadsMode:
 
         captured: dict[str, Any] = {}
 
-        def capture(op: str, args: Any, host_config: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        def capture(
+            op: str, args: Any, host_config: Any, **kwargs: Any
+        ) -> tuple[subprocess.CompletedProcess[str], None]:
             captured["host_config"] = host_config
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="24.0.7\n", stderr="")
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="24.0.7\n", stderr=""), None
 
-        monkeypatch.setattr("core.dispatch.invoke", capture)
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         checks = {c.id: c for c in build_check_registry()}
         checks["docker_available"].run("sandbox", None)
         assert captured["host_config"].host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER

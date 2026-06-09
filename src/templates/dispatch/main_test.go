@@ -611,9 +611,41 @@ func TestEncodeJournalFieldsNewlineBranch(t *testing.T) {
 
 func TestWrapSentinel(t *testing.T) {
 	got := wrapSentinel("echo ok", "deadbeef")
-	want := "( echo ok ); echo __SANDBOX_EXIT_deadbeef_$?"
+	want := "__PFNONCE=deadbeef; ( echo ok ); echo __SANDBOX_EXIT_deadbeef_$?"
 	if got != want {
 		t.Fatalf("wrapSentinel = %q, want %q", got, want)
+	}
+}
+
+// TestWrapSentinelBindsPreflightMarkersToNonce guards H-1: the preflight bundle
+// inner references ${__PFNONCE}, and wrapSentinel assigns __PFNONCE=<nonce>
+// (the SAME nonce as the BEGIN/EXIT frame) before the subshell — so at
+// shell-expansion time the rendered markers carry the per-crossing nonce.
+// Untrusted op output cannot forge a verdict because it cannot learn the nonce.
+// Run under /bin/sh (busybox in the golang:1.23-alpine compile container).
+func TestWrapSentinelBindsPreflightMarkersToNonce(t *testing.T) {
+	wrapped := wrapSentinel(preflightInner, "deadbeefcafef00d")
+	out, err := exec.Command("/bin/sh", "-c", wrapped).Output()
+	if err != nil {
+		// docker/compose are absent in the test container; the queries fail, but
+		// the begin/rc echo markers still expand. Tolerate the non-nil exit and
+		// inspect stdout.
+		if len(out) == 0 {
+			t.Fatalf("sh -c %q produced no stdout: %v", wrapped, err)
+		}
+	}
+	for _, want := range []string{
+		"__PREFLIGHT_Q_deadbeefcafef00d_auth-probe__",
+		"__PREFLIGHT_RC_deadbeefcafef00d_auth-probe_",
+		"__PREFLIGHT_Q_deadbeefcafef00d_compose-ls__",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("rendered markers missing %q; stdout=%q", want, out)
+		}
+	}
+	// The literal template token must NOT survive into the output (it expanded).
+	if strings.Contains(string(out), "${__PFNONCE}") {
+		t.Fatalf("unexpanded ${__PFNONCE} in stdout=%q", out)
 	}
 }
 

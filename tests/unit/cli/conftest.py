@@ -126,11 +126,13 @@ def _preflight_pass_default(request: pytest.FixtureRequest) -> object:
         return
     from core.dispatch import ProbeOutcome
 
+    nonce = "feedface00c0ffee"
     healthy = ProbeOutcome(
         ok=True,
         timed_out=False,
-        stdout="__PREFLIGHT_Q_auth-probe__\nok\n__PREFLIGHT_RC_auth-probe_0__",
+        stdout=f"__PREFLIGHT_Q_{nonce}_auth-probe__\nok\n__PREFLIGHT_RC_{nonce}_auth-probe_0__",
         message="",
+        preflight_nonce=nonce,
     )
     with (
         patch("cli.main.dispatch.probe", return_value=healthy),

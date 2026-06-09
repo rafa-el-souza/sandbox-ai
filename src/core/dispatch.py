@@ -38,6 +38,7 @@ import gzip
 import io
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import tarfile
@@ -183,12 +184,19 @@ class ProbeOutcome:
             (carrying its informative exit-status / ``OSError`` context).
             Probe-style callers interpolate this into their operator-facing
             ``detail`` so the pre-refactor diagnostic fidelity is preserved.
+        preflight_nonce: For a ``preflight`` bundle outcome (H-1), the
+            per-crossing nonce the markers are bound to — the dispatcher's begin
+            nonce on the separate-user framed path, or the locally-minted nonce
+            on the operator-rootless path. ``None`` for every non-preflight
+            outcome and for a failed/timed-out preflight crossing;
+            :func:`parse_preflight_outcome` fails closed when it is absent.
     """
 
     ok: bool
     timed_out: bool
     stdout: str
     message: str
+    preflight_nonce: str | None = None
 
 
 # ─── Shared argument-shape predicates ───────────────────────────────────────
@@ -637,10 +645,21 @@ def _preflight_query_segments() -> list[tuple[str, str]]:
 
 
 def _preflight_inner() -> str:
-    """Build the ``;``-sequenced, per-query-attributed preflight bundle inner."""
+    """Build the ``;``-sequenced, per-query-attributed preflight bundle inner.
+
+    Each marker is bound to the ``${__PFNONCE}`` shell variable (H-1): the
+    variable is assigned post-authorization — by the dispatcher's
+    :func:`wrapSentinel` on the framed path, or by ``core.dispatch`` injecting
+    ``__PFNONCE=<nonce>; `` onto the inner on the operator-rootless local path —
+    so the bundle inner this builder emits is byte-static (the literal
+    ``${__PFNONCE}`` token, NOT a concrete nonce), keeping the Python↔Go fixture
+    parity intact. At shell-expansion time each marker carries the per-crossing
+    nonce, so untrusted op output cannot forge a verdict by emitting a
+    byte-perfect marker copy: it cannot learn the nonce.
+    """
     parts = [
-        f"echo {_PREFLIGHT_QUERY_MARKER_PREFIX}{name}__; {inner} 2>&1; "
-        f"echo {_PREFLIGHT_RC_MARKER_PREFIX}{name}_$?__"
+        f"echo {_PREFLIGHT_QUERY_MARKER_PREFIX}${{__PFNONCE}}_{name}__; {inner} 2>&1; "
+        f"echo {_PREFLIGHT_RC_MARKER_PREFIX}${{__PFNONCE}}_{name}_$?__"
         for name, inner in _preflight_query_segments()
     ]
     return " ; ".join(parts)
@@ -672,17 +691,55 @@ def parse_preflight_outcome(outcome: ProbeOutcome) -> dict[str, ProbeOutcome]:
 
     The markers are derived from the :data:`_PREFLIGHT_QUERY_MARKER_PREFIX` /
     :data:`_PREFLIGHT_RC_MARKER_PREFIX` constants (SSOT for the bundle format —
-    never hand-typed). A query whose begin marker, RC marker, or exit code is
-    absent or unparseable is returned as a not-ok outcome with an empty
-    ``stdout`` so each interpret fn sees a clean failure rather than partial
-    data.
+    never hand-typed) and bound to ``outcome.preflight_nonce`` (H-1): the
+    per-crossing nonce minted by the dispatcher's begin frame (separate-user) or
+    by ``core.dispatch`` on the operator-rootless local path. The parser is
+    uniformly **fail-closed**:
+
+    - **Nonce-absent** (a failed/timed-out crossing, or any path that did not
+      surface a nonce) → every query is returned not-ok. A failed/timed-out
+      crossing is already caught by ``start``'s reachability gate before parse,
+      so ``None`` → fail-closed is the correct posture.
+    - **Sequential scan** (Layer 1): each query's begin marker is searched
+      starting *after* the previous query's RC-marker index and must be the next
+      begin marker found — the scan never skips past untrusted bytes to a marker
+      a later position, so an attacker cannot pre-seed a forged marker upstream.
+    - **Reject-duplicate** (Layer 2): if a query's begin OR rc marker appears
+      more than once in the blob the query is ambiguous → not-ok.
+
+    A query whose begin marker, RC marker, or exit code is absent, duplicated,
+    or unparseable is returned as a not-ok outcome with an empty ``stdout`` so
+    each interpret fn sees a clean failure rather than partial data.
     """
     text = outcome.stdout
+    nonce = outcome.preflight_nonce
     result: dict[str, ProbeOutcome] = {}
+    if not nonce:
+        # Fail closed: no per-crossing nonce ⇒ no marker we emit can be trusted.
+        for name, _inner in _preflight_query_segments():
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} unverifiable: preflight nonce absent",
+            )
+        return result
+
+    cursor = 0
     for name, _inner in _preflight_query_segments():
-        q_marker = f"{_PREFLIGHT_QUERY_MARKER_PREFIX}{name}__"
-        rc_prefix = f"{_PREFLIGHT_RC_MARKER_PREFIX}{name}_"
-        q_idx = text.find(q_marker)
+        q_marker = f"{_PREFLIGHT_QUERY_MARKER_PREFIX}{nonce}_{name}__"
+        rc_prefix = f"{_PREFLIGHT_RC_MARKER_PREFIX}{nonce}_{name}_"
+        # Layer 2: a duplicated begin or rc marker makes the query ambiguous.
+        if text.count(q_marker) > 1 or text.count(rc_prefix) > 1:
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} marker appears more than once (ambiguous)",
+            )
+            continue
+        # Layer 1: scan strictly forward from the prior query's RC index.
+        q_idx = text.find(q_marker, cursor)
         rc_idx = text.find(rc_prefix, q_idx + len(q_marker)) if q_idx != -1 else -1
         if q_idx == -1 or rc_idx == -1:
             result[name] = ProbeOutcome(
@@ -705,6 +762,7 @@ def parse_preflight_outcome(outcome: ProbeOutcome) -> dict[str, ProbeOutcome]:
                 message=f"preflight query {name!r} exit code unparseable ({rc_token!r})",
             )
             continue
+        cursor = rc_idx + len(rc_prefix)
         ok = rc == 0
         result[name] = ProbeOutcome(
             ok=ok,
@@ -1065,16 +1123,54 @@ def invoke(
     :class:`~core.exceptions.SandboxExecutionError` before any normalization
     runs.
     """
+    cp, _ = _invoke_with_nonce(op, args, host_config, timeout=timeout)
+    return cp
+
+
+def _invoke_with_nonce(
+    op: Op | str,
+    args: list[str],
+    host_config: HostConfig,
+    *,
+    timeout: float | None = None,
+) -> tuple[subprocess.CompletedProcess[str], str | None]:
+    """Run the dispatcher and surface the per-crossing preflight nonce (H-1).
+
+    The shared body behind :func:`invoke` and :func:`probe`. Returns the
+    :class:`subprocess.CompletedProcess` plus the per-crossing nonce the
+    ``preflight`` bundle's markers are bound to (``None`` for every other op and
+    for both modes when ``op`` is not ``preflight``):
+
+    - **separate-user (framed)** — the dispatcher mints the nonce for its
+      ``__SANDBOX_BEGIN_<nonce>`` frame; the :class:`~core.executor.Executor`
+      stashes the recovered begin nonce on ``_last_frame_nonce`` (its public
+      ``CompletedProcess`` contract is unchanged), which we surface here.
+    - **operator-rootless (local)** — there is no dispatcher to mint a nonce, so
+      for a ``preflight`` crossing we mint one locally (``secrets.token_hex(8)``,
+      the project CSPRNG idiom) and inject ``__PFNONCE=<nonce>; `` onto the bash
+      inner *after* :func:`emit_op_audit` has logged the CLEAN argv (so journald
+      records no nonce), then run ``framed=False`` and return the minted nonce.
+    """
     argv = build_invocation(op, args, host_config)
     if is_operator_rootless(host_config):
         op_value = Op(op).value
         instance = args[0] if op_value in _COMPOSE_VERB else ""
+        # Audit the CLEAN argv first so journald logs no nonce.
         emit_op_audit(op_value, list(args), argv, instance)
+        nonce: str | None = None
+        if op_value == Op.PREFLIGHT.value:
+            nonce = secrets.token_hex(8)
+            # Assign __PFNONCE outside the bundle inner so the markers expand to
+            # the per-crossing nonce; the assignment emits no stdout.
+            argv = [*argv[:-1], f"__PFNONCE={nonce}; {argv[-1]}"]
         cp = Executor().run(argv, framed=False, timeout=timeout)
-        return subprocess.CompletedProcess(
+        normalized = subprocess.CompletedProcess(
             cp.args, cp.returncode, normalize_captured_output(cp.stdout), cp.stderr
         )
-    return Executor().run(argv, framed=True, timeout=timeout)
+        return normalized, nonce
+    ex = Executor()
+    cp = ex.run(argv, framed=True, timeout=timeout)
+    return cp, ex._last_frame_nonce
 
 
 def probe(
@@ -1105,15 +1201,20 @@ def probe(
         to surface in their operator-facing ``detail``.
     """
     try:
-        cp = invoke(op, args, host_config, timeout=timeout)
+        cp, nonce = _invoke_with_nonce(op, args, host_config, timeout=timeout)
     except SandboxExecutionError as exc:
+        # A failed/timed-out crossing surfaces no usable nonce; leaving
+        # preflight_nonce=None makes parse_preflight_outcome fail closed (the
+        # crossing is already caught by start's reachability gate before parse).
         return ProbeOutcome(
             ok=False,
             timed_out=isinstance(exc.__cause__, subprocess.TimeoutExpired),
             stdout="",
             message=str(exc),
         )
-    return ProbeOutcome(ok=True, timed_out=False, stdout=cp.stdout, message="")
+    return ProbeOutcome(
+        ok=True, timed_out=False, stdout=cp.stdout, message="", preflight_nonce=nonce
+    )
 
 
 # ─── Offline reproducible compile recipe ────────────────────────────────────
