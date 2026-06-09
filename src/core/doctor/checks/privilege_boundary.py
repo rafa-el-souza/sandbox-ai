@@ -122,6 +122,15 @@ def check_machinectl_reachable(
     in sudo mode, or polkit dialog/timeout in polkit mode.
     """
     outcome = dispatch.probe("auth-probe", [], minimal_host_config(user, auth_mode, mode), timeout=10)
+    return _interpret_machinectl_reachable(outcome, user, auth_mode)
+
+
+def _interpret_machinectl_reachable(
+    outcome: dispatch.ProbeOutcome,
+    user: str,
+    auth_mode: MachinectlAuth,
+) -> CheckResult:
+    """Interpret the ``auth-probe`` outcome (the seam reused by ``start`` preflight)."""
     if outcome.timed_out:
         if auth_mode == MachinectlAuth.SUDO:
             timeout_remediation = (
@@ -162,6 +171,11 @@ def check_docker_available(
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
     outcome = dispatch.probe("docker-version", [], minimal_host_config(user, auth_mode, mode), timeout=15)
+    return _interpret_docker_available(outcome, user)
+
+
+def _interpret_docker_available(outcome: dispatch.ProbeOutcome, user: str) -> CheckResult:
+    """Interpret the ``docker-version`` outcome."""
     if outcome.ok and outcome.stdout.strip():
         return CheckResult(
             status="pass",
@@ -187,6 +201,11 @@ def check_docker_rootless(
     outcome = dispatch.probe(
         "docker-info", ["security-options"], minimal_host_config(user, auth_mode, mode), timeout=15
     )
+    return _interpret_docker_rootless(outcome, user)
+
+
+def _interpret_docker_rootless(outcome: dispatch.ProbeOutcome, user: str) -> CheckResult:
+    """Interpret the ``docker-info ["security-options"]`` outcome."""
     if outcome.ok and "rootless" in outcome.stdout:
         return CheckResult(
             status="pass",
@@ -212,6 +231,11 @@ def check_runsc_registered(
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
     outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)
+    return _interpret_runsc_registered(outcome)
+
+
+def _interpret_runsc_registered(outcome: dispatch.ProbeOutcome) -> CheckResult:
+    """Interpret the ``docker-info ["runtimes"]`` outcome for runsc registration."""
     if outcome.ok:
         try:
             runtimes = json.loads(outcome.stdout.strip())
@@ -249,6 +273,11 @@ def check_runsc_runtimeargs(
     is a defense-in-depth advisory.
     """
     outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)
+    return _interpret_runsc_runtimeargs(outcome, user)
+
+
+def _interpret_runsc_runtimeargs(outcome: dispatch.ProbeOutcome, user: str) -> CheckResult:
+    """Interpret the ``docker-info ["runtimes"]`` outcome for runsc runtimeArgs."""
     if not outcome.ok:
         return CheckResult(
             status="warn",
@@ -311,6 +340,11 @@ def check_host_uds(
     Returns PASS if --host-uds=all is absent, WARN if present.
     """
     outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)
+    return _interpret_host_uds(outcome, user)
+
+
+def _interpret_host_uds(outcome: dispatch.ProbeOutcome, user: str) -> CheckResult:
+    """Interpret the ``docker-info ["runtimes"]`` outcome for the ``--host-uds`` posture."""
     if not outcome.ok:
         return CheckResult(
             status="warn",
@@ -365,6 +399,29 @@ def check_compose_project_name_collision(
     (``<sanitized-dev-username>-<inst>`` per ``instance-registry``).
     """
     del distro
+    from core.doctor.checks.workspace_bridge import _read_registry_raw
+
+    if not list(_read_registry_raw().keys()):
+        return CheckResult(
+            status="pass",
+            name="compose project name collision",
+            detail="no registered instances; nothing to check",
+            category="Privilege Boundary",
+        )
+
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, auth_mode, mode), timeout=15)
+    return _interpret_compose_project_name_collision(outcome)
+
+
+def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) -> CheckResult:
+    """Interpret the ``compose-ls`` outcome against the local registry.
+
+    Self-contained: reads the instance registry locally (a LOCAL operation, not
+    a boundary crossing) so the ``start`` preflight can feed this a
+    ``compose-ls``-derived outcome without re-deriving the expected project set.
+    The no-registered-instances early return is reproduced here so the function
+    is total over any outcome it is handed.
+    """
     from core.compose import compose_project_name
     from core.doctor.checks.workspace_bridge import _read_registry_raw
 
@@ -378,7 +435,6 @@ def check_compose_project_name_collision(
         )
     expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
 
-    outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, auth_mode, mode), timeout=15)
     if outcome.timed_out:
         return CheckResult(
             status="skip",

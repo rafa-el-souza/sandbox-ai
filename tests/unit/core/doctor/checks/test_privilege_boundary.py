@@ -787,3 +787,239 @@ class TestOperatorRootlessLocalRouting:
         assert captured["framed"] is True
         assert "machinectl" not in captured["argv"]
         assert captured["argv"][:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+
+
+# ── C-009 M4b-2: direct interpret-fn contract tests ──────────────────────────
+#
+# Each ``_interpret_<name>`` is the SINGLE interpretation source for its check
+# (the check fn = ``dispatch.probe(...)`` then ``return _interpret_<name>(...)``).
+# A LATER milestone feeds these the same per-op ``ProbeOutcome``s reconstructed
+# from ONE ``preflight`` crossing, so these tests lock the outcome→CheckResult
+# contract independent of the crossing path. The crossing-path tests above stay.
+
+
+def _outcome(*, ok: bool = False, timed_out: bool = False, stdout: str = "", message: str = "") -> Any:
+    """Build a synthetic ``dispatch.ProbeOutcome`` for direct interpret-fn tests."""
+    from core.dispatch import ProbeOutcome
+
+    return ProbeOutcome(ok=ok, timed_out=timed_out, stdout=stdout, message=message)
+
+
+class TestInterpretMachinectlReachable:
+    def test_pass(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
+        from core.host_config import MachinectlAuth
+
+        result = _interpret_machinectl_reachable(_outcome(ok=True), "sandbox", MachinectlAuth.SUDO)
+        assert result.status == "pass"
+        assert "sandbox@.host" in result.detail
+
+    def test_timeout_sudo_remediation(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
+        from core.host_config import MachinectlAuth
+
+        result = _interpret_machinectl_reachable(_outcome(timed_out=True), "sandbox", MachinectlAuth.SUDO)
+        assert result.status == "fail"
+        assert "sudo" in (result.detail + (result.remediation or "")).lower()
+        assert "sudoers" in (result.remediation or "")
+
+    def test_timeout_polkit_remediation(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
+        from core.host_config import MachinectlAuth
+
+        result = _interpret_machinectl_reachable(_outcome(timed_out=True), "sandbox", MachinectlAuth.POLKIT)
+        assert result.status == "fail"
+        assert "polkit" in (result.remediation or "")
+
+    def test_not_ok_interpolates_message(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
+        from core.host_config import MachinectlAuth
+
+        result = _interpret_machinectl_reachable(_outcome(message="boom"), "sandbox", MachinectlAuth.SUDO)
+        assert result.status == "fail"
+        assert "boom" in result.detail
+
+
+class TestInterpretDockerAvailable:
+    def test_pass(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_available
+
+        result = _interpret_docker_available(_outcome(ok=True, stdout="24.0.7\n"), "sandbox")
+        assert result.status == "pass"
+        assert "24.0.7" in result.detail
+
+    def test_empty_stdout_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_available
+
+        result = _interpret_docker_available(_outcome(ok=True, stdout="   "), "sandbox")
+        assert result.status == "fail"
+
+    def test_not_ok_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_available
+
+        result = _interpret_docker_available(_outcome(message="x"), "sandbox")
+        assert result.status == "fail"
+
+
+class TestInterpretDockerRootless:
+    def test_pass(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_rootless
+
+        result = _interpret_docker_rootless(_outcome(ok=True, stdout="[name=rootless]"), "sandbox")
+        assert result.status == "pass"
+
+    def test_not_rootless_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_rootless
+
+        result = _interpret_docker_rootless(_outcome(ok=True, stdout="[name=seccomp]"), "sandbox")
+        assert result.status == "fail"
+
+    def test_not_ok_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_docker_rootless
+
+        result = _interpret_docker_rootless(_outcome(message="x"), "sandbox")
+        assert result.status == "fail"
+
+
+class TestInterpretRunscRegistered:
+    def test_pass(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        result = _interpret_runsc_registered(_outcome(ok=True, stdout=json.dumps({_RUNSC: {}})))
+        assert result.status == "pass"
+
+    def test_missing_key_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        result = _interpret_runsc_registered(_outcome(ok=True, stdout=json.dumps({"runsc": {}})))
+        assert result.status == "fail"
+
+    def test_bad_json_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        result = _interpret_runsc_registered(_outcome(ok=True, stdout="not-json"))
+        assert result.status == "fail"
+
+    def test_not_ok_fails(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_registered
+
+        result = _interpret_runsc_registered(_outcome(message="x"))
+        assert result.status == "fail"
+
+
+class TestInterpretRunscRuntimeargs:
+    def test_pass(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        stdout = json.dumps({_RUNSC: {"runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"]}})
+        result = _interpret_runsc_runtimeargs(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "pass"
+
+    def test_missing_arg_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        stdout = json.dumps({_RUNSC: {"runtimeArgs": ["--oci-seccomp"]}})
+        result = _interpret_runsc_runtimeargs(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "warn"
+        assert "--ignore-cgroups" in result.detail
+
+    def test_bad_json_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        result = _interpret_runsc_runtimeargs(_outcome(ok=True, stdout="garbage"), "sandbox")
+        assert result.status == "warn"
+        assert "parse" in result.detail
+
+    def test_not_ok_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_runsc_runtimeargs
+
+        result = _interpret_runsc_runtimeargs(_outcome(message="x"), "sandbox")
+        assert result.status == "warn"
+        assert "query" in result.detail
+
+
+class TestInterpretHostUds:
+    def test_none_passes(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        stdout = json.dumps({_RUNSC: {"runtimeArgs": ["--oci-seccomp"]}})
+        result = _interpret_host_uds(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "pass"
+
+    def test_all_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        stdout = json.dumps({_RUNSC: {"runtimeArgs": ["--host-uds=all"]}})
+        result = _interpret_host_uds(_outcome(ok=True, stdout=stdout), "sandbox")
+        assert result.status == "warn"
+        assert "--host-uds=all" in result.detail
+
+    def test_bad_json_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        result = _interpret_host_uds(_outcome(ok=True, stdout="garbage"), "sandbox")
+        assert result.status == "warn"
+        assert "parse" in result.detail
+
+    def test_not_ok_warns(self) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_host_uds
+
+        result = _interpret_host_uds(_outcome(message="x"), "sandbox")
+        assert result.status == "warn"
+        assert "query" in result.detail
+
+
+class TestInterpretComposeProjectNameCollision:
+    """The collision interpret fn is self-contained — it reads the registry
+    internally, so it takes ONLY the outcome (the next milestone feeds it a
+    ``compose-ls``-derived outcome)."""
+
+    def test_no_registered_instances_passes(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text("{}")
+        result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout="[]"))
+        assert result.status == "pass"
+        assert "no registered" in result.detail
+
+    def test_timeout_skips(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = _interpret_compose_project_name_collision(_outcome(timed_out=True))
+        assert result.status == "skip"
+        assert "timed out" in result.detail
+
+    def test_not_ok_skips_with_message(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = _interpret_compose_project_name_collision(_outcome(message="boom"))
+        assert result.status == "skip"
+        assert result.detail == "docker compose ls failed: boom"
+
+    def test_unparseable_skips(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout="not-json"))
+        assert result.status == "skip"
+        assert "parse" in result.detail
+
+    def test_clean_daemon_passes(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.doctor.checks.privilege_boundary import _interpret_compose_project_name_collision
+
+        state = isolated_sandbox_ai_home / "state"
+        state.mkdir(parents=True)
+        (state / "instances.json").write_text(json.dumps({"foo": {"instance_dir": "/x"}}))
+        result = _interpret_compose_project_name_collision(_outcome(ok=True, stdout="[]"))
+        assert result.status == "pass"
+        assert "registered instance" in result.detail
