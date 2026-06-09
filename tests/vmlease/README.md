@@ -27,8 +27,9 @@ Each probe emits `<CMD>_*_OK` / `_FAIL` gating tokens plus observational `_revie
 `mutating:operator-space` probe, the rest are `mutating:host-root` (single rank → authoring order is
 execution order).
 
-`vmlease-compose-plugin-check.json` is a separate, read-only check that a freshly-provisioned host has
-vmlease's docker prerequisites (compose v2 plugin, buildx, `script(1)`); no source upload.
+(The vmlease-provisioning smoke that used to sit here — verifying a fresh VM's docker/compose install —
+now lives in the vmlease repo at `examples/compose-plugin-check.json`, since it validates vmlease's own
+provisioning, not sandbox-ai.)
 
 ## `baseline-matrix.md`
 
