@@ -34,7 +34,6 @@ from core.actions import (
     NamedAclRevokeAction,
     WorkspaceSharedGroupAction,
 )
-from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
@@ -1702,13 +1701,14 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     inst_dir = home / "instances" / inst
     secrets = inst_dir / "secrets"
 
-    # Container name uses the compose project name (sanitized-username
-    # prefix), not the bare instance name; ``core_ipc_ip`` is a read-only
-    # ledger peek (no allocation; instance is already started by the time
-    # this argv is built). Per cli-attach: attach does not mutate IPAM state.
-    project_name = compose_project_name(inst)
-    base_index, _existing = IPAMLedger().peek_next_slot(inst)
-    core_ipc_ip = derive_static_ips(base_index)["core_ipc_ip"]
+    # Project name (sanitized-username prefix, not the bare instance name) and
+    # the instance's read-only ``core_ipc_ip`` ledger peek both come from the
+    # single ``fwd`` resolver ``core.dispatch.resolve_fwd_state`` — the SAME
+    # source the ProxyCommand wire expansion uses, so the session-log directory
+    # name and the ``agent@<ip>`` ssh destination can never drift from the wire.
+    # No allocation happens (the instance is already started by the time this
+    # argv is built); per cli-attach, attach does not mutate IPAM state.
+    project_name, core_ipc_ip = dispatch.resolve_fwd_state(inst)
 
     # Operator-side session log path — host filesystem only, never a
     # bind mount or instance secrets directory (per cli-attach spec).

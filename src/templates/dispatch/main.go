@@ -75,11 +75,11 @@ var validOps = []string{
 }
 
 // preflightInner is the byte-identical Go spelling of core.dispatch's
-// _preflight_inner() — the ``;``-sequenced, per-query-attributed read-only
-// health bundle backing ``sandbox start``'s privilege-boundary preflight
+// _preflight_inner() — the `;`-sequenced, per-query-attributed read-only
+// health bundle backing `sandbox start`'s privilege-boundary preflight
 // (C-009 D6). It is necessarily a second spelling; the shared fixture
 // (target_argv_cases.json, TestTargetArgvFixtureParity) pins it equal to the
-// Python builder's output, so a drift fails ``go test`` -> the compile.
+// Python builder's output, so a drift fails `go test` -> the compile.
 //
 // Each marker is bound to the ${__PFNONCE} shell variable (H-1): wrapSentinel
 // assigns __PFNONCE=<nonce> (the same nonce as the BEGIN/EXIT frame) before the
@@ -152,8 +152,8 @@ func genNonce() (string, error) {
 // untrusted op output cannot forge a verdict because it cannot learn it. The
 // assignment is branch-free (harmless for non-preflight ops, which never
 // reference __PFNONCE), emits no stdout, and runs before the subshell — so
-// F-023 is preserved (the subshell ``( … )`` is unchanged and still captures an
-// inner ``exit`` without swallowing the trailer).
+// F-023 is preserved (the subshell `( … )` is unchanged and still captures an
+// inner `exit` without swallowing the trailer).
 func wrapSentinel(inner, nonce string) string {
 	return fmt.Sprintf("__PFNONCE=%s; ( %s ); echo __SANDBOX_EXIT_%s_$?", nonce, inner, nonce)
 }
@@ -521,10 +521,14 @@ func validateFwdIP(ip string) error {
 	}
 	vals := make([]int, 4)
 	for idx, o := range octets {
-		// Reject empty, leading '+'/'-', non-digit, or multi-byte surprises:
-		// require a pure 1–3 digit decimal octet with no leading zero ambiguity
-		// beyond a single "0".
+		// Reject empty, over-long, non-digit, or leading-zero octets: require a
+		// pure 1–3 digit decimal octet. A leading-zero octet (e.g. "010") is
+		// rejected outright — bare "0" is the only acceptable octet that begins
+		// with '0' — so no octet is silently reinterpreted (octal/ambiguous).
 		if o == "" || len(o) > 3 {
+			return reject()
+		}
+		if len(o) > 1 && o[0] == '0' {
 			return reject()
 		}
 		n := 0

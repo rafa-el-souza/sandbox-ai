@@ -452,19 +452,15 @@ _STREAMING_DISPATCH_MODULE = "src/core/dispatch.py"
 # The wire payload prefix that crosses the boundary, and the in-container dial
 # binary of the docker-exec target argv. The payload SUBSTRING appearing in any
 # literal, or a literal EQUAL to the standalone ``/fwd`` argv element, OUTSIDE
-# core.dispatch (and the transitional allowlist below) means a module is
-# hand-building the streaming crossing. The argv-element match is by EQUALITY
-# (not substring) so an unrelated path literal like ``docker/admin/fwd.go``
-# (which merely contains ``/fwd``) is not a false positive — only the discrete
-# docker-exec ``"/fwd"`` argv element is the dial.
+# core.dispatch means a module is hand-building the streaming crossing. The
+# argv-element match is by EQUALITY (not substring) so an unrelated path literal
+# like ``docker/admin/fwd.go`` (which merely contains ``/fwd``) is not a false
+# positive — only the discrete docker-exec ``"/fwd"`` argv element is the dial.
+# core.dispatch.proxy_argv is the single sanctioned producer of either literal;
+# there are no exemptions (cli.main._build_attach_argv and the start dry-run
+# preview obtain the ProxyCommand from proxy_argv, holding neither literal).
 _FWD_PAYLOAD_SUBSTR = "dispatch fwd"
 _FWD_TARGET_BINARY = "/fwd"
-# Zero exemptions. The C-010 group-3 rewrite landed: cli.main._build_attach_argv
-# and the start dry-run preview now obtain the ProxyCommand from
-# core.dispatch.proxy_argv, so no module outside core.dispatch holds a ``/fwd``
-# docker-exec argv or a ``dispatch fwd`` payload literal. core.dispatch is the
-# single sanctioned producer; the allowlist is intentionally empty.
-_FWD_PAYLOAD_ALLOWLIST: frozenset[str] = frozenset()
 
 
 def _fwd_invoke_probe_call_lines(tree: ast.AST) -> list[int]:
@@ -503,12 +499,11 @@ def _fwd_invoke_probe_call_lines(tree: ast.AST) -> list[int]:
 def _fwd_payload_literal_lines(tree: ast.AST) -> tuple[list[int], list[int]]:
     """Return ``(payload_lines, target_argv_lines)`` for string-literal nodes.
 
-    ``payload_lines`` embed the ``dispatch fwd`` wire payload (never exempt);
-    ``target_argv_lines`` embed the bare ``/fwd`` docker-exec target binary
-    (transitionally exempt for the allowlisted module). AST-only
-    (``ast.Constant`` string nodes) so comments/docstrings that merely *mention*
-    the op in prose are NOT flagged — only real string literals a module would
-    interpolate into a crossing argv."""
+    ``payload_lines`` embed the ``dispatch fwd`` wire payload; ``target_argv_lines``
+    embed the bare ``/fwd`` docker-exec target binary. Both are sanctioned only
+    in core.dispatch. AST-only (``ast.Constant`` string nodes) so
+    comments/docstrings that merely *mention* the op in prose are NOT flagged —
+    only real string literals a module would interpolate into a crossing argv."""
     payload_lines: list[int] = []
     target_lines: list[int] = []
     for node in ast.walk(tree):
@@ -547,11 +542,10 @@ def _streaming_op_violations(
         if rel != _STREAMING_DISPATCH_MODULE:
             payload_lines, target_lines = _fwd_payload_literal_lines(tree)
             if payload_lines:
-                # The ``dispatch fwd`` wire payload is never exempt anywhere.
+                # The ``dispatch fwd`` wire payload is sanctioned only here.
                 offenders.append((src, "payload", payload_lines))
-            if target_lines and rel not in _FWD_PAYLOAD_ALLOWLIST:
-                # The bare ``/fwd`` docker-exec argv is transitionally exempt for
-                # the allowlisted module (cli.main, pre-group-3 rewrite).
+            if target_lines:
+                # The bare ``/fwd`` docker-exec argv is sanctioned only here.
                 offenders.append((src, "target-argv", target_lines))
     return offenders
 
@@ -581,17 +575,20 @@ def test_streaming_op_reachable_only_via_proxy_argv() -> None:
 
 
 def test_streaming_op_deliberate_violations_are_detected(tmp_path: Path) -> None:
-    """Both violation kinds are caught by the shared detector (proves the guard
-    catches the bug class, not just the symptom's absence)."""
+    """All three violation kinds are caught by the shared detector (proves the
+    guard catches the bug class, not just the symptom's absence)."""
     rogue_invoke = tmp_path / "rogue_invoke.py"
     rogue_invoke.write_text("invoke(Op.FWD, ['myinst'], hc)\nprobe('fwd', ['x'], hc)\n")
     rogue_payload = tmp_path / "rogue_payload.py"
     rogue_payload.write_text('CMD = "/usr/local/libexec/sandbox-ai/dispatch fwd myinst"\n')
+    rogue_target = tmp_path / "rogue_target.py"
+    rogue_target.write_text('ARGV = ["docker", "exec", "-i", "p-admin-1", "/fwd", "10.100.0.7:9999"]\n')
 
-    offenders = _streaming_op_violations(iter([rogue_invoke, rogue_payload]))
+    offenders = _streaming_op_violations(iter([rogue_invoke, rogue_payload, rogue_target]))
     kinds_by_path = {(p, kind) for p, kind, _ in offenders}
     assert (rogue_invoke, "invoke/probe") in kinds_by_path
     assert (rogue_payload, "payload") in kinds_by_path
+    assert (rogue_target, "target-argv") in kinds_by_path
 
 
 # ── D7 regression guard: runtime owner resolved via resolve_daemon_owner ──────

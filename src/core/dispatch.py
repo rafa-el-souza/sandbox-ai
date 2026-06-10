@@ -186,6 +186,53 @@ class StreamingOpError(ValueError):
     """
 
 
+# ─── Streaming-op classification guard (C-010 D3) ────────────────────────────
+#
+# One predicate + one symmetric guard pair, co-located with ``_STREAMING_OPS``
+# and :class:`StreamingOpError`, shared by both sides of the carve-out: the
+# framed path (:func:`build_invocation` / :func:`invoke` / :func:`probe`) must
+# REJECT a streaming op, and :func:`proxy_argv` (the sole streaming-op argv
+# producer) must reject a non-streaming (framed) op.
+
+
+def _is_streaming_op(op: Op | str) -> bool:
+    """Return ``True`` iff ``op`` is a streaming (frameless) op (C-010 D3)."""
+    return Op(op) in _STREAMING_OPS
+
+
+def _require_framed_op(op: Op | str) -> None:
+    """Raise :class:`StreamingOpError` if ``op`` is a streaming op (C-010 D3).
+
+    The guard at the head of the framed construction/execution path
+    (:func:`build_invocation`, and therefore :func:`invoke`/:func:`probe`). A
+    streaming op carries no orchestrator-interpreted output, so the orchestrator
+    must never construct a captured crossing for it — it is reachable only via
+    :func:`proxy_argv`.
+    """
+    if _is_streaming_op(op):
+        raise StreamingOpError(
+            f"op {Op(op).value!r} is a streaming op and cannot be run via "
+            "invoke()/probe() (its output is a raw byte stream with no "
+            "orchestrator-interpreted content); use core.dispatch.proxy_argv() "
+            "to construct the ProxyCommand crossing argv instead"
+        )
+
+
+def _require_streaming_op(op: Op | str) -> None:
+    """Raise :class:`StreamingOpError` if ``op`` is NOT a streaming op (C-010 D3).
+
+    The guard at the head of :func:`proxy_argv`, the sole producer of
+    streaming-op crossing argv — a framed op belongs on
+    :func:`invoke`/:func:`probe`.
+    """
+    if not _is_streaming_op(op):
+        raise StreamingOpError(
+            f"op {Op(op).value!r} is not a streaming op; proxy_argv() "
+            "constructs ProxyCommand argv only for streaming ops — run framed "
+            "ops via invoke()/probe()"
+        )
+
+
 @dataclass(frozen=True)
 class ProbeOutcome:
     """Typed result of a non-raising :func:`probe` call (design Q8).
@@ -852,16 +899,19 @@ _DOCKER_BINARY = "/usr/bin/docker"
 _FWD_PORT = "9999"
 
 
-def _resolve_fwd_state(inst: str) -> tuple[str, str]:
+def resolve_fwd_state(inst: str) -> tuple[str, str]:
     """Return ``(project_name, core_ipc_ip)`` for ``inst``.
 
-    Mirrors the two operator-side lookups ``cli.main._build_attach_argv``
-    performs (the compose project name via :func:`compose_project_name`, and the
-    instance's core IPC IP via a read-only IPAM ledger peek — attach never
-    mutates IPAM state, per ``cli-attach``). This is the SSOT for the ``fwd``
-    operator-side resolution; the inline original in ``cli.main`` is removed by
-    the sibling milestone that rewrites the ProxyCommand to call
-    :func:`proxy_argv`.
+    The SSOT for the ``fwd`` operator-side resolution: the compose project name
+    via :func:`compose_project_name`, and the instance's core IPC IP via a
+    read-only IPAM ledger peek (attach never mutates IPAM state, per
+    ``cli-attach``). Both :func:`_expand_fwd_wire` (the ProxyCommand wire
+    payload) and ``cli.main._build_attach_argv`` (its own session-log directory
+    name + ``agent@<ip>`` ssh destination) consume this same resolver, so a
+    single source of truth exists. The two invocations per attach are
+    deterministic for an allocated instance: :meth:`IPAMLedger.peek_next_slot`
+    is read-only and the warm gate guarantees the instance is already allocated
+    by the time this argv is built.
     """
     project_name = compose_project_name(inst)
     base_index, _existing = IPAMLedger().peek_next_slot(inst)
@@ -877,7 +927,7 @@ def _expand_fwd_wire(args: Sequence[str]) -> list[str]:
     NEVER caller-supplied; the typed validator rejects any second positional).
     """
     inst = args[0]
-    project_name, core_ipc_ip = _resolve_fwd_state(inst)
+    project_name, core_ipc_ip = resolve_fwd_state(inst)
     return [inst, "--project", project_name, "--ip", core_ipc_ip]
 
 
@@ -1126,12 +1176,19 @@ def build_invocation(
       ``<dispatch-binary> <op>`` indirection — the Go dispatcher is bypassed and
       the op runs as a plain local subprocess.
 
+    A streaming op (``fwd``) is NOT reachable here: it emits no framing and
+    carries a raw byte stream the orchestrator must never capture, so it is
+    rejected before any crossing argv is built (its sole sanctioned producer is
+    :func:`proxy_argv`).
+
     Raises:
+        StreamingOpError: ``op`` is a streaming op (use :func:`proxy_argv`).
         DispatchValidationError: the typed args are malformed for ``op`` (raised
             before any boundary-crossing argv is built).
         ValueError: ``op`` is not a known :class:`Op`.
     """
     resolved = Op(op)
+    _require_framed_op(resolved)
     op_value = resolved.value
     validate_args(resolved, args)
     wire_args = (
@@ -1158,22 +1215,6 @@ def build_invocation(
         "-c",
         inner,
     ]
-
-
-def _reject_streaming_op(op: Op | str) -> None:
-    """Raise :class:`StreamingOpError` if ``op`` is a streaming op (C-010 D3).
-
-    The guard at the head of the :func:`invoke`/:func:`probe` shared body. A
-    streaming op carries no orchestrator-interpreted output, so the orchestrator
-    must never capture it — it is reachable only via :func:`proxy_argv`.
-    """
-    if Op(op) in _STREAMING_OPS:
-        raise StreamingOpError(
-            f"op {Op(op).value!r} is a streaming op and cannot be run via "
-            "invoke()/probe() (its output is a raw byte stream with no "
-            "orchestrator-interpreted content); use core.dispatch.proxy_argv() "
-            "to construct the ProxyCommand crossing argv instead"
-        )
 
 
 def proxy_argv(
@@ -1218,12 +1259,7 @@ def proxy_argv(
         ValueError: ``op`` is not a known :class:`Op`.
     """
     resolved = Op(op)
-    if resolved not in _STREAMING_OPS:
-        raise StreamingOpError(
-            f"op {resolved.value!r} is not a streaming op; proxy_argv() "
-            "constructs ProxyCommand argv only for streaming ops — run framed "
-            "ops via invoke()/probe()"
-        )
+    _require_streaming_op(resolved)
     validate_args(resolved, args)
     wire_args = _expand_fwd_wire(args)
     if is_operator_rootless(host_config):
@@ -1375,7 +1411,7 @@ def _invoke_with_nonce(
       inner *after* :func:`emit_op_audit` has logged the CLEAN argv (so journald
       records no nonce), then run ``framed=False`` and return the minted nonce.
     """
-    _reject_streaming_op(op)
+    _require_framed_op(op)
     argv = build_invocation(op, args, host_config)
     if is_operator_rootless(host_config):
         op_value = Op(op).value

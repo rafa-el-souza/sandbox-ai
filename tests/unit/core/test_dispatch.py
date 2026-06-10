@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from core.compose import compose_project_name
 from core.dispatch import (
     _DISPATCH_BINARY,
     OP_SPECS,
@@ -39,11 +40,13 @@ from core.dispatch import (
     parse_preflight_outcome,
     probe,
     proxy_argv,
+    resolve_fwd_state,
     sudo_pipe_crossing_argv,
     validate_args,
 )
 from core.exceptions import SandboxExecutionError
 from core.hydration import IMAGE_REGISTRY
+from core.ipam import IPAMLedger, derive_static_ips
 
 if TYPE_CHECKING:
     from core.host_config import HostConfig
@@ -897,8 +900,6 @@ class TestComposeWireExpansion:
     def test_expands_compose_up_to_named_flag_form(
         self, isolated_sandbox_ai_home: Path
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
@@ -916,8 +917,6 @@ class TestComposeWireExpansion:
     def test_round_trip_expansion_then_build_is_byte_faithful(
         self, isolated_sandbox_ai_home: Path, host_config: HostConfig
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
@@ -982,16 +981,12 @@ def _expected_fwd_ip(inst: str) -> str:
     A seeded-but-not-IPAM-allocated instance peeks to the lowest free slot;
     derived via the real ``core.ipam`` functions so the expectation tracks the
     allocator, never a hardcoded literal."""
-    from core.ipam import IPAMLedger, derive_static_ips
-
     base_index, _existing = IPAMLedger().peek_next_slot(inst)
     return derive_static_ips(base_index)["core_ipc_ip"]
 
 
 class TestFwdWireExpansion:
     def test_expands_to_named_flag_wire(self, isolated_sandbox_ai_home: Path) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         ip = _expected_fwd_ip("demo")
@@ -1011,8 +1006,6 @@ class TestFwdWireExpansion:
     def test_round_trip_expansion_then_build_is_byte_faithful(
         self, isolated_sandbox_ai_home: Path, host_config: HostConfig
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         ip = _expected_fwd_ip("demo")
@@ -1107,8 +1100,6 @@ class TestFwdProxyArgv:
     def test_sudo_mode_rides_sudo_pipe_cmd_with_bare_payload(
         self, isolated_sandbox_ai_home: Path
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         ip = _expected_fwd_ip("demo")
@@ -1123,8 +1114,6 @@ class TestFwdProxyArgv:
     def test_polkit_mode_rides_pipe_cmd_no_sudo_same_payload(
         self, isolated_sandbox_ai_home: Path
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         ip = _expected_fwd_ip("demo")
@@ -1154,8 +1143,6 @@ class TestFwdProxyArgv:
     def test_operator_rootless_returns_bare_target_argv(
         self, isolated_sandbox_ai_home: Path
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         ip = _expected_fwd_ip("demo")
@@ -1199,6 +1186,43 @@ class TestFwdProxyArgv:
         proxy_argv("fwd", ["demo"], _rootless_hc())
 
 
+class TestResolveFwdState:
+    """``resolve_fwd_state`` is the public SSOT consumed by BOTH the wire
+    expansion and ``cli.main._build_attach_argv`` (its session-log dir name +
+    ``agent@<ip>`` destination)."""
+
+    def test_returns_project_name_and_core_ipc_ip(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        project_name, core_ipc_ip = resolve_fwd_state("demo")
+        assert project_name == compose_project_name("demo")
+        assert core_ipc_ip == _expected_fwd_ip("demo")
+
+    def test_is_the_source_the_wire_expansion_uses(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # The wire form embeds exactly resolve_fwd_state's two values — proving
+        # _expand_fwd_wire and any cli.main consumer share one resolution.
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        project_name, core_ipc_ip = resolve_fwd_state("demo")
+        assert _expand_fwd_wire(["demo"]) == [
+            "demo",
+            "--project",
+            project_name,
+            "--ip",
+            core_ipc_ip,
+        ]
+
+    def test_is_read_only_no_ipam_allocation(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        # Two calls return identical state (peek_next_slot is read-only); the
+        # slot is not consumed, so the warm gate's allocation determinism holds.
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        assert resolve_fwd_state("demo") == resolve_fwd_state("demo")
+
+
 class TestStreamingOpRejectedByInvokeProbe:
     def test_invoke_rejects_fwd(self) -> None:
         with pytest.raises(StreamingOpError, match=r"proxy_argv"):
@@ -1211,6 +1235,13 @@ class TestStreamingOpRejectedByInvokeProbe:
     def test_invoke_rejects_fwd_by_wire_name(self) -> None:
         with pytest.raises(StreamingOpError):
             invoke("fwd", ["myinst"], _rootless_hc())
+
+    def test_build_invocation_rejects_fwd(self) -> None:
+        # build_invocation itself raises (the framed construction seam): a
+        # streaming op is "not reachable through build_invocation" (D3 prose),
+        # and the error names proxy_argv as the sanctioned path.
+        with pytest.raises(StreamingOpError, match=r"proxy_argv"):
+            build_invocation(Op.FWD, ["myinst"], _sudo_hc())
 
     def test_rejection_happens_before_any_crossing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1298,8 +1329,6 @@ class TestInvoke:
         self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import subprocess
-
-        from core.compose import compose_project_name
 
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
@@ -1428,8 +1457,6 @@ class TestBuildInvocation:
     def test_compose_wire_expansion_is_internal(
         self, isolated_sandbox_ai_home: Path
     ) -> None:
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"
@@ -1532,7 +1559,7 @@ def _polkit_hc() -> HostConfig:
     return cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
 
 
-# Representative valid typed args for every one of the eleven current ops.
+# Representative valid typed args for the eleven framed ops.
 # The two compose ops with state and docker-manifest-inspect resolve their
 # args lazily so the registry/instance fixtures are honored at call time.
 def _valid_args_for(op: str) -> list[str]:
@@ -1642,8 +1669,6 @@ class TestSudoSeparateUserRidesPipe:
         # Explicit Q6 wire-flag expansion check on the SUDO-pipe path: the
         # inner payload carries the named-flag wire form (the compose op is the
         # one path that expands typed args before crossing).
-        from core.compose import compose_project_name
-
         _seed_instance(isolated_sandbox_ai_home, "demo")
         proj = compose_project_name("demo")
         inst_dir = isolated_sandbox_ai_home / "instances" / "demo"

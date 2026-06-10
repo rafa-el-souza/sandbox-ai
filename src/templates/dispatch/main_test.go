@@ -802,6 +802,8 @@ func TestFwdWireRejections(t *testing.T) {
 		{"ip ipv6", fwdWire("myinst", "dev-myinst", "::1"), "IPAM superblock"},
 		{"ip five octets", fwdWire("myinst", "dev-myinst", "10.100.0.7.1"), "IPAM superblock"},
 		{"ip octet over 255", fwdWire("myinst", "dev-myinst", "10.100.0.256"), "IPAM superblock"},
+		{"ip leading-zero first octet", fwdWire("myinst", "dev-myinst", "010.100.0.7"), "IPAM superblock"},
+		{"ip leading-zero inner octet", fwdWire("myinst", "dev-myinst", "10.100.00.7"), "IPAM superblock"},
 		{"unknown flag", []string{"myinst", "--project", "dev-myinst", "--ip", "10.100.0.7", "--evil", "x"}, "unrecognized flag"},
 		{"duplicate project", []string{"myinst", "--project", "dev-myinst", "--project", "dev-myinst", "--ip", "10.100.0.7"}, "--project given more than once"},
 		{"duplicate ip", []string{"myinst", "--project", "dev-myinst", "--ip", "10.100.0.7", "--ip", "10.100.0.8"}, "--ip given more than once"},
