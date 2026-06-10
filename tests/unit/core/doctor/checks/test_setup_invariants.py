@@ -735,6 +735,34 @@ class TestAuditRuleBody:
         assert any("installed op set != core.dispatch.Op" in x for x in v)
         assert any(first_op in x for x in v)
 
+    def test_stale_host_missing_fwd_spec_warns_with_setup_remedy(self, monkeypatch: Any) -> None:
+        """C-010 migration surface: a drop-in predating the ``fwd`` op WARNs.
+
+        A host provisioned before ``Op.FWD`` existed has every other op spec but
+        lacks the ``dispatch\\ fwd\\ *`` Cmnd_Spec — exactly the stale state that
+        silently breaks separate-user SUDO attach (the ``fwd`` crossing is
+        denied). The op-enum-drift audit must name ``fwd`` as missing and point
+        at ``sudo sandbox setup`` (the named remedy — re-renders from the live
+        enum). This is the doctor-side analogue of cli-attach's "Stale sudoers
+        rule surfaces as doctor drift" scenario.
+        """
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr(
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
+        )
+        body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
+        # Drop ONLY the fwd spec (the streaming op's lone ``\\ *`` Cmnd_Spec).
+        stale = "\n".join(
+            line for line in body.splitlines() if f"{_DISPATCH_BINARY}\\ {Op.FWD.value}\\ *" not in line
+        )
+        assert f"{_DISPATCH_BINARY}\\ {Op.FWD.value}" not in stale
+        v: list[str] = []
+        m._audit_rule_body(self._hc(), "alice", stale, v)
+        assert any("installed op set != core.dispatch.Op" in x for x in v)
+        assert any(Op.FWD.value in x for x in v)
+        assert any("sudo sandbox setup" in x for x in v)
+
     def test_resolution_error_skips_body(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
         from core.setup.l0_identity import SystemdRunResolutionError
@@ -856,7 +884,12 @@ class TestExtractOps:
         from core.doctor.checks.setup_invariants import _extract_ops
 
         body = render_sudoers_rule("/usr/bin/machinectl", "alice", "h", "sandbox")
-        assert _extract_ops(body) == {op.value for op in Op}
+        extracted = _extract_ops(body)
+        assert extracted == {op.value for op in Op}
+        # C-010: the canonical op set is the twelve-op enum, including the
+        # streaming ``fwd`` op — the audit's expected set must contain it.
+        assert "fwd" in extracted
+        assert len(extracted) == 12
 
 
 class TestAuditRuleShapeAgreement:

@@ -122,6 +122,30 @@ def test_sweep_all_match(monkeypatch: pytest.MonkeyPatch) -> None:
     assert probed == [op.value for op in Op]
 
 
+def test_sweep_probes_fwd_via_lone_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C-010: the streaming ``fwd`` op IS in the L3a probe set (lone ``--check``).
+
+    The sweep derives its op set from ``core.dispatch.Op`` (`for op in Op`), so
+    ``fwd`` is probed automatically — like every other op, via the bare
+    ``<dispatch> fwd --check`` no-op-success shape (the streaming/framed split
+    lives only in the dispatcher at runtime, never in the probe). This pins that
+    membership explicitly so a future refactor that special-cased streaming ops
+    out of the probe set (which would leave the ``fwd`` grant unverified at
+    setup time) breaks loudly.
+    """
+    fake = _install_executor(monkeypatch, {})
+    l3a._act(_ctx())
+    probed = [
+        c[-1].split("dispatch ", 1)[1].split(" ", 1)[0] for c in fake.calls
+    ]
+    assert Op.FWD.value in probed
+    # Probed via the lone ``--check`` payload, exactly like every other op.
+    fwd_call = next(c for c in fake.calls if f"dispatch {Op.FWD.value} " in c[-1])
+    assert fwd_call[-1] == (
+        f"/usr/local/libexec/sandbox-ai/dispatch {Op.FWD.value} --check"
+    )
+
+
 def test_probe_argv_is_relative_systemd_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

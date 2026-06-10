@@ -140,6 +140,38 @@ def test_render_emits_pipe_spec_per_arg_op() -> None:
     )
 
 
+def test_render_emits_exactly_one_fwd_arg_spec_at_enum_tail() -> None:
+    """C-010: ``fwd`` renders as an ordinary arg-bearing op — one ``\\ *`` spec.
+
+    The streaming op (op 12, the attach ProxyCommand payload) is an arg-bearing
+    op at the sudoers layer: a single ``\\ *`` spec covers both the runtime wire
+    form (``fwd <inst> --project <P> --ip <IP>``) and the lone ``--check`` probe
+    form, exactly like the other arg ops. It needs NO streaming-specific
+    renderer treatment (the framed/streaming split lives only in the dispatcher,
+    after authorization). It is NOT a no-arg op, so it gets exactly ONE spec
+    (the ``\\ *`` form) and never the bare + exact-``--check`` double-spec.
+    """
+    rendered = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    base = "/usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c "
+    fwd_arg_spec = f"{base}/usr/local/libexec/sandbox-ai/dispatch\\ fwd\\ *"
+    # Exactly one ``fwd`` spec, in the ``\\ *`` arg-op form.
+    assert rendered.count("dispatch\\ fwd") == 1
+    assert fwd_arg_spec in rendered
+    # ``fwd`` is NOT a no-arg op: no bare/exact-``--check`` double-spec.
+    assert "dispatch\\ fwd," not in rendered
+    assert "dispatch\\ fwd\\ --check" not in rendered
+    # Enum-derived ordering: ``fwd`` is the last enum member, so its spec is the
+    # final (trailing, comma-less) Cmnd_Spec in the rendered body.
+    assert rendered.rstrip().endswith(fwd_arg_spec)
+    # The no-arg double-spec set is unchanged: exactly these four no-arg ops.
+    assert frozenset(
+        {"auth-probe", "compose-ls", "docker-version", "preflight"}
+    ) == l3._NO_ARG_OP_NAMES
+    assert "fwd" not in l3._NO_ARG_OP_NAMES
+
+
 def test_render_emits_no_machinectl_operator_spec() -> None:
     """D4: under SUDO the machinectl operator ``Cmnd_Spec`` is GONE entirely.
 
