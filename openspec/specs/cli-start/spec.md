@@ -107,17 +107,17 @@ The system SHALL block launch until all services with defined healthchecks repor
 - **THEN** the CLI emits a service health summary, releases `state.lock`, and exits with a non-zero code
 
 ### Requirement: PTY Handover via machinectl
-The system SHALL hand over the terminal to **core** (as `agent`) using the same canonical mechanism `cli-attach`'s `PTY Handover Without Re-Hydration` requirement defines: a host-side ssh client wrapped in `tlog-rec`, with a `ProxyCommand` that uses `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) to cross the privilege boundary and exec `/fwd` inside the admin container, forwarding stdio↔TCP to `core_ipc_ip:9999`. The exact command shape is owned by `cli-attach`; this requirement delegates to it. `state.lock` SHALL be released before the handover invocation.
+The system SHALL hand over the terminal to **core** (as `agent`) using the same canonical mechanism `cli-attach`'s `PTY Handover Without Re-Hydration` requirement defines: a host-side ssh client wrapped in `tlog-rec`, with a `ProxyCommand` that **in separate-user mode** crosses the privilege boundary via the streaming dispatcher op `fwd` (the bare `dispatch fwd <inst> --project <P> --ip <IP>` payload over the auth-mode-selected pipe prefix), which execs `docker exec -i <project>-admin-1 /fwd <core_ipc_ip>:9999` to forward stdio↔TCP to core's sshd. The exact command shape is owned by `cli-attach`; this requirement delegates to it. `state.lock` SHALL be released before the handover invocation.
 
-The `ProxyCommand` SHALL use `pipe_cmd` (polkit-authenticated) regardless of the `machinectl_authentication` mode configured in host config; the `sudo`/`polkit` setting governs other handover paths via `machinectl_cmd` and does NOT prefix the `ProxyCommand` in either mode.
+The `ProxyCommand` crossing prefix is selected by `machinectl_authentication` (per `cli-attach`): **SUDO** → `sudo_pipe_cmd` (the privileged byte-pipe, sudoers-authorized, headless-capable); **POLKIT** → `pipe_cmd` (the unprivileged byte-pipe, polkit `manage-units`-authorized, interactive-only). The crossed `dispatch fwd <wire>` payload is identical in both modes; `machinectl_cmd` is never used for the ProxyCommand (the PTY's `onlcr` would corrupt the SSH binary stream).
 
 #### Scenario: Terminal handed to core (sudo mode)
 - **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"sudo"`
-- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin" scenario); the `ProxyCommand` uses `systemd-run -q --pipe --uid=<docker_unprivileged_user> /usr/bin/docker exec -i <inst>-admin-1 /fwd <core_ipc_ip>:9999` with no `sudo` prefix
+- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin (separate-user, SUDO mode)" scenario); the `ProxyCommand` is `sudo systemd-run -q --pipe --uid=<docker_unprivileged_user> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'`
 
 #### Scenario: Terminal handed to core (polkit mode)
 - **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"polkit"`
-- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin" scenario); the invocation is byte-identical to the sudo-mode scenario above because the `ProxyCommand` uses `pipe_cmd` (polkit) regardless of `machinectl_authentication`
+- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin (separate-user, POLKIT mode)" scenario); the invocation differs from the sudo-mode scenario only in the `ProxyCommand`'s missing `sudo` prefix (the `dispatch fwd <wire>` payload is identical)
 
 ### Requirement: Instance Pre-Flight Checks
 The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `machinectl_authentication` mode from host config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Per-instance file ownership matching for ro single-files (including the four IPC SSH secrets, all proxy ro files, dotfiles, and rendered service configs) SHALL occur during `_phase_helper_cp_chown_ro_files`, after ACL grants and the cache/log helper-recipe phase, via the disposable-helper-container primitive `helper_chown_files` (per the `helper-container` capability).
@@ -444,4 +444,34 @@ silently shipping under a refactor.
 - **THEN** the maintainer MUST submit a new OpenSpec change that
   modifies this requirement; ad-hoc flips in a refactor are
   prohibited
+
+### Requirement: `start` preflight health crossings collapse to one (plus the compose-ps warm-check)
+
+`sandbox start`'s preflight SHALL perform its instance-agnostic read-only health checks (the 7-check
+privilege-boundary doctor chain — `machinectl_reachable`, `docker_available`, `docker_rootless`, `runsc`,
+`runsc_runtimeargs`, `host_uds`, `compose_project_name_collision`) in a **single** `preflight`-op crossing
+whose result is parsed orchestrator-side, instead of one crossing per check. (Reachability, formerly the
+`machinectl_reachable`/`auth-probe` check, is established by the `preflight` crossing itself succeeding — its
+`echo ok` query.) The instance-stateful `compose-ps` warm-check (Q6 —
+operator-resolved project/compose-file/env-file) SHALL remain its own crossing. So the read-only preflight
+collapses from 8 crossings to **two** (one `preflight` + one `compose-ps`). The bundle SHALL be read-only and
+SHALL preserve each check's individual pass/fail signal + its specific diagnostic in the parsed result. The
+explicit (init-path) `auth-probe`'s redundancy with the chain's `machinectl_reachable` check SHALL be removed
+(the crossing succeeding is the reachability signal).
+
+#### Scenario: one health crossing, not a burst
+- **WHEN** `sandbox start <inst>` runs its preflight on a separate-user host
+- **THEN** the instance-agnostic health checks perform exactly one boundary crossing (the `preflight` op), not
+  one per check
+- **AND** the `compose-ps` warm-check is the only other read-only crossing
+- **AND** each bundled check's pass/fail is still surfaced individually to the operator
+
+#### Scenario: a failing preflight check still aborts with its own message
+- **WHEN** a bundled preflight check fails (e.g. the privilege boundary is misconfigured)
+- **THEN** `start` aborts with that check's specific diagnostic, not a generic bundle failure
+
+#### Scenario: behavior parity off the burst
+- **WHEN** the preflight passes
+- **THEN** `start` proceeds to `compose-up` exactly as before (the bundling changes crossing count, not the
+  set of checks performed)
 

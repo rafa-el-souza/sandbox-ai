@@ -10,8 +10,10 @@ modules.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
+
+from core.host_config import DockerExecutionMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -31,7 +33,15 @@ class CheckResult:
 
 @dataclass
 class Check:
-    """Declarative diagnostic check with dependency graph support."""
+    """Declarative diagnostic check with dependency graph support.
+
+    ``applies_in`` gates the check by the active execution mode. It defaults to
+    ALL modes (every check runs in both ``separate-user`` and
+    ``operator-rootless`` unless it opts out). A check whose ``applies_in``
+    EXCLUDES the active mode is reported with an explicit mode-skip status by
+    the runner — never PASS (no false green). This mirrors the setup
+    ``Phase.applies_in`` gating (C-004).
+    """
 
     id: str
     name: str
@@ -40,6 +50,7 @@ class Check:
     run: Callable[[str, str | None], CheckResult]
     remediation: str
     doc_ref: str | None = None
+    applies_in: frozenset[DockerExecutionMode] = field(default_factory=lambda: frozenset(DockerExecutionMode))
 
 
 _DISTRO_MAP: dict[str, str] = {

@@ -9,8 +9,8 @@ exists on disk by the time the rule is written.
 Content-aware probe (design D10): the *expected* rule body is rendered from the
 current ``core.dispatch.Op`` enum + the resolved operator + the host's
 ``hostname`` + ``[host].docker_unprivileged_user`` + the L0-resolved
-``MACHINECTL_PATH`` (re-resolved here via
-:func:`core.setup.l0_identity.resolve_machinectl_path` — orchestrator decision
+``SYSTEMD_RUN_PATH`` (re-resolved here via
+:func:`core.setup.l0_identity.resolve_systemd_run_path` — orchestrator decision
 1; the phase-runner has no context bus, so re-resolution at render time IS the
 L0↔live reconciliation and also catches a ``secure_path`` drift between L0 and
 L3). The rendered bytes are byte-compared against the on-disk drop-in:
@@ -21,12 +21,22 @@ L3). The rendered bytes are byte-compared against the on-disk drop-in:
   re-renders + re-installs);
 - present and byte-identical → ``ALREADY_CORRECT``.
 
+Under SUDO every separate-user op crosses the boundary via the privileged
+byte-pipe (``core.dispatch.build_invocation`` → ``sudo_pipe_cmd``; C-009 design
+D2), so L3 renders ONLY the per-op PIPE ``Cmnd_Spec`` and emits NO machinectl
+operator spec — a machinectl operator grant would be dead, never-matched authz
+(D4). The pipe spec's argv is DERIVED from the SAME
+``core.dispatch.sudo_pipe_crossing_argv`` + ``core.dispatch.dispatch_payload``
+that ``build_invocation`` builds, so the grant cannot drift from the invocation
+(a meta-test asserts equality). POLKIT mode and setup's ROOT L5/L6/L7 machinectl
+crossings are unaffected.
+
 Two load-bearing F-004 / B-3 invariants:
 
-- The Cmnd_Spec path is the L0-resolved ``MACHINECTL_PATH``, NEVER a hardcoded
-  ``/usr/bin/machinectl`` (B-3 — ``machinectl_cmd()`` emits *relative*
-  ``machinectl``; sudo bridges relative→absolute via ``secure_path``; the rule
-  is only correct if its Cmnd_Spec path equals that resolution).
+- The pipe ``Cmnd_Spec`` launcher path is the L0-resolved ``SYSTEMD_RUN_PATH``,
+  NEVER a hardcoded ``/usr/bin`` literal (B-3 — ``sudo_pipe_cmd()`` emits a
+  *relative* launcher; sudo bridges relative→absolute via ``secure_path``; the
+  rule is only correct if its ``Cmnd_Spec`` launcher equals that resolution).
 - ZERO ``"`` characters appear in any ``Cmnd_Spec`` body (F-004 — sudoers
   ``Cmnd_Spec`` args use backslash-escape, not shell-quoting; a ``"`` passes
   ``visudo -cf`` but matches nothing at runtime). The renderer asserts this at
@@ -48,12 +58,14 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# ``_DISPATCH_BINARY`` is the single source of truth for the dispatcher path
-# the rule pins inside the bash command argv slot; ``Op`` is the single source
-# of truth for the enumerated ops (do not duplicate either literal).
-from core.dispatch import _DISPATCH_BINARY, Op
-from core.host_config import MachinectlAuth
-from core.setup.l0_identity import resolve_machinectl_path
+# The pipe ``Cmnd_Spec`` argv is DERIVED from the same builders
+# ``core.dispatch.build_invocation`` uses (C-009 design D4 SSOT): the crossing
+# prefix from :func:`core.dispatch.sudo_pipe_crossing_argv` and the payload from
+# :func:`core.dispatch.dispatch_payload` — never hand-retyped here. ``Op`` is the
+# single source of truth for the enumerated ops.
+from core.dispatch import Op, dispatch_payload, sudo_pipe_crossing_argv
+from core.host_config import _USERNAME_RE, DockerExecutionMode, MachinectlAuth
+from core.setup.l0_identity import resolve_systemd_run_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -82,7 +94,12 @@ _OP_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 # arg-bearing ``\ *`` shape (the safe direction). Derived from the canonical
 # ``Op`` enum so a wire-name rename there is a single-point change here.
 _NO_ARG_OP_NAMES: frozenset[str] = frozenset(
-    {Op.AUTH_PROBE.value, Op.COMPOSE_LS.value, Op.DOCKER_VERSION.value}
+    {
+        Op.AUTH_PROBE.value,
+        Op.COMPOSE_LS.value,
+        Op.DOCKER_VERSION.value,
+        Op.PREFLIGHT.value,
+    }
 )
 
 
@@ -100,20 +117,39 @@ def _hostname() -> str:
     return socket.gethostname()
 
 
-def _cmnd_specs(machinectl_path: str, sandbox_user: str, op: Op) -> list[str]:
-    """Render the ``Cmnd_Spec`` line(s) for ``op`` in the V9-validated shape.
+def _escape_cmnd_spec_ws(payload: str) -> str:
+    """Backslash-escape embedded whitespace for a sudoers ``Cmnd_Spec`` arg.
 
-    Shape (full invocation prefix; backslash-escaped embedded whitespace; NO
-    double-quotes — F-004):
+    Sudoers ``Cmnd_Spec`` arguments escape whitespace with a backslash (NEVER
+    shell-quoting — F-004): a ``"`` passes ``visudo -cf`` but matches nothing at
+    runtime. ``<dispatch> <op>`` → ``<dispatch>\\ <op>``.
+    """
+    return payload.replace(" ", "\\ ")
 
-        ``<MACHINECTL_PATH> shell <user>@.host /bin/bash -c <dispatch>\\ <op>[…]``
+
+def _cmnd_specs(systemd_run_path: str, sandbox_user: str, op: Op) -> list[str]:
+    """Render the per-op PIPE ``Cmnd_Spec`` line(s) (C-009 design D4).
+
+    Shape (the full ``sudo``-stripped byte-pipe crossing argv with an absolute
+    launcher; backslash-escaped embedded whitespace; NO double-quotes — F-004):
+
+        ``<SYSTEMD_RUN_PATH> -q --pipe --uid=<user> /bin/bash -c <dispatch>\\ <op>[…]``
+
+    Both the crossing prefix and the ``<dispatch> <op>`` payload are DERIVED from
+    the same builders ``core.dispatch.build_invocation`` uses
+    (:func:`core.dispatch.sudo_pipe_crossing_argv` /
+    :func:`core.dispatch.dispatch_payload`) — never hand-retyped — so the grant
+    and the actual crossing provably cannot drift (a meta-test enforces this).
+    The machinectl operator ``Cmnd_Spec`` is NOT rendered: under SUDO every op
+    crosses via the pipe (D2), so a machinectl operator grant would be dead,
+    never-matched authz.
 
     Returns a list because no-arg ops need TWO exact specs:
 
     - **arg ops** → one spec ``…<dispatch>\\ <op>\\ *`` — the trailing ``\\ *``
       matches the op's runtime args AND the ``--check`` probe arg.
-    - **no-arg ops** (``auth-probe``, ``compose-ls``, ``docker-version``) → two
-      EXACT specs (no ``\\ *`` wildcard, so arg-smuggling stays denied — V9 B7):
+    - **no-arg ops** (``auth-probe``, ``compose-ls``, ``docker-version``,
+      ``preflight``) → two EXACT specs (no ``\\ *`` wildcard, so arg-smuggling stays denied — V9 B7):
       ``…<dispatch>\\ <op>`` (the operator's runtime invocation) AND
       ``…<dispatch>\\ <op>\\ --check`` (L3a's per-op probe target — every op
       accepts ``--check`` as its no-op-success probe shape, so the rule must
@@ -130,26 +166,40 @@ def _cmnd_specs(machinectl_path: str, sandbox_user: str, op: Op) -> list[str]:
             f"op name {op_name!r} is not [a-z0-9-]+; refusing to render "
             f"(visudo -cf is a syntactic gate only — spec op-name rule)"
         )
-    prefix = f"{machinectl_path} shell {sandbox_user}@.host /bin/bash -c"
-    base = f"{_DISPATCH_BINARY}\\ {op_name}"
+    crossing = " ".join(sudo_pipe_crossing_argv(systemd_run_path, sandbox_user))
+    prefix = f"{crossing} /bin/bash -c"
+    base = _escape_cmnd_spec_ws(dispatch_payload(op_name, []))
     if op_name not in _NO_ARG_OP_NAMES:
         return [f"{prefix} {base}\\ *"]
     return [f"{prefix} {base}", f"{prefix} {base}\\ --check"]
 
 
 def render_sudoers_rule(
-    machinectl_path: str, operator: str, hostname: str, sandbox_user: str
+    systemd_run_path: str, operator: str, hostname: str, sandbox_user: str
 ) -> str:
-    """Render the full V9-validated sudoers drop-in body.
+    """Render the full SUDO sudoers drop-in body (pipe-only — C-009 design D4).
 
     Asserts the F-004 zero-``"`` invariant across every ``Cmnd_Spec`` body at
     render time — BEFORE the staged file is written and ``visudo -cf`` is
     invoked. Raises :class:`RuleRenderError` on any violation.
+
+    Also re-asserts the POSIX username grammar on ``sandbox_user`` before it is
+    interpolated into the ``--uid=<user>`` operand of every ``Cmnd_Spec`` (M-1):
+    a typo / space / metacharacter would corrupt the rendered rule. This mirrors
+    the ``_OP_NAME_RE`` op-name gate above and is the render-time fail-closed
+    guard — defense-in-depth even if the ``HostSettings`` field validator was
+    somehow bypassed.
     """
+    if _USERNAME_RE.match(sandbox_user) is None:
+        raise RuleRenderError(
+            f"sandbox_user {sandbox_user!r} is not a valid POSIX username "
+            f"(must match {_USERNAME_RE.pattern}); refusing to render the "
+            f"sudoers Cmnd_Spec (a space/metacharacter would corrupt the rule)"
+        )
     specs = [
         spec
         for op in Op
-        for spec in _cmnd_specs(machinectl_path, sandbox_user, op)
+        for spec in _cmnd_specs(systemd_run_path, sandbox_user, op)
     ]
     for spec in specs:
         if '"' in spec:
@@ -215,7 +265,7 @@ def _expected_body(host_config: HostConfig, operator: str) -> str:
     sandbox_user = host_config.host.docker_unprivileged_user
     if host_config.host.machinectl_authentication == MachinectlAuth.SUDO:
         return render_sudoers_rule(
-            resolve_machinectl_path(host_config),
+            resolve_systemd_run_path(host_config),
             operator,
             _hostname(),
             sandbox_user,
@@ -319,4 +369,7 @@ PHASE = Phase(
     reverify=_reverify,
     depends_on=("l7",),
     rollback=_rollback,
+    # operator-rootless has no orchestrator→sandbox crossing, so no
+    # privilege-boundary rule (sudoers/polkit AUTH GATE) is ever written.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

@@ -16,6 +16,16 @@ uid-scoped systemd ``Delegate=yes`` drop-in moved out to its own phase
   not fixable by setup; an unmet one surfaces as a ``CONFLICT`` refusal (the
   spec's ``✗ verify-only failure`` marker).
 
+**L1 is separate-user only** (``applies_in`` excludes operator-rootless, D5a/O3):
+its single mutation — the sysctl drop-in — is host-root, so in operator-rootless
+(where the apply pass runs unprivileged as the operator) it is owned by the
+``host_batch`` ``SYSCTL`` item + ``_bootstrap-host`` escalation
+(``host_batch._apply_sysctl`` reuses :func:`render_sysctl_dropin`). The runner
+reports the phase ``skipped (operator-rootless)`` in both passes, joining L2 and
+the M2 crossing-only phases. (Consequence: L1's verify-only ACL/cgroup-v2 checks
+do not run in the op-rootless apply pass — that posture is a ``sandbox doctor``
+concern in operator-rootless, C-005.)
+
 Content-aware probe (design D10): the expected file *body* is rendered from
 the current source (the distro family decides whether the
 ``unprivileged_userns_clone`` line is present). The probe byte-compares
@@ -32,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.doctor import detect_distro
+from core.host_config import DockerExecutionMode
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -163,6 +174,12 @@ PHASE = Phase(
     act=_act,
     reverify=_reverify,
     depends_on=("l0",),
+    # separate-user only. The sysctl drop-in is a host-root mutation; in
+    # operator-rootless the apply pass runs unprivileged as the operator, so the
+    # drop-in is owned by the ``host_batch`` ``SYSCTL`` item + ``_bootstrap-host``
+    # escalation (design D5a / O3). Gated OUT (reported ``skipped`` in both
+    # passes), mirroring L2 and the M2 crossing-only phases.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )
 
 __all__ = [

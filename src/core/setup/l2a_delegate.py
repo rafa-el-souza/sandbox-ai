@@ -8,6 +8,15 @@ on-disk file, narrow-scoped to the sandbox user's per-user systemd manager:
   user's manager (NOT the template-wide ``user@.service.d/`` — design "Why
   narrow Delegate=yes scope"). Followed by ``systemctl daemon-reload``.
 
+**L2a is separate-user only** (``applies_in`` excludes operator-rootless,
+D5a/O3): the ``Delegate=yes`` drop-in is a host-root mutation, so in
+operator-rootless (where the apply pass runs unprivileged as the operator) it is
+owned by the ``host_batch`` ``DELEGATE`` item + ``_bootstrap-host`` escalation
+(``host_batch._apply_delegate`` reuses :func:`render_delegate_dropin`, targeting
+``user-<operator-uid>.service.d/``). The runner reports the phase ``skipped
+(operator-rootless)`` in both passes, joining L1/L2 and the M2 crossing-only
+phases.
+
 **Why this is its own phase, after L2 (load-bearing — do NOT move it before
 L2).** The drop-in path is uid-scoped: it embeds the sandbox user's host uid,
 which only exists once L2's ``useradd`` has created the user. This phase's
@@ -34,6 +43,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from core.host_config import DockerExecutionMode
 from core.setup.phase_runner import (
     Identity,
     Phase,
@@ -138,6 +148,11 @@ PHASE = Phase(
     act=_act,
     reverify=_reverify,
     depends_on=("l2",),
+    # separate-user only. The Delegate drop-in is a host-root mutation; in
+    # operator-rootless it is owned by the ``host_batch`` ``DELEGATE`` item +
+    # ``_bootstrap-host`` escalation (design D5a / O3). Gated OUT (reported
+    # ``skipped`` in both passes), mirroring L1/L2 and the M2 crossing-only phases.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )
 
 __all__ = [

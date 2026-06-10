@@ -16,6 +16,12 @@ performs the shared, idempotent, host-level prerequisite mutations:
 
 **L2 does NOT install runsc** — that is its own phase L6a (R1).
 
+**L2 is separate-user only** (``applies_in`` excludes operator-rootless, D5a/O3):
+its dedicated-user + machined work is inapplicable when the daemon runs as the
+operator, and its genuinely-privileged subuid/subgid + ``sb-ws`` mutations are
+owned by the ``host_batch`` classifier + ``_bootstrap-host`` escalation in
+operator-rootless. The runner reports it ``skipped (operator-rootless)``.
+
 Content-aware probe (design D10): the expected state is computed from the
 current source (the configured sandbox user / bridge-group name, the subuid
 minimum-range requirement). The probe compares it to the observed host:
@@ -29,9 +35,11 @@ from __future__ import annotations
 import grp
 import pwd
 import subprocess
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.host_config import (
+    DockerExecutionMode,
     autodetect_workspace_bridge_gid_recommendation,
     parse_subgid_for_user,
     parse_subuid_for_user,
@@ -88,6 +96,131 @@ def _operator_in_group(operator: str, group: str) -> bool:
         return grp.getgrnam(group).gr_gid == pwd.getpwnam(operator).pw_gid
     except KeyError:
         return False
+
+
+# The privilege-granting groups whose membership confers (or gates) sudo-to-root
+# across the supported distro families: ``sudo`` (Debian/Ubuntu), ``wheel``
+# (RHEL/Fedora/Arch), and the legacy ``admin`` group. This is the single source
+# for "what counts as an admin group" — the two C-005 doctor safety nets (the
+# no-sudo daemon-user invariant and the sudoer daemon-owner WARN) both resolve
+# membership through :func:`_user_admin_groups` so they cannot disagree.
+_ADMIN_GROUPS: tuple[str, ...] = ("sudo", "wheel", "admin")
+
+
+def _user_admin_groups(user: str) -> list[str]:
+    """Return the :data:`_ADMIN_GROUPS` the ``user`` is a member of.
+
+    Membership is by supplementary-group listing **or** primary group (same
+    member-or-primary logic as :func:`_operator_in_group`). A user absent from
+    ``/etc/passwd`` (no primary gid to resolve) is treated as in no admin group.
+    Empty list ⇒ the user cannot sudo-to-root via group membership.
+    """
+    try:
+        primary_gid: int | None = pwd.getpwnam(user).pw_gid
+    except KeyError:
+        primary_gid = None
+    found: list[str] = []
+    for group in _ADMIN_GROUPS:
+        try:
+            entry = grp.getgrnam(group)
+        except KeyError:
+            continue
+        if user in entry.gr_mem or entry.gr_gid == primary_gid:
+            found.append(group)
+    return found
+
+
+@dataclass(frozen=True)
+class SudoersGrant:
+    """Whether the **sudoers policy** grants a user sudo (drop-ins + NOPASSWD).
+
+    The companion to :func:`_user_admin_groups`: group membership is only one of
+    two ways a user reaches root. The sudoers *policy* — a ``/etc/sudoers.d/``
+    drop-in (cloud-init's ``90-cloud-init-users``, the common cloud-VM / dev-box
+    pattern) or an inline ``NOPASSWD`` rule — confers sudo independently of any
+    ``sudo``/``wheel``/``admin`` group, so a group-only check misses it.
+
+    Fields:
+
+    - ``granted`` — the sudoers policy grants this user sudo (NOPASSWD or
+      password-gated alike). A password-gated grant is still a grant: the user
+      *can* reach root.
+    - ``nopasswd`` — at least one grant is ``NOPASSWD`` (instant, unprompted
+      escalation — the sharpest blast-radius signal).
+    - ``determinable`` — ``False`` when the query could not be performed (e.g.
+      ``-U <other-user>`` needs root and we are not root). Indeterminate is NOT
+      a grant: never false-WARN on it.
+    """
+
+    granted: bool
+    nopasswd: bool
+    determinable: bool
+
+
+# Version-tolerant markers in ``sudo -l`` output (combined stdout+stderr,
+# case-folded before matching so distro/version casing differences are moot).
+_SUDO_NOT_ALLOWED = "not allowed to run sudo"
+_SUDO_MAY_NOT_LIST = "may not list"
+_SUDO_RUNNABLE_MARKERS = (
+    "may run the following commands",
+    "may run the following command",
+)
+
+
+def _user_sudoers_grant(user: str, *, self_query: bool) -> SudoersGrant:
+    """Detect whether the **sudoers policy** grants ``user`` sudo.
+
+    Complements :func:`_user_admin_groups` (group membership) with the
+    policy-grant path: ``/etc/sudoers.d/`` drop-ins and inline ``NOPASSWD``
+    rules. Runs ``sudo -n -l`` non-interactively and parses the captured output
+    version-tolerantly.
+
+    - ``self_query=True`` (operator-rootless: the daemon owner IS the current
+      process user) → ``sudo -n -l`` queries the *current* user's own
+      privileges, needs no root. ``-U`` is rejected for non-root even for self,
+      so it is deliberately NOT used here.
+    - ``self_query=False`` (separate-user: the owner is a *different*, dedicated
+      account) → ``sudo -n -l -U <user>`` lists another user's privileges, which
+      requires root. When not root, sudo refuses ("may not list" / errors) →
+      ``determinable=False`` (we did not learn anything; do NOT infer a grant).
+
+    Parsing (case-folded combined output):
+
+    - contains "not allowed to run sudo" → ``granted=False`` (clean no-priv).
+    - contains a "may run the following command(s)" marker → ``granted=True``.
+    - contains "NOPASSWD" → ``nopasswd=True`` (only meaningful when granted).
+    - a non-zero exit whose output asks for a password (no "not allowed", no
+      runnable listing — the ``-n`` non-interactive run that would otherwise
+      prompt) still means the user CAN sudo, password-gated →
+      ``granted=True, nopasswd=False``.
+    - "may not list" (the non-root ``-U`` refusal) → ``determinable=False``.
+    - ``OSError`` (sudo absent) or genuinely unparseable output →
+      ``determinable=False`` (never a false WARN).
+    """
+    argv = ["sudo", "-n", "-l"]
+    if not self_query:
+        argv += ["-U", user]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError:
+        return SudoersGrant(granted=False, nopasswd=False, determinable=False)
+
+    combined = f"{proc.stdout}\n{proc.stderr}".casefold()
+    nopasswd = "nopasswd" in combined
+
+    if _SUDO_NOT_ALLOWED in combined:
+        return SudoersGrant(granted=False, nopasswd=False, determinable=True)
+    if any(marker in combined for marker in _SUDO_RUNNABLE_MARKERS):
+        return SudoersGrant(granted=True, nopasswd=nopasswd, determinable=True)
+    if _SUDO_MAY_NOT_LIST in combined:
+        # Non-root ``-U <other-user>`` refusal — we could not query. Never infer.
+        return SudoersGrant(granted=False, nopasswd=False, determinable=False)
+    if proc.returncode != 0:
+        # ``-n`` refused to prompt for a password the user WOULD be asked for:
+        # the user can sudo, but it is password-gated (no NOPASSWD listing seen).
+        return SudoersGrant(granted=True, nopasswd=False, determinable=True)
+    # Clean exit with no recognizable marker — unparseable; do not guess.
+    return SudoersGrant(granted=False, nopasswd=False, determinable=False)
 
 
 def _adequate_range(ranges: list[tuple[int, int]]) -> bool:
@@ -266,6 +399,15 @@ PHASE = Phase(
     act=_act,
     reverify=_reverify,
     depends_on=("l1",),
+    # separate-user only. Every L2 mutation is either inapplicable or host-root-
+    # batch-owned in operator-rootless: the dedicated useradd is skipped (the
+    # daemon runs as the operator's own pre-existing user), systemd-machined is
+    # skipped (no machinectl consumer), and the genuinely-privileged subuid/subgid
+    # + sb-ws groupadd are applied by the classifier + ``_bootstrap-host`` host-root
+    # batch (design D5a / O3) rather than by this unprivileged apply pass. So the
+    # phase is gated OUT of operator-rootless (reported ``skipped`` in both passes)
+    # — mirroring the M2 crossing-only phases (L3/L3a/L6.5/L8).
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )
 
 __all__ = ["PHASE"]

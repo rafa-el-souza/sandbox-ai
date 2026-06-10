@@ -3,8 +3,12 @@
 Pre-pulls the disposable-helper image so the first ``sandbox start`` does not
 pay the pull latency. The image is the digest-pinned
 ``IMAGE_REGISTRY["busybox_musl"].pinned`` (``busybox@sha256:…``). The pull
-crosses into the sandbox user via ``machinectl_cmd`` (identity ``SANDBOX``) —
-the rootless daemon installed by L5 owns the image cache.
+crosses to the daemon owner via :func:`daemon_owner_crossing` — ``machinectl_cmd``
+into the sandbox user in separate-user (identity ``SANDBOX``, sentinel on, since
+``machinectl shell`` masks the inner exit), an empty LOCAL prefix in
+operator-rootless (sentinel off; setup runs as the operator, so the pull is a
+plain local ``docker`` subprocess in the operator's session). The rootless daemon
+installed by L5 (owned by the daemon owner) owns the image cache.
 
 Content-aware probe (design D10): the converged state is *the pinned digest is
 present in the sandbox user's local image store*. ``docker image inspect`` on
@@ -23,12 +27,16 @@ from typing import TYPE_CHECKING
 
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import machinectl_cmd
+from core.host_config import is_operator_rootless
 from core.hydration import IMAGE_REGISTRY
-from core.setup.phase_runner import Identity, Phase, PhaseResult
+from core.setup.phase_runner import (
+    Identity,
+    Phase,
+    PhaseResult,
+    daemon_owner_crossing,
+)
 
 if TYPE_CHECKING:
-    from core.host_config import HostConfig
     from core.setup.phase_runner import SetupContext
 
 _HELPER_PIN = IMAGE_REGISTRY["busybox_musl"]
@@ -36,32 +44,32 @@ _HELPER_REF = _HELPER_PIN.pinned
 _HELPER_TAGGED = _HELPER_PIN.tagged
 
 
-def _crossed(host_config: HostConfig, inner: str) -> list[str]:
-    """Build the ``machinectl`` crossing argv for an inner ``bash -c`` string."""
-    return [
-        *machinectl_cmd(
-            host_config.host.docker_unprivileged_user,
-            host_config.host.machinectl_authentication,
-        ),
-        "/bin/bash",
-        "-c",
-        inner,
-    ]
+def _crossed(ctx: SetupContext, inner: str) -> list[str]:
+    """Build the daemon-owner crossing argv for an inner ``bash -c`` string.
+
+    ``machinectl_cmd`` into the sandbox user in separate-user; an empty LOCAL
+    prefix in operator-rootless (:func:`daemon_owner_crossing`).
+    """
+    return [*daemon_owner_crossing(ctx), "/bin/bash", "-c", inner]
 
 
-def _ref_present(host_config: HostConfig, ref: str) -> bool:
-    """``True`` iff ``docker image inspect <ref>`` succeeds (crossed)."""
-    cmd = _crossed(host_config, f"docker image inspect {ref}")
+def _ref_present(ctx: SetupContext, ref: str) -> bool:
+    """``True`` iff ``docker image inspect <ref>`` succeeds (crossed).
+
+    Sentinel is on in separate-user (``machinectl shell`` masks the inner exit)
+    and off in operator-rootless (a local command's exit is not masked).
+    """
+    cmd = _crossed(ctx, f"docker image inspect {ref}")
     try:
-        Executor().run(cmd, sentinel=True)
+        Executor().run(cmd, sentinel=not is_operator_rootless(ctx.host_config))
     except SandboxExecutionError:
         return False
     return True
 
 
-def _digest_present(host_config: HostConfig) -> bool:
-    """``True`` iff the *pinned digest* is in the sandbox user's image store."""
-    return _ref_present(host_config, _HELPER_REF)
+def _digest_present(ctx: SetupContext) -> bool:
+    """``True`` iff the *pinned digest* is in the daemon owner's image store."""
+    return _ref_present(ctx, _HELPER_REF)
 
 
 def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
@@ -77,13 +85,12 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
       not a bare presence check);
     - no matching image at all → ``MISSING``.
     """
-    host_config = ctx.host_config
-    if _digest_present(host_config):
+    if _digest_present(ctx):
         return (
             PhaseResult.ALREADY_CORRECT,
             f"helper image {_HELPER_REF} already cached",
         )
-    if _ref_present(host_config, _HELPER_TAGGED):
+    if _ref_present(ctx, _HELPER_TAGGED):
         return (
             PhaseResult.DRIFT,
             f"{_HELPER_TAGGED} present but not at the pinned digest "
@@ -97,14 +104,14 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
 
 def _act(ctx: SetupContext) -> str:
     """``docker pull`` the pinned digest (idempotent on an already-cached one)."""
-    cmd = _crossed(ctx.host_config, f"docker pull {_HELPER_REF}")
-    Executor().run(cmd, sentinel=True)
+    cmd = _crossed(ctx, f"docker pull {_HELPER_REF}")
+    Executor().run(cmd, sentinel=not is_operator_rootless(ctx.host_config))
     return f"helper image {_HELPER_REF} pulled"
 
 
 def _reverify(ctx: SetupContext) -> bool:
     """Confirm the pinned digest is now present in the local image store."""
-    return _digest_present(ctx.host_config)
+    return _digest_present(ctx)
 
 
 PHASE = Phase(

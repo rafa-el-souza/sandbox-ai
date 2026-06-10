@@ -6,7 +6,10 @@ the operator user (precedence rule), classifies the detected distro into the
 three support tiers (Validated / Untested / Unrecognized), verifies every
 required host binary is present, captures the sudo-version floor, and resolves
 ``machinectl`` on the sudoers ``secure_path`` basis with the uniqueness
-assertion (B-3, F-005).
+assertion (B-3, F-005). The machinectl assertion underpins the privilege
+boundary's sudoers ``Cmnd_Spec`` path, so it is gated to the crossing modes —
+**skipped in operator-rootless** (no machinectl crossing exists there; D2) while
+operator/distro/binary resolution stays mode-agnostic.
 
 Content-aware probe (design D10): L0's convergence target is "operator
 resolvable AND distro supported AND every required binary present AND exactly
@@ -39,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from core.doctor import detect_distro, get_install_cmd
+from core.host_config import is_operator_rootless, pipe_cmd
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -122,6 +126,17 @@ class MachinectlResolutionError(ValueError):
 
     Raised by :func:`resolve_machinectl_path` for the zero / >1 / sole-non-
     canonical cases (spec L0; B-3, F-005). The message names every found path.
+    """
+
+
+class SystemdRunResolutionError(ValueError):
+    """The transient-unit launcher has no single canonical secure_path entry.
+
+    The :func:`resolve_systemd_run_path` sibling of
+    :class:`MachinectlResolutionError` (C-009 design D5): raised for the zero /
+    ≥2-genuinely-distinct / sole-non-canonical cases so the SUDO pipe
+    ``Cmnd_Spec`` is rendered against a single, canonical, absolute launcher
+    path. The message names every found path.
     """
 
 
@@ -369,49 +384,51 @@ def _file_identity(path: str) -> tuple[int, int] | None:
     return (st.st_dev, st.st_ino)
 
 
-def resolve_machinectl_path(host_config: HostConfig) -> str:
-    """Resolve the single canonical ``machinectl`` on the secure_path basis.
+def _resolve_secure_path_binary(
+    binary: str,
+    error: type[ValueError],
+    *,
+    absent_hint: str,
+    distinct_hint: str,
+    non_canonical_hint: str,
+) -> str:
+    """Resolve a single canonical ``binary`` on the sudoers secure_path basis.
+
+    The shared F-005 inode-dedup resolver behind both
+    :func:`resolve_machinectl_path` and :func:`resolve_systemd_run_path` (the
+    two differ only by binary name, error class, and diagnostic hints — the
+    secure_path enumeration + ``(st_dev, st_ino)`` dedup + canonical-preference
+    logic is ONE definition, never re-derived).
 
     Pure / re-derivable (no caching, no module state). Enumerates every
-    ``secure_path`` directory containing an executable ``machinectl``, then
+    ``secure_path`` directory containing an executable ``binary``, then
     **dedupes by real file identity** (``os.stat`` ``(st_dev, st_ino)``) so a
     usrmerged host — where ``/usr/bin``/``/usr/sbin``/``/sbin``/``/bin`` are
-    symlink aliases of one directory — counts the four aliased paths as the
-    ONE underlying binary rather than a false ">1" refusal:
+    symlink aliases of one directory — counts the aliased paths as the ONE
+    underlying binary rather than a false ">1" refusal:
 
     - the secure_path entries resolve (by inode) to exactly one file, and at
-      least one of its paths is in a canonical systemd location (``/usr/bin``
-      or ``/usr/sbin``) → return that canonical path;
-    - zero → :class:`MachinectlResolutionError` (the orchestrator's relative
-      ``sudo machinectl …`` could never be granted by any rule);
+      least one of its paths is in a canonical location (``/usr/bin`` or
+      ``/usr/sbin``) → return that canonical path (preferring ``/usr/bin``);
+    - zero → ``error`` (the orchestrator's relative invocation could never be
+      granted/resolved by any rule);
     - ≥2 *genuinely distinct* files (different ``(st_dev, st_ino)``) → the
-      F-005 attacker-shadow refusal: :class:`MachinectlResolutionError` with a
-      diagnostic listing every found path and instructing removal of the
-      unexpected copy;
-    - a sole binary whose only path is in a non-canonical location →
-      :class:`MachinectlResolutionError` (unchanged).
+      F-005 attacker-shadow refusal (``error`` listing every found path);
+    - a sole binary whose only path is non-canonical → ``error``.
 
     The inode dedupe PRESERVES the F-005/V9e anti-shadow property: a shadow
-    binary at e.g. ``/usr/local/bin/machinectl`` is a *different* inode, so it
-    still triggers the genuinely-distinct refusal; only the usrmerge symlink
-    dup (same inode) is collapsed.
-
-    ``host_config`` is accepted for signature stability (Group 7's ``l3``
-    codes against this exact signature); resolution itself is host-global.
+    binary at e.g. a non-canonical dir is a *different* inode, so it still
+    triggers the genuinely-distinct refusal; only the usrmerge symlink dup
+    (same inode) is collapsed.
     """
     found: list[str] = []
     for d in _secure_path_dirs():
-        candidate = os.path.join(d, "machinectl")
+        candidate = os.path.join(d, binary)
         if os.access(candidate, os.X_OK) and candidate not in found:
             found.append(candidate)
 
     if not found:
-        raise MachinectlResolutionError(
-            "no executable 'machinectl' found on the sudoers secure_path "
-            f"({':'.join(_secure_path_dirs())}); the orchestrator's relative "
-            "`sudo machinectl …` can never be granted by any rule. Install "
-            "the systemd-container package."
-        )
+        raise error(absent_hint.format(secure_path=":".join(_secure_path_dirs())))
 
     # Dedupe by real file identity: group every found path by its
     # ``(st_dev, st_ino)`` so usrmerge symlink aliases of one binary collapse
@@ -423,29 +440,101 @@ def resolve_machinectl_path(host_config: HostConfig) -> str:
         distinct.setdefault(key, []).append(path)
 
     if len(distinct) > 1:
-        raise MachinectlResolutionError(
-            "machinectl does not resolve to a single canonical secure_path "
-            f"entry; found {len(distinct)} genuinely distinct binaries: "
-            f"{found}. Remove the unexpected copy; the orchestrator expects "
-            "the single systemd /usr/bin/machinectl."
-        )
+        raise error(distinct_hint.format(count=len(distinct), found=found))
 
     aliases = next(iter(distinct.values()))
-    canonical = [
-        p for p in aliases if os.path.dirname(p) in _CANONICAL_MACHINECTL_DIRS
-    ]
+    canonical = [p for p in aliases if os.path.dirname(p) in _CANONICAL_MACHINECTL_DIRS]
     if canonical:
-        # Prefer ``/usr/bin/machinectl`` (the form the L3 renderer + operator
+        # Prefer ``/usr/bin/<binary>`` (the form the L3 renderer + operator
         # texts name); fall back to any other canonical alias deterministically.
         for preferred in sorted(canonical):
             if os.path.dirname(preferred) == "/usr/bin":
                 return preferred
         return sorted(canonical)[0]
 
-    raise MachinectlResolutionError(
-        "machinectl resolves to a single binary but only outside a canonical "
-        f"systemd location; found: {found}. The orchestrator expects the "
-        "single systemd /usr/bin/machinectl."
+    raise error(non_canonical_hint.format(found=found))
+
+
+def resolve_machinectl_path(host_config: HostConfig) -> str:
+    """Resolve the single canonical ``machinectl`` on the secure_path basis.
+
+    Thin wrapper over :func:`_resolve_secure_path_binary` (the shared F-005
+    inode-dedup resolver). Returns the canonical ``/usr/bin/machinectl`` for the
+    zero / >1 / sole-non-canonical refusals see
+    :class:`MachinectlResolutionError`.
+
+    ``host_config`` is accepted for signature stability (Group 7's ``l3``
+    codes against this exact signature); resolution itself is host-global.
+    """
+    return _resolve_secure_path_binary(
+        "machinectl",
+        MachinectlResolutionError,
+        absent_hint=(
+            "no executable 'machinectl' found on the sudoers secure_path "
+            "({secure_path}); the orchestrator's relative `sudo machinectl …` "
+            "can never be granted by any rule. Install the systemd-container "
+            "package."
+        ),
+        distinct_hint=(
+            "machinectl does not resolve to a single canonical secure_path "
+            "entry; found {count} genuinely distinct binaries: {found}. Remove "
+            "the unexpected copy; the orchestrator expects the single systemd "
+            "/usr/bin/machinectl."
+        ),
+        non_canonical_hint=(
+            "machinectl resolves to a single binary but only outside a "
+            "canonical systemd location; found: {found}. The orchestrator "
+            "expects the single systemd /usr/bin/machinectl."
+        ),
+    )
+
+
+def _systemd_run_binary_name() -> str:
+    """The relative transient-unit launcher name, taken from ``pipe_cmd``.
+
+    Derived from :func:`core.host_config.pipe_cmd` (a call, not a re-typed
+    literal) so the launcher name has ONE source and the convention guard
+    ``test_no_raw_systemd_run_outside_pipe_cmd`` is honored: ``pipe_cmd(_)`` is
+    ``[<launcher>, "-q", "--pipe", "--uid=…"]``, so element 0 is the relative
+    launcher whose absolute secure_path resolution this module pins.
+    """
+    return pipe_cmd("")[0]
+
+
+def resolve_systemd_run_path(host_config: HostConfig) -> str:
+    """Resolve the single canonical transient-unit launcher on secure_path.
+
+    The C-009 design-D5 sibling of :func:`resolve_machinectl_path`: the SUDO
+    separate-user crossing rides ``sudo`` + the transient-unit launcher
+    (``core.host_config.sudo_pipe_cmd``), so the per-op pipe ``Cmnd_Spec`` must
+    name the absolute path sudo resolves that *relative* launcher to via
+    ``secure_path``. Delegates to the same :func:`_resolve_secure_path_binary`
+    inode-dedup resolver (usrmerge aliases collapse to one; ≥2 genuinely-distinct
+    inodes are the F-005 shadow refusal; zero is refused; the canonical
+    ``/usr/bin`` path is preferred). Raises :class:`SystemdRunResolutionError`.
+
+    ``host_config`` is accepted for signature symmetry with
+    :func:`resolve_machinectl_path`; resolution itself is host-global.
+    """
+    return _resolve_secure_path_binary(
+        _systemd_run_binary_name(),
+        SystemdRunResolutionError,
+        absent_hint=(
+            "no executable transient-unit launcher found on the sudoers "
+            "secure_path ({secure_path}); the SUDO pipe `Cmnd_Spec` can never "
+            "be granted/resolved by any rule. It ships with systemd."
+        ),
+        distinct_hint=(
+            "the transient-unit launcher does not resolve to a single canonical "
+            "secure_path entry; found {count} genuinely distinct binaries: "
+            "{found}. Remove the unexpected copy; the orchestrator expects the "
+            "single systemd /usr/bin launcher."
+        ),
+        non_canonical_hint=(
+            "the transient-unit launcher resolves to a single binary but only "
+            "outside a canonical systemd location; found: {found}. The "
+            "orchestrator expects the single systemd /usr/bin launcher."
+        ),
     )
 
 
@@ -485,12 +574,20 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
             f"required binaries missing: {', '.join(missing)} — install: {cmds}",
         )
 
-    try:
-        machinectl_path = resolve_machinectl_path(ctx.host_config)
-    except MachinectlResolutionError as exc:
-        return PhaseResult.CONFLICT, str(exc)
+    # The machinectl-path uniqueness assertion (B-3, F-005) underpins the
+    # privilege boundary's sudoers ``Cmnd_Spec`` path — a crossing-mode concern.
+    # operator-rootless has no machinectl crossing (L3/L3a/L8 are skipped and the
+    # runtime bypasses the dispatcher), so the assertion is gated out (D2); the
+    # operator-resolution + distro + binary checks above stay unchanged.
+    machinectl_detail = ""
+    if not is_operator_rootless(ctx.host_config):
+        try:
+            machinectl_path = resolve_machinectl_path(ctx.host_config)
+        except MachinectlResolutionError as exc:
+            return PhaseResult.CONFLICT, str(exc)
+        machinectl_detail = f", machinectl={machinectl_path}"
 
-    detail = f"operator={operator}, distro={raw_id} ({tier}), machinectl={machinectl_path}"
+    detail = f"operator={operator}, distro={raw_id} ({tier}){machinectl_detail}"
     floor_warn = sudo_floor_warning()
     if floor_warn:
         detail += f" [WARN: {floor_warn}]"
@@ -521,13 +618,18 @@ def _act(ctx: SetupContext) -> str:
 
 
 def _reverify(ctx: SetupContext) -> bool:
-    """L0 converged iff no required binary is missing and machinectl resolves."""
+    """L0 converged iff no required binary is missing and machinectl resolves.
+
+    The machinectl resolution is asserted only in crossing modes; operator-
+    rootless has no machinectl crossing, so it is skipped there (D2).
+    """
     if missing_binaries():
         return False
-    try:
-        resolve_machinectl_path(ctx.host_config)
-    except MachinectlResolutionError:
-        return False
+    if not is_operator_rootless(ctx.host_config):
+        try:
+            resolve_machinectl_path(ctx.host_config)
+        except MachinectlResolutionError:
+            return False
     return True
 
 
@@ -571,12 +673,14 @@ __all__ = [
     "PHASE",
     "MachinectlResolutionError",
     "OperatorResolutionError",
+    "SystemdRunResolutionError",
     "classify_distro",
     "emit_distro_gate",
     "missing_binaries",
     "parse_sudo_version",
     "resolve_machinectl_path",
     "resolve_operator",
+    "resolve_systemd_run_path",
     "sudo_floor_warning",
     "unsupported_distro_refusal",
     "untested_distro_warning",

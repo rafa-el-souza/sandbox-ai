@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.dispatch import _DISPATCH_SOURCE_ENTRIES
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup import l65_dispatcher as l65
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -368,3 +368,5 @@ def test_phase_shape() -> None:
     assert l65.PHASE.id == "l65"
     assert l65.PHASE.depends_on == ("l6a",)
     assert l65.PHASE.identity == Identity.ROOT
+    # fork B: no dispatcher binary in operator-rootless → separate-user only.
+    assert l65.PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})

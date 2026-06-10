@@ -372,3 +372,41 @@ Hydration SHALL write sensitive files at restrictive modes from creation, bypass
 - **WHEN** `render_templates()` programmatically generates `allowed_domains.txt`, `read_only_domains.txt`, or `.htpasswd`
 - **THEN** the same `os.open` + explicit mode 0640 pattern is used
 
+### Requirement: Host-Aware CPU Limit Clamping
+
+`build_jinja_context()` SHALL clamp the per-container CPU limits it renders from configuration (the `core` and `admin` containers — see below) to the host's available CPU count, so that `sandbox start` degrades to the host maximum on a small host instead of failing compose-up. The host CPU count SHALL be obtained from `os.cpu_count()` (which reports the host's online CPU count, matching Docker's `--cpus` validation source), falling back to `len(os.sched_getaffinity(0))` when `os.cpu_count()` returns `None`, and floored at `1`.
+
+For each per-container CPU limit, the rendered value SHALL be `min(configured, host_cpus)`. This SHALL apply to the `core` container (`core_cpus`, sourced from `[core].cpus`) and to the `admin` container, whose CPU intent SHALL be a single named module constant rendered into a new `admin_cpus` context key (replacing the previously hardcoded `cpus: "4.0"` literal in the compose template). The `[core].cpus` schema default is unchanged; the clamp is a render-time transformation, not a schema-validation change.
+
+#### Scenario: Core CPU limit clamped on a small host
+
+- **WHEN** `build_jinja_context()` runs on a host with 2 online CPUs and `[core].cpus` is `4.0`
+- **THEN** the `core_cpus` context value is `2.0` (clamped to the host count)
+
+#### Scenario: Admin CPU limit clamped on a small host
+
+- **WHEN** `build_jinja_context()` runs on a host with 2 online CPUs
+- **THEN** the `admin_cpus` context value is `2.0`, derived from the admin CPU constant clamped to the host count
+- **AND** the rendered `compose.yml` `admin` service `cpus` resolves from `{{ admin_cpus }}`, not a hardcoded literal
+
+#### Scenario: No-op on a host with sufficient CPUs
+
+- **WHEN** `build_jinja_context()` runs on a host with 8 online CPUs, `[core].cpus` is `4.0`, and the admin constant is `4.0`
+- **THEN** `core_cpus` is `4.0` and `admin_cpus` is `4.0` (the clamp does not reduce values that already fit)
+
+#### Scenario: Reducing clamp emits a warning
+
+- **WHEN** a configured CPU limit exceeds the host CPU count and is clamped to a lower value
+- **THEN** hydration emits a warning naming the configured value, the host CPU count, and the effective clamped value
+- **AND** hydration proceeds (the clamp is a graceful degrade, not an error)
+
+### Requirement: Compose Runtime Name Single-Sourced With the Daemon Registration
+
+The compose `runtime` value rendered by `build_jinja_context()` SHALL be the reserved gVisor runtime name that `sandbox setup` registers in the daemon's `daemon.json` (`sandbox-ai-runsc` — namespaced so it never clobbers an operator's own `runsc` runtime). The name SHALL have a single definition (`RESERVED_RUNTIME_KEY` in the hydration module); the daemon-registration site and the `cli-doctor` runtime checks SHALL derive from that same definition. A divergence between the rendered runtime name and the registered runtime name would make Docker reject container-create with `unknown or invalid runtime name`, so the two MUST NOT be independently spelled.
+
+#### Scenario: Rendered runtime name equals the registered runtime name
+
+- **WHEN** `build_jinja_context()` renders the compose context
+- **THEN** the `runtime` value equals the reserved runtime key registered in `daemon.json` by setup
+- **AND** that name has a single source of truth shared by the render, the registration, and the doctor checks (no independent literal)
+

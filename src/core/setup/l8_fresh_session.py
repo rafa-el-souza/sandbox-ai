@@ -15,15 +15,22 @@ Two checks, each with the operator-drop primitive matched to its command:
    the post-``usermod`` set even though the operator's login session predates
    the ``usermod`` — empirically validated V0/V3, the whole reason this re-probe
    is a *fresh* session). ``id`` is a plain binary, so ``pipe_cmd`` is correct.
-2. ``sudo_as_operator(<operator>) → sudo -n machinectl shell <user>@.host
-   /bin/bash -c '<dispatch> auth-probe'`` — relative ``machinectl`` (B-3, byte-
-   identical to ``core.host_config.machinectl_cmd()``'s runtime output) —
-   confirms machinectl is reachable end-to-end through the just-installed rule.
-   The operator-side command is the setuid binary ``sudo``, so it MUST drop via
-   ``sudo_as_operator`` (a normal-process ``sudo -u``), NOT ``pipe_cmd``:
-   ``pipe_cmd``'s ``--uid`` transient unit EXIT_EXECs (203) on setuid
-   ``sudo`` (F-016, the same defect fixed in L3a). The crossed payload is the
-   bare ``<dispatch> auth-probe`` (so it MATCHES the per-op ``Cmnd_Spec`` — a
+2. ``sudo_as_operator(<operator>) → sudo -n <SYSTEMD_RUN_PATH> -q --pipe
+   --uid=<user> /bin/bash -c '<dispatch> auth-probe'`` — the relative
+   transient-unit launcher (B-3, byte-identical to
+   ``core.host_config.pipe_cmd()``'s runtime output) — confirms the
+   dispatcher is reachable end-to-end through the just-installed rule, crossing
+   via the PIPE. The M3-i rule renders ONLY the pipe ``Cmnd_Spec`` (the
+   machinectl operator spec was REMOVED), so this check MUST cross via
+   ``pipe_cmd`` or it is unauthorized → "password required" → L8 false-FAILs a
+   correct rule (C-009 design D4). The operator-side command is still the setuid
+   binary ``sudo``, so root drops to the operator via ``sudo_as_operator`` (a
+   normal-process ``sudo -u``), NOT ``pipe_cmd``: a ``pipe_cmd`` ``--uid``
+   transient unit EXIT_EXECs (203) on setuid ``sudo`` (F-016). F-016 does not
+   block the crossing's inner — the authorized transient-unit launcher's
+   ``--uid`` unit execs ``/bin/bash`` → dispatch, a non-setuid binary. The
+   crossed payload is
+   the bare ``<dispatch> auth-probe`` (so it MATCHES the per-op ``Cmnd_Spec`` — a
    wrapping ``sentinel=True`` would not, F-018), and the inner exit is recovered
    via the dispatcher's begin/exit framing (``framed=True``) so a masked
    dispatcher reject is not read as success (same Finding-J class as L3a).
@@ -40,10 +47,10 @@ from __future__ import annotations
 import grp
 from typing import TYPE_CHECKING
 
-from core.dispatch import _DISPATCH_BINARY, Op
+from core.dispatch import Op, dispatch_payload
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import pipe_cmd, sudo_as_operator
+from core.host_config import DockerExecutionMode, pipe_cmd, sudo_as_operator
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -97,10 +104,22 @@ def _check_group_set(host_config: HostConfig, operator: str) -> None:
         )
 
 
-def _check_machinectl_reachable(
+def _check_dispatcher_reachable(
     host_config: HostConfig, operator: str
 ) -> None:
-    """Verify machinectl is reachable end-to-end through the new rule.
+    """Verify the dispatcher is reachable end-to-end through the new rule.
+
+    Crosses via the PIPE (``pipe_cmd``) — the M3-i rule renders ONLY the pipe
+    ``Cmnd_Spec`` (the machinectl operator spec was REMOVED), so a machinectl
+    crossing would be unauthorized and false-FAIL a correct rule (C-009 design
+    D4). The crossing prefix is derived from ``pipe_cmd`` (the relative
+    transient-unit launcher, B-3) and the inner payload from ``dispatch_payload``
+    — never a hand-typed launcher literal — so it stays byte-identical to the
+    rendered ``auth-probe`` ``Cmnd_Spec``. Root drops to the operator via
+    ``sudo_as_operator`` (the setuid ``sudo`` cannot exec inside a ``pipe_cmd``
+    ``--uid`` transient unit — F-016); F-016 does not block the crossing's inner
+    (the authorized transient-unit launcher's ``--uid`` unit execs ``/bin/bash``
+    → dispatch, a non-setuid binary).
 
     The inner ``/bin/bash -c '<dispatch> auth-probe'`` exit is recovered via the
     dispatcher's begin/exit framing (``Executor().run(..., framed=True)``) — a
@@ -112,14 +131,12 @@ def _check_machinectl_reachable(
     failed this check for every SUDO-mode password-operator (F-018).
     """
     sandbox_user = host_config.host.docker_unprivileged_user
-    inner = f"{_DISPATCH_BINARY} {Op.AUTH_PROBE.value}"
+    inner = dispatch_payload(Op.AUTH_PROBE.value, [])
     argv = [
         *sudo_as_operator(operator),
         "sudo",
         "-n",
-        "machinectl",
-        "shell",
-        f"{sandbox_user}@.host",
+        *pipe_cmd(sandbox_user),
         "/bin/bash",
         "-c",
         inner,
@@ -128,7 +145,7 @@ def _check_machinectl_reachable(
         Executor().run(argv, framed=True)
     except SandboxExecutionError as exc:
         raise FreshSessionError(
-            f"machinectl is NOT reachable end-to-end through the new rule "
+            f"the dispatcher is NOT reachable end-to-end through the new rule "
             f"for operator {operator!r} (recovered inner exit / trace: "
             f"{exc})"
         ) from exc
@@ -139,10 +156,10 @@ def _verify(ctx: SetupContext) -> str:
     operator = ctx.operator
     host_config = ctx.host_config
     _check_group_set(host_config, operator)
-    _check_machinectl_reachable(host_config, operator)
+    _check_dispatcher_reachable(host_config, operator)
     return (
         f"fresh-session verified for operator {operator!r}: bridge gid in "
-        f"group set; machinectl reachable through the new rule"
+        f"group set; dispatcher reachable through the new rule"
     )
 
 
@@ -178,4 +195,8 @@ PHASE = Phase(
     reverify=_reverify,
     depends_on=("l3a",),
     rollback=None,
+    # operator-rootless has no privilege-boundary crossing and no boundary
+    # group to re-probe; the operator's subuid/linger posture is a doctor
+    # concern (C-005), not L8's. So L8 SKIPS entirely in operator-rootless.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

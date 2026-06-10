@@ -210,7 +210,11 @@ class GateDecision:
 
 
 def decide_gate(
-    outcomes: Sequence[PhasePlanOutcome], *, is_tty: bool, assume_yes: bool
+    outcomes: Sequence[PhasePlanOutcome],
+    *,
+    is_tty: bool,
+    assume_yes: bool,
+    extra_mutations: int = 0,
 ) -> GateDecision:
     """Pure gating decision — the full spec edge-case matrix in one place.
 
@@ -224,11 +228,17 @@ def decide_gate(
        - ``--yes`` → ``PROCEED`` (TTY or non-TTY; skip prompt).
        - non-TTY, no ``--yes`` → ``NON_TTY_NEEDS_YES``.
        - TTY, no ``--yes`` → ``PROMPT``.
+
+    ``extra_mutations`` counts pending mutations the plan outcomes do NOT carry —
+    operator-rootless setup's host-root escalation batch (classified separately
+    from the phase plan). It adds to the mutation count so a converged phase plan
+    with a non-empty host-root batch still prompts/proceeds rather than reporting
+    ``NOTHING_TO_APPLY``. Separate-user callers leave it 0 (behavior unchanged).
     """
     tally = tally_plan(outcomes)
     if tally.refused > 0:
         return GateDecision(GateOutcome.REFUSED, tally)
-    if tally.will_mutate == 0:
+    if tally.will_mutate + extra_mutations == 0:
         return GateDecision(GateOutcome.NOTHING_TO_APPLY, tally)
     if assume_yes:
         return GateDecision(GateOutcome.PROCEED, tally)

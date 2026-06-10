@@ -80,6 +80,8 @@ The system SHALL display the exact subprocess commands that would be executed du
 
 The `docker compose up` command displayed by the preview SHALL be obtained from the same `_compose_up_cmd_plan` helper that `_phase_compose_up` uses for live execution (per `cli-start`'s "Compose Environment File Flag" requirement). The displayed inner `bash -c` command string SHALL be byte-identical to what the live path would execute given the same `(instance_dir, project_name, config)` inputs. The preview SHALL NOT reconstruct the compose command from local variables in the dry-run helper-recipe loops; in particular, no inner-loop variable in the helper-mkdir or helper-cp preview blocks SHALL shadow the compose-files string.
 
+The handover command displayed by the preview SHALL likewise be obtained from the same builder the live attach/handover path uses (the `_build_attach_argv` generator, whose separate-user ProxyCommand comes from `core.dispatch`'s streaming entrypoint — per `cli-attach`) — the preview SHALL NOT hand-assemble a parallel ProxyCommand string, so the previewed and executed handover argvs cannot drift (C-010 D4).
+
 #### Scenario: Compose command displayed
 - **WHEN** dry-run completes validation
 - **THEN** the full `docker compose` command is displayed, including all `-f` flags for component-conditional extras
@@ -96,11 +98,11 @@ The `docker compose up` command displayed by the preview SHALL be obtained from 
 
 #### Scenario: Handover command displayed (sudo mode)
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"sudo"`
-- **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand="systemd-run -q --pipe --uid=<sbuser> /usr/bin/docker exec -i <project_name>-admin-1 /fwd <core_ipc_ip>:9999" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
+- **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -F /dev/null -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no -o ProxyCommand="sudo systemd-run -q --pipe --uid=<sbuser> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
 
 #### Scenario: Handover command displayed (polkit mode)
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"polkit"`
-- **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o ProxyCommand="systemd-run -q --pipe --uid=<sbuser> /usr/bin/docker exec -i <project_name>-admin-1 /fwd <core_ipc_ip>:9999" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'` (the `systemd-run` ProxyCommand path is auth-mode independent)
+- **THEN** the preview shows the same command as the sudo-mode scenario except the `ProxyCommand` value carries no `sudo` prefix (the unprivileged `pipe_cmd` crossing; the `dispatch fwd <wire>` payload is identical, per `cli-attach`)
 
 #### Scenario: Named-ACL grant commands displayed (per-workspace)
 - **WHEN** dry-run completes validation for an instance with workspaces `main` and `scratch`

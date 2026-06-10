@@ -10,16 +10,18 @@ content-aware-probe contract via the conftest fixture.
 from __future__ import annotations
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup import l0_identity
 from core.setup.l0_identity import (
     PHASE,
     MachinectlResolutionError,
     OperatorResolutionError,
+    SystemdRunResolutionError,
     classify_distro,
     missing_binaries,
     resolve_machinectl_path,
     resolve_operator,
+    resolve_systemd_run_path,
     sudo_floor_warning,
     unsupported_distro_refusal,
     untested_distro_warning,
@@ -30,6 +32,15 @@ from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        operator=operator,
+    )
+
+
+def _oprootless_ctx(operator: str = "alice") -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+        ),
         operator=operator,
     )
 
@@ -479,6 +490,86 @@ def test_resolve_machinectl_sole_non_canonical(
         resolve_machinectl_path(_ctx().host_config)
 
 
+# ── systemd-run path resolution (C-009 design D5 — mirrors machinectl) ───────
+
+
+def test_resolve_systemd_run_exactly_one_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: p == "/usr/bin/systemd-run")
+    _stub_stat(monkeypatch, {"/usr/bin/systemd-run": (1, 200)})
+    assert (
+        resolve_systemd_run_path(_ctx().host_config) == "/usr/bin/systemd-run"
+    )
+
+
+def test_resolve_systemd_run_usrmerge_same_inode_no_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """usrmerged host: 4 secure_path aliases of ONE inode → canonical, no raise.
+
+    Mirrors ``test_resolve_machinectl_usrmerge_same_inode_no_refusal``: the four
+    usrmerge aliases ``os.stat`` to the SAME ``(st_dev, st_ino)`` and collapse to
+    a single binary resolving to the canonical ``/usr/bin/systemd-run``.
+    """
+    _stub_secure_path(monkeypatch, ["/usr/sbin", "/usr/bin", "/sbin", "/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    one_inode = (66, 77000)
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/sbin/systemd-run": one_inode,
+            "/usr/bin/systemd-run": one_inode,
+            "/sbin/systemd-run": one_inode,
+            "/bin/systemd-run": one_inode,
+        },
+    )
+    assert (
+        resolve_systemd_run_path(_ctx().host_config) == "/usr/bin/systemd-run"
+    )
+
+
+def test_resolve_systemd_run_more_than_one_distinct_inode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two GENUINELY DISTINCT launchers (different inodes) → F-005 shadow refusal."""
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/bin"])
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    _stub_stat(
+        monkeypatch,
+        {
+            "/usr/local/bin/systemd-run": (1, 9999),  # attacker shadow inode
+            "/usr/bin/systemd-run": (1, 200),  # the genuine systemd binary
+        },
+    )
+    with pytest.raises(
+        SystemdRunResolutionError, match="genuinely distinct binaries"
+    ):
+        resolve_systemd_run_path(_ctx().host_config)
+
+
+def test_resolve_systemd_run_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_secure_path(monkeypatch, ["/usr/bin", "/sbin"])
+    monkeypatch.setattr("os.access", lambda p, m: False)
+    with pytest.raises(SystemdRunResolutionError, match="no executable"):
+        resolve_systemd_run_path(_ctx().host_config)
+
+
+def test_resolve_systemd_run_sole_non_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_secure_path(monkeypatch, ["/usr/local/bin", "/usr/sbin"])
+    monkeypatch.setattr(
+        "os.access", lambda p, m: p == "/usr/local/bin/systemd-run"
+    )
+    _stub_stat(monkeypatch, {"/usr/local/bin/systemd-run": (1, 200)})
+    with pytest.raises(
+        SystemdRunResolutionError, match="only outside a canonical"
+    ):
+        resolve_systemd_run_path(_ctx().host_config)
+
+
 # ── _secure_path_dirs parsing branches ───────────────────────────────────────
 
 
@@ -668,6 +759,41 @@ def test_reverify_false_machinectl_unresolvable(
         "os.access", lambda p, m: not p.endswith("machinectl")
     )
     assert PHASE.reverify(_ctx()) is False
+
+
+# ── operator-rootless: machinectl-path assertion is gated out (§5.1) ──────────
+
+
+def test_probe_oprootless_skips_machinectl_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """op-rootless L0 probe must NOT run the machinectl uniqueness assertion.
+
+    With ``machinectl`` ABSENT from secure_path — a CONFLICT in separate-user
+    (see ``test_probe_conflict_machinectl``) — operator-rootless still converges
+    ``ALREADY_CORRECT`` and the detail carries no ``machinectl=`` field, because
+    there is no machinectl crossing in that mode (D2).
+    """
+    _ok_world(monkeypatch)
+    monkeypatch.setattr("os.access", lambda p, m: not p.endswith("machinectl"))
+    result, detail = PHASE.probe(_oprootless_ctx())
+    assert result == PhaseResult.ALREADY_CORRECT
+    assert "machinectl=" not in detail
+    assert "operator=alice" in detail
+
+
+def test_reverify_oprootless_skips_machinectl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """op-rootless reverify mirrors the probe: machinectl unresolvable is moot.
+
+    An unresolvable machinectl makes ``_reverify`` False in separate-user (see
+    ``test_reverify_false_machinectl_unresolvable``); in operator-rootless it is
+    True so long as the required binaries are present.
+    """
+    _ok_world(monkeypatch)
+    monkeypatch.setattr("os.access", lambda p, m: not p.endswith("machinectl"))
+    assert PHASE.reverify(_oprootless_ctx()) is True
 
 
 # ── content-aware probe contract (conftest fixture) ──────────────────────────

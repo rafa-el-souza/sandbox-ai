@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox init` command, which scaffolds a new sandbox instance for the current project directory — creating the directory tree, configuration files, registry entry, default ACLs, and the `.initialized` sentinel.
-
 ## Requirements
-
 ### Requirement: Default Bootstrap is Empty Workspace Named main
 
 When `sandbox init <inst>` is invoked with no `--copy` and no `--empty` flags, the system SHALL scaffold exactly one workspace named `main` with `bootstrap_mode = "empty"`. This default fires only when both flag lists are empty; supplying any flag (even a single `--empty other`) suppresses the default and the operator gets exactly the workspaces named.
@@ -103,22 +101,22 @@ CWD-based instance discovery is removed: the `<inst>` argument is positional and
 - **THEN** the CLI exits with a typer "missing argument" error
 
 ### Requirement: Init-Time Auth Mode Probe
-The system SHALL validate that the resolved machinectl authentication mode works at init time by executing a probe command against the resolved docker unprivileged user. The probe SHALL use a 5-second timeout.
+The system SHALL validate that the resolved machinectl authentication mode works at init time by executing the dispatcher `auth-probe` op against the resolved docker unprivileged user (via `core.dispatch.probe("auth-probe", [], host_config)` — which crosses the bare `dispatch auth-probe` payload, NOT an inline `"echo ok"` string; the dispatcher's `auth-probe` target argv is `["/bin/bash", "-c", "echo ok"]`). The crossing primitive is selected by the resolved `machinectl_authentication` mode: SUDO crosses via `sudo_pipe_cmd` (the privileged byte-pipe), POLKIT via `machinectl_cmd(user, POLKIT)`. The probe SHALL use a 5-second timeout.
 
 #### Scenario: Sudo mode probe succeeds
-- **WHEN** init resolves `machinectl_authentication = "sudo"` and `sudo machinectl shell <user>@.host /bin/bash -c "echo ok"` returns exit code 0 within 5 seconds
+- **WHEN** init resolves `machinectl_authentication = "sudo"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `sudo_pipe_cmd(<user>)` as `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
 - **THEN** init proceeds normally
 
 #### Scenario: Polkit mode probe succeeds
-- **WHEN** init resolves `machinectl_authentication = "polkit"` and `machinectl shell <user>@.host /bin/bash -c "echo ok"` returns exit code 0 within 5 seconds
+- **WHEN** init resolves `machinectl_authentication = "polkit"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `machinectl_cmd(<user>, POLKIT)` as `[*machinectl_cmd(<user>, POLKIT), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
 - **THEN** init proceeds normally
 
 #### Scenario: Sudo mode probe fails with timeout
-- **WHEN** the sudo probe times out after 5 seconds
+- **WHEN** the sudo probe times out after 5 seconds (`probe(...)` returns `timed_out=True`)
 - **THEN** init exits with an error including remediation: "Configure passwordless machinectl access in /etc/sudoers.d/"
 
 #### Scenario: Polkit mode probe fails
-- **WHEN** the polkit probe returns a non-zero exit code or times out
+- **WHEN** the polkit probe returns `ok=False` or times out
 - **THEN** init exits with an error including remediation: "Configure polkit rules for org.freedesktop.machine1.shell"
 
 ### Requirement: Init Doctor Pre-Flight Auth Mode Awareness
@@ -217,9 +215,11 @@ The system SHALL create the per-user tree (`<home>/`, `<home>/config/`, `<home>/
 ### Requirement: Host Config Seeding (TTY Prompt or Non-TTY Fail)
 When `<home>/config/sandbox-ai.toml` does not exist, `sandbox init` SHALL seed it. In TTY mode, the system SHALL prompt the operator interactively for `docker_unprivileged_user` (required) and `machinectl_authentication` (optional, default `"sudo"`). In non-TTY mode, the system SHALL exit with a clear error directing the operator to create the file manually before retrying.
 
+The seeded file SHALL begin with a leading managed-comment header — `# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)` — guarding the setup-determined `[host]` fields (D10 stopgap). The seed SHALL NOT write a `docker_execution_mode` field: the execution mode is no longer a toml field (it is resolved at runtime from the setup-state marker — see the `host-config` capability's "Docker Execution Mode Selector").
+
 #### Scenario: TTY clean install — interactive seed
 - **WHEN** `sandbox init` runs in a TTY and `<home>/config/sandbox-ai.toml` does not exist
-- **THEN** the CLI prompts: "docker_unprivileged_user (e.g., sandbox):" — accepts a non-empty value — then prompts: "machinectl_authentication [sudo/polkit, default sudo]:" — accepts `sudo`, `polkit`, or empty (defaulting to `sudo`) — then writes the seeded values to `<home>/config/sandbox-ai.toml`
+- **THEN** the CLI prompts: "docker_unprivileged_user (e.g., sandbox):" — accepts a non-empty value — then prompts: "machinectl_authentication [sudo/polkit, default sudo]:" — accepts `sudo`, `polkit`, or empty (defaulting to `sudo`) — then writes the seeded values to `<home>/config/sandbox-ai.toml`, preceded by the managed-comment header and with no `docker_execution_mode` field
 
 #### Scenario: TTY clean install — empty user rejected
 - **WHEN** the operator presses Enter without typing a value at the `docker_unprivileged_user` prompt
@@ -233,6 +233,10 @@ When `<home>/config/sandbox-ai.toml` does not exist, `sandbox init` SHALL seed i
 - **WHEN** `sandbox init` runs and `<home>/config/sandbox-ai.toml` already exists with valid content
 - **THEN** the system does NOT prompt and does NOT overwrite; init proceeds using the existing values
 
+#### Scenario: seeded toml carries the managed-comment header
+- **WHEN** `sandbox init` seeds `<home>/config/sandbox-ai.toml`
+- **THEN** the file's first line is the `# sandbox-ai managed — …; do not edit (rerun setup to change)` comment and the file contains no `docker_execution_mode` key
+
 ### Requirement: Init Detects Legacy CWD-Local Files
 During `sandbox init`, the system SHALL inspect the current working directory for legacy `<cwd>/sandbox-ai.toml` and `<cwd>/.state/` and warn the operator that these files are no longer used.
 
@@ -243,3 +247,4 @@ During `sandbox init`, the system SHALL inspect the current working directory fo
 #### Scenario: Legacy state directory detected
 - **WHEN** `sandbox init` runs and `<cwd>/.state/` exists
 - **THEN** init prints a warning: "Found legacy `<cwd>/.state/`. Orchestrator state now lives at `<resolved-home>/state/`. Migrate manually or delete the legacy directory."
+

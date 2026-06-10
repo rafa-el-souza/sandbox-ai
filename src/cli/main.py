@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import getpass
 import json as _json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -32,12 +34,14 @@ from core.actions import (
     NamedAclRevokeAction,
     WorkspaceSharedGroupAction,
 )
-from core.compose import compose_project_name
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
     build_check_registry,
-    check_compose_project_name_collision,
     detect_distro,
+    evaluate_preflight_gate,
+    interpret_compose_collision_segment,
+    interpret_preflight_bundle,
+    interpret_preflight_reachability,
     render_results,
     run_check_subset,
     run_checks,
@@ -45,6 +49,8 @@ from core.doctor import (
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
+    DockerExecutionMode,
     HostConfig,
     HostSettings,
     MachinectlAuth,
@@ -52,8 +58,10 @@ from core.host_config import (
     ensure_per_user_state,
     host_gid_for_in_container,
     host_id_for_in_container,
+    is_operator_rootless,
     minimal_host_config,
-    pipe_cmd,
+    resolve_daemon_owner,
+    resolve_daemon_owner_settings,
     sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
@@ -79,11 +87,17 @@ from core.scaffold import (
     write_initialized_sentinel,
     write_sandbox_toml,
 )
-from core.setup import cli_flow
+from core.setup import cli_flow, host_batch
 from core.setup.extras import selected_extras
 from core.setup.l0_identity import OperatorResolutionError, emit_distro_gate, resolve_operator
 from core.setup.l6a_runsc import set_force_update
 from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
+from core.setup_state import (
+    ModeMarkerMissing,
+    read_mode,
+    resolve_execution_mode,
+    write_mode_root_owned,
+)
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
 from core.walker import walk_ancestors
 from core.workspace_backups import (
@@ -286,12 +300,18 @@ def _load_config(instance_dir: str) -> InstanceConfig:
 
 # ─── Warm state check ───────────────────────────────────────────────────────
 
+# Defense-in-depth parse ceiling for the untrusted ``compose-ps`` NDJSON (M-2).
+# The daemon's self-reported container status is parsed line-by-line; reject an
+# oversized blob before ``json.loads`` rather than parse an unbounded payload.
+_MAX_COMPOSE_PS_BYTES = 256 * 1024
+
 
 def _container_status(
     instance_dir: str,
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
 
@@ -314,30 +334,37 @@ def _container_status(
     # ``--compose-file`` / ``--env-file`` operands are resolved internally by
     # ``invoke``'s single operator-side resolver (``_resolve_compose_state``),
     # so they are no longer constructed here.
-    host_config = minimal_host_config(host_user, auth)
+    host_config = minimal_host_config(host_user, auth, mode)
     outcome = dispatch.probe("compose-ps", [config.instance.name], host_config)
     if not outcome.ok:
         return []
 
     containers: list[ContainerInfo] = []
-    if outcome.stdout:
+    # Size-bound the untrusted NDJSON blob before parsing (M-2): an oversized
+    # daemon report fails closed to an empty list, never an unbounded parse.
+    if outcome.stdout and len(outcome.stdout.encode("utf-8", errors="ignore")) <= _MAX_COMPOSE_PS_BYTES:
         for line in outcome.stdout.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
                 data = _json.loads(line)
-                containers.append(
-                    ContainerInfo(
-                        name=data.get("Name", ""),
-                        service=data.get("Service", ""),
-                        state=data.get("State", ""),
-                        health=data.get("Health", None) or None,
-                        status=data.get("Status", ""),
-                    )
-                )
             except _json.JSONDecodeError:
                 continue
+            # Strict shape: each NDJSON record must be a JSON object. A
+            # non-dict line (array, scalar, malformed shape) is skipped — never
+            # coerced into a ContainerInfo.
+            if not isinstance(data, dict):
+                continue
+            containers.append(
+                ContainerInfo(
+                    name=data.get("Name", ""),
+                    service=data.get("Service", ""),
+                    state=data.get("State", ""),
+                    health=data.get("Health", None) or None,
+                    status=data.get("Status", ""),
+                )
+            )
     return containers
 
 
@@ -345,6 +372,7 @@ def _warm_check(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> bool:
     """Check if containers are already running. Returns True if warm.
 
@@ -355,7 +383,7 @@ def _warm_check(
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, host_user, config, auth))
+    return bool(_container_status(instance_dir, host_user, config, auth, mode))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -1020,7 +1048,6 @@ def _diagnose_traverse_failure(instance_dir: str, host_user: str) -> str:
     Returns:
         Diagnostic message string, or empty string if no failure found.
     """
-    import pwd
     import stat
 
     try:
@@ -1407,7 +1434,7 @@ def _phase_workspace_shared_group(
         WorkspaceBridgeGroupMissingError: if the bridge group is missing.
     """
     bridge_gid = workspace_bridge_gid(host)
-    host_user = host.docker_unprivileged_user
+    host_user = resolve_daemon_owner_settings(host)
 
     if _workspace_needs_recursive_setup(workspace_path, bridge_gid):
         failure_count, sample_paths = _workspace_shared_group_recursive(workspace_path, bridge_gid)
@@ -1443,6 +1470,7 @@ def _phase_helper_cp_chown_ro_files(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> None:
     """Phase 5d: helper-cp + chown for ro single-file mounts.
 
@@ -1460,6 +1488,7 @@ def _phase_helper_cp_chown_ro_files(
         auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
+        docker_execution_mode=mode,
     )
     for action in _helper_cp_chown_plan(instance_dir, host_user):
         action.execute(ctx)
@@ -1495,6 +1524,7 @@ def _phase_helper_mkdir_chown_cache_log(
     host_user: str,
     auth: MachinectlAuth,
     dev_user: str | None = None,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> None:
     """Phase 5c: helper-mkdir + chown for cache/log leaves.
 
@@ -1512,6 +1542,7 @@ def _phase_helper_mkdir_chown_cache_log(
         auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
+        docker_execution_mode=mode,
     )
     for action in _helper_mkdir_chown_plan(instance_dir, host_user):
         parent_abs = str(action.parent)
@@ -1600,7 +1631,7 @@ def _phase_compose_up(
     # narrower ctx would force type special-casing the phase loop, the very
     # non-uniformity the render_command contract removed).
     ctx = ActionContext(
-        host_user=host_config.host.docker_unprivileged_user,
+        host_user=resolve_daemon_owner(host_config),
         auth=host_config.host.machinectl_authentication,
         executor=Executor(),
         instance_dir=Path(instance_dir),
@@ -1613,47 +1644,71 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     """Build the canonical PTY-handover argv for ``sandbox attach`` / ``sandbox start``.
 
     The invocation: ``tlog-rec`` wraps a host-side ssh client whose
-    ``ProxyCommand`` uses :func:`pipe_cmd` to cross the privilege boundary
-    via the byte-pipe primitive, then dials ``/fwd`` inside admin's net
-    namespace, which forwards stdio↔TCP to core's sshd on ipc_net. The PTY lives at the host ssh layer; admin
-    is a dumb byte pipe (per `admin-reframe` design D1 — Shape 2). Workspace
-    cwd is set via the ssh remote-command suffix (per design D9), not via
-    ``docker exec -w``.
+    ``ProxyCommand`` crosses (in separate-user mode) the privilege boundary
+    into the unprivileged docker user and runs the streaming dispatcher op
+    ``fwd``, which execs ``docker exec -i <project>-admin-1 /fwd <ip>:9999``
+    inside admin's net namespace to forward stdio↔TCP to core's sshd on
+    ipc_net. The PTY lives at the host ssh layer; admin is a dumb byte pipe
+    (per `admin-reframe` design D1 — Shape 2). Workspace cwd is set via the
+    ssh remote-command suffix (per design D9), not via ``docker exec -w``.
 
-    The ``ProxyCommand`` uses :func:`pipe_cmd` (polkit-authenticated via
-    ``manage-units``) regardless of the host's ``machinectl_authentication``
-    mode — ``pipe_cmd`` is auth-mode-independent (per design D2). The ssh
-    client itself runs as the operator (dev) with no boundary crossing.
+    The ``ProxyCommand`` value is the single sanctioned producer
+    :func:`core.dispatch.proxy_argv` (``Op.FWD``) — ``cli.main`` never
+    hand-assembles the crossing prefix, the streaming-op wire payload, or the
+    docker-exec argv (C-010). ``proxy_argv`` selects the per-mode crossing:
+
+    - **separate-user + SUDO** → the ``fwd`` dispatcher wire payload over
+      ``sudo_pipe_cmd`` (the privileged byte-pipe, authorized non-interactively
+      by the per-op sudoers ``Cmnd_Spec`` — headless-capable, the F-060 fix).
+    - **separate-user + POLKIT** → the same payload over ``pipe_cmd`` (the
+      unprivileged byte-pipe, polkit ``manage-units``-authorized — interactive
+      polkit agent required; headless POLKIT attach is unsupported).
+    - **operator-rootless** → the bare local
+      ``docker exec -i <project>-admin-1 /fwd <ip>:9999`` (no crossing, no
+      dispatcher indirection — the operator owns dockerd, per design D5/D7).
+
+    A ``machinectl_cmd`` crossing is NEVER used for the ProxyCommand in any
+    mode (the PTY's ``onlcr`` would corrupt the SSH binary stream). The IPAM
+    read on the separate-user / operator-rootless paths is the existing
+    read-only ledger peek (no allocation) inside the ``fwd`` wire expansion.
+
+    The ssh client is hardened in every mode: ``-F /dev/null`` (ignores the
+    operator's ``~/.ssh/config`` and system ``ssh_config``) plus the
+    non-escalation pins ``-o ForwardAgent=no -o ForwardX11=no
+    -o ClearAllForwardings=yes -o IdentitiesOnly=yes -o IdentityAgent=none
+    -o PermitLocalCommand=no`` and the per-instance host-key pins
+    ``-o UserKnownHostsFile=<secrets>/ipc_known_hosts
+    -o StrictHostKeyChecking=yes``. The session endpoint lives inside the
+    untrusted sandbox plane, so attach guarantees not a trustworthy view of
+    the plane but that the session cannot reach back into the operator (per
+    cli-attach's "Hardened ssh Client Invocation").
 
     The ``--file-path`` value is the operator-side ``tlog-rec`` session log
     path; it lives at ``<sandbox_ai_home()>/sessions/<inst>/<UTC-ts>.log``
     and is created on demand.
 
     Args:
-        inst: Instance name (used for the admin container name and the
-            sessions log directory).
+        inst: Instance name (used for the sessions log directory and the
+            ``fwd`` wire expansion the ProxyCommand carries).
         ws: Workspace name (used for the remote-command ``cd`` target).
-        host_config: Per-host config (used for ``docker_unprivileged_user``).
+        host_config: Per-host config (drives the per-mode ProxyCommand
+            crossing and the core IPC IP resolution).
 
     Returns:
         The argv to pass to :func:`subprocess.run` (no shell needed).
     """
-    sbuser = host_config.host.docker_unprivileged_user
     home = sandbox_ai_home()
     inst_dir = home / "instances" / inst
     secrets = inst_dir / "secrets"
 
-    # Container name uses the compose project name (sanitized-username
-    # prefix), not the bare instance name. Mismatching this produces
-    # ``Error response from daemon: No such container: <inst>-admin-1``
-    # at attach time — verified empirically during admin-reframe smoke.
-    project_name = compose_project_name(inst)
-
-    # Core IPC IP — read-only ledger peek (no allocation; instance is
-    # already started by the time this argv is built). Per cli-attach
-    # spec: attach does not mutate IPAM state.
-    base_index, _existing = IPAMLedger().peek_next_slot(inst)
-    core_ipc_ip = derive_static_ips(base_index)["core_ipc_ip"]
+    # Project name (sanitized-username prefix, not the bare instance name) and
+    # the instance's read-only ``core_ipc_ip`` ledger peek both come from the
+    # single ``fwd`` resolver ``core.dispatch.resolve_fwd_state`` — the SAME
+    # source the ProxyCommand wire expansion uses, so the session-log directory
+    # name and the ``agent@<ip>`` ssh destination can never drift from the wire.
+    # No allocation happens (the instance is already started by the time this
+    # argv is built); per cli-attach, attach does not mutate IPAM state.
+    project_name, core_ipc_ip = dispatch.resolve_fwd_state(inst)
 
     # Operator-side session log path — host filesystem only, never a
     # bind mount or instance secrets directory (per cli-attach spec).
@@ -1664,19 +1719,13 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     session_log = session_log_dir / f"{timestamp}.log"
 
-    # ProxyCommand: pipe_cmd → docker exec -i <admin> /fwd <ip>:9999.
-    # Joined via shlex.join so the value can be passed as a single
-    # ``-o ProxyCommand=...`` token to ssh.
-    proxy_argv = [
-        *pipe_cmd(sbuser),
-        "/usr/bin/docker",
-        "exec",
-        "-i",
-        f"{project_name}-admin-1",
-        "/fwd",
-        f"{core_ipc_ip}:9999",
-    ]
-    proxy_command = shlex.join(proxy_argv)
+    # ProxyCommand — the SINGLE sanctioned producer is
+    # ``core.dispatch.proxy_argv(Op.FWD, [inst], host_config)``: it selects
+    # the per-mode crossing prefix (sudo_pipe_cmd / pipe_cmd / none) and emits
+    # the bare ``dispatch fwd <wire>`` payload (or, operator-rootless, the bare
+    # local docker-exec target argv). ``cli.main`` does NOT branch on the mode
+    # or re-spell any prefix/payload/docker-exec literal here (C-010).
+    proxy_command = shlex.join(dispatch.proxy_argv(dispatch.Op.FWD, [inst], host_config))
 
     return [
         "tlog-rec",
@@ -1684,12 +1733,26 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         f"--file-path={session_log}",
         "--",
         "ssh",
+        "-F",
+        "/dev/null",
         "-i",
         str(secrets / "ipc_ssh_key"),
         "-o",
         f"UserKnownHostsFile={secrets / 'ipc_known_hosts'}",
         "-o",
         "StrictHostKeyChecking=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
         "-o",
         f"ProxyCommand={proxy_command}",
         "-p",
@@ -1709,6 +1772,7 @@ def _compose_down(
     *,
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> None:
     """Run docker compose down via the typed ``compose-down`` dispatcher op.
 
@@ -1723,7 +1787,7 @@ def _compose_down(
     ``--compose-file`` expansion are all internal to the single
     ``core.dispatch`` seam — not constructed here.
     """
-    host_config = minimal_host_config(host_user, auth)
+    host_config = minimal_host_config(host_user, auth, mode)
     args = [config.instance.name, "--volumes"] if volumes else [config.instance.name]
     dispatch.invoke("compose-down", args, host_config)
 
@@ -1765,6 +1829,7 @@ def _phase_stop_teardown(
     *,
     volumes: bool,
     auth: MachinectlAuth,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[str]:
     """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
     Sequence requirement).
@@ -1782,7 +1847,7 @@ def _phase_stop_teardown(
     compose-down (stop propagates, destroy demotes to a warning).
     """
     warnings: list[str] = []
-    _compose_down(host_user, config, volumes=volumes, auth=auth)
+    _compose_down(host_user, config, volumes=volumes, auth=auth, mode=mode)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
     warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
     return warnings
@@ -1802,10 +1867,9 @@ def _dry_run_pipeline(inst: str) -> None:
     instance_dir = _lookup_instance_or_exit(inst)
     console.print(f"  Instance: [green]{inst}[/green] (existing)")
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
-
-    project_name = compose_project_name(inst)
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
 
     # ── IPAM preview ─────────────────────────────────────────────────────
     ledger = IPAMLedger()
@@ -1921,24 +1985,15 @@ def _dry_run_pipeline(inst: str) -> None:
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover — admin-reframe D1: tlog-rec → ssh → ProxyCommand → /fwd into core.
-    # The full argv is constructed by `_build_attach_argv` at runtime; the
-    # dry-run preview shows the canonical shape rather than re-deriving it
-    # (the IPAM peek + sessions log mkdir are runtime-only side effects).
+    # ONE generator (C-010 D4): the preview is the live builder
+    # ``_build_attach_argv`` itself, rendered via ``shlex.join`` — NOT a parallel
+    # hand-assembled string. The per-mode ProxyCommand therefore comes from
+    # ``core.dispatch``'s streaming entrypoint exactly as the executed handover
+    # does, so the previewed and executed argvs cannot drift (the IPAM peek is
+    # read-only; the sessions-log mkdir is a benign idempotent dry-run touch).
     workspace_names = sorted(config.workspaces.keys())
     ws_preview = workspace_names[0] if len(workspace_names) == 1 else "<ws>"
-    sbuser = host_user
-    proxy_cmd_preview = shlex.join(
-        [*pipe_cmd(sbuser), "/usr/bin/docker", "exec", "-i", f"{project_name}-admin-1", "/fwd", "<core_ipc_ip>:9999"]
-    )
-    handover_preview = (
-        f"tlog-rec --writer=file --file-path=<sessions>/{project_name}/<UTC>.log -- "
-        f"ssh -i <inst>/secrets/ipc_ssh_key "
-        f"-o UserKnownHostsFile=<inst>/secrets/ipc_known_hosts "
-        f"-o StrictHostKeyChecking=yes "
-        f"-o ProxyCommand={shlex.quote(proxy_cmd_preview)} "
-        f"-p 9999 -t agent@<core_ipc_ip> "
-        f"'cd /workspaces/{ws_preview} && exec bash -l'"
-    )
+    handover_preview = shlex.join(_build_attach_argv(inst, ws_preview, preview_host_config))
     console.print(f"    $ {handover_preview}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")
@@ -1970,34 +2025,36 @@ def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
     return missing
 
 
-def _resolve_host_config() -> tuple[str, MachinectlAuth]:
-    """Resolve host_user and auth from per-host ``sandbox-ai.toml``.
-
-    Post-init commands SHALL fail when host config is absent — the field
-    no longer exists on the per-instance ``SandboxInstanceSection``.
-    """
-    settings = _resolve_host_settings()
-    return settings.docker_unprivileged_user, settings.machinectl_authentication
-
-
-def _resolve_host_settings() -> HostSettings:
-    """Resolve the full ``HostSettings`` from per-host ``sandbox-ai.toml``."""
-    return _resolve_full_host_config().host
-
-
 def _resolve_full_host_config() -> HostConfig:
-    """Resolve the full ``HostConfig`` from per-host ``sandbox-ai.toml``.
+    """Resolve the full ``HostConfig`` (toml + marker-resolved execution mode).
 
-    Used by ``sandbox attach`` and ``sandbox start``'s handover path —
-    :func:`_build_attach_argv` consumes the full ``HostConfig`` (it reads
-    ``host.docker_unprivileged_user``); other call sites can keep using
-    :func:`_resolve_host_settings` / :func:`_resolve_host_config`.
+    The runtime daemon owner is :func:`core.host_config.resolve_daemon_owner` of
+    this config (the operator in operator-rootless, ``docker_unprivileged_user``
+    in separate-user) — runtime commands MUST resolve the owner through it, never
+    by reading ``docker_unprivileged_user`` directly (D7).
     """
     try:
-        return HostConfig.from_toml()
+        host_config = HostConfig.from_toml()
     except FileNotFoundError as exc:
         console.print(str(exc), style="red")
         raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        # A malformed managed toml — pydantic ValidationError / tomllib
+        # TOMLDecodeError / the D11 removed-field (docker_execution_mode) rejection,
+        # all ValueError subclasses — surfaced cleanly rather than as a traceback.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+    # The execution mode is no longer a toml field (D11) — resolve it from the
+    # per-operator setup-state marker and overlay it onto the in-memory carrier.
+    # Fail closed when the host is not provisioned (no marker entry).
+    try:
+        mode = resolve_execution_mode(getpass.getuser())
+    except ModeMarkerMissing as exc:
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+    return host_config.model_copy(
+        update={"host": host_config.host.model_copy(update={"docker_execution_mode": mode})}
+    )
 
 
 def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
@@ -2029,6 +2086,68 @@ def _stdin_is_tty() -> bool:
     is robust to runner-level stdin replacement.
     """
     return sys.stdin.isatty()
+
+
+def _refuse_root_euid() -> None:
+    """Hard-fail when a runtime command is invoked as root (``euid == 0``).
+
+    Runtime commands (`init`, `start`, `stop`, `status`, `attach`, `destroy`,
+    and the `workspace` subcommands) call this as their first step. Running them
+    as root would make ``sandbox_ai_home()`` (``~/.sandbox-ai``) resolve to
+    ``/root/.sandbox-ai`` — an operator-invisible tree (D8 / G1). `setup` and
+    `doctor` are exempt (setup legitimately runs as root in separate-user mode).
+    """
+    if os.geteuid() == 0:
+        console.print(
+            "Error: run sandbox as your operator account, not root. Running as root "
+            "would create /root/.sandbox-ai instead of your own ~/.sandbox-ai. "
+            "Re-invoke without sudo as your own (non-root) user.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+
+def _refuse_wrong_setup_identity(ctx: SetupContext) -> None:
+    """Mode-conditional entry-identity gate for `sandbox setup` (D5; §8-C).
+
+    Unlike the runtime commands (which always refuse root), `setup`'s identity
+    requirement depends on the resolved execution mode, so this runs AFTER
+    `_build_setup_context_with_operator` has decided the mode (the build mutates
+    nothing — resolution + fail-closed flag guards only — so it is safe before
+    the identity gate):
+
+    - **separate-user** REQUIRES root: it creates the dedicated daemon user, the
+      sudoers rule, and the dispatcher, and crosses via ``machinectl``. A
+      non-root invocation is refused with the existing message.
+    - **operator-rootless** REFUSES root: it runs as the operator's own account
+      (the rootless daemon runs as that user; running as root would own the
+      daemon as the wrong user and create ``/root/.sandbox-ai``). A root
+      invocation is refused.
+
+    The ``--operator``≠invoker and root-daemon-owner refusals are enforced by
+    :func:`_guard_setup_flags` (§4), which :func:`setup` runs immediately AFTER
+    this gate — so under ``sudo`` (owner resolves to root) this gate's actionable
+    root-refusal message wins over §4's generic owner-root refusal (finding 8.7).
+    """
+    if is_operator_rootless(ctx.host_config):
+        if os.geteuid() == 0:
+            console.print(
+                "operator-rootless setup must NOT be run as root. Re-invoke as your own "
+                "(non-root) operator account, without sudo — the rootless Docker daemon "
+                "runs as your user.",
+                style="red",
+                markup=False,
+            )
+            raise typer.Exit(code=1)
+        return
+    if os.geteuid() != 0:
+        console.print(
+            "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
 
 
 def _require_per_user_state_initialized() -> None:
@@ -2095,6 +2214,7 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
+        "# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)\n"
         "[host]\n"
         f'docker_unprivileged_user = "{docker_user}"\n'
         f'machinectl_authentication = "{resolved_auth_for_seed.value}"\n'
@@ -2103,6 +2223,9 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
+_BOOTSTRAP_ITEM_FLAG = typer.Option(
+    [], "--item", help="A host-root BatchItem to apply (repeatable, canonical order)"
+)
 
 
 # ─── `sandbox setup` (privileged host-provisioning ceremony) ─────────────────
@@ -2121,6 +2244,30 @@ class _SetupAuthRefused(Exception):
     exits non-zero WITHOUT entering the plan or apply pass — no host state is
     touched (the "no permissive window" property extends to "no half-wired
     polkit rule either").
+    """
+
+
+class _SetupModeConflict(Exception):
+    """Setup refuses a mode-switch that conflicts with the recorded marker (D6).
+
+    Raised by :func:`resolve_effective_mode` when the marker already records the
+    operator under one mode and ``--docker-execution-mode`` requests a different
+    one. Switching modes for a provisioned operator would create a catastrophic
+    mixed-mode host (separate-user artifacts + op-rootless artifacts for one
+    operator), so setup refuses BEFORE any mutation and directs the operator to
+    tear down first. Mirrors :class:`_SetupAuthRefused` (printed at the entry
+    point, exit non-zero, no host state touched).
+    """
+
+
+class _SetupFlagRefused(Exception):
+    """Setup refuses an inapplicable flag or a dangerous value (D9, fail-closed).
+
+    Raised before any mutation when a flag does not apply in the active mode
+    (e.g. ``--docker-unprivileged-user`` / ``--machinectl-auth`` in
+    operator-rootless), or when a flag carries a dangerous value (a resolved
+    daemon owner of root, or ``--operator`` naming someone other than the
+    invoker in operator-rootless). Mirrors :class:`_SetupAuthRefused`.
     """
 
 
@@ -2184,22 +2331,64 @@ def setup(
         "--machinectl-auth",
         help="machinectl auth mode: 'sudo' (default; only supported mode) or 'polkit' (refused — see docs)",
     ),
+    docker_execution_mode: str | None = typer.Option(
+        None,
+        "--docker-execution-mode",
+        help="Execution mode: 'separate-user' (default) or 'operator-rootless'; on re-run must match the marker.",
+    ),
+    docker_unprivileged_user: str = typer.Option(
+        "sandbox",
+        "--docker-unprivileged-user",
+        help="Dedicated daemon user (separate-user only; refused in operator-rootless)",
+    ),
+    workspace_bridge_group: str = typer.Option(
+        "sb-ws",
+        "--workspace-bridge-group",
+        help="Workspace shared bridge group name",
+    ),
 ) -> None:
-    """Provision the host: privileged plan/apply two-pass ceremony (run as root)."""
-    if os.geteuid() != 0:
-        console.print(
-            "sandbox setup must be run as root. Re-invoke as: sudo sandbox setup",
-            style="red",
-            markup=False,
-        )
-        raise typer.Exit(code=1)
+    """Provision the host: mode-conditional plan/apply two-pass ceremony.
 
+    Entry identity is mode-conditional (D5): separate-user setup REQUIRES root;
+    operator-rootless setup REFUSES root and runs as the operator's own account.
+    The mode is decided by ``_build_setup_context_with_operator`` (flag/marker),
+    so the identity gate (:func:`_refuse_wrong_setup_identity`) runs AFTER the
+    context is built — that build mutates nothing, so it is safe before the gate.
+    """
     try:
-        ctx = _build_setup_context_with_operator(operator, machinectl_auth)
+        ctx = _build_setup_context_with_operator(
+            operator,
+            machinectl_auth,
+            mode_flag=docker_execution_mode,
+            docker_unprivileged_user=docker_unprivileged_user,
+            workspace_bridge_group=workspace_bridge_group,
+        )
     except OperatorResolutionError as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
-    except _SetupAuthRefused as exc:
+    except (_SetupAuthRefused, _SetupModeConflict, _SetupFlagRefused) as exc:
+        # _SetupFlagRefused here is the invalid-mode-value refusal from
+        # `_parse_mode_flag` (a build-time resolution error); the FLAG guards
+        # (`_guard_setup_flags`) run separately below, after the identity gate.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
+
+    # Entry-identity gate (§8-C) BEFORE the flag guards (§4): under `sudo` the
+    # daemon owner resolves to root, so running §4 first would shadow §8-C's
+    # actionable "operator-rootless setup must NOT be run as root" with the generic
+    # owner-root refusal (finding 8.7). §8-C owns the euid root-refusal; §4's
+    # owner-root check remains the residual defense for a non-euid-0 owner that
+    # still resolves to root (e.g. an explicit ``--docker-unprivileged-user root``).
+    _refuse_wrong_setup_identity(ctx)
+    try:
+        _guard_setup_flags(
+            ctx.host_config,
+            operator=ctx.operator,
+            operator_flag=operator,
+            machinectl_auth_flag=machinectl_auth,
+            docker_unprivileged_user=docker_unprivileged_user,
+        )
+    except _SetupFlagRefused as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
 
@@ -2232,18 +2421,88 @@ def setup(
     raise typer.Exit(code=exit_code)
 
 
-def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | None) -> MachinectlAuth:
-    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2).
+@app.command("_bootstrap-host", hidden=True)
+def _bootstrap_host(
+    items: list[str] = _BOOTSTRAP_ITEM_FLAG,
+    operator: str = typer.Option(..., "--operator", help="The operator the batch provisions for"),
+    operator_uid: int = typer.Option(..., "--operator-uid", help="The operator's numeric uid"),
+    bridge_group: str = typer.Option(..., "--bridge-group", help="The workspace bridge group name"),
+    bridge_gid: int = typer.Option(
+        ..., "--bridge-gid", help="The bridge gid (autodetected in the operator's subgid range)"
+    ),
+    distro_family: str = typer.Option(
+        ..., "--distro-family", help="The distro family (sysctl + nftables module branch)"
+    ),
+    docker_execution_mode: str = typer.Option(
+        ..., "--docker-execution-mode", help="The execution mode written to the marker"
+    ),
+) -> None:
+    """Apply the enumerated host-root batch as root, then exit (operator-rootless §8).
+
+    Hidden, root-only escalation sub-step. Operator-rootless ``sandbox setup``
+    runs unprivileged and escalates ONCE via ``sudo sandbox _bootstrap-host …``
+    (the argv built by :func:`core.setup.host_batch.build_bootstrap_argv`) to
+    apply EXACTLY the typed, dependency-ordered batch — no shell, no
+    operator-controlled argv beyond the typed flags. The applier walks the
+    canonical :data:`~core.setup.host_batch.HOST_ROOT_BATCH` order (marker LAST,
+    crash-safe), so a mid-batch failure can never reach the marker write; on any
+    applier failure this exits non-zero so the unprivileged parent detects it.
+    """
+    if os.geteuid() != 0:
+        console.print(
+            "sandbox _bootstrap-host must be run as root; it is the operator-rootless "
+            "host-root escalation step (invoked via: sudo sandbox _bootstrap-host).",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        batch_items = frozenset(host_batch.BatchItem(item) for item in items)
+    except ValueError as exc:
+        console.print(f"Invalid --item: {exc}", style="red", markup=False)
+        raise typer.Exit(code=1) from None
+
+    try:
+        mode = DockerExecutionMode(docker_execution_mode)
+    except ValueError:
+        console.print(
+            f"Invalid --docker-execution-mode value: '{docker_execution_mode}'. "
+            "Must be 'separate-user' or 'operator-rootless'.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1) from None
+
+    params = host_batch.BatchParams(
+        operator=operator,
+        operator_uid=operator_uid,
+        bridge_group=bridge_group,
+        bridge_gid=bridge_gid,
+        distro_family=distro_family,
+        mode=mode,
+    )
+    try:
+        host_batch.apply_host_root_batch(batch_items, params)
+    except (subprocess.SubprocessError, OSError, SandboxExecutionError) as exc:
+        console.print(
+            f"host-root batch failed: {exc}. The mode marker is written last, so a "
+            "partial-batch failure leaves no marker (re-run setup to retry).",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1) from None
+
+
+def _resolve_setup_auth(machinectl_auth_flag: str | None) -> MachinectlAuth:
+    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2 / D8).
 
     Precedence: the ``--machinectl-auth`` flag (explicit operator intent) wins;
-    else the operator toml's value if a toml is present; else the SUDO default.
-    POLKIT through *any* of those channels is refused — raising
-    :class:`_SetupAuthRefused` BEFORE any phase runs — because setup's L3a/L8
-    verification probes are SUDO-only, so a polkit rule it wrote could not be
-    verified (and would be rolled back). An explicit ``--machinectl-auth sudo``
-    is the affirmative SUDO selection even if a stale toml says polkit (the
-    `setup_invariants` doctor cross-check then WARNs on the toml/rule
-    disagreement so the operator fixes the toml).
+    else the SUDO default. Setup is toml-free (D8) — it never reads the operator
+    toml — so there is no toml fallback channel for the auth mode. POLKIT through
+    the flag is refused — raising :class:`_SetupAuthRefused` BEFORE any phase
+    runs — because setup's L3a/L8 verification probes are SUDO-only, so a polkit
+    rule it wrote could not be verified (and would be rolled back).
     """
     if machinectl_auth_flag is not None:
         try:
@@ -2252,8 +2511,6 @@ def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | Non
             raise _SetupAuthRefused(
                 f"Invalid --machinectl-auth value: '{machinectl_auth_flag}'. Must be 'sudo' or 'polkit'."
             ) from None
-    elif toml is not None:
-        effective = toml.host.machinectl_authentication
     else:
         effective = MachinectlAuth.SUDO
     if effective == MachinectlAuth.POLKIT:
@@ -2261,38 +2518,198 @@ def _resolve_setup_auth(machinectl_auth_flag: str | None, toml: HostConfig | Non
     return effective
 
 
+def resolve_effective_mode(
+    operator: str, mode_flag: DockerExecutionMode | None
+) -> DockerExecutionMode:
+    """Decide the operator's effective execution mode from marker + flag (D6).
+
+    Single-mode-per-operator policy:
+
+    - **No marker entry**: use ``mode_flag`` when given, else the provisioning
+      default (:data:`core.host_config.DEFAULT_PROVISIONING_MODE` =
+      ``OPERATOR_ROOTLESS``); `separate-user` is the opt-in hardened posture.
+    - **Entry present, no flag**: use the recorded mode (robust idempotent
+      re-run — no flag needed).
+    - **Entry present, conflicting flag**: refuse with :class:`_SetupModeConflict`
+      (switching a provisioned operator's mode would create a mixed-mode host).
+
+    DECISION ONLY — this does NOT write the marker (the write is §8). The caller
+    threads the result into the constructed ``host_config``.
+    """
+    recorded = read_mode(operator)
+    if recorded is None:
+        return mode_flag if mode_flag is not None else DEFAULT_PROVISIONING_MODE
+    if mode_flag is not None and mode_flag is not recorded:
+        raise _SetupModeConflict(
+            f"operator '{operator}' is provisioned as {recorded.value}; "
+            f"switching to {mode_flag.value} requires teardown first"
+        )
+    return recorded
+
+
+def _parse_mode_flag(mode_flag: str | None) -> DockerExecutionMode | None:
+    """Parse the ``--docker-execution-mode`` string into the enum, or ``None``.
+
+    Returns ``None`` when the flag is absent. An unrecognized value is refused
+    (mirrors :func:`_resolve_setup_auth`'s invalid-value handling) before any
+    mutation via :class:`_SetupFlagRefused`.
+    """
+    if mode_flag is None:
+        return None
+    try:
+        return DockerExecutionMode(mode_flag)
+    except ValueError:
+        raise _SetupFlagRefused(
+            f"Invalid --docker-execution-mode value: '{mode_flag}'. "
+            "Must be 'separate-user' or 'operator-rootless'."
+        ) from None
+
+
+def _resolve_setup_operator(operator_flag: str | None) -> str:
+    """Resolve the operator for ``sandbox setup``, euid-aware (D5/D7; §8-D).
+
+    The canonical :func:`resolve_operator` precedence (``--operator`` →
+    ``$SUDO_USER`` → ``$PKEXEC_UID`` → refuse; no TTY heuristics) is specified
+    **"when running as root"** — that is the separate-user path, used unchanged
+    here. operator-rootless setup runs **non-root as the operator themselves**
+    (D5): the invoking user IS the operator, and the spec's "Operator-Run
+    Least-Privilege Provisioning" requirement resolves the daemon owner as that
+    invoking user. ``euid`` partitions the modes cleanly (separate-user REQUIRES
+    root; op-rootless REFUSES it — see :func:`_refuse_wrong_setup_identity`), so a
+    non-root invocation that the root-scoped precedence cannot resolve (no
+    ``--operator``, no ``$SUDO_USER``) falls back to the current user — never the
+    F-021-banned TTY heuristic, just the process owner. A ``--operator`` value
+    naming a different user is refused later by :func:`_guard_setup_flags`.
+
+    The fallback fires ONLY when :func:`resolve_operator` actually refuses, so the
+    root path (and any test that stubs ``resolve_operator`` to succeed) is
+    unchanged; the F-021 root refusal is preserved by re-raising under ``euid == 0``.
+    """
+    try:
+        return resolve_operator(operator_flag)
+    except OperatorResolutionError:
+        if os.geteuid() != 0:
+            return getpass.getuser()
+        raise
+
+
 def _build_setup_context_with_operator(
-    operator_flag: str | None, machinectl_auth_flag: str | None = None
+    operator_flag: str | None,
+    machinectl_auth_flag: str | None = None,
+    *,
+    mode_flag: str | None = None,
+    docker_unprivileged_user: str = "sandbox",
+    workspace_bridge_group: str = "sb-ws",
 ) -> SetupContext:
     """Build the per-run :class:`SetupContext` for ``sandbox setup``.
 
-    On a fresh host ``<sandbox_ai_home()>/config/sandbox-ai.toml`` does not
-    exist — and setup does NOT create it (the per-operator tree + toml are
-    ``sandbox init``'s artifact, created as the operator; F-021). The CLI still
-    needs a :class:`HostConfig` to construct the context *before* any phase
-    runs, so: load the toml when present, else fall back to defaults
-    (``docker_unprivileged_user="sandbox"``). The auth mode is an **explicit
-    input** via ``--machinectl-auth`` (F-022) — resolved + POLKIT-fenced by
-    :func:`_resolve_setup_auth` — NOT inferred from an absent toml. The
-    constructed config always carries the resolved (always-SUDO past the fence)
-    auth mode, even if a present toml said otherwise, so L3 renders the sudoers
-    rule the verification phases can actually check. Operator is resolved once
-    via the canonical L0 resolver, threading ``--operator``.
+    Setup is **toml-free** (D8): it builds ``host_config`` purely from flags +
+    documented defaults and never reads ``<sandbox_ai_home()>/config/
+    sandbox-ai.toml`` (``HostConfig.from_toml``). This is the core G1 fix — a
+    toml read here resolved to root's ``/root/.sandbox-ai`` (setup runs as root
+    in separate-user mode), so an operator's real toml override never reached
+    setup. The daemon user, auth mode, execution mode, and bridge group are all
+    **explicit inputs** via flags (with documented defaults). The auth mode is
+    POLKIT-fenced by :func:`_resolve_setup_auth`; the execution mode is decided
+    against the per-operator marker by :func:`resolve_effective_mode` (the marker
+    WRITE is §8). Operator is resolved once via :func:`_resolve_setup_operator`
+    (euid-aware: the canonical root-scoped precedence, with a non-root current-user
+    fallback for operator-run op-rootless), threading ``--operator`` (never a toml).
+
+    This builder is pure resolution — it mutates nothing and raises only the
+    resolution refusals (:class:`_SetupAuthRefused` POLKIT fence,
+    :class:`_SetupModeConflict` marker mismatch, :class:`OperatorResolutionError`).
+    The refuse-all FLAG guards (D9 — inapplicable flag / dangerous resolved owner /
+    cross-operator owner) are NOT run here: :func:`setup` runs them via
+    :func:`_guard_setup_flags` AFTER the entry-identity gate
+    (:func:`_refuse_wrong_setup_identity`, §8-C), so a root invocation of
+    operator-rootless surfaces the actionable "must NOT be run as root" message
+    rather than the generic owner-root refusal (finding 8.7).
     """
-    try:
-        toml: HostConfig | None = HostConfig.from_toml()
-    except FileNotFoundError:
-        toml = None
-    auth = _resolve_setup_auth(machinectl_auth_flag, toml)
-    if toml is None:
-        host_config = minimal_host_config("sandbox", auth)
-    else:
-        host_config = toml.model_copy(
-            update={"host": toml.host.model_copy(update={"machinectl_authentication": auth})}
+    auth = _resolve_setup_auth(machinectl_auth_flag)
+    operator = _resolve_setup_operator(operator_flag)
+    mode = resolve_effective_mode(operator, _parse_mode_flag(mode_flag))
+    host_config = HostConfig(
+        host=HostSettings(
+            docker_unprivileged_user=docker_unprivileged_user,
+            machinectl_authentication=auth,
+            docker_execution_mode=mode,
+            workspace_bridge_group=workspace_bridge_group,
         )
-    return SetupContext(
-        host_config=host_config, operator=resolve_operator(operator_flag)
     )
+    # NOTE: the marker WRITE (persisting `mode` for `operator`) is §8 — this
+    # builder only DECIDES the effective mode; it never mutates host state.
+    return SetupContext(host_config=host_config, operator=operator)
+
+
+def _guard_setup_flags(
+    host_config: HostConfig,
+    *,
+    operator: str,
+    operator_flag: str | None,
+    machinectl_auth_flag: str | None,
+    docker_unprivileged_user: str,
+) -> None:
+    """Refuse-all guards for setup flags (D9, fail-closed, pre-mutation).
+
+    :func:`setup` runs this AFTER the entry-identity gate
+    (:func:`_refuse_wrong_setup_identity`, §8-C) so the euid root-refusal surfaces
+    its actionable message before the generic owner-root check here (finding 8.7).
+
+    Inapplicable-flag guard: in operator-rootless mode neither a non-default
+    ``--docker-unprivileged-user`` nor ``--machinectl-auth`` applies (there is no
+    dedicated daemon user and no crossing to authorize). Dangerous-value guard:
+    a resolved daemon owner of ``root`` (or uid 0) — the residual root defense for
+    a non-euid-0 owner that still resolves to root (e.g. ``--docker-unprivileged-user
+    root`` in separate-user; the ``sudo`` op-rootless euid case is already refused
+    by §8-C) — or an ``--operator`` naming a user other than the invoker in
+    operator-rootless, is refused. Each refusal raises :class:`_SetupFlagRefused`
+    before any host state is touched.
+    """
+    if is_operator_rootless(host_config):
+        if docker_unprivileged_user != "sandbox":
+            raise _SetupFlagRefused(
+                "--docker-unprivileged-user does not apply in operator-rootless mode "
+                "(the rootless daemon runs as the operator's own user)."
+            )
+        if machinectl_auth_flag is not None:
+            raise _SetupFlagRefused(
+                "--machinectl-auth does not apply in operator-rootless mode "
+                "(there is no privilege-boundary crossing to authorize)."
+            )
+        if operator_flag is not None and operator_flag != getpass.getuser():
+            raise _SetupFlagRefused(
+                f"--operator '{operator_flag}' does not match the invoking user "
+                f"'{getpass.getuser()}'; operator-rootless setup provisions only for the invoker."
+            )
+
+    owner = resolve_daemon_owner(host_config)
+    if owner == "root" or _is_root_user(owner):
+        raise _SetupFlagRefused(
+            f"refusing: the resolved daemon owner is '{owner}' (root / uid 0); "
+            "the rootless daemon owner must never be root."
+        )
+
+
+def _is_root_user(name: str) -> bool:
+    """True iff ``name`` resolves to uid 0 (handles a root-aliased account)."""
+    try:
+        return pwd.getpwnam(name).pw_uid == 0
+    except KeyError:
+        return False
+
+
+def _record_separate_user_mode(ctx: SetupContext) -> None:
+    """Persist the separate-user mode marker (root-owned) on successful setup.
+
+    The runtime resolves its mode from the marker (D11), so a provisioned host
+    MUST carry a marker entry in BOTH modes — op-rootless writes it as the last
+    host-root batch action; separate-user setup runs as root and writes it
+    directly here. Idempotent (a converged re-run rewrites the same entry), so it
+    is safe to call on both the apply-success and the nothing-to-apply paths
+    (the latter also heals a host provisioned before the marker existed).
+    """
+    write_mode_root_owned(ctx.operator, DockerExecutionMode.SEPARATE_USER)
 
 
 def _setup_body(
@@ -2308,6 +2725,17 @@ def _setup_body(
     SIGINT is handled by the caller (translated to exit 130); the distro gate,
     plan pass, gating decision, prompt, and apply pass all run here.
     """
+    if is_operator_rootless(ctx.host_config):
+        # operator-rootless converges runsc (install OR pin-update) through the
+        # host-root batch on ANY `sandbox setup` run — L6a is gated out, so the
+        # separate-user `--update-runsc` L6a-subset path does not apply here.
+        # `--update-runsc` therefore routes to the normal op-rootless body, which
+        # detects runsc drift in the batch classifier and escalates to converge it
+        # (the op-rootless analogue of `--update-runsc`).
+        return _setup_body_operator_rootless(
+            ctx, dry_run=dry_run, yes=yes, flags=flags
+        )
+
     if update_runsc:
         return _run_setup_update_runsc(ctx)
 
@@ -2330,6 +2758,7 @@ def _setup_body(
     )
 
     if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
+        _record_separate_user_mode(ctx)
         console.print("Nothing to apply. Setup is complete.", markup=False)
         return 0
 
@@ -2359,7 +2788,167 @@ def _setup_body(
     apply_outcomes = run_apply_pass(phases, ctx)
     for line in cli_flow.summarize_apply(phases, apply_outcomes):
         console.print(line, markup=False)
-    return 1 if cli_flow.apply_pass_failed(apply_outcomes) else 0
+    if cli_flow.apply_pass_failed(apply_outcomes):
+        return 1
+    _record_separate_user_mode(ctx)
+    return 0
+
+
+def _resolve_sandbox_executable() -> str:
+    """Resolve the absolute path of the running ``sandbox`` CLI for re-invocation.
+
+    The escalation re-invokes ``sandbox _bootstrap-host`` under ``sudo``; a bare
+    ``sandbox`` may not be on root's ``secure_path`` (the CLI is operator-installed
+    via ``pip``/``uv`` — design D6), so an absolute path is used. Prefer the PATH
+    lookup; fall back to this process's own ``argv[0]`` realpath.
+    """
+    return shutil.which("sandbox") or os.path.realpath(sys.argv[0])
+
+
+def _run_bootstrap_escalation(
+    items: frozenset[host_batch.BatchItem],
+    params: host_batch.BatchParams,
+    *,
+    is_tty: bool,
+) -> bool:
+    """Escalate the host-root batch ONCE via ``sudo sandbox _bootstrap-host`` (§8-D).
+
+    Returns ``True`` iff the batch was applied (sudo authorized and the sub-step
+    exited 0); ``False`` iff there is no usable escalation path or the sub-step
+    failed — the caller then emits the remediation block and exits non-zero
+    (fail-closed). De-escalation is automatic: the sub-step applies the batch as
+    root and exits, and this operator-run parent continues unprivileged.
+
+    TTY-aware (O2): interactive → attempt ``sudo`` directly (a password prompt is
+    normal, so stdio is inherited); non-interactive → a prompt cannot be answered,
+    so require passwordless sudo (a ``sudo -n true`` probe) before attempting.
+    """
+    flags = host_batch.build_bootstrap_argv(items, params)[2:]
+    # ``env PYTHONDONTWRITEBYTECODE=1`` so root importing the operator-installed CLI
+    # does not write root-owned ``__pycache__/*.pyc`` into the operator's uv/venv
+    # (the F-021 footgun — a later operator ``uv tool install --force`` / ``uv sync``
+    # would hit EACCES removing it). ``env`` sets it then execs, robust to sudo's
+    # env_reset / the rule's NOSETENV.
+    sub_argv = ["env", "PYTHONDONTWRITEBYTECODE=1", _resolve_sandbox_executable(), "_bootstrap-host", *flags]
+    if is_tty:
+        return subprocess.run(["sudo", *sub_argv]).returncode == 0
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        return False
+    return subprocess.run(["sudo", "-n", *sub_argv]).returncode == 0
+
+
+def _host_root_batch_plan_lines(
+    items: frozenset[host_batch.BatchItem],
+) -> list[str]:
+    """Operator-facing plan lines for the host-root escalation batch."""
+    if not items:
+        return ["Host-root prerequisites: all satisfied (no escalation needed)."]
+    ordered = ", ".join(i.value for i in host_batch.HOST_ROOT_BATCH if i in items)
+    return [
+        f"Host-root prerequisites needing one `sudo` escalation: {ordered}",
+    ]
+
+
+def _operator_rootless_finalization_lines(
+    items: frozenset[host_batch.BatchItem],
+    params: host_batch.BatchParams,
+) -> list[str]:
+    """Finalization lines, incl. the re-login note when the operator was added to
+    the bridge group (supplementary groups don't refresh until re-login — P9 /
+    §8.5; mirrors ``doctor/checks/workspace_bridge.py``)."""
+    if host_batch.BatchItem.GROUPADD in items:
+        return [
+            "Setup complete.",
+            f"You were added to the '{params.bridge_group}' group — log out and "
+            "back in to refresh your group membership before `sandbox start`.",
+        ]
+    return ["Setup complete."]
+
+
+def _setup_body_operator_rootless(
+    ctx: SetupContext,
+    *,
+    dry_run: bool,
+    yes: bool,
+    flags: dict[str, bool],
+) -> int:
+    """Operator-run, least-privilege setup body (D5/D5a; §8-D). Returns exit code.
+
+    Runs as the operator (non-root). Flow: distro gate → unprivileged plan pass
+    (read-only phase probes) → content-aware host-root batch classification → if
+    the batch is non-empty, escalate ONCE via ``sudo sandbox _bootstrap-host``
+    (auto de-escalation) → operator-space apply pass run locally. A converged
+    host (empty batch) escalates zero times; no escalation path → a copy-pasteable
+    ``sudo`` remediation block + exit non-zero (fail-closed, mutating nothing).
+    """
+    emit_distro_gate(is_tty=_stdin_is_tty(), assume_yes=yes)
+
+    extras = selected_extras(flags)
+    phases = cli_flow.build_phase_list(extras)
+
+    plan = run_plan_pass(phases, ctx)
+    for line in cli_flow.render_plan(phases, plan):
+        console.print(line, markup=False)
+    console.print(cli_flow.plan_summary_line(cli_flow.tally_plan(plan)), markup=False)
+
+    items, params = host_batch.classify_host_root_batch(ctx)
+    for line in _host_root_batch_plan_lines(items):
+        console.print(line, markup=False)
+
+    if dry_run:
+        return 0
+
+    # Apply gate (same UX as separate-user), with the host-root batch counted as
+    # pending mutations the phase plan does not carry. The escalation's own sudo
+    # password prompt is a separate, later gate on the privileged sub-step.
+    decision = cli_flow.decide_gate(
+        plan,
+        is_tty=_stdin_is_tty(),
+        assume_yes=yes,
+        extra_mutations=len(items),
+    )
+    if decision.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY:
+        console.print("Nothing to apply. Setup is complete.", markup=False)
+        return 0
+    if decision.outcome == cli_flow.GateOutcome.REFUSED:
+        for line in cli_flow.refusal_lines(phases, plan):
+            console.print(line, markup=False)
+        console.print("Setup will not enter the apply pass.", markup=False)
+        return 1
+    if decision.outcome == cli_flow.GateOutcome.NON_TTY_NEEDS_YES:
+        console.print(
+            "non-interactive context requires --yes flag to apply mutations",
+            style="red",
+            markup=False,
+        )
+        return 1
+    if decision.outcome == cli_flow.GateOutcome.PROMPT and not (
+        cli_flow.prompt_response_proceeds(input("Proceed with apply? [y/N]: "))
+    ):
+        console.print("aborted by operator (n). No mutations applied.", markup=False)
+        return 0
+
+    if items and not _run_bootstrap_escalation(
+        items, params, is_tty=_stdin_is_tty()
+    ):
+        console.print(
+            "no escalation path for the host-root prerequisites; run them manually:",
+            style="red",
+            markup=False,
+        )
+        for line in host_batch.render_remediation_block(items, params).splitlines():
+            console.print(line, markup=False)
+        return 1
+
+    apply_outcomes = run_apply_pass(phases, ctx)
+    for line in cli_flow.summarize_apply(phases, apply_outcomes):
+        console.print(line, markup=False)
+    if cli_flow.apply_pass_failed(apply_outcomes):
+        return 1
+
+    for line in _operator_rootless_finalization_lines(items, params):
+        console.print(line, markup=False)
+    return 0
 
 
 @app.command()
@@ -2375,6 +2964,7 @@ def init(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
 ) -> None:
     """Initialize a new sandbox instance with one or more workspaces."""
+    _refuse_root_euid()
     _validate_name(inst, kind="instance", max_len=_INSTANCE_NAME_MAX)
 
     # Per-user tree creation (idempotent, mode 0700)
@@ -2401,6 +2991,13 @@ def init(
         project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
+    except ValueError as exc:
+        # A malformed managed toml — pydantic ValidationError / tomllib
+        # TOMLDecodeError / the D11 removed-field rejection (all ValueError) —
+        # is a real error to fix, not "absent" (FileNotFoundError); surface it
+        # cleanly instead of an uncaught traceback.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
     resolved_user: str
     if project_config is not None:
@@ -2444,26 +3041,58 @@ def init(
     # wraps both), so ``message`` naturally distinguishes them in the
     # operator-facing detail.
     if not dry_run:
-        probe_host_config = minimal_host_config(resolved_user, resolved_auth)
-        probe_outcome = dispatch.probe("auth-probe", [], probe_host_config, timeout=5)
-        if not probe_outcome.ok:
+        # Resolve the active execution mode from the root-owned setup marker
+        # (the single runtime authority, C-004), mirroring ``doctor``. An
+        # un-setup host has no marker entry → diagnose it as separate-user (the
+        # pre-flip default). In operator-rootless the daemon runs as the
+        # *operator's* own user, so the boundary-crossing owner is
+        # ``resolve_daemon_owner`` of the resolved config — NOT the stale
+        # ``docker_unprivileged_user``, which would cross machinectl into a
+        # nonexistent dedicated user. Threading ``mode`` into
+        # ``minimal_host_config`` makes ``dispatch.probe`` take the local
+        # (no-machinectl) path in op-rootless. Resolved once and reused across
+        # the init pre-flight crossing (the single ``preflight`` op) and the
+        # local doctor subset.
+        try:
+            probe_mode = resolve_execution_mode(getpass.getuser())
+        except ModeMarkerMissing:
+            probe_mode = DockerExecutionMode.SEPARATE_USER
+        probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
+        probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
+
+        # One ``preflight`` crossing replaces the separate explicit ``auth-probe``
+        # probe (the crossing succeeding IS the reachability signal — C-009 D6,
+        # dropping the init-only redundancy with ``machinectl_reachable``). Its
+        # bundled ``compose-ls`` segment feeds the compose-project-name collision
+        # pre-flight, so init no longer fires a second ``compose-ls`` crossing.
+        probe_outcome = dispatch.probe("preflight", [], probe_host_config, timeout=15)
+        # Parse the bundle ONCE (F3) via the shared gate helper — the same
+        # reachability gate ``start`` uses; ``gate.per_op`` is reused for the
+        # compose-ls collision pre-flight below (no second parse).
+        gate = evaluate_preflight_gate(probe_outcome)
+        if not gate.reachable:
             if probe_outcome.timed_out:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 5 seconds")
+                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 15 seconds")
             else:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, probe_outcome.message)
+                auth_probe_segment = gate.per_op.get("auth-probe")
+                detail = probe_outcome.message or (
+                    auth_probe_segment.message if auth_probe_segment is not None else "preflight crossing failed"
+                )
+                _emit_auth_probe_failure(resolved_auth, resolved_user, detail)
             raise typer.Exit(code=1)
 
-    # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
-    # ancestor_traverse is excluded — ACLs are granted during `start`, not `init`,
-    # so the ancestor check would always fail on first init (D10).
-    if not dry_run:
+        # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
+        # ancestor_traverse is excluded — ACLs are granted during `start`, not
+        # `init`, so the ancestor check would always fail on first init (D10).
+        # These are local checks (no boundary crossing).
         distro = detect_distro()
         preflight_results = run_check_subset(
             ["Filesystem", "Repo Integrity"],
-            resolved_user,
+            probe_owner,
             distro,
             exclude_ids={"ancestor_traverse"},
             auth_mode=resolved_auth,
+            mode=probe_mode,
         )
         has_failures = any(r.status == "fail" for r in preflight_results)
         if has_failures:
@@ -2471,12 +3100,9 @@ def init(
             raise typer.Exit(code=1)
 
         # Compose-project-name collision pre-flight (per cli-doctor's
-        # "Init pre-flight includes compose_project_name_collision"). The
-        # auth probe above proved machinectl_reachable; call the check
-        # directly and surface failure.
-        collision_result = check_compose_project_name_collision(
-            resolved_user, distro, auth_mode=resolved_auth
-        )
+        # "Init pre-flight includes compose_project_name_collision"), fed by the
+        # bundled ``compose-ls`` segment of the preflight crossing above.
+        collision_result = interpret_compose_collision_segment(gate.per_op.get("compose-ls"))
         if collision_result.status == "fail":
             render_results([collision_result], console=console)
             raise typer.Exit(code=1)
@@ -2574,6 +3200,7 @@ def start(
     ),
 ) -> None:
     """Start the sandbox."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     if dry_run:
@@ -2593,8 +3220,9 @@ def start(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
 
     # Operator-edited TOML guard: ``instance.name`` should match the registry
@@ -2621,16 +3249,50 @@ def start(
         )
         raise typer.Exit(code=1)
 
-    # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check)
-    distro = detect_distro()
-    preflight_results = run_check_subset(["Privilege Boundary"], host_user, distro, auth_mode=auth)
+    # Pre-flight: Doctor Chain 1 — Privilege Boundary (before warm check).
+    #
+    # The seven instance-agnostic read-only privilege-boundary checks
+    # (machinectl_reachable, docker_available, docker_rootless, runsc,
+    # runsc_runtimeargs, host_uds, compose_project_name_collision) collapse into
+    # ONE ``preflight``-op crossing (C-009 D6): the bundle is parsed
+    # orchestrator-side and each existing interpret fn produces its verdict, so
+    # the set of checks is unchanged and only the crossing count drops. The
+    # ``compose-ps`` warm-check below stays its own (instance-stateful) crossing
+    # → start's read-only preflight is two crossings, not eight.
+    preflight_host_config = minimal_host_config(host_user, auth, host_settings.docker_execution_mode)
+    preflight_outcome = dispatch.probe("preflight", [], preflight_host_config, timeout=15)
+
+    # Crossing-as-reachability gate (D6): the preflight crossing itself failing
+    # — a timeout, a non-zero op exit, or an unparseable bundle whose
+    # ``auth-probe`` segment is absent — IS "boundary unreachable" (the old
+    # ``machinectl_reachable`` FAIL). Abort with that reachability diagnostic and
+    # do NOT interpret the downstream checks: they have no meaningful data, which
+    # is how the old ``depends_on`` short-circuit is preserved without a
+    # BLOCKED-BY cascade.
+    # Parse the bundle ONCE (F3): the gate helper returns the reachability
+    # verdict, the most-specific failing outcome, and the parsed per-op map that
+    # ``interpret_preflight_bundle`` reuses (no second parse).
+    gate = evaluate_preflight_gate(preflight_outcome)
+    if not gate.reachable:
+        # Feed the reachability interpret fn the most specific failing outcome:
+        # the whole-crossing outcome (carries the timeout / op-failure message)
+        # when the crossing itself failed, else the parsed (not-ok or absent)
+        # ``auth-probe`` segment.
+        reachability = interpret_preflight_reachability(gate.reach_outcome, host_user, auth)
+        render_results([reachability], console=console)
+        raise typer.Exit(code=1)
+
+    # The crossing succeeded → split the bundle and produce all seven verdicts
+    # (the single ``docker-info-runtimes`` segment feeds the three
+    # runsc/host-uds checks — the intrinsic dedup).
+    preflight_results = interpret_preflight_bundle(gate.per_op, host_user, auth)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, host_user, auth):
+    if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
@@ -2720,11 +3382,13 @@ def start(
         console.print("✓ ACL — post-hydrate daemon-readable files")
 
         # Phase 6a: helper-mkdir+chown for cache/log leaves
-        _phase_helper_mkdir_chown_cache_log(instance_dir, host_user, auth, dev_user)
+        _phase_helper_mkdir_chown_cache_log(
+            instance_dir, host_user, auth, dev_user, host_settings.docker_execution_mode
+        )
         console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
         # Phase 6b: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
-        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth)
+        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth, host_settings.docker_execution_mode)
         console.print("✓ Ownership — ro config files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase).
@@ -2772,7 +3436,7 @@ def start(
     ws = workspace_names[0]
 
     # Re-resolve the full HostConfig for `_build_attach_argv` (the start
-    # command earlier resolved only HostSettings via `_resolve_host_settings`).
+    # command earlier resolved only the toml-built config).
     host_config = _resolve_full_host_config()
     console.print("→ Handing over to core via ssh-through-admin")
     completed = subprocess.run(_build_attach_argv(inst, ws, host_config), check=False)
@@ -2785,14 +3449,18 @@ def stop(
     clean: bool = False,
 ) -> None:
     """Stop the sandbox."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    host_user, auth = _resolve_host_config()
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
+    auth = host_settings.machinectl_authentication
 
     # Warm check
-    if not _warm_check(instance_dir, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
@@ -2820,7 +3488,13 @@ def stop(
     # `_phase_stop_teardown` (cluster 3 — Teardown Sequence requirement).
     ws_paths = [ws.path for _, ws in sorted(config.workspaces.items())]
     for w in _phase_stop_teardown(
-        instance_dir, host_user, config, ws_paths, volumes=clean, auth=auth
+        instance_dir,
+        host_user,
+        config,
+        ws_paths,
+        volumes=clean,
+        auth=auth,
+        mode=host_settings.docker_execution_mode,
     ):
         console.print(f"⚠ {w}", style="yellow")
 
@@ -2838,6 +3512,7 @@ def attach(
     ws: str | None = typer.Argument(None, help="Workspace name (optional iff N=1)"),
 ) -> None:
     """Attach to a running sandbox."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     # Backup-lock check (cli-attach: refuse fast if held; attach holds no
@@ -2852,7 +3527,7 @@ def attach(
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
     host_config = _resolve_full_host_config()
-    host_user = host_config.host.docker_unprivileged_user
+    host_user = resolve_daemon_owner(host_config)
     auth = host_config.host.machinectl_authentication
 
     # Workspace selection per cli-attach spec.
@@ -2875,7 +3550,7 @@ def attach(
         raise typer.Exit(code=1)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, host_user, auth):
+    if not _warm_check(instance_dir, host_user, auth, host_config.host.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
@@ -2951,6 +3626,7 @@ def destroy(
     D10 IPAM release + registry remove
     D11 release locks
     """
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)
@@ -2966,7 +3642,10 @@ def destroy(
         raise typer.Exit(code=1)
 
     config = _load_config(instance_dir)
-    host_user, auth = _resolve_host_config()
+    host_config = _resolve_full_host_config()
+    host_user = resolve_daemon_owner(host_config)
+    auth = host_config.host.machinectl_authentication
+    mode = host_config.host.docker_execution_mode
     available = set(config.workspaces.keys())
 
     # D1: Confirmation + backup-set selection.
@@ -3018,7 +3697,7 @@ def destroy(
 
         # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(host_user, config, volumes=False, auth=auth)
+            _compose_down(host_user, config, volumes=False, auth=auth, mode=mode)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
@@ -3069,6 +3748,7 @@ def destroy(
                     ws_paths,
                     volumes=True,
                     auth=auth,
+                    mode=mode,
                 )
             except SandboxExecutionError as e:
                 console.print(f"⚠ Compose teardown warning: {e}", style="yellow")
@@ -3129,18 +3809,44 @@ def doctor(
         project_config = HostConfig.from_toml()
     except FileNotFoundError:
         pass
+    except ValueError as exc:
+        # A malformed managed toml (ValidationError / TOMLDecodeError / the D11
+        # removed-field rejection — all ValueError) is a real error, not "absent";
+        # surface it cleanly rather than as an uncaught traceback.
+        console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
-    if user is None:
-        if project_config is None:
-            console.print(
-                "No user specified. Create sandbox-ai.toml with [host].docker_unprivileged_user or pass --user.",
-                style="red",
-                markup=False,
-            )
-            raise typer.Exit(code=1)
+    # Resolve the active execution mode from the root-owned setup marker (the
+    # single runtime authority, C-004) BEFORE the user, so user resolution can be
+    # mode-aware. The marker read is toml-independent — an un-setup host has no
+    # marker entry → diagnose it as separate-user (the pre-flip default; a future
+    # group flips the broader default). The operator is the current real user,
+    # exactly how the rest of doctor resolves the invoker.
+    try:
+        mode = resolve_execution_mode(getpass.getuser())
+    except ModeMarkerMissing:
+        mode = DockerExecutionMode.SEPARATE_USER
+
+    if user is not None:
+        # Explicit --user wins in both modes.
+        resolved_user = user
+    elif mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        # Operator-rootless: the daemon owner IS the invoking operator, so no toml
+        # / docker_unprivileged_user is needed (this equals resolve_daemon_owner in
+        # op-rootless). Do NOT read host.docker_unprivileged_user here (D7 guard).
+        resolved_user = getpass.getuser()
+    elif project_config is not None:
+        # Separate-user with a toml present: the dedicated daemon user (doctor is
+        # allowlisted for this separate-user read).
         resolved_user = project_config.host.docker_unprivileged_user
     else:
-        resolved_user = user
+        console.print(
+            "No user specified (separate-user mode). Pass --user or create "
+            "sandbox-ai.toml with [host].docker_unprivileged_user.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
 
     if machinectl_auth is not None:
         try:
@@ -3159,8 +3865,8 @@ def doctor(
     console.print(f"Per-user home: {sandbox_ai_home()}")
 
     distro = detect_distro()
-    checks = build_check_registry(resolved_auth)
-    results = run_checks(checks, resolved_user, distro)
+    checks = build_check_registry(resolved_auth, mode)
+    results = run_checks(checks, resolved_user, distro, mode)
     render_results(results, console=console)
 
     has_failures = any(r.status == "fail" for r in results)
@@ -3248,12 +3954,15 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     """Render the per-instance detailed panel + workspaces + containers."""
     instance_dir = _lookup_instance_or_exit(inst)
     config = _load_config(instance_dir)
-    host_settings = _resolve_host_settings()
-    host_user = host_settings.docker_unprivileged_user
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
     auth = host_settings.machinectl_authentication
 
     # Container status
-    containers = _container_status(instance_dir, host_user, config, auth)
+    containers = _container_status(
+        instance_dir, host_user, config, auth, host_settings.docker_execution_mode
+    )
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
 
@@ -3364,6 +4073,7 @@ def status(
     detailed: bool = typer.Option(False, "--detailed", help="Include `du -sh` per workspace"),
 ) -> None:
     """Show sandbox instance status and diagnostics."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
     if inst is None:
         if detailed:
@@ -3395,8 +4105,11 @@ def _require_instance_stopped(inst: str, instance_dir: str) -> None:
     Workspace mutations (add/remove/rename/restore) require the instance to
     be STOPPED — otherwise live bind-mounts disagree with sandbox.toml.
     """
-    host_user, auth = _resolve_host_config()
-    if _warm_check(instance_dir, host_user, auth):
+    host_config = _resolve_full_host_config()
+    host_settings = host_config.host
+    host_user = resolve_daemon_owner(host_config)
+    auth = host_settings.machinectl_authentication
+    if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
         console.print(
             f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
             style="red",
@@ -3420,6 +4133,7 @@ def workspace_add(
     empty: list[str] = _WORKSPACE_EMPTY_FLAG,
 ) -> None:
     """Add one or more workspaces to a stopped instance."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
     if not copy and not empty:
         console.print("Specify at least one --copy or --empty flag.", style="red")
@@ -3496,6 +4210,7 @@ def workspace_remove(
     purge: bool = typer.Option(False, "--purge", help="Remove without backup"),
 ) -> None:
     """Remove a workspace from a stopped instance."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     if backup and purge:
@@ -3601,6 +4316,7 @@ def workspace_rename(
     new: str = typer.Argument(..., help="New workspace name"),
 ) -> None:
     """Rename a workspace in a stopped instance (atomic, ACL-preserving)."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     if old == new:
@@ -3687,6 +4403,7 @@ def workspace_restore(
     ),
 ) -> None:
     """Restore a backup into a stopped instance as a new workspace."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
     _validate_name(ws_name, kind="workspace", max_len=_WORKSPACE_NAME_MAX)
 
@@ -3781,6 +4498,7 @@ def workspace_list(
     json_out: bool = typer.Option(False, "--json", help="Emit structured JSON output"),
 ) -> None:
     """List live workspaces and (by default) available backups for an instance."""
+    _refuse_root_euid()
     _require_per_user_state_initialized()
 
     instance_dir = _lookup_instance_or_exit(inst)

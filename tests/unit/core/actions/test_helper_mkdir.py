@@ -8,18 +8,22 @@ from typing import TYPE_CHECKING
 from core.actions.context import ActionContext
 from core.actions.helper_mkdir import HelperMkdirChownAction
 from core.executor import Executor
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
 
 if TYPE_CHECKING:
     import pytest
 
 
-def _ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> ActionContext:
+def _ctx(
+    auth: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+) -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
         auth=auth,
         executor=Executor(),
         instance_dir=Path("/inst"),
+        docker_execution_mode=mode,
     )
 
 
@@ -54,8 +58,16 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
 
     invocations: list[tuple[object, ...]] = []
 
-    def _fake(host_user: str, parent: str, leaves: Iterable[str], uid: int, gid: int, auth: object) -> None:
-        invocations.append((host_user, parent, tuple(leaves), uid, gid, auth))
+    def _fake(
+        host_user: str,
+        parent: str,
+        leaves: Iterable[str],
+        uid: int,
+        gid: int,
+        auth: object,
+        execution_mode: object = DockerExecutionMode.SEPARATE_USER,
+    ) -> None:
+        invocations.append((host_user, parent, tuple(leaves), uid, gid, auth, execution_mode))
 
     # Replace via module-string per project convention so static analysis is happy.
     monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake)
@@ -67,5 +79,40 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
     )
     action.execute(_ctx(MachinectlAuth.POLKIT))
     assert invocations == [
-        ("claude-sandbox", "/inst/log", ("core", "admin"), 166535, 166535, MachinectlAuth.POLKIT)
+        (
+            "claude-sandbox",
+            "/inst/log",
+            ("core", "admin"),
+            166535,
+            166535,
+            MachinectlAuth.POLKIT,
+            DockerExecutionMode.SEPARATE_USER,
+        )
     ]
+
+
+def test_execute_forwards_operator_rootless_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections.abc import Iterable
+
+    captured: dict[str, object] = {}
+
+    def _fake(
+        host_user: str,
+        parent: str,
+        leaves: Iterable[str],
+        uid: int,
+        gid: int,
+        auth: object,
+        execution_mode: object = DockerExecutionMode.SEPARATE_USER,
+    ) -> None:
+        captured["execution_mode"] = execution_mode
+
+    monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake)
+    action = HelperMkdirChownAction(
+        parent=Path("/inst/log"),
+        leaves=("core",),
+        owner_uid=166535,
+        owner_gid=166535,
+    )
+    action.execute(_ctx(mode=DockerExecutionMode.OPERATOR_ROOTLESS))
+    assert captured["execution_mode"] == DockerExecutionMode.OPERATOR_ROOTLESS

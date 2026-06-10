@@ -92,6 +92,37 @@ class TestCheckDataclass:
         )
         assert c.depends_on == ["chk-1"]
 
+    def test_applies_in_defaults_to_both_modes(self) -> None:
+        """A check is mode-agnostic by default: ``applies_in`` is BOTH modes."""
+        from core.doctor.types import Check, CheckResult
+        from core.host_config import DockerExecutionMode
+
+        def dummy_run(user: str, distro: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="d", detail="ok")
+
+        c = Check(id="c", name="C", category="t", depends_on=[], run=dummy_run, remediation="")
+        assert c.applies_in == frozenset(DockerExecutionMode)
+        assert DockerExecutionMode.SEPARATE_USER in c.applies_in
+        assert DockerExecutionMode.OPERATOR_ROOTLESS in c.applies_in
+
+    def test_applies_in_can_gate_to_separate_user(self) -> None:
+        from core.doctor.types import Check, CheckResult
+        from core.host_config import DockerExecutionMode
+
+        def dummy_run(user: str, distro: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="d", detail="ok")
+
+        c = Check(
+            id="c",
+            name="C",
+            category="t",
+            depends_on=[],
+            run=dummy_run,
+            remediation="",
+            applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
+        )
+        assert DockerExecutionMode.OPERATOR_ROOTLESS not in c.applies_in
+
 
 # ── Section 2: Distro Detection ─────────────────────────────────────────────
 

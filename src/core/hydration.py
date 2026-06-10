@@ -6,9 +6,11 @@ Implements the PHASE 4 (HYDRATION) from the orchestrator design:
 3. Render templates from tooling plane → instance directory
 """
 
+import base64
 import json
 import logging
 import os
+import secrets
 import tomllib
 from dataclasses import dataclass as _dataclass
 from enum import StrEnum
@@ -18,10 +20,50 @@ from typing import Any
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.host_config import HostSettings, in_container_gid_for_host_gid, workspace_bridge_gid
+from core import host_resources
+from core.host_config import (
+    HostSettings,
+    in_container_gid_for_host_gid,
+    resolve_daemon_owner_settings,
+    workspace_bridge_gid,
+)
 from core.ipam import derive_static_ips, derive_subnets
 
 logger = logging.getLogger(__name__)
+
+# Admin's CPU intent — the single source of truth that replaces the former
+# `cpus: "4.0"` literal in compose.yml. Admin is a static binary with no
+# configurable runtime knobs, so this is a module constant rather than config.
+ADMIN_CPUS = 4.0
+
+
+def _clamp_cpus(value: float, host_cpus: int) -> tuple[float, bool]:
+    """Clamp a ``--cpus`` request to the host's online CPU count.
+
+    Docker rejects ``--cpus`` above the host's online CPU count at
+    container-create, so a configured value larger than the host would abort
+    ``sandbox start``. Returns ``(effective, was_clamped)`` where ``was_clamped``
+    is ``True`` iff the value was reduced.
+    """
+    if value > host_cpus:
+        return float(host_cpus), True
+    return value, False
+
+
+def _warn_cpu_clamped(label: str, configured: float, host_cpus: int, effective: float) -> None:
+    """Emit one operator-facing warning that a CPU limit was reduced to fit the host.
+
+    Graceful degrade: hydration proceeds with the clamped value, so this only
+    informs — it never raises. Routes through the module logger (the same warn
+    surface `render_templates` already uses for whitelist warnings).
+    """
+    logger.warning(
+        "%s=%s exceeds the host's %d CPUs — clamped to %s",
+        label,
+        configured,
+        host_cpus,
+        effective,
+    )
 
 
 # ─── Image Digest Registry ──────────────────────────────────────────────────
@@ -133,6 +175,17 @@ BINARY_REGISTRY: dict[str, BinaryPin] = {
         fetch_method=FetchMethod.GVISOR_TARBALL,
     ),
 }
+
+# The reserved gVisor runtime name registered in the daemon's daemon.json
+# (`runtimes["sandbox-ai-runsc"]`), namespaced so it never clobbers an operator's
+# own `runsc` runtime. Single source of truth for that name: the compose `runtime`
+# value rendered here, the registration in `core.setup.l6_daemon_json`, and the
+# `cli-doctor` verification all derive from this constant and MUST agree — a
+# mismatch makes Docker reject container-create with `unknown or invalid runtime
+# name`. (F-024 single-sourced the doctor literal but left the compose render
+# hardcoded to the bare `runsc`; that mismatch stayed latent until the F-053 CPU
+# clamp let `start` reach container-create and expose it.)
+RESERVED_RUNTIME_KEY = "sandbox-ai-runsc"
 
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
 
@@ -294,6 +347,23 @@ def _read_optional_file(path: str) -> str:
     return ""
 
 
+def _dnsdist_console_key() -> str:
+    """A base64-encoded 32-byte key for dnsdist's localhost-only management console.
+
+    dnsdist refuses every console connection unless ``setKey()`` is configured, and
+    the ``dnsdist -e 'showServers()'`` healthcheck connects to that console — so
+    without a key the healthcheck always fails and dnsdist never reports healthy
+    (blocking ``core``, which ``depends_on`` it). The console binds 127.0.0.1 inside
+    the container's isolated network namespace (console ACL 127.0.0.0/8), so this is
+    not an external trust boundary; it satisfies dnsdist's "console requires a key"
+    contract so the healthcheck can run. Generated per hydration — the server and the
+    healthcheck client both read the same rendered ``dnsdist.conf``, so they always
+    agree. Standard base64 (not ``token_urlsafe``'s URL-safe alphabet), which
+    dnsdist's key decoder accepts.
+    """
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
 def build_jinja_context(
     config: InstanceConfig,
     base_index: int,
@@ -319,11 +389,22 @@ def build_jinja_context(
     isolated, core_proxy, dns, egress, ipc = derive_subnets(base_index)
     ips = derive_static_ips(base_index)
 
+    # Clamp every --cpus request to the host's online CPU count so `sandbox
+    # start` never dies at container-create on a sub-4-vCPU host (the modal
+    # 2-vCPU cloud VM / CI runner). Detected once; shared by core + admin.
+    host_cpus = host_resources.host_cpu_count()
+    core_cpus, core_clamped = _clamp_cpus(config.core.cpus, host_cpus)
+    admin_cpus, admin_clamped = _clamp_cpus(ADMIN_CPUS, host_cpus)
+    if core_clamped:
+        _warn_cpu_clamped("[core].cpus", config.core.cpus, host_cpus, core_cpus)
+    if admin_clamped:
+        _warn_cpu_clamped("admin cpus", ADMIN_CPUS, host_cpus, admin_cpus)
+
     extra: dict[str, Any] = {}
     if host is not None:
         bridge_gid = workspace_bridge_gid(host)
         extra["in_container_workspace_bridge_gid"] = in_container_gid_for_host_gid(
-            bridge_gid, host.docker_unprivileged_user
+            bridge_gid, resolve_daemon_owner_settings(host)
         )
 
     return {
@@ -337,6 +418,9 @@ def build_jinja_context(
         # Credentials
         "proxy_password": proxy_password,
         "proxy_url_core": f"http://proxyuser:{proxy_password}@proxy:3128",
+        # dnsdist console key — enables the localhost-only console so its
+        # healthcheck (`dnsdist -e`) can connect (see `_dnsdist_console_key`).
+        "dnsdist_console_key": _dnsdist_console_key(),
         # Paths
         "instance_dir": instance_dir,
         "workspaces": [
@@ -362,7 +446,8 @@ def build_jinja_context(
         "core_shm_size": config.core.shm_size,
         "core_mem_limit": config.core.mem_limit,
         "core_memswap_limit": config.core.mem_limit,
-        "core_cpus": str(config.core.cpus),
+        "core_cpus": str(core_cpus),
+        "admin_cpus": str(admin_cpus),
         # Runtimes
         "runtimes": {
             "python": config.runtimes.python,
@@ -373,7 +458,7 @@ def build_jinja_context(
         "nvm_version": config.runtimes_node.nvm_version,
         "node_version": config.runtimes_node.version,
         # Images — infrastructure (not user-configurable)
-        "runtime": "runsc",
+        "runtime": RESERVED_RUNTIME_KEY,
         "dns_image": IMAGE_REGISTRY["coredns"].pinned,
         "proxy_image": IMAGE_REGISTRY["squid"].pinned,
         "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,

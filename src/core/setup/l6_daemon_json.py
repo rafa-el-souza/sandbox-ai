@@ -5,17 +5,27 @@ Setup owns exactly one key in the sandbox user's rootless docker
 operator's own ``runtimes[...]`` entries, log opts, registry mirrors, …) is
 left untouched (design — "Reserved Namespace File Ownership").
 
-The file is read by **root** (the ``sudo sandbox setup`` process itself —
-identity ``ROOT``); the conditional ``systemctl --user restart docker`` and the
-``docker info`` readiness poll cross into the sandbox user via
-``machinectl_cmd``. The file write is inode-stable (``cat > file`` semantics —
+The daemon owner is :func:`daemon_owner_user` (the dedicated ``sandbox`` user in
+separate-user; the invoking operator in operator-rootless), and the
+``daemon.json`` lives under that owner's home. The file is read/written by the
+``sandbox setup`` process itself (identity ``ROOT`` in separate-user — root
+writes the sandbox user's file; the operator writes their own file in
+operator-rootless). The conditional ``systemctl --user restart docker`` and the
+``docker info`` readiness poll cross to the owner via
+:func:`daemon_owner_crossing` — ``machinectl_cmd`` in separate-user (sentinel on,
+since ``machinectl shell`` masks the inner exit), an empty LOCAL prefix in
+operator-rootless (sentinel off; setup already runs as the operator, so it is a
+plain local subprocess in the operator's live session — no user-manager
+readiness gate needed). The file write is inode-stable (``cat > file`` semantics —
 truncate-in-place, design D9) so a live dockerd watching the inode is not
 surprised by a rename.
 
 Content-aware probe (design D10): a deep-equal comparison of the *observed*
 ``runtimes["sandbox-ai-runsc"]`` value against the *expected* one
 (``{"path": "/usr/local/libexec/sandbox-ai/runsc", "runtimeArgs":
-["--oci-seccomp"]}``). key (or file) absent → ``MISSING``; present + differing
+["--oci-seccomp", "--ignore-cgroups"]}`` — see ``_EXPECTED_RUNTIME`` for why
+``--ignore-cgroups`` is required under rootless). key (or file) absent →
+``MISSING``; present + differing
 → ``DRIFT``; present + deep-equal **but the daemon has not loaded the runtime**
 → ``DRIFT`` (will restart); present + deep-equal **and loaded** →
 ``ALREADY_CORRECT``. The probe/reverify are **runtime-aware** (F-023): they
@@ -36,35 +46,51 @@ from typing import TYPE_CHECKING
 
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import machinectl_cmd
+from core.host_config import is_operator_rootless
+from core.hydration import RESERVED_RUNTIME_KEY
 from core.setup.phase_runner import (
     Identity,
     Phase,
     PhaseResult,
+    daemon_owner_crossing,
+    daemon_owner_user,
     probe_sandbox_pw_or_missing,
     wait_user_manager_ready,
 )
 
 if TYPE_CHECKING:
-    from core.host_config import HostConfig
     from core.setup.phase_runner import SetupContext
 
-# The single reserved key + its expected value (the content-aware target).
-_RESERVED_RUNTIME_KEY = "sandbox-ai-runsc"
+# The single reserved key + its expected value (the content-aware target). The
+# key is single-sourced from `core.hydration` (the compose `runtime` value must
+# equal what we register here) and re-exported under the private name so the
+# `cli-doctor` checks keep importing it from this module unchanged.
+_RESERVED_RUNTIME_KEY = RESERVED_RUNTIME_KEY
+# `--ignore-cgroups` is load-bearing under operator-rootless (F-057): rootless
+# docker runs the `systemd` cgroup driver, so it passes `--systemd-cgroup` to the
+# runtime. runsc's systemd-cgroup manager is NOT rootless-aware — it asks the
+# *system* systemd (over the system D-Bus) to create the container's transient
+# `docker-<id>.scope` under `user.slice`, which an unprivileged user may not do
+# (→ "systemd error: Interactive authentication required" / "Permission denied" at
+# OCI task-create). Plain runc sidesteps this because it routes to the user manager
+# when rootless; runsc has no such path, so we tell it to skip systemd cgroup setup
+# entirely. Cost: runsc no longer enforces the OCI cgroup CPU/memory limits (the
+# C-008 clamp becomes render-time-only for gVisor containers) — restoring runtime
+# enforcement via the rootless `cgroupfs` driver is a tracked follow-up (F-057).
 _EXPECTED_RUNTIME: dict[str, object] = {
     "path": "/usr/local/libexec/sandbox-ai/runsc",
-    "runtimeArgs": ["--oci-seccomp"],
+    "runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"],
 }
 
 
-def _sandbox_user(host_config: HostConfig) -> str:
-    """The unprivileged docker user whose rootless daemon.json is managed."""
-    return host_config.host.docker_unprivileged_user
+def _daemon_json_path(ctx: SetupContext) -> Path:
+    """Resolve ``~<daemon-owner>/.config/docker/daemon.json`` via passwd.
 
-
-def _daemon_json_path(host_config: HostConfig) -> Path:
-    """Resolve ``~<sandbox-user>/.config/docker/daemon.json`` via passwd."""
-    home = pwd.getpwnam(_sandbox_user(host_config)).pw_dir
+    The owner is :func:`daemon_owner_user` (sandbox user in separate-user; the
+    invoking operator in operator-rootless), so the path lands under the right
+    home in both modes.
+    """
+    home = pwd.getpwnam(daemon_owner_user(ctx)).pw_dir
     return Path(home) / ".config" / "docker" / "daemon.json"
 
 
@@ -106,10 +132,14 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     rather than a crash escaping the plan/apply passes (content-aware-probe
     contract / B1 class).
     """
-    pw = probe_sandbox_pw_or_missing(ctx.host_config)
-    if not isinstance(pw, pwd.struct_passwd):
-        return pw
-    path = Path(pw.pw_dir) / ".config" / "docker" / "daemon.json"
+    if not is_operator_rootless(ctx.host_config):
+        # separate-user: the sandbox user is created by L2, so a fresh-host plan
+        # pass sees it absent (the MISSING signal). operator-rootless's owner is
+        # the invoking operator (always present), so this guard does not apply.
+        pw = probe_sandbox_pw_or_missing(ctx.host_config)
+        if not isinstance(pw, pwd.struct_passwd):
+            return pw
+    path = _daemon_json_path(ctx)
     doc = _read_doc(path)
     if doc is None:
         return PhaseResult.MISSING, f"{path} absent; will create with reserved key"
@@ -128,7 +158,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     # write-success/restart-fail leaves the file correct and the runtime
     # unregistered (F-023); a file-only probe would report ALREADY_CORRECT over
     # a broken end state. Confirm the loaded runtime before skipping.
-    if not _runtime_registered(ctx.host_config):
+    if not _runtime_registered(ctx):
         return (
             PhaseResult.DRIFT,
             f"{path} has the reserved runtime key but docker has not loaded it; "
@@ -155,31 +185,31 @@ def _write_inode_stable(path: Path, text: str) -> None:
         os.close(fd)
 
 
-def _runtime_registered(host_config: HostConfig) -> bool:
+def _runtime_registered(ctx: SetupContext) -> bool:
     """``True`` iff docker's *loaded* runtimes include the reserved key (crossed).
 
-    Queries the sandbox user's rootless daemon via ``docker info`` — the runtime
+    Queries the daemon owner's rootless daemon via ``docker info`` — the runtime
     docker has actually **loaded**, NOT the ``daemon.json`` file. This is the
     distinction F-023 turned on: a write-success/restart-fail leaves the file
     correct while the daemon never reloaded, so a file-only probe reports
     ``ALREADY_CORRECT`` over an unregistered runtime. A failed crossing (docker
     down, sentinel absent) is treated as not-registered, so the probe/reverify
-    fail toward DRIFT and ``act`` re-restarts (idempotent, fail-closed).
+    fail toward DRIFT and ``act`` re-restarts (idempotent, fail-closed). The
+    crossing is :func:`daemon_owner_crossing` (``machinectl`` in separate-user,
+    sentinel on; LOCAL in operator-rootless, sentinel off).
     """
-    prefix = machinectl_cmd(
-        _sandbox_user(host_config), host_config.host.machinectl_authentication
-    )
+    prefix = daemon_owner_crossing(ctx)
     try:
         result = Executor().run(
             [*prefix, "/bin/bash", "-c", "docker info --format '{{json .Runtimes}}'"],
-            sentinel=True,
+            sentinel=not is_operator_rootless(ctx.host_config),
         )
     except SandboxExecutionError:
         return False
     return _RESERVED_RUNTIME_KEY in (result.stdout or "")
 
 
-def _restart_and_poll(host_config: HostConfig) -> None:
+def _restart_and_poll(ctx: SetupContext) -> None:
     """Restart rootless docker StartLimit-safely; poll until the runtime loads.
 
     Two F-023-driven properties (the parts of the F-023 work that were real, as
@@ -201,12 +231,16 @@ def _restart_and_poll(host_config: HostConfig) -> None:
       :class:`~core.exceptions.SandboxExecutionError` → phase FAIL.
 
     ``wait_user_manager_ready`` (F-014, a root-side ``is-active`` query) remains
-    the cheap necessary precondition before crossing into the sandbox user.
+    the cheap necessary precondition before crossing into the sandbox user in
+    separate-user. operator-rootless runs locally in the operator's already-live
+    session, so the gate is unnecessary and the crossing is an empty LOCAL prefix
+    (sentinel off — a local command's inner exit is not masked).
     """
-    user = _sandbox_user(host_config)
-    auth = host_config.host.machinectl_authentication
-    wait_user_manager_ready(user)
-    prefix = machinectl_cmd(user, auth)
+    op_rootless = is_operator_rootless(ctx.host_config)
+    if not op_rootless:
+        wait_user_manager_ready(daemon_owner_user(ctx))
+    prefix = daemon_owner_crossing(ctx)
+    sentinel = not op_rootless
     Executor().run(
         [
             *prefix,
@@ -215,14 +249,14 @@ def _restart_and_poll(host_config: HostConfig) -> None:
             "systemctl --user reset-failed docker.service; "
             "systemctl --user restart --no-block docker",
         ],
-        sentinel=True,
+        sentinel=sentinel,
     )
     poll = (
         "for i in $(seq 1 30); do "
         "docker info --format '{{json .Runtimes}}' 2>/dev/null "
         "| grep -qF " + _RESERVED_RUNTIME_KEY + " && exit 0; sleep 1; done; exit 1"
     )
-    Executor().run([*prefix, "/bin/bash", "-c", poll], sentinel=True)
+    Executor().run([*prefix, "/bin/bash", "-c", poll], sentinel=sentinel)
 
 
 def _act(ctx: SetupContext) -> str:
@@ -237,8 +271,7 @@ def _act(ctx: SetupContext) -> str:
     loads — so a no-op-merge with an already-loaded runtime is screened out at
     *probe* time (ALREADY_CORRECT → act not called), not here.
     """
-    host_config = ctx.host_config
-    path = _daemon_json_path(host_config)
+    path = _daemon_json_path(ctx)
     doc = _read_doc(path) or {}
     runtimes = doc.get("runtimes")
     if not isinstance(runtimes, dict):
@@ -253,7 +286,7 @@ def _act(ctx: SetupContext) -> str:
         old_text = ""
     if new_text != old_text:
         _write_inode_stable(path, new_text)
-    _restart_and_poll(host_config)
+    _restart_and_poll(ctx)
     return "reserved runtime key ensured; rootless docker restarted + runtime loaded"
 
 
@@ -264,13 +297,13 @@ def _reverify(ctx: SetupContext) -> bool:
     the *end state* the phase exists to produce: the runtime is registered in
     the running daemon.
     """
-    path = _daemon_json_path(ctx.host_config)
+    path = _daemon_json_path(ctx)
     doc = _read_doc(path)
     if doc is None:
         return False
     if _observed_runtime(doc) != _EXPECTED_RUNTIME:
         return False
-    return _runtime_registered(ctx.host_config)
+    return _runtime_registered(ctx)
 
 
 PHASE = Phase(

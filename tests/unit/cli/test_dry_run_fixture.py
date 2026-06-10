@@ -55,6 +55,13 @@ FIXTURE_POLKIT = FIXTURE_DIR / "start_polkit.txt"
 # ANSI escape stripping (Rich emits CSI sequences when force_terminal is on).
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# The handover preview is now the live ``_build_attach_argv`` generator
+# (C-010 D4 — one generator), whose session-log filename embeds a real UTC
+# ``%Y%m%dT%H%M%SZ`` timestamp. That stamp is genuinely runtime-derived (like
+# the per-run tmp_root), so it is normalized to a stable token before the
+# byte-equivalence compare — the same portability treatment ``<TMP>`` gets.
+_UTC_STAMP_RE = re.compile(r"\d{8}T\d{6}Z")
+
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
@@ -89,6 +96,7 @@ def _normalize(output: str, tmp_root: Path) -> str:
     text = _strip_ansi(output)
     text = text.replace(str(tmp_root.resolve()), "<TMP>")
     text = text.replace(str(tmp_root), "<TMP>")
+    text = _UTC_STAMP_RE.sub("<UTC>", text)
 
     out: list[str] = []
     in_above_run = False

@@ -1,9 +1,7 @@
 ## Purpose
 
 This specification defines the `sandbox status` command, which displays the current state of the sandbox instance for the current project directory — including container health, IPAM allocation, enabled components, and configuration completeness warnings.
-
 ## Requirements
-
 ### Requirement: Workspaces Section in Status Panel
 
 `sandbox status [<inst>]` SHALL display a Workspaces section in the Rich panel listing each workspace's name, bootstrap mode, path, and state. State values:
@@ -54,7 +52,7 @@ The system SHALL provide a `sandbox status [<inst>]` command that displays the c
 - **THEN** the system displays a summary table of all entries in `instances.json`, each row showing name, state (running/stopped), workspace count, and IPAM slot
 
 ### Requirement: Container Health Display
-The system SHALL query per-container health via `docker compose ps --format json` through machinectl using the configured authentication mode and display results in a Rich Table.
+The system SHALL query per-container health by running the dispatcher `compose-ps` op across the privilege boundary (via `core.dispatch.invoke("compose-ps", [<inst>], host_config)`, which resolves the dev-context compose state operator-side and crosses the bare `dispatch compose-ps <inst> …` payload — NOT an inline `"docker compose ps --format json"` string) **in separate-user mode** and display results in a Rich Table. The crossing primitive is selected by the configured `machinectl_authentication` mode: SUDO crosses via `sudo_pipe_cmd` (the privileged byte-pipe), POLKIT via `machinectl_cmd(user, POLKIT)`. In operator-rootless mode the container-status probe runs locally with no crossing, per the "Container-Status Probe Honors Execution Mode" requirement.
 
 #### Scenario: All containers healthy
 - **WHEN** all containers with healthchecks report "healthy" and all containers are in "running" state
@@ -64,13 +62,13 @@ The system SHALL query per-container health via `docker compose ps --format json
 - **WHEN** one or more containers report "unhealthy" or are not running
 - **THEN** the Panel header includes "⚠ degraded" and the Panel border is yellow, and unhealthy containers are highlighted with `✗` in the Table
 
-#### Scenario: Container health query via machinectl (sudo mode)
+#### Scenario: Container health query via the compose-ps op (sudo mode) (separate-user mode)
 - **WHEN** the status command queries container state and `machinectl_authentication` is `"sudo"`
-- **THEN** it invokes `docker compose ps --format json` via `sudo machinectl shell <user>@.host /bin/bash -c "<command>"`
+- **THEN** it invokes `core.dispatch.invoke("compose-ps", [<inst>], host_config)`, which crosses via `sudo_pipe_cmd(<user>)` — `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-ps <inst> …"]` (the dispatcher's op-hardcoded verb is `ps --format json`)
 
-#### Scenario: Container health query via machinectl (polkit mode)
+#### Scenario: Container health query via the compose-ps op (polkit mode) (separate-user mode)
 - **WHEN** the status command queries container state and `machinectl_authentication` is `"polkit"`
-- **THEN** it invokes `docker compose ps --format json` via `machinectl shell <user>@.host /bin/bash -c "<command>"` without `sudo` prefix
+- **THEN** the same `compose-ps <inst>` crossing is performed via `machinectl_cmd(<user>, POLKIT)` (no `sudo` prefix) — `[*machinectl_cmd(<user>, POLKIT), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-ps <inst> …"]`
 
 ### Requirement: IPAM Display
 The system SHALL display the instance's IPAM allocation including slot index and derived subnets.
@@ -112,7 +110,6 @@ The `ip_map` used by `sandbox status` SHALL include entries for all containers w
 - **WHEN** `sandbox status` constructs the IP display map
 - **THEN** the map does NOT reference `dns_sidecar_ip`, `proxy_ip`, `admin_isolated_ip`, `mcp_firecrawl_isolated_ip`, `admin_admin_ip`, `admin_proxy_ip`, `coredns_admin_ip`, `dnsdist_admin_ip`, `proxy_admin_ip`, or `db_postgres_admin_ip`
 
-
 ### Requirement: Per-User State Initialization Required
 The `sandbox status` command SHALL refuse to operate when the per-user state tree is not initialized. Initialization is signaled by the presence of `<sandbox_ai_user_home()>/state/instances.json`. On absence, the command SHALL exit with a clear error directing the operator to run `sandbox init`.
 
@@ -123,3 +120,18 @@ The `sandbox status` command SHALL refuse to operate when the per-user state tre
 #### Scenario: Resolved home in error message
 - **WHEN** the status command above runs with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
 - **THEN** the error message contains `/tmp/test-home`
+
+### Requirement: Container-Status Probe Honors Execution Mode
+
+The container-status query that backs `sandbox status` and the lifecycle warm-checks (`_container_status` → `compose-ps`) SHALL honor `docker_execution_mode`. In `operator-rootless` mode it SHALL obtain container status by running `docker compose ps` as a local subprocess (via `core.dispatch.probe(Op.COMPOSE_PS, …)`, which itself routes to the local path), with no `machinectl` crossing. The returned status semantics (running / stopped / not-created) and the non-raising warm-check behavior SHALL be identical across both modes.
+
+#### Scenario: status query runs locally in operator-rootless mode
+
+- **WHEN** `sandbox status <inst>` (or a lifecycle warm-check) queries container status with `docker_execution_mode == operator-rootless`
+- **THEN** the `compose-ps` probe runs as a local `docker compose ps` subprocess with no `machinectl` crossing, and yields the same running/stopped/not-created determination it would in `separate-user` mode
+
+#### Scenario: warm-check remains non-raising across modes
+
+- **WHEN** the warm-check probe fails (daemon down, instance absent) in `operator-rootless` mode
+- **THEN** it returns a non-running result without raising, identically to `separate-user` mode
+

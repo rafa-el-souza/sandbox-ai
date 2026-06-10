@@ -3,16 +3,22 @@
 Provides 16 diagnostic checks across 4 independent chains:
 - Chain 1 (privilege boundary, 10 checks): sudo -> machinectl -> user -> machined
   -> reachable -> docker -> rootless -> runsc -> runsc_runtimeargs -> host_uds
-- Chain 2 (filesystem, 3 checks): setfacl → ACL support → ancestor traverse
+- Chain 2 (filesystem, 4 checks): setfacl → ACL support, cgroup v2, ancestor traverse
 - Chain 3 (repo integrity, 2 checks): tooling plane, state dir (independent)
 - Chain 4 (supply chain, 1 check): image_digests (depends on docker_available)
 """
 
 from __future__ import annotations
 
+from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo as check_daemon_owner_sudo
 from core.doctor.checks.filesystem import check_acl_support as check_acl_support
 from core.doctor.checks.filesystem import check_ancestor_traverse as check_ancestor_traverse
+from core.doctor.checks.filesystem import check_cgroup_v2 as check_cgroup_v2
 from core.doctor.checks.filesystem import check_setfacl as check_setfacl
+from core.doctor.checks.instance_resources import check_host_cpu_capacity as check_host_cpu_capacity
+from core.doctor.checks.instance_resources import (
+    check_instance_memory_overcommit as check_instance_memory_overcommit,
+)
 from core.doctor.checks.per_user_tree import check_legacy_cwd_files as check_legacy_cwd_files
 from core.doctor.checks.per_user_tree import check_legacy_registry_shape as check_legacy_registry_shape
 from core.doctor.checks.per_user_tree import (
@@ -23,6 +29,7 @@ from core.doctor.checks.per_user_tree import (
 )
 from core.doctor.checks.per_user_tree import check_per_user_tree_exists as check_per_user_tree_exists
 from core.doctor.checks.per_user_tree import check_per_user_tree_mode as check_per_user_tree_mode
+from core.doctor.checks.privilege_boundary import PreflightGate as PreflightGate
 from core.doctor.checks.privilege_boundary import (
     check_compose_project_name_collision as check_compose_project_name_collision,
 )
@@ -37,6 +44,12 @@ from core.doctor.checks.privilege_boundary import check_sudo as check_sudo
 from core.doctor.checks.privilege_boundary import check_systemd_machined as check_systemd_machined
 from core.doctor.checks.privilege_boundary import check_tlog as check_tlog
 from core.doctor.checks.privilege_boundary import check_user_exists as check_user_exists
+from core.doctor.checks.privilege_boundary import evaluate_preflight_gate as evaluate_preflight_gate
+from core.doctor.checks.privilege_boundary import (
+    interpret_compose_collision_segment as interpret_compose_collision_segment,
+)
+from core.doctor.checks.privilege_boundary import interpret_preflight_bundle as interpret_preflight_bundle
+from core.doctor.checks.privilege_boundary import interpret_preflight_reachability as interpret_preflight_reachability
 from core.doctor.checks.repo_integrity import check_state_dir_writable as check_state_dir_writable
 from core.doctor.checks.repo_integrity import check_tooling_plane as check_tooling_plane
 from core.doctor.checks.supply_chain import check_image_digests as check_image_digests
@@ -85,18 +98,23 @@ from core.doctor.types import get_install_cmd as get_install_cmd
 __all__ = [
     "Check",
     "CheckResult",
+    "PreflightGate",
     "build_check_registry",
     "check_acl_support",
     "check_ancestor_traverse",
     "check_backups_disk_pressure",
     "check_backups_partial_dirs_present",
+    "check_cgroup_v2",
     "check_compose_project_name_collision",
+    "check_daemon_owner_sudo",
     "check_dev_in_workspace_bridge_group",
     "check_dev_umask_workspace_friendly",
     "check_docker_available",
     "check_docker_rootless",
+    "check_host_cpu_capacity",
     "check_host_uds",
     "check_image_digests",
+    "check_instance_memory_overcommit",
     "check_legacy_cwd_files",
     "check_legacy_registry_shape",
     "check_legacy_sandboxes_dir_detected",
@@ -121,7 +139,11 @@ __all__ = [
     "check_workspace_home_single_filesystem",
     "check_workspace_path_in_walker_boundary",
     "detect_distro",
+    "evaluate_preflight_gate",
     "get_install_cmd",
+    "interpret_compose_collision_segment",
+    "interpret_preflight_bundle",
+    "interpret_preflight_reachability",
     "render_results",
     "run_check_subset",
     "run_checks",

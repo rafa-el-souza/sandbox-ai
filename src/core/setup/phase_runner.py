@@ -65,7 +65,12 @@ from typing import TYPE_CHECKING
 
 import core.setup as _setup_package
 from core.executor import Executor
-from core.host_config import machinectl_cmd, pipe_cmd
+from core.host_config import (
+    DockerExecutionMode,
+    is_operator_rootless,
+    machinectl_cmd,
+    pipe_cmd,
+)
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -184,6 +189,14 @@ class Phase:
             hardcoded sequence (orchestrator decision 1).
         rollback: Optional undo for a failed phase (the L3a sudoers-probe case,
             design D1). ``None`` for phases that are not rolled back.
+        applies_in: The set of :class:`~core.host_config.DockerExecutionMode`
+            values in which this phase runs. Defaults to ALL modes (every phase
+            is mode-agnostic unless it opts out). A phase whose ``applies_in``
+            EXCLUDES the active ``docker_execution_mode`` is reported
+            ``SKIPPED`` (not run — its probe/act/reverify are never called) in
+            BOTH the plan and apply passes. A mode-skip is "not applicable",
+            NOT a failure: it does NOT block its dependents (a phase depending
+            on a mode-skipped phase still runs).
     """
 
     id: str
@@ -194,6 +207,7 @@ class Phase:
     reverify: ReverifyFn
     depends_on: tuple[str, ...] = ()
     rollback: RollbackFn | None = None
+    applies_in: frozenset[DockerExecutionMode] = frozenset(DockerExecutionMode)
 
 
 @dataclass(frozen=True)
@@ -375,6 +389,54 @@ def route(identity: Identity, ctx: SetupContext) -> list[str]:
     )
 
 
+def daemon_owner_user(ctx: SetupContext) -> str:
+    """The OS user that owns the rootless docker daemon.
+
+    separate-user: the dedicated ``host.docker_unprivileged_user``.
+    operator-rootless: the operator (the daemon runs as the operator's own user).
+    """
+    if is_operator_rootless(ctx.host_config):
+        return ctx.operator
+    return ctx.host_config.host.docker_unprivileged_user
+
+
+def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
+    """argv prefix to run a ``/bin/bash -c`` as the rootless-daemon owner in their user session.
+
+    separate-user: ``machinectl_cmd(<sandbox-user>, <auth>)`` — BYTE-IDENTICAL to
+    what L5/L6/L7 build inline (so the L5/L6/L7 separate-user path is unchanged).
+    Root must still drop into the dedicated ``sandbox`` user.
+
+    operator-rootless: a LOCAL ``env …`` prefix that re-injects the operator's
+    user-session environment (no ``sudo`` drop — setup already runs AS the operator,
+    D5). There is no root→operator privilege drop, so the C-prime ``sudo_as_operator``
+    half is gone; but the **session env must still be injected explicitly**, because
+    :class:`core.executor.Executor` runs every subprocess in a *sterile matrix*
+    (only ``PATH`` survives — ``HOME`` / ``XDG_RUNTIME_DIR`` / ``DBUS_SESSION_BUS_ADDRESS``
+    / ``DOCKER_HOST`` are scrubbed *regardless of who runs setup*). Rootless docker +
+    ``systemctl --user`` need that session env: ``dockerd-rootless-setuptool.sh``
+    fails with "HOME needs to be set", and ``docker`` falls back to the rootful
+    ``/var/run/docker.sock`` (permission-denied) without ``DOCKER_HOST``. (Real-host
+    finding 8.11 — the §10 convergence smoke; D4/D5's "no injection needed" reasoning
+    was wrong: it accounted for the absent privilege drop but not the sterile Executor.)
+    The C-prime ``machinectl`` recipe survives only on the separate-user branch above.
+    """
+    if is_operator_rootless(ctx.host_config):
+        pw = pwd.getpwnam(ctx.operator)
+        run_dir = f"/run/user/{pw.pw_uid}"
+        return [
+            "env",
+            f"HOME={pw.pw_dir}",
+            f"XDG_RUNTIME_DIR={run_dir}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path={run_dir}/bus",
+            f"DOCKER_HOST=unix://{run_dir}/docker.sock",
+        ]
+    return machinectl_cmd(
+        ctx.host_config.host.docker_unprivileged_user,
+        ctx.host_config.host.machinectl_authentication,
+    )
+
+
 class SandboxUserNotYetCreated(KeyError):
     """The sandbox OS user does not exist *yet* during a probe.
 
@@ -482,8 +544,20 @@ def run_plan_pass(
     Returns one :class:`PhasePlanOutcome` per phase in dependency order.
     """
     ordered = order_phases(phases, allow_external_deps=allow_external_deps)
+    mode = ctx.host_config.host.docker_execution_mode
     outcomes: list[PhasePlanOutcome] = []
     for phase in ordered:
+        if mode not in phase.applies_in:
+            # Mode-gated: the phase is not applicable in the active execution
+            # mode. Report SKIPPED without running its probe; a mode-skip is
+            # "not applicable", never a failure (it does not block dependents —
+            # the apply pass treats it as dependency-satisfied).
+            outcomes.append(
+                PhasePlanOutcome(
+                    phase.id, PhaseResult.SKIPPED, f"skipped ({mode.value})"
+                )
+            )
+            continue
         try:
             result, detail = phase.probe(ctx)
         except Exception as exc:
@@ -538,10 +612,27 @@ def run_apply_pass(
     Returns one :class:`PhaseApplyOutcome` per phase in dependency order.
     """
     ordered = order_phases(phases, allow_external_deps=allow_external_deps)
+    mode = ctx.host_config.host.docker_execution_mode
     outcomes: list[PhaseApplyOutcome] = []
     failed_ids: set[str] = set()
 
     for phase in ordered:
+        if mode not in phase.applies_in:
+            # Mode-gated: not applicable in the active execution mode. Emit
+            # SKIPPED and continue WITHOUT adding the phase to ``failed_ids`` —
+            # a mode-skip is dependency-satisfied, NOT a failure, so a phase
+            # depending on a mode-skipped phase still runs (it is never marked
+            # BLOCKED_BY). Surfaced identically to the plan pass.
+            outcomes.append(
+                PhaseApplyOutcome(
+                    phase.id,
+                    PhaseResult.SKIPPED,
+                    f"skipped ({mode.value})",
+                    reverified=False,
+                )
+            )
+            continue
+
         blocker = next(
             (dep for dep in phase.depends_on if dep in failed_ids), None
         )
@@ -659,6 +750,8 @@ __all__ = [
     "RollbackFn",
     "SandboxUserNotYetCreated",
     "SetupContext",
+    "daemon_owner_crossing",
+    "daemon_owner_user",
     "discover_phases",
     "order_phases",
     "probe_sandbox_pw_or_missing",

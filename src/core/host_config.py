@@ -9,16 +9,27 @@ Also exposes subuid/subgid resolvers and the workspace bridge group helpers
 used by the helper-container ACL/ownership recipes.
 """
 
+import getpass
 import grp
 import os
 import pwd
+import re
 import tomllib
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from core.exceptions import SandboxExecutionError
+
+# POSIX-portable username grammar (M-1). ``docker_unprivileged_user`` reaches the
+# ``--uid={user}`` operand of ``systemd-run``/``pipe_cmd`` and the rendered
+# sudoers ``Cmnd_Spec``, so a value carrying a space, an uppercase letter, or a
+# sudoers/shell metacharacter (``;``, ``--property=…``) could corrupt the
+# emitted rule or the crossing argv. Reject any non-conforming value at the
+# Pydantic boundary: lowercase initial letter or underscore, then up to 31 more
+# of ``[a-z0-9_-]`` (32-char useradd ceiling).
+_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def sandbox_ai_home() -> Path:
@@ -81,11 +92,66 @@ class MachinectlAuth(StrEnum):
     POLKIT = "polkit"
 
 
+class DockerExecutionMode(StrEnum):
+    """Selects how Docker runtime ops reach the daemon.
+
+    ``SEPARATE_USER`` is the existing behavior: Docker runs as the dedicated
+    ``docker_unprivileged_user`` and every op crosses the ``machinectl``
+    privilege boundary. ``OPERATOR_ROOTLESS`` runs rootless Docker as the
+    operator's own user, invoking ops as local subprocesses with no boundary
+    crossing.
+    """
+
+    SEPARATE_USER = "separate-user"
+    OPERATOR_ROOTLESS = "operator-rootless"
+
+
+# The PROVISIONING default: the mode `sandbox setup` provisions when the operator
+# passes no `--docker-execution-mode` flag and the marker has no entry — the single,
+# user-facing default (referenced, never re-literalised; see finding F-051). It is
+# DISTINCT from the in-memory fallback on `HostSettings.docker_execution_mode` and
+# `minimal_host_config` below (intentionally kept `SEPARATE_USER`): the runtime never
+# acts on that fallback because `_resolve_full_host_config` always overlays the
+# marker-resolved mode, so it is moot, and keeping it avoids a no-benefit re-pin sweep.
+DEFAULT_PROVISIONING_MODE = DockerExecutionMode.OPERATOR_ROOTLESS
+
+
 class HostSettings(BaseModel):
-    """[host] section of sandbox-ai.toml."""
+    """[host] section of sandbox-ai.toml.
+
+    ``machinectl_authentication`` is **inert** when
+    ``docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS``: there
+    is no crossing to authorize, so the value is accepted and ignored rather
+    than rejected. The two fields are intentionally not cross-validated —
+    Pydantic accepting both together IS the inert behavior.
+    """
 
     docker_unprivileged_user: str
     machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
+
+    @field_validator("docker_unprivileged_user")
+    @classmethod
+    def _validate_docker_unprivileged_user(cls, value: str) -> str:
+        """Enforce the POSIX-portable username grammar (M-1).
+
+        The value flows into the ``--uid={user}`` crossing operand and the
+        sudoers ``Cmnd_Spec``; reject empty / spaces / uppercase / shell- or
+        sudoers-metacharacters before it can corrupt a rendered rule.
+        """
+        if _USERNAME_RE.match(value) is None:
+            raise ValueError(
+                f"docker_unprivileged_user {value!r} is not a valid POSIX username "
+                f"(must match {_USERNAME_RE.pattern}: lowercase/underscore start, "
+                f"then [a-z0-9_-], max 32 chars — no spaces, uppercase, or "
+                f"shell/sudoers metacharacters)"
+            )
+        return value
+    # In-memory carrier ONLY (D11): the execution mode is NOT a user-editable toml
+    # field — it is setup-determined and resolved at runtime from the per-operator
+    # marker (``core.setup_state.resolve_execution_mode``). ``from_toml`` rejects a
+    # toml that sets it; the field is populated programmatically (by setup, by
+    # ``minimal_host_config``, and by the runtime overlay in ``cli.main``).
+    docker_execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
     workspace_bridge_group: str = "sb-ws"
 
 
@@ -104,6 +170,9 @@ class HostConfig(BaseModel):
             FileNotFoundError: If the canonical file does not exist.
             tomllib.TOMLDecodeError: If the file contains invalid TOML.
             pydantic.ValidationError: If the content fails schema validation.
+            ValueError: If the ``[host]`` table sets ``docker_execution_mode`` —
+                that field is setup-determined (the per-operator marker), not a
+                user-editable toml value (D11).
         """
         path = sandbox_ai_home() / "config" / "sandbox-ai.toml"
         try:
@@ -111,16 +180,63 @@ class HostConfig(BaseModel):
                 raw = tomllib.load(f)
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"No sandbox-ai.toml found at {path}. Run sandbox init to create one.") from exc
+        host_table = raw.get("host")
+        if isinstance(host_table, dict) and "docker_execution_mode" in host_table:
+            raise ValueError(
+                f"docker_execution_mode is no longer a sandbox-ai.toml field; it is "
+                f"setup-determined (the per-operator setup-state marker). Remove it "
+                f"from {path} and rerun `sudo sandbox setup` to change the mode."
+            )
         return cls.model_validate(raw)
 
 
-def minimal_host_config(user: str, auth: MachinectlAuth) -> HostConfig:
-    """Build a HostConfig carrying only the two fields the dispatch boundary reads.
+def minimal_host_config(
+    user: str, auth: MachinectlAuth, mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
+) -> HostConfig:
+    """Build a HostConfig carrying only the fields the dispatch boundary reads.
 
-    The two fields are ``docker_unprivileged_user`` and
-    ``machinectl_authentication``.
+    The fields are ``docker_unprivileged_user``, ``machinectl_authentication``,
+    and ``docker_execution_mode`` (defaulting to ``SEPARATE_USER``).
     """
-    return HostConfig(host=HostSettings(docker_unprivileged_user=user, machinectl_authentication=auth))
+    return HostConfig(
+        host=HostSettings(
+            docker_unprivileged_user=user,
+            machinectl_authentication=auth,
+            docker_execution_mode=mode,
+        )
+    )
+
+
+def is_operator_rootless(host_config: HostConfig) -> bool:
+    """True iff host_config selects operator-rootless execution mode."""
+    return host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+
+def resolve_daemon_owner_settings(host: HostSettings) -> str:
+    """Resolve the rootless-daemon owner from :class:`HostSettings` (design D7).
+
+    ``separate-user`` → the configured ``docker_unprivileged_user``;
+    ``operator-rootless`` → the **invoking user** (:func:`getpass.getuser`), the
+    operator whose own user runs the daemon. The ``operator-rootless`` branch
+    NEVER reads ``docker_unprivileged_user`` (it would resolve to the stale
+    default ``"sandbox"`` and silently corrupt on-disk ownership). This is the
+    single owner-resolution worker — the one sanctioned reader of
+    ``docker_unprivileged_user`` for owner purposes — that the internal helpers
+    holding only ``HostSettings`` (``workspace_bridge_gid``, hydration's
+    bridge-gid translation, the workspace shared-group phase) route through.
+    """
+    if host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        return getpass.getuser()
+    return host.docker_unprivileged_user
+
+
+def resolve_daemon_owner(host_config: HostConfig) -> str:
+    """Resolve the rootless-daemon owner (design D7) — the ``HostConfig`` alias.
+
+    The command-level resolver; delegates to :func:`resolve_daemon_owner_settings`.
+    The runtime parallel of setup's ``daemon_owner_user(ctx)``.
+    """
+    return resolve_daemon_owner_settings(host_config.host)
 
 
 def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
@@ -170,6 +286,39 @@ def pipe_cmd(user: str) -> list[str]:
     a fixed, audited orchestrator path rather than a user-typed command.
     """
     return ["systemd-run", "-q", "--pipe", f"--uid={user}"]
+
+
+def sudo_pipe_cmd(user: str) -> list[str]:
+    """Build the *privileged* byte-pipe primitive: ``["sudo", *pipe_cmd(user)]``.
+
+    The per-op-sudoers-authorized sibling of :func:`pipe_cmd`. Where ``pipe_cmd``
+    crosses into ``user`` as an already-privileged caller (root setup phases, the
+    SSH ``ProxyCommand`` path), ``sudo_pipe_cmd`` prepends ``sudo`` so an
+    unprivileged operator can cross via a per-op sudoers rule that authorizes
+    exactly this argv (separate-user + SUDO dispatch routing — design D2).
+
+    It **delegates** to :func:`pipe_cmd` and never re-spells the transient-unit
+    literal — ``pipe_cmd`` remains the single sanctioned home for that literal
+    (design D1, single source of truth), so the convention guard
+    ``test_no_raw_systemd_run_outside_pipe_cmd`` needs no extension.
+
+    Takes only ``user`` — there is NO ``auth`` argument: the per-op sudoers rule
+    is the sole authorization layer (the per-host ``machinectl_authentication``
+    setting does not apply, exactly as for ``pipe_cmd``).
+
+    It MUST never append ``--unit``/``--description``: the rendered argv has to
+    stay byte-identical to the per-op sudoers ``Cmnd_Spec`` derived from this same
+    function, or sudo will refuse the crossing.
+
+    PAM-skip carries over from :func:`pipe_cmd`: the transient-unit launcher does
+    not invoke PAM, so ``pam_limits.conf`` and similar policies do not apply to
+    processes started this way (operator-signed-off — design D7).
+
+    Returns:
+        ``["sudo", *pipe_cmd(user)]`` — i.e. ``pipe_cmd``'s argv prefixed with
+        ``"sudo"``.
+    """
+    return ["sudo", *pipe_cmd(user)]
 
 
 def sudo_as_operator(operator: str) -> list[str]:
@@ -386,7 +535,7 @@ def workspace_bridge_gid(host: HostSettings) -> int:
             f"group {host.workspace_bridge_group!r} does not exist on this host; "
             f"run `sandbox doctor` for setup commands or override [host].workspace_bridge_group"
         ) from exc
-    in_container_gid_for_host_gid(gid, host.docker_unprivileged_user)
+    in_container_gid_for_host_gid(gid, resolve_daemon_owner_settings(host))
     return gid
 
 

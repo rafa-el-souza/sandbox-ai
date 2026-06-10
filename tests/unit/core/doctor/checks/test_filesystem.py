@@ -1,7 +1,7 @@
 """Tests for core.doctor.checks.filesystem.
 
-Covers `check_setfacl`, `check_acl_support`, `check_ancestor_traverse`,
-plus the private `_has_acl_exec` getfacl probe.
+Covers `check_setfacl`, `check_acl_support`, `check_cgroup_v2`,
+`check_ancestor_traverse`, plus the private `_has_acl_exec` getfacl probe.
 """
 
 from __future__ import annotations
@@ -13,12 +13,13 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 
-def test_module_exposes_three_check_functions_and_private_helpers() -> None:
+def test_module_exposes_check_functions_and_private_helpers() -> None:
     from core.doctor.checks import filesystem
 
     assert set(filesystem.__all__) == {
         "check_acl_support",
         "check_ancestor_traverse",
+        "check_cgroup_v2",
         "check_setfacl",
     }
     assert callable(filesystem._has_acl_exec)
@@ -93,6 +94,26 @@ class TestAclSupport:
             mock_tmp.return_value.__exit__ = lambda s, *a: None
             result = check_acl_support("sandbox", None)
             assert result.status == "fail"
+
+
+class TestCgroupV2:
+    def test_cgroup_v2_active_passes(self) -> None:
+        from core.doctor import check_cgroup_v2
+
+        with patch("core.doctor.checks.filesystem._CGROUP_V2_CONTROLLERS") as ctrls:
+            ctrls.exists.return_value = True
+            result = check_cgroup_v2("sandbox", None)
+        assert result.status == "pass"
+        assert result.name == "cgroup v2"
+
+    def test_cgroup_v2_absent_fails(self) -> None:
+        from core.doctor import check_cgroup_v2
+
+        with patch("core.doctor.checks.filesystem._CGROUP_V2_CONTROLLERS") as ctrls:
+            ctrls.exists.return_value = False
+            result = check_cgroup_v2("sandbox", None)
+        assert result.status == "fail"
+        assert result.remediation
 
 
 class TestCheckAncestorTraverse:
@@ -352,46 +373,46 @@ class TestNoSandboxRunning:
     def test_true_when_zero_projects(self, monkeypatch: Any) -> None:
         from core.dispatch import ProbeOutcome
         from core.doctor.checks.filesystem import _no_sandbox_running
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         monkeypatch.setattr(
             "core.dispatch.probe",
             lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="[]", message=""),
         )
-        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is True
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER) is True
 
     def test_false_when_projects_present(self, monkeypatch: Any) -> None:
         from core.dispatch import ProbeOutcome
         from core.doctor.checks.filesystem import _no_sandbox_running
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         monkeypatch.setattr(
             "core.dispatch.probe",
             lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout='[{"Name": "sandbox-x"}]', message=""),
         )
-        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER) is False
 
     def test_false_when_probe_not_ok(self, monkeypatch: Any) -> None:
         from core.dispatch import ProbeOutcome
         from core.doctor.checks.filesystem import _no_sandbox_running
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         monkeypatch.setattr(
             "core.dispatch.probe",
             lambda *a, **k: ProbeOutcome(ok=False, timed_out=False, stdout="", message="docker unreachable"),
         )
-        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER) is False
 
     def test_false_when_unparseable(self, monkeypatch: Any) -> None:
         from core.dispatch import ProbeOutcome
         from core.doctor.checks.filesystem import _no_sandbox_running
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         monkeypatch.setattr(
             "core.dispatch.probe",
             lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="not json{{{", message=""),
         )
-        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER) is False
 
     def test_false_when_json_not_a_list(self, monkeypatch: Any) -> None:
         # Valid JSON that decodes to a non-list (e.g. a daemon that emits an
@@ -399,10 +420,10 @@ class TestNoSandboxRunning:
         # False (report the real traverse gap, not hide it behind a SKIP).
         from core.dispatch import ProbeOutcome
         from core.doctor.checks.filesystem import _no_sandbox_running
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode, MachinectlAuth
 
         monkeypatch.setattr(
             "core.dispatch.probe",
             lambda *a, **k: ProbeOutcome(ok=True, timed_out=False, stdout="{}", message=""),
         )
-        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO) is False
+        assert _no_sandbox_running("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER) is False

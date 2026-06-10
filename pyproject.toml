@@ -59,6 +59,7 @@ markers = [
     "no_warm_mock: opt out of cli/conftest.py's autouse `_warm_check` patch (for tests that exercise the real function)",
     "no_host_config_mock: opt out of cli/conftest.py's autouse `HostConfig.from_toml` patch (for tests that exercise the real loader)",
     "no_seed_registry: opt out of cli/conftest.py's autouse `seed_registry` fixture (for tests that need a truly empty per-user home, e.g. `sandbox init` first-run flows)",
+    "no_preflight_mock: opt out of cli/conftest.py's autouse `preflight` crossing stub (for tests that exercise the real start/init preflight gate)",
     "timeout: per-test deadline enforced by pytest-timeout (plugin marker)",
 ]
 

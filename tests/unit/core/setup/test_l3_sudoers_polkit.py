@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.dispatch import Op
-from core.host_config import HostConfig, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    HostConfig,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l3_sudoers_polkit as l3
 from core.setup.l3_sudoers_polkit import (
     PHASE,
@@ -36,10 +41,10 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "sudoers_rule_v9.golden"
 
 
 @pytest.fixture(autouse=True)
-def _stable_machinectl(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the L0 machinectl resolution to the golden's typical value."""
+def _stable_systemd_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the L0 launcher resolution to the golden's typical value."""
     monkeypatch.setattr(
-        l3, "resolve_machinectl_path", lambda _hc: "/usr/bin/machinectl"
+        l3, "resolve_systemd_run_path", lambda _hc: "/usr/bin/systemd-run"
     )
 
 
@@ -64,14 +69,14 @@ def _ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> SetupContext:
 
 def test_render_matches_v9_golden() -> None:
     rendered = render_sudoers_rule(
-        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
     assert rendered == _FIXTURE.read_text()
 
 
 def test_render_has_zero_double_quotes_in_every_cmnd_spec() -> None:
     rendered = render_sudoers_rule(
-        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
     # The Cmnd_Spec lines are inlined into the operator's user-spec (no
     # Cmnd_Alias — F-020); they run from the ``NOPASSWD: NOSETENV: \`` header to
@@ -83,7 +88,7 @@ def test_render_has_zero_double_quotes_in_every_cmnd_spec() -> None:
 
 def test_render_enumerates_every_op_once() -> None:
     rendered = render_sudoers_rule(
-        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
     for op in Op:
         assert f"dispatch\\ {op.value}" in rendered
@@ -91,7 +96,7 @@ def test_render_enumerates_every_op_once() -> None:
 
 def test_no_arg_ops_omit_trailing_glob() -> None:
     rendered = render_sudoers_rule(
-        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
     assert "dispatch\\ auth-probe," in rendered
     # No wildcard for no-arg ops (V9 B7 anti-arg-smuggling preserved).
@@ -110,15 +115,181 @@ def test_no_arg_ops_also_grant_exact_check_probe_shape() -> None:
     arg-smuggling stays denied.
     """
     rendered = render_sudoers_rule(
-        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
-    for no_arg in ("auth-probe", "compose-ls", "docker-version"):
+    for no_arg in ("auth-probe", "compose-ls", "docker-version", "preflight"):
         assert f"dispatch\\ {no_arg}," in rendered  # exact runtime shape
         assert f"dispatch\\ {no_arg}\\ --check" in rendered  # exact probe shape
         assert f"dispatch\\ {no_arg}\\ *" not in rendered  # never a wildcard
     # Arg-ops' ``\\ *`` already covers ``--check``, so they get NO separate
     # ``--check`` entry.
     assert "dispatch\\ compose-up\\ --check" not in rendered
+
+
+# ── C-009 D4: pipe-only spec, no machinectl operator spec, SSOT no-drift ──────
+
+
+def test_render_emits_pipe_spec_per_arg_op() -> None:
+    """Each arg op's spec is the ``systemd-run --pipe`` argv + trailing ``\\ *``."""
+    rendered = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    assert (
+        "/usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c "
+        "/usr/local/libexec/sandbox-ai/dispatch\\ compose-up\\ *" in rendered
+    )
+
+
+def test_render_emits_exactly_one_fwd_arg_spec_at_enum_tail() -> None:
+    """C-010: ``fwd`` renders as an ordinary arg-bearing op — one ``\\ *`` spec.
+
+    The streaming op (op 12, the attach ProxyCommand payload) is an arg-bearing
+    op at the sudoers layer: a single ``\\ *`` spec covers both the runtime wire
+    form (``fwd <inst> --project <P> --ip <IP>``) and the lone ``--check`` probe
+    form, exactly like the other arg ops. It needs NO streaming-specific
+    renderer treatment (the framed/streaming split lives only in the dispatcher,
+    after authorization). It is NOT a no-arg op, so it gets exactly ONE spec
+    (the ``\\ *`` form) and never the bare + exact-``--check`` double-spec.
+    """
+    rendered = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    base = "/usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c "
+    fwd_arg_spec = f"{base}/usr/local/libexec/sandbox-ai/dispatch\\ fwd\\ *"
+    # Exactly one ``fwd`` spec, in the ``\\ *`` arg-op form.
+    assert rendered.count("dispatch\\ fwd") == 1
+    assert fwd_arg_spec in rendered
+    # ``fwd`` is NOT a no-arg op: no bare/exact-``--check`` double-spec.
+    assert "dispatch\\ fwd," not in rendered
+    assert "dispatch\\ fwd\\ --check" not in rendered
+    # Enum-derived ordering: ``fwd`` is the last enum member, so its spec is the
+    # final (trailing, comma-less) Cmnd_Spec in the rendered body.
+    assert rendered.rstrip().endswith(fwd_arg_spec)
+    # The no-arg double-spec set is unchanged: exactly these four no-arg ops.
+    assert frozenset(
+        {"auth-probe", "compose-ls", "docker-version", "preflight"}
+    ) == l3._NO_ARG_OP_NAMES
+    assert "fwd" not in l3._NO_ARG_OP_NAMES
+
+
+def test_render_emits_no_machinectl_operator_spec() -> None:
+    """D4: under SUDO the machinectl operator ``Cmnd_Spec`` is GONE entirely.
+
+    Every op crosses via the pipe (``build_invocation`` → ``sudo_pipe_cmd``), so
+    a ``machinectl shell <user>@.host`` operator grant would be dead authz. The
+    rendered rule must contain no ``machinectl`` token at all.
+    """
+    rendered = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    assert "machinectl" not in rendered
+    assert "shell sandbox@.host" not in rendered
+
+
+def test_render_no_arg_op_pipe_specs_are_exact() -> None:
+    """No-arg op gets the two EXACT pipe specs (bare + ``\\ --check``), no glob."""
+    rendered = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    base = "/usr/bin/systemd-run -q --pipe --uid=sandbox /bin/bash -c "
+    assert (
+        f"{base}/usr/local/libexec/sandbox-ai/dispatch\\ auth-probe," in rendered
+    )
+    assert (
+        f"{base}/usr/local/libexec/sandbox-ai/dispatch\\ auth-probe\\ --check"
+        in rendered
+    )
+    assert (
+        f"{base}/usr/local/libexec/sandbox-ai/dispatch\\ auth-probe\\ *"
+        not in rendered
+    )
+
+
+def test_pipe_spec_prefix_matches_build_invocation_no_drift() -> None:
+    """D4 SSOT drift meta-test: the rendered spec prefix == ``build_invocation``.
+
+    For every op, the rendered pipe ``Cmnd_Spec`` (modulo the relative→absolute
+    launcher substitution + the F-004 backslash-escaping + trailing
+    ``\\ *``/exact) MUST equal the argv ``core.dispatch.build_invocation`` builds
+    for that op. Both derive from the same ``sudo_pipe_crossing_argv`` /
+    ``dispatch_payload`` primitives, so the grant and the crossing provably
+    cannot diverge.
+    """
+    from core.dispatch import build_invocation, sudo_pipe_crossing_argv
+
+    path = "/usr/bin/systemd-run"
+    user = "sandbox"
+    hc = _hc()
+    for op in Op:
+        # The grant base: sudo-stripped crossing argv (abspath launcher) +
+        # /bin/bash -c + the bare <dispatch> <op> payload, F-004-escaped.
+        expected_argv = [
+            *sudo_pipe_crossing_argv(path, user),
+            "/bin/bash",
+            "-c",
+            f"/usr/local/libexec/sandbox-ai/dispatch {op.value}",
+        ]
+        expected_base = " ".join(expected_argv).replace(
+            f"dispatch {op.value}", f"dispatch\\ {op.value}"
+        )
+        specs = l3._cmnd_specs(path, user, op)
+        # Every rendered spec for the op starts with the SSOT-derived base.
+        for spec in specs:
+            assert spec.startswith(expected_base), (op.value, spec)
+
+    # For the no-arg ops (no registry-dependent wire expansion) compare the FULL
+    # ``build_invocation`` argv: the leading ``sudo`` is stripped, the relative
+    # launcher is abspath'd, and the inner is F-004-escaped — proving the
+    # rendered grant is reconstructable from the live invocation primitive.
+    for op in (Op.AUTH_PROBE, Op.COMPOSE_LS, Op.DOCKER_VERSION):
+        inv = build_invocation(op, [], hc)
+        # inv == [sudo, <relative-launcher>, -q, --pipe, --uid=user,
+        #         /bin/bash, -c, "<dispatch> <op>"]
+        bridged = [path, *inv[2:-1], inv[-1].replace(" ", "\\ ")]
+        derived = " ".join(bridged)
+        assert l3._cmnd_specs(path, user, op)[0] == derived, op.value
+
+
+# ── C-009 authz1: injection-deny set on the pipe argv ─────────────────────────
+
+
+def test_pipe_specs_deny_injection_authz1() -> None:
+    """authz1 mirror: only the enumerated per-op argv matches; injections deny.
+
+    The rendered specs are exact strings (plus a trailing ``\\ *`` for arg ops);
+    none of the injection shapes appears verbatim, so sudo would never authorize
+    them. (visudo accepts the file; runtime matching is per-Cmnd_Spec.)
+    """
+    rendered = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    # A transient-unit-naming flag, an ExecStartPre property, a non-enumerated
+    # op, and an arbitrary command must NOT appear as a granted Cmnd_Spec.
+    assert "--unit" not in rendered
+    assert "--property" not in rendered
+    assert "ExecStartPre" not in rendered
+    assert "dispatch\\ not-an-op" not in rendered
+    assert "/bin/bash -c /bin/sh" not in rendered
+    # A trailing extra arg on a no-arg op (auth-probe) is denied: the only
+    # auth-probe grants are the bare + exact ``--check`` shapes (no ``\\ *``).
+    assert "dispatch\\ auth-probe\\ evil" not in rendered
+    assert "dispatch\\ auth-probe\\ *" not in rendered
+
+
+def test_pipe_specs_pass_visudo(tmp_path: Path) -> None:
+    """The rendered pipe-only rule must still pass ``visudo -cf``."""
+    visudo = shutil.which("visudo")
+    if visudo is None:
+        pytest.skip("visudo not available on this host")
+    rule = render_sudoers_rule(
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
+    )
+    staged = tmp_path / "staged"
+    staged.write_text(rule)
+    result = subprocess.run(
+        [visudo, "-cf", str(staged)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
 
 
 # ── F-020 multi-operator: no shared Cmnd_Alias namespace ─────────────────────
@@ -130,7 +301,7 @@ def test_render_defines_no_cmnd_alias() -> None:
     specs are inlined into the operator's user-spec instead.
     """
     rendered = render_sudoers_rule(
-        "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+        "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
     )
     assert "Cmnd_Alias" not in rendered
     # The grant is the operator's own user-spec carrying the inlined cmnd list.
@@ -148,8 +319,8 @@ def test_two_operators_pass_visudo_without_duplicate_alias(
     visudo = shutil.which("visudo")
     if visudo is None:
         pytest.skip("visudo not available on this host")
-    alice = render_sudoers_rule("/usr/bin/machinectl", "alice", "testhost", "sandbox")
-    bob = render_sudoers_rule("/usr/bin/machinectl", "bob", "testhost", "sandbox")
+    alice = render_sudoers_rule("/usr/bin/systemd-run", "alice", "testhost", "sandbox")
+    bob = render_sudoers_rule("/usr/bin/systemd-run", "bob", "testhost", "sandbox")
     # sudo loads every /etc/sudoers.d/* file into ONE policy; concatenation
     # reproduces that (a duplicate Cmnd_Alias across files is the real failure).
     combined = tmp_path / "combined"
@@ -181,7 +352,7 @@ def test_render_refuses_quote_in_cmnd_spec(
     )
     with pytest.raises(RuleRenderError, match="F-004"):
         render_sudoers_rule(
-            "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+            "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
         )
 
 
@@ -194,8 +365,23 @@ def test_render_refuses_bad_op_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(l3, "Op", [_BadOp()])
     with pytest.raises(RuleRenderError, match=r"\[a-z0-9-\]"):
         render_sudoers_rule(
-            "/usr/bin/machinectl", "alice", "testhost", "sandbox"
+            "/usr/bin/systemd-run", "alice", "testhost", "sandbox"
         )
+
+
+@pytest.mark.parametrize(
+    "bad_user",
+    ["", "has space", "UPPER", "a;b", "--property=x", "user!", "a" * 33],
+)
+def test_render_refuses_bad_sandbox_user(bad_user: str) -> None:
+    """M-1: a ``sandbox_user`` not matching the POSIX grammar MUST raise.
+
+    This is the render-time fail-closed guard (mirrors the op-name gate): a
+    space/metacharacter in the ``--uid=<user>`` operand would corrupt the
+    rendered rule, even if the ``HostSettings`` field validator were bypassed.
+    """
+    with pytest.raises(RuleRenderError, match="valid POSIX username"):
+        render_sudoers_rule("/usr/bin/systemd-run", "alice", "testhost", bad_user)
 
 
 # ── POLKIT branch ────────────────────────────────────────────────────────────
@@ -384,3 +570,5 @@ def test_phase_identity_and_graph() -> None:
     assert PHASE.depends_on == ("l7",)
     assert PHASE.identity == Identity.ROOT
     assert PHASE.rollback is l3._rollback
+    # no crossing → no sudoers/polkit AUTH GATE → separate-user only.
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})

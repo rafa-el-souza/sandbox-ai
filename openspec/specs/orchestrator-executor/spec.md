@@ -85,3 +85,31 @@ The system SHALL prepend environment variables to non-interactive compose comman
 - **WHEN** a non-interactive compose command is constructed for machinectl execution
 - **THEN** the command payload is prefixed with `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain` and includes `--ansi never` in the compose arguments
 
+### Requirement: Local Execution Path for Operator-Rootless Mode
+
+`Executor.run(cmd, *, framed=False)` (the default, non-PTY, non-sentinel path) SHALL be the sanctioned execution path for operator-rootless runtime ops: it runs `cmd` as a sterile local subprocess and returns a `CompletedProcess` whose `returncode`/`stdout` come directly from the process (no `__SANDBOX_BEGIN/EXIT` nonce parsing, no sentinel injection). On non-zero exit it SHALL raise `SandboxExecutionError`, and on timeout the raised error's `__cause__` SHALL be a `subprocess.TimeoutExpired` (preserving the timeout discrimination `core.dispatch.probe()` depends on). Neither `sentinel=True` (root setup-phase wrap) nor `framed=True` (dispatcher-emitted framing) SHALL be required for operator-rootless ops.
+
+#### Scenario: framed=False returns native exit
+
+- **WHEN** `Executor.run(argv, framed=False)` runs a local command that exits 0
+- **THEN** the returned `CompletedProcess.returncode == 0` and `stdout` is the command's real stdout, with no framing lines stripped or expected
+
+#### Scenario: framed=False raises on non-zero with timeout discriminable
+
+- **WHEN** `Executor.run(argv, framed=False)` runs a command that exits non-zero, or that times out
+- **THEN** it raises `SandboxExecutionError`; for the timeout case the error's `__cause__` is a `subprocess.TimeoutExpired`
+
+#### Scenario: default framed=False path returns raw stdout
+
+- **WHEN** `Executor.run(argv, framed=False)` succeeds
+- **THEN** the returned stdout is the process's raw stdout (no ANSI/CR/newline normalization is applied by the executor default path — that normalization is the caller's concern, applied by `core.dispatch` for runtime ops)
+
+### Requirement: Shared Captured-Output Normalization Helper
+
+The three-step normalization currently inlined in `Executor._sanitize_pty_output` (strip ANSI escape sequences, remove carriage returns, collapse 3+ consecutive newlines to 2) SHALL be available as a single shared helper so that both the `separate-user` framing-recovery path and the `operator-rootless` `core.dispatch` path normalize captured op output through one implementation (no duplicated normalization logic).
+
+#### Scenario: One normalization implementation, two callers
+
+- **WHEN** the framing-recovery path (`separate-user`) and the operator-rootless dispatch path each normalize captured stdout
+- **THEN** both invoke the same shared normalization helper (single source of truth), producing identical output for identical input
+

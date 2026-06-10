@@ -22,6 +22,22 @@ Shape #3 (the "gVisor Runsc Drift and Update Offering" contract):
 All install mechanics (download + sha512 verify + atomic install + ``chattr
 +i``) live in ``core.binary_install``; this phase only owns the probe/act
 policy.
+
+**L6a is separate-user only** (``applies_in`` excludes operator-rootless,
+D5a/O3): the root-owned runsc install is a host-root mutation, so in
+operator-rootless (where the apply pass runs unprivileged as the operator) it is
+owned by the ``host_batch`` ``RUNSC`` item + ``_bootstrap-host`` escalation
+(``host_batch._apply_runsc`` drives the same ``core.binary_install.install_pinned``
+mechanism). The runner reports the phase ``skipped (operator-rootless)`` in both
+passes, joining L1/L2/L2a and the M2 crossing-only phases. (``--update-runsc``:
+on a separate-user host this phase runs as today. operator-rootless has NO L6a
+subset to run — instead the runsc lifecycle (install AND pin-update) is owned by
+the ``host_batch`` ``RUNSC`` item: the classifier selects it whenever the on-disk
+sha is absent or drifts, and ``host_batch._apply_runsc`` installs with
+``force=True`` (unsealing the immutable target on a drift re-install). So a normal
+``sandbox setup`` re-run converges runsc to the pin under the one escalation, and
+``--update-runsc`` routes to that op-rootless body — no privileged operator-side
+L6a step is needed or possible.)
 """
 
 from __future__ import annotations
@@ -29,6 +45,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from core.binary_install import SHA_DISPLAY_PREFIX, detect_drift, install_pinned
+from core.host_config import DockerExecutionMode
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -119,4 +136,10 @@ PHASE = Phase(
     act=_act,
     reverify=_reverify,
     depends_on=("l6",),
+    # separate-user only. The root-owned runsc install is a host-root mutation;
+    # in operator-rootless it is owned by the ``host_batch`` ``RUNSC`` item +
+    # ``_bootstrap-host`` escalation (design D5a / O3). Gated OUT (reported
+    # ``skipped`` in both passes), mirroring L1/L2/L2a and the M2 crossing-only
+    # phases.
+    applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )

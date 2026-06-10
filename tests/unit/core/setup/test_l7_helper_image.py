@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l7_helper_image as l7
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -92,6 +96,42 @@ def test_act_pulls_pinned_digest(store: _Store, ctx: SetupContext) -> None:
     assert "pulled" in detail
 
 
+def test_act_separate_user_pull_crosses_via_machinectl_sentinel(
+    monkeypatch: pytest.MonkeyPatch, ctx: SetupContext
+) -> None:
+    """C-009 §3.7 guard: the L7 ROOT crossing stays machinectl + ``sentinel=True``.
+
+    L7 runs as root BEFORE the operator sudoers rule exists, crossing into the
+    sandbox user via ``daemon_owner_crossing`` (``machinectl_cmd`` in
+    separate-user) with the orchestrator-injected sentinel ON. It neither uses
+    nor depends on the operator pipe ``Cmnd_Spec`` (L3a/L8's ``framed=True``
+    pipe path), so it MUST NOT be touched.
+    """
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        inner = cmd[-1]
+        if inner.startswith("docker image inspect "):
+            raise SandboxExecutionError("no such image")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    l7.PHASE.act(ctx)
+
+    pulls = [
+        (c, s) for c, s in seen if c[-1].startswith("docker pull ")
+    ]
+    assert len(pulls) == 1
+    cmd, sentinel = pulls[0]
+    assert "machinectl" in cmd
+    assert sentinel is True
+    assert "systemd-run" not in cmd
+
+
 def test_reverify_true_after_pull(store: _Store, ctx: SetupContext) -> None:
     l7.PHASE.act(ctx)
     assert l7.PHASE.reverify(ctx) is True
@@ -117,6 +157,60 @@ def test_content_aware(
         store.refs.add(l7._HELPER_TAGGED)
 
     assert_phase_content_aware(l7.PHASE, ctx, make_stale)
+
+
+# ── operator-rootless: LOCAL docker pull, no machinectl (§6.4) ────────────────
+
+
+def test_act_operator_rootless_local_pull(monkeypatch: pytest.MonkeyPatch) -> None:
+    """op-rootless act pulls the pinned digest LOCAL with the injected session env
+    (no machinectl, sentinel off) — finding 8.11.
+
+    The daemon owner is the operator, so the pull is a local ``docker`` subprocess
+    in the operator's session — but the sterile Executor scrubs the env, so the
+    crossing injects HOME / XDG_RUNTIME_DIR / DBUS / DOCKER_HOST so ``docker`` hits
+    the rootless socket (not the rootful ``/var/run/docker.sock``).
+    """
+    import pwd
+
+    monkeypatch.setattr(
+        "core.setup.phase_runner.pwd.getpwnam",
+        lambda _n: pwd.struct_passwd(("alice", "x", 5000, 5000, "", "/home/alice", "/bin/bash")),
+    )
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+    ctx = SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser",
+            MachinectlAuth.SUDO,
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        ),
+        operator="alice",
+    )
+
+    detail = l7.PHASE.act(ctx)
+
+    assert f"docker pull {l7._HELPER_REF}" in detail or "pulled" in detail
+    (cmd, sentinel), = seen
+    assert cmd == [
+        "env",
+        "HOME=/home/alice",
+        "XDG_RUNTIME_DIR=/run/user/5000",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
+        "DOCKER_HOST=unix:///run/user/5000/docker.sock",
+        "/bin/bash",
+        "-c",
+        f"docker pull {l7._HELPER_REF}",
+    ]
+    assert "machinectl" not in " ".join(cmd)
+    assert sentinel is False
 
 
 def test_phase_shape() -> None:

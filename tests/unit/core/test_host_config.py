@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from core.host_config import (
+    DockerExecutionMode,
     HostConfig,
     HostSettings,
     MachinectlAuth,
@@ -21,12 +22,16 @@ from core.host_config import (
     host_gid_for_in_container,
     host_id_for_in_container,
     in_container_gid_for_host_gid,
+    is_operator_rootless,
     machinectl_cmd,
+    minimal_host_config,
     parse_subgid_for_user,
     parse_subuid_for_user,
     pipe_cmd,
+    resolve_daemon_owner,
     sandbox_ai_home,
     sudo_as_operator,
+    sudo_pipe_cmd,
     workspace_bridge_gid,
 )
 from pydantic import ValidationError
@@ -154,11 +159,49 @@ class TestHostConfigFromToml:
         with pytest.raises(ValidationError):
             HostConfig.from_toml()
 
+    @pytest.mark.parametrize(
+        "good_user",
+        ["sandbox", "_svc", "a", "user-1", "claude_sandbox", "x" * 32],
+    )
+    def test_valid_docker_unprivileged_user_accepted(self, good_user: str) -> None:
+        """M-1: POSIX-conformant usernames pass the field validator."""
+        settings = HostSettings(docker_unprivileged_user=good_user)
+        assert settings.docker_unprivileged_user == good_user
+
+    @pytest.mark.parametrize(
+        "bad_user",
+        ["", "has space", "UPPER", "a;b", "--property=x", "1abc", "user!", "x" * 33],
+    )
+    def test_invalid_docker_unprivileged_user_rejected(self, bad_user: str) -> None:
+        """M-1: empty / spaces / uppercase / metacharacters fail the validator.
+
+        The value reaches the ``--uid=<user>`` crossing operand and the sudoers
+        ``Cmnd_Spec``; reject it at the Pydantic boundary, fail-closed.
+        """
+        with pytest.raises(ValidationError, match="valid POSIX username"):
+            HostSettings(docker_unprivileged_user=bad_user)
+
     def test_default_auth_mode_is_sudo(self, isolated_sandbox_ai_home: Path) -> None:
         """Omitted machinectl_authentication defaults to 'sudo'."""
         _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML_NO_AUTH)
         config = HostConfig.from_toml()
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
+
+    def test_docker_execution_mode_in_toml_rejected(self, isolated_sandbox_ai_home: Path) -> None:
+        """docker_execution_mode is setup-determined (the marker), not a toml field (D11).
+
+        ``from_toml`` rejects a ``[host]`` table that sets it — a manual edit only
+        desyncs from the authoritative marker, so it fails loudly rather than being
+        silently overridden by the runtime overlay.
+        """
+        bad_toml = (
+            '[host]\n'
+            'docker_unprivileged_user = "sandbox"\n'
+            'docker_execution_mode = "operator-rootless"\n'
+        )
+        _seed_host_config(isolated_sandbox_ai_home, bad_toml)
+        with pytest.raises(ValueError, match="setup-determined"):
+            HostConfig.from_toml()
 
     def test_loader_honors_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Loader reads from SANDBOX_AI_HOME-resolved path."""
@@ -199,6 +242,137 @@ class TestMachinectlAuthEnum:
         """Enum values are the expected strings."""
         assert MachinectlAuth.SUDO.value == "sudo"
         assert MachinectlAuth.POLKIT.value == "polkit"
+
+
+class TestDockerExecutionMode:
+    """DockerExecutionMode selector field and StrEnum members."""
+
+    def test_exactly_two_members(self) -> None:
+        """DockerExecutionMode contains exactly SEPARATE_USER and OPERATOR_ROOTLESS."""
+        members = list(DockerExecutionMode)
+        assert len(members) == 2
+        assert DockerExecutionMode.SEPARATE_USER in members
+        assert DockerExecutionMode.OPERATOR_ROOTLESS in members
+
+    def test_string_values(self) -> None:
+        """Enum values are the expected strings."""
+        assert DockerExecutionMode.SEPARATE_USER.value == "separate-user"
+        assert DockerExecutionMode.OPERATOR_ROOTLESS.value == "operator-rootless"
+
+    def test_defaults_to_separate_user_when_omitted(self) -> None:
+        """A [host] section without docker_execution_mode defaults to SEPARATE_USER."""
+        hc = HostSettings.model_validate({"docker_unprivileged_user": "sandbox"})
+        assert hc.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+    def test_operator_rootless_parses(self) -> None:
+        """'operator-rootless' parses to the OPERATOR_ROOTLESS member."""
+        hc = HostSettings.model_validate(
+            {"docker_unprivileged_user": "sandbox", "docker_execution_mode": "operator-rootless"}
+        )
+        assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+    def test_invalid_value_raises_validation_error(self) -> None:
+        """An invalid enum value raises pydantic.ValidationError."""
+        with pytest.raises(ValidationError):
+            HostSettings.model_validate(
+                {"docker_unprivileged_user": "sandbox", "docker_execution_mode": "rootful"}
+            )
+
+    def test_machinectl_auth_inert_under_operator_rootless(self) -> None:
+        """operator-rootless together with machinectl_authentication=sudo validates (inert, not error)."""
+        hc = HostSettings.model_validate(
+            {
+                "docker_unprivileged_user": "sandbox",
+                "docker_execution_mode": "operator-rootless",
+                "machinectl_authentication": "sudo",
+            }
+        )
+        assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+        assert hc.machinectl_authentication == MachinectlAuth.SUDO
+
+
+class TestMinimalHostConfigMode:
+    """minimal_host_config() docker_execution_mode parameter (additive, defaulted)."""
+
+    def test_default_mode_is_separate_user(self) -> None:
+        """Omitting the mode parameter yields SEPARATE_USER."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+
+    def test_explicit_operator_rootless_mode(self) -> None:
+        """Passing mode=OPERATOR_ROOTLESS sets the field."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+
+
+class TestIsOperatorRootless:
+    """is_operator_rootless() single-source mode predicate."""
+
+    def test_true_for_operator_rootless(self) -> None:
+        """Returns True when the host_config carries OPERATOR_ROOTLESS."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert is_operator_rootless(hc) is True
+
+    def test_false_for_separate_user(self) -> None:
+        """Returns False for the default SEPARATE_USER mode."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        assert is_operator_rootless(hc) is False
+
+
+class TestResolveDaemonOwner:
+    """resolve_daemon_owner() — runtime daemon-owner resolver (D7)."""
+
+    def test_operator_rootless_returns_invoking_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """In operator-rootless mode the owner is the current (invoking) user."""
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert resolve_daemon_owner(hc) == "alice"
+
+    def test_operator_rootless_never_reads_docker_unprivileged_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The op-rootless branch must NOT consult docker_unprivileged_user."""
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        hc = minimal_host_config(
+            "the-stale-default", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+        )
+        owner = resolve_daemon_owner(hc)
+        assert owner == "alice"
+        assert owner != "the-stale-default"
+
+    def test_separate_user_returns_docker_unprivileged_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In separate-user mode the owner is the configured dedicated user."""
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        assert resolve_daemon_owner(hc) == "sandbox"
+
+
+class TestResolveDaemonOwnerSettings:
+    """resolve_daemon_owner_settings() — the HostSettings-level owner worker (D7).
+
+    The single owner-resolution worker the HostSettings-only helpers
+    (workspace_bridge_gid, hydration bridge-gid, the workspace shared-group phase)
+    route through; resolve_daemon_owner is the HostConfig-level alias.
+    """
+
+    def test_operator_rootless_is_invoking_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import resolve_daemon_owner_settings
+
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        host = HostSettings(
+            docker_unprivileged_user="the-stale-default",
+            docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        )
+        assert resolve_daemon_owner_settings(host) == "alice"
+
+    def test_separate_user_is_docker_unprivileged_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from core.host_config import resolve_daemon_owner_settings
+
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        host = HostSettings(docker_unprivileged_user="sandbox")
+        assert resolve_daemon_owner_settings(host) == "sandbox"
 
 
 # ─── Task 1.3: machinectl_cmd() ──────────────────────────────────────────────
@@ -248,6 +422,39 @@ class TestPipeCmd:
         """
         assert set(inspect.signature(pipe_cmd).parameters) == {"user"}
         assert set(inspect.signature(machinectl_cmd).parameters) == {"user", "auth"}
+
+
+# ─── sudo_pipe_cmd() privileged byte-pipe primitive ──────────────────────────
+
+
+class TestSudoPipeCmd:
+    """sudo_pipe_cmd() — the per-op-sudoers-authorized sibling of pipe_cmd (D1)."""
+
+    def test_is_sudo_prefixed_pipe_cmd(self) -> None:
+        """Canonical shape: ['sudo', *pipe_cmd(user)] — delegates, never re-spells.
+
+        Asserts the delegation contract only; pipe_cmd's concrete argv is owned
+        and pinned by pipe_cmd's own test — re-pinning the expanded literal here
+        would duplicate that constant (anti-hack rule 4, single source of truth).
+        """
+        assert sudo_pipe_cmd("claude-sandbox") == ["sudo", *pipe_cmd("claude-sandbox")]
+
+    def test_signature_takes_only_user(self) -> None:
+        """No ``auth`` argument: the per-op sudoers rule is the sole authz layer."""
+        assert set(inspect.signature(sudo_pipe_cmd).parameters) == {"user"}
+
+    def test_no_unit_or_description_token(self) -> None:
+        """Argv must stay byte-identical to the per-op sudoers Cmnd_Spec."""
+        argv = sudo_pipe_cmd("claude-sandbox")
+        assert not any(a == "--unit" or a.startswith("--unit=") for a in argv)
+        assert not any(a == "--description" or a.startswith("--description=") for a in argv)
+
+    def test_distinct_from_pipe_cmd_by_sudo_prefix(self) -> None:
+        """Distinct from pipe_cmd: the sole difference is the leading ``sudo``."""
+        argv = sudo_pipe_cmd("claude-sandbox")
+        assert argv != pipe_cmd("claude-sandbox")
+        assert argv[0] == "sudo"
+        assert argv[1:] == pipe_cmd("claude-sandbox")
 
 
 # ─── sudo_as_operator() setuid-safe operator drop ────────────────────────────
@@ -480,6 +687,26 @@ class TestWorkspaceBridgeGid:
         host = HostSettings(docker_unprivileged_user="claude-sandbox")
         with pytest.raises(SubgidOutOfRangeError):
             workspace_bridge_gid(host)
+
+    def test_operator_rootless_validates_against_operator_subgid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """In op-rootless the bridge gid is validated against the OPERATOR's subgid
+        range (D7), not the stale docker_unprivileged_user (which has no entry)."""
+        # Only the operator ("alice") has a subgid range; the stale default does not.
+        _patch_subgid(monkeypatch, tmp_path, "alice:200000:65536\n")
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+
+        class _Gr:
+            gr_gid = 200500
+
+        monkeypatch.setattr("core.host_config.grp.getgrnam", lambda n: _Gr())
+        host = HostSettings(
+            docker_unprivileged_user="the-stale-default",
+            docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        )
+        # Resolves + validates against alice's range (no NoSubgidRangeError).
+        assert workspace_bridge_gid(host) == 200500
 
 
 class TestAutodetectRecommendation:

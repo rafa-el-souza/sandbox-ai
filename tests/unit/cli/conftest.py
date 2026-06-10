@@ -110,6 +110,45 @@ def _stop_warm_check(request: pytest.FixtureRequest) -> object:
 
 
 @pytest.fixture(autouse=True)
+def _preflight_pass_default(request: pytest.FixtureRequest) -> object:
+    """Default: the ``start``/``init`` ``preflight`` crossing passes cleanly.
+
+    ``start``/``init`` collapse their privilege-boundary preflight into ONE
+    ``dispatch.probe("preflight", ...)`` crossing whose bundle is parsed and
+    interpreted orchestrator-side (C-009 D6). Most CLI tests don't exercise the
+    preflight itself — they want it to pass so the rest of the command runs — so
+    this autouse fixture stubs the crossing to a healthy bundle and the
+    interpret seams to clean verdicts. Tests that exercise the preflight gate
+    directly mark themselves with ``@pytest.mark.no_preflight_mock``.
+    """
+    if "no_preflight_mock" in request.keywords:
+        yield
+        return
+    from core.dispatch import ProbeOutcome
+
+    nonce = "feedface00c0ffee"
+    healthy = ProbeOutcome(
+        ok=True,
+        timed_out=False,
+        stdout=f"__PREFLIGHT_Q_{nonce}_auth-probe__\nok\n__PREFLIGHT_RC_{nonce}_auth-probe_0__",
+        message="",
+        preflight_nonce=nonce,
+    )
+    with (
+        patch("cli.main.dispatch.probe", return_value=healthy),
+        patch("cli.main.interpret_preflight_bundle", return_value=[]),
+        patch("cli.main.interpret_compose_collision_segment", return_value=_pass_check("compose")),
+    ):
+        yield
+
+
+def _pass_check(name: str) -> object:
+    from core.doctor.types import CheckResult
+
+    return CheckResult(status="pass", name=name, detail="ok")
+
+
+@pytest.fixture(autouse=True)
 def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
     """Tests that exercise ``HostConfig.from_toml`` directly mark themselves
     with ``@pytest.mark.no_host_config_mock`` to bypass this autouse patch.
@@ -117,13 +156,37 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
     if "no_host_config_mock" in request.keywords:
         yield
         return
-    from core.host_config import HostConfig
+    from core.host_config import DockerExecutionMode, HostConfig
 
     cfg = HostConfig.model_validate(
         {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
     )
-    with patch("cli.main.HostConfig.from_toml", return_value=cfg):
+    # The runtime resolves the execution mode from the per-operator marker (D11)
+    # via ``_resolve_full_host_config`` → ``resolve_execution_mode``. The marker
+    # lives at a root-owned ``/usr/local/libexec`` path absent in tests, so stub
+    # the resolver to the default separate-user mode; op-rootless tests override
+    # it (or use ``@pytest.mark.no_host_config_mock``).
+    with (
+        patch("cli.main.HostConfig.from_toml", return_value=cfg),
+        patch(
+            "cli.main.resolve_execution_mode",
+            return_value=DockerExecutionMode.SEPARATE_USER,
+        ),
+    ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def stub_marker_write() -> object:
+    """Stub the separate-user root-owned marker write.
+
+    ``cli.main._record_separate_user_mode`` calls ``write_mode_root_owned``, which
+    ``chown``s the root-owned ``/usr/local/libexec/sandbox-ai/setup-state.json`` —
+    not writable in a unit test. Patched to a no-op Mock; yielded so the tests
+    that assert the marker was recorded can inspect ``.call_args``.
+    """
+    with patch("cli.main.write_mode_root_owned") as mock:
+        yield mock
 
 
 @pytest.fixture(autouse=True)

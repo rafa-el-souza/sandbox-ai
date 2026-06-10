@@ -434,6 +434,344 @@ def test_machinectl_cmd_deliberate_violation_is_detected(
     assert str(rogue) in detail
 
 
+# ── 5. Streaming-op discipline: fwd is reachable ONLY via proxy_argv ─────────
+#
+# The runtime-dispatcher "Streaming ProxyCommand Entrypoint" requirement pins,
+# structurally (the test_machinectl_cmd_callers_restricted pattern), that:
+#   (a) no src/ call site passes a streaming op (Op.FWD / "fwd") to
+#       core.dispatch.invoke()/probe() — those capture output the orchestrator
+#       would branch on, and a streaming op carries zero such content; and
+#   (b) no src/ module OTHER than core.dispatch constructs a ``dispatch fwd``
+#       payload or its docker-exec target argv (the ``/fwd`` dial) directly —
+#       core.dispatch.proxy_argv is the single sanctioned producer.
+# A hand-rolled fwd payload elsewhere would reintroduce the forgery surface the
+# streaming carve-out narrowed; this guard fails the gate if it reappears.
+
+# core.dispatch is the sole sanctioned home for fwd payload/argv construction.
+_STREAMING_DISPATCH_MODULE = "src/core/dispatch.py"
+# The wire payload prefix that crosses the boundary, and the in-container dial
+# binary of the docker-exec target argv. The payload SUBSTRING appearing in any
+# literal, or a literal EQUAL to the standalone ``/fwd`` argv element, OUTSIDE
+# core.dispatch means a module is hand-building the streaming crossing. The
+# argv-element match is by EQUALITY (not substring) so an unrelated path literal
+# like ``docker/admin/fwd.go`` (which merely contains ``/fwd``) is not a false
+# positive — only the discrete docker-exec ``"/fwd"`` argv element is the dial.
+# core.dispatch.proxy_argv is the single sanctioned producer of either literal;
+# there are no exemptions (cli.main._build_attach_argv and the start dry-run
+# preview obtain the ProxyCommand from proxy_argv, holding neither literal).
+_FWD_PAYLOAD_SUBSTR = "dispatch fwd"
+_FWD_TARGET_BINARY = "/fwd"
+
+
+def _fwd_invoke_probe_call_lines(tree: ast.AST) -> list[int]:
+    """Return line numbers of ``invoke(...)``/``probe(...)`` calls whose FIRST
+    positional argument names the streaming op (``Op.FWD`` attribute or the
+    ``"fwd"`` wire-name constant).
+
+    AST-only: the callee must be a bare ``invoke``/``probe`` name or a
+    ``….invoke``/``….probe`` attribute (e.g. ``dispatch.invoke``), and the first
+    arg is inspected for ``Op.FWD`` (``ast.Attribute`` ``attr == "FWD"``) or the
+    string constant ``"fwd"``.
+    """
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        callee = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else None
+        )
+        if callee not in {"invoke", "probe"}:
+            continue
+        first = node.args[0]
+        is_fwd = (isinstance(first, ast.Attribute) and first.attr == "FWD") or (
+            isinstance(first, ast.Constant) and first.value == "fwd"
+        )
+        if is_fwd:
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
+def _fwd_payload_literal_lines(tree: ast.AST) -> tuple[list[int], list[int]]:
+    """Return ``(payload_lines, target_argv_lines)`` for string-literal nodes.
+
+    ``payload_lines`` embed the ``dispatch fwd`` wire payload; ``target_argv_lines``
+    embed the bare ``/fwd`` docker-exec target binary. Both are sanctioned only
+    in core.dispatch. AST-only (``ast.Constant`` string nodes) so
+    comments/docstrings that merely *mention* the op in prose are NOT flagged —
+    only real string literals a module would interpolate into a crossing argv."""
+    payload_lines: list[int] = []
+    target_lines: list[int] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if _FWD_PAYLOAD_SUBSTR in node.value:
+            payload_lines.append(node.lineno)
+        elif node.value == _FWD_TARGET_BINARY:
+            target_lines.append(node.lineno)
+    return sorted(payload_lines), sorted(target_lines)
+
+
+def _streaming_op_violations(
+    files: Iterator[Path],
+) -> list[tuple[Path, str, list[int]]]:
+    """Scan ``files``; return ``(path, kind, linenos)`` for each violation.
+
+    ``kind`` is ``"invoke/probe"`` (a streaming op passed to invoke/probe — flagged
+    in EVERY scanned file incl. core.dispatch, which must never do it either) or
+    ``"payload"`` (a ``dispatch fwd`` / ``/fwd`` literal OUTSIDE core.dispatch).
+
+    Reusable detector seam (anti-hack rule 5): ``files`` is a parameter so the
+    deliberate-violation regression drives the same predicate."""
+    offenders: list[tuple[Path, str, list[int]]] = []
+    for src in files:
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        tree = ast.parse(src.read_text(), filename=str(src))
+        ip_lines = _fwd_invoke_probe_call_lines(tree)
+        if ip_lines:
+            offenders.append((src, "invoke/probe", ip_lines))
+        # Payload/argv construction is sanctioned ONLY in core.dispatch.
+        if rel != _STREAMING_DISPATCH_MODULE:
+            payload_lines, target_lines = _fwd_payload_literal_lines(tree)
+            if payload_lines:
+                # The ``dispatch fwd`` wire payload is sanctioned only here.
+                offenders.append((src, "payload", payload_lines))
+            if target_lines:
+                # The bare ``/fwd`` docker-exec argv is sanctioned only here.
+                offenders.append((src, "target-argv", target_lines))
+    return offenders
+
+
+def test_streaming_op_reachable_only_via_proxy_argv() -> None:
+    """``fwd`` (the streaming op) is reachable ONLY via core.dispatch.proxy_argv.
+
+    (a) No src/ call site passes ``Op.FWD``/``"fwd"`` to invoke()/probe(); (b) no
+    src/ module other than core.dispatch builds a ``dispatch fwd`` payload or its
+    ``/fwd`` docker-exec target argv. Enforces the runtime-dispatcher "Streaming
+    ProxyCommand Entrypoint" invariant structurally (C-010 D3).
+    """
+    offenders = _streaming_op_violations(_python_files(_SRC_ROOT))
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)} [{kind}]: line(s) {linenos}"
+            for p, kind, linenos in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} streaming-op discipline violation(s).\n{details}\n\n"
+            "Fix: route streaming-op crossings through core.dispatch.proxy_argv "
+            "(it constructs but never executes the ProxyCommand argv); never pass "
+            "a streaming op to invoke()/probe(), and never hand-build a "
+            "'dispatch fwd' payload or its '/fwd' docker-exec argv outside "
+            "core.dispatch (runtime-dispatcher 'Streaming ProxyCommand Entrypoint')."
+        )
+
+
+def test_streaming_op_deliberate_violations_are_detected(tmp_path: Path) -> None:
+    """All three violation kinds are caught by the shared detector (proves the
+    guard catches the bug class, not just the symptom's absence)."""
+    rogue_invoke = tmp_path / "rogue_invoke.py"
+    rogue_invoke.write_text("invoke(Op.FWD, ['myinst'], hc)\nprobe('fwd', ['x'], hc)\n")
+    rogue_payload = tmp_path / "rogue_payload.py"
+    rogue_payload.write_text('CMD = "/usr/local/libexec/sandbox-ai/dispatch fwd myinst"\n')
+    rogue_target = tmp_path / "rogue_target.py"
+    rogue_target.write_text('ARGV = ["docker", "exec", "-i", "p-admin-1", "/fwd", "10.100.0.7:9999"]\n')
+
+    offenders = _streaming_op_violations(iter([rogue_invoke, rogue_payload, rogue_target]))
+    kinds_by_path = {(p, kind) for p, kind, _ in offenders}
+    assert (rogue_invoke, "invoke/probe") in kinds_by_path
+    assert (rogue_payload, "payload") in kinds_by_path
+    assert (rogue_target, "target-argv") in kinds_by_path
+
+
+# ── D7 regression guard: runtime owner resolved via resolve_daemon_owner ──────
+
+# host-config "Daemon Owner Resolution" (design D7): the runtime layer MUST resolve
+# the rootless-daemon owner via ``resolve_daemon_owner`` / ``resolve_daemon_owner_settings``,
+# NEVER by reading ``host.docker_unprivileged_user`` directly — in operator-rootless
+# the owner is the invoking operator, so a direct read resolves to the stale
+# ``"sandbox"`` default and silently corrupts on-disk ownership. The single sanctioned
+# reader (for owner purposes) is the resolver in ``core.host_config``; this guard scopes
+# the *runtime* modules and allowlists the functions that read the field for NON-owner,
+# separate-user-only purposes. A new reader elsewhere (e.g. a lifecycle command binding
+# ``host_user`` from the field) is the regression this catches.
+#
+# Scanned-module set (C-005 1.7): the original two runtime modules (``cli/main.py``,
+# ``hydration.py``) PLUS every ``core/doctor/checks/*.py`` module — now that the doctor
+# checks are op-rootless-reachable (the runner threads the active ``mode`` + the operator
+# owner into them, C-005 1.1-1.6), an *unguarded* owner-read of ``docker_unprivileged_user``
+# in a check is exactly the regression this broadening catches. A scanned file with NO
+# allowlist entry is scanned with an empty sanctioned set: ANY read fails the guard.
+_DOCKER_USER_SCANNED_DIRS: tuple[Path, ...] = (_SRC_ROOT / "core" / "doctor" / "checks",)
+_DOCKER_USER_SCANNED_FILES: tuple[Path, ...] = (
+    _SRC_ROOT / "cli" / "main.py",
+    _SRC_ROOT / "core" / "hydration.py",
+)
+_DOCKER_USER_READ_ALLOWLIST: dict[str, frozenset[str]] = {
+    "src/cli/main.py": frozenset(
+        {
+            "_build_attach_argv",  # separate-user ProxyCommand pipe_cmd crossing only
+            "init",                # seeds + auth-probes the separate-user dedicated user
+            "doctor",              # separate-user boundary validation (mode-awareness → C-005)
+        }
+    ),
+    "src/core/hydration.py": frozenset(),  # owner via resolve_daemon_owner_settings only
+    # The sudoers-rule body audit re-renders the SUDO rule that enumerates the
+    # dedicated ``sandbox_user``; the whole ``setup_invariants`` check is
+    # ``applies_in=separate-user`` (registry), so this read is correctly
+    # mode-guarded and is NOT an owner-resolution read.
+    # ``_audit_rule_body`` re-renders the SUDO rule that enumerates the dedicated
+    # ``sandbox_user``; ``_audit_daemon_user_no_admin`` reads the dedicated daemon
+    # user to verify it is in NO admin group. Both are separate-user-only sub-audits
+    # of the both-mode ``setup_invariants`` check (the caller runs them only on the
+    # separate-user branch, after the operator-rootless early-return) — sanctioned
+    # reads of the dedicated user, NOT operator-rootless owner-resolution reads.
+    "src/core/doctor/checks/setup_invariants.py": frozenset(
+        {"_audit_rule_body", "_audit_daemon_user_no_admin"}
+    ),
+}
+
+
+def _docker_user_scanned_files() -> list[Path]:
+    """The D7-scanned module set: the two runtime files + every doctor-check module.
+
+    Defining the scanned set independently of the allowlist (rather than scanning
+    only allowlist keys) is the load-bearing 1.7 broadening: a brand-new doctor
+    check that reads ``docker_unprivileged_user`` is scanned with an empty
+    sanctioned set and fails the guard, instead of being silently skipped."""
+    files = list(_DOCKER_USER_SCANNED_FILES)
+    for d in _DOCKER_USER_SCANNED_DIRS:
+        files.extend(_python_files(d))
+    return files
+
+
+def _docker_user_read_functions(tree: ast.AST) -> list[tuple[int, str]]:
+    """Return ``(lineno, enclosing-function-name)`` for each ``.docker_unprivileged_user``
+    attribute read in ``tree`` (AST-only — string literals / comments are never
+    ``ast.Attribute`` nodes, so message text mentioning the field is not flagged)."""
+    funcs = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+
+    def enclosing(lineno: int) -> str:
+        best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        for f in funcs:
+            if f.lineno <= lineno <= (f.end_lineno or f.lineno) and (
+                best is None or f.lineno > best.lineno
+            ):
+                best = f
+        return best.name if best is not None else "<module>"
+
+    return [
+        (node.lineno, enclosing(node.lineno))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "docker_unprivileged_user"
+    ]
+
+
+def _docker_user_owner_violations(
+    files: Iterator[Path], allowlist: dict[str, frozenset[str]]
+) -> list[tuple[Path, list[tuple[int, str]]]]:
+    """Scan the given module set; return ``(path, [(lineno, func), …])``
+    for every ``.docker_unprivileged_user`` read in a NON-sanctioned function.
+    A scanned file absent from ``allowlist`` defaults to an empty sanctioned set.
+
+    Reusable detector seam (anti-hack rule 5): ``files`` + ``allowlist`` are
+    parameters, so the deliberate-violation regression drives the same predicate."""
+    offenders: list[tuple[Path, list[tuple[int, str]]]] = []
+    for src in files:
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        # Every scanned file is in-scope; a file with no allowlist entry has an
+        # empty sanctioned set, so ANY owner-read in it fails the guard.
+        sanctioned = allowlist.get(rel, frozenset())
+        tree = ast.parse(src.read_text(), filename=str(src))
+        bad = [
+            (ln, fn) for ln, fn in _docker_user_read_functions(tree) if fn not in sanctioned
+        ]
+        if bad:
+            offenders.append((src, bad))
+    return offenders
+
+
+def test_no_op_rootless_docker_user_owner_read() -> None:
+    """No runtime owner-resolution reads ``docker_unprivileged_user`` directly (D7).
+
+    The daemon owner MUST flow through ``resolve_daemon_owner(_settings)`` so the
+    operator-rootless owner is the invoking operator, never the stale ``"sandbox"``
+    default. Reads outside the allowlisted (separate-user-only / non-owner) functions
+    fail — route the owner through the resolver instead of broadening the allowlist.
+    """
+    offenders = _docker_user_owner_violations(
+        iter(_docker_user_scanned_files()), _DOCKER_USER_READ_ALLOWLIST
+    )
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)}: {[(ln, fn) for ln, fn in bad]}"
+            for p, bad in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} runtime module(s) read host.docker_unprivileged_user "
+            f"in a non-sanctioned function (D7).\n{details}\n\n"
+            "Fix: resolve the daemon owner via core.host_config.resolve_daemon_owner"
+            "(_settings) — in operator-rootless a direct read corrupts ownership "
+            "(stale 'sandbox' default). Do NOT broaden the allowlist without a "
+            "separate-user-only / non-owner justification."
+        )
+
+
+def test_docker_user_owner_guard_detects_violation(tmp_path: Path) -> None:
+    """The D7 detector flags a ``.docker_unprivileged_user`` read in a non-sanctioned
+    function — proving the guard catches the bug class, not just its absence."""
+    rogue = tmp_path / "rogue_command.py"
+    rogue.write_text(
+        "def start(host_config):\n"
+        "    host_user = host_config.host.docker_unprivileged_user\n"
+        "    return host_user\n"
+    )
+    # Map the rogue file into the allowlist with NO sanctioned functions.
+    offenders = _docker_user_owner_violations(
+        iter([rogue]), {rogue.as_posix(): frozenset()}
+    )
+    assert offenders, "deliberate D7 owner-read violation was not detected"
+    assert offenders[0][0] == rogue
+    assert offenders[0][1] == [(2, "start")]
+
+
+def test_docker_user_owner_guard_catches_unguarded_doctor_check(tmp_path: Path) -> None:
+    """A NEW doctor check that reads ``docker_unprivileged_user`` for owner purposes
+    fails the broadened guard (C-005 1.7).
+
+    Proves the scanned-set broadening: a check module with NO allowlist entry is
+    scanned with an empty sanctioned set (the ``allowlist.get(rel, frozenset())``
+    default), so an unguarded op-rootless owner-read is flagged rather than silently
+    skipped — mirroring how ``test_docker_user_owner_guard_detects_violation`` proves
+    the catch for the original two-module scope."""
+    rogue_check = tmp_path / "rogue_check.py"
+    rogue_check.write_text(
+        "def check_rogue(user, distro, host_config):\n"
+        "    owner = host_config.host.docker_unprivileged_user\n"
+        "    return owner\n"
+    )
+    # No allowlist entry for the rogue check → empty sanctioned set → any read fails.
+    offenders = _docker_user_owner_violations(iter([rogue_check]), _DOCKER_USER_READ_ALLOWLIST)
+    assert offenders, "broadened D7 guard did not catch the unguarded doctor-check owner-read"
+    assert offenders[0][0] == rogue_check
+    assert offenders[0][1] == [(2, "check_rogue")]
+
+
 def test_every_custom_marker_is_registered() -> None:
     registered = _registered_markers()
     offenders: list[tuple[Path, int, str]] = []

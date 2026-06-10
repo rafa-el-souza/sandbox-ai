@@ -162,6 +162,25 @@ def test_decide_gate_prompt_tty_no_yes() -> None:
     assert d.outcome == cli_flow.GateOutcome.PROMPT
 
 
+def test_decide_gate_extra_mutations_overrides_nothing_to_apply() -> None:
+    # A converged phase plan (zero mutations) with a non-empty host-root batch
+    # (extra_mutations > 0) still prompts — operator-rootless's batch counts.
+    plan = [_plan("a", PhaseResult.ALREADY_CORRECT)]
+    d = cli_flow.decide_gate(
+        plan, is_tty=True, assume_yes=False, extra_mutations=2
+    )
+    assert d.outcome == cli_flow.GateOutcome.PROMPT
+
+
+def test_decide_gate_extra_mutations_zero_is_nothing_to_apply() -> None:
+    # extra_mutations defaults to 0 → separate-user behavior is unchanged.
+    plan = [_plan("a", PhaseResult.ALREADY_CORRECT)]
+    d = cli_flow.decide_gate(
+        plan, is_tty=True, assume_yes=False, extra_mutations=0
+    )
+    assert d.outcome == cli_flow.GateOutcome.NOTHING_TO_APPLY
+
+
 @pytest.mark.parametrize(
     ("raw", "proceeds"),
     [

@@ -1,5 +1,6 @@
 """Tests for core/hydration.py — Pydantic config model and Jinja2 rendering pipeline."""
 
+import base64
 import os
 import re
 from pathlib import Path
@@ -9,6 +10,7 @@ from core.hydration import (
     _JINJA_RENDERED_CONFIG,
     BINARY_REGISTRY,
     IMAGE_REGISTRY,
+    RESERVED_RUNTIME_KEY,
     BinaryPin,
     CoreConfig,
     DbPostgresConfig,
@@ -357,8 +359,11 @@ class TestLegacyAdminSectionRejection:
 class TestBuildJinjaContextResourceLimits:
     """Tasks 8.5-8.8: build_jinja_context resource limit keys."""
 
-    def test_core_resource_keys_present(self, tmp_path: Path) -> None:
+    def test_core_resource_keys_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Context includes core_mem_limit, core_memswap_limit, core_cpus."""
+        # Pin a roomy host so the default cpus=4.0 is not reduced by the clamp;
+        # this test asserts the unclamped pass-through value.
+        monkeypatch.setattr("core.hydration.host_resources.host_cpu_count", lambda: 16)
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
@@ -368,7 +373,12 @@ class TestBuildJinjaContextResourceLimits:
         assert ctx["core_cpus"] == "4.0"
 
     def test_admin_resource_keys_absent(self, tmp_path: Path) -> None:
-        """Per admin-reframe: admin resource-limit keys are no longer in context."""
+        """Per admin-reframe: admin resource-limit keys are no longer in context.
+
+        Exception (instance-cpu-host-clamp M2): admin_cpus is reintroduced as the
+        host-clamped --cpus limit (the single source of truth that replaces the
+        former `cpus: "4.0"` compose literal), so it is asserted separately.
+        """
         toml_path = tmp_path / "sandbox.toml"
         toml_path.write_text(VALID_TOML)
         config = InstanceConfig.from_toml(str(toml_path))
@@ -376,7 +386,6 @@ class TestBuildJinjaContextResourceLimits:
         for key in (
             "admin_mem_limit",
             "admin_memswap_limit",
-            "admin_cpus",
             "admin_pids_limit",
             "admin_shm_size",
             "admin_base_image",
@@ -400,6 +409,120 @@ class TestBuildJinjaContextResourceLimits:
         ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
         assert ctx["core_mem_limit"] == "16gb"
         assert ctx["core_memswap_limit"] == "16gb"
+
+
+class TestCpuHostClamp:
+    """instance-cpu-host-clamp M2: --cpus limits are clamped to the host CPU count.
+
+    Pre-fix reasoning (F-053 bug class): against the pre-M2 tree, build_jinja_context
+    rendered ``core_cpus = str(config.core.cpus)`` (always "4.0") and the compose
+    template hardcoded the admin ``cpus: "4.0"`` — neither consulted the host. On a
+    2-CPU host Docker rejects ``--cpus 4.0`` at container-create and ``sandbox start``
+    dies. The 2-CPU assertions below render "2.0"; they would render "4.0" on the
+    pre-fix tree, so they fail there — proving the test catches the regression class.
+    """
+
+    def test_clamp_cpus_reduces_above_host(self) -> None:
+        """_clamp_cpus reports a reducing clamp when the value exceeds the host."""
+        from core.hydration import _clamp_cpus
+
+        effective, was_clamped = _clamp_cpus(4.0, 2)
+        assert effective == 2.0
+        assert was_clamped is True
+
+    def test_clamp_cpus_passthrough_at_or_below_host(self) -> None:
+        """_clamp_cpus passes the value through unchanged when it fits the host."""
+        from core.hydration import _clamp_cpus
+
+        # Below host capacity.
+        assert _clamp_cpus(4.0, 8) == (4.0, False)
+        # Exactly at host capacity is not a reduction.
+        assert _clamp_cpus(2.0, 2) == (2.0, False)
+
+    def test_two_cpu_host_clamps_core_and_admin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On a 2-CPU host both core_cpus and admin_cpus render '2.0' (clamped)."""
+        monkeypatch.setattr("core.hydration.host_resources.host_cpu_count", lambda: 2)
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["core_cpus"] == "2.0"
+        assert ctx["admin_cpus"] == "2.0"
+
+    def test_eight_cpu_host_no_clamp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On an 8-CPU host the default 4.0 limits are untouched (no-op clamp)."""
+        monkeypatch.setattr("core.hydration.host_resources.host_cpu_count", lambda: 8)
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["core_cpus"] == "4.0"
+        assert ctx["admin_cpus"] == "4.0"
+
+    def test_admin_cpus_derives_from_constant(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """admin_cpus tracks ADMIN_CPUS (not a config field) under a roomy host."""
+        from core.hydration import ADMIN_CPUS
+
+        monkeypatch.setattr("core.hydration.host_resources.host_cpu_count", lambda: 64)
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["admin_cpus"] == str(ADMIN_CPUS)
+
+    def test_admin_cpus_flows_into_rendered_compose(self, tmp_path: Path) -> None:
+        """The clamped admin_cpus actually lands on the admin service in rendered compose.
+
+        Renders the real compose.yml template with a context whose admin_cpus is the
+        clamped 2-CPU value, then locates the admin service block and asserts its
+        cpus directive carries that value (proving admin_cpus replaced the literal).
+        """
+        import jinja2
+
+        ctx = _build_test_context(str(tmp_path / "inst"))
+        ctx["admin_cpus"] = "2.0"
+        template_content = (
+            Path(__file__).parent.parent.parent.parent / "src" / "templates" / "docker" / "compose.yml"
+        ).read_text()
+        rendered = (
+            jinja2.Environment(loader=jinja2.BaseLoader(), undefined=jinja2.StrictUndefined)
+            .from_string(template_content)
+            .render(ctx)
+        )
+        admin_block = rendered[rendered.index("\n  admin:"):]
+        assert 'cpus: "2.0"' in admin_block
+
+    def test_reducing_clamp_emits_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A reducing clamp emits one warning per limit naming value/host/effective."""
+        import logging
+
+        monkeypatch.setattr("core.hydration.host_resources.host_cpu_count", lambda: 2)
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        with caplog.at_level(logging.WARNING, logger="core.hydration"):
+            build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        clamp_msgs = [r.getMessage() for r in caplog.records if "clamped to" in r.getMessage()]
+        # One for [core], one for admin.
+        assert len(clamp_msgs) == 2
+        assert any(m == "[core].cpus=4.0 exceeds the host's 2 CPUs — clamped to 2.0" for m in clamp_msgs)
+        assert any(m == "admin cpus=4.0 exceeds the host's 2 CPUs — clamped to 2.0" for m in clamp_msgs)
+
+    def test_non_reducing_clamp_emits_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A no-op clamp (roomy host) emits no clamp warning."""
+        import logging
+
+        monkeypatch.setattr("core.hydration.host_resources.host_cpu_count", lambda: 8)
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        with caplog.at_level(logging.WARNING, logger="core.hydration"):
+            build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert [r for r in caplog.records if "clamped to" in r.getMessage()] == []
 
 
 class TestScaffoldTemplateResourceLimits:
@@ -426,6 +549,31 @@ class TestScaffoldTemplateResourceLimits:
 
         # Verify [admin] section absent (admin-reframe)
         assert "[admin]" not in content
+
+
+class TestComposeRuntimeName:
+    """The compose ``runtime`` value MUST equal the runtime name setup registers in
+    daemon.json (``runtimes["sandbox-ai-runsc"]``). A mismatch makes Docker reject
+    container-create with 'unknown or invalid runtime name' — the latent bug that
+    broke ``start`` on every host until the F-053 clamp let compose-up reach
+    container-create and expose it. (F-024 single-sourced the *doctor* literal; the
+    compose render kept the bare ``runsc`` until this fix single-sourced it too.)
+    """
+
+    def test_compose_runtime_is_the_reserved_key(self, tmp_path: Path) -> None:
+        """build_jinja_context renders ``runtime`` as the reserved runtime key."""
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="x", instance_dir="/tmp/x")
+        assert ctx["runtime"] == RESERVED_RUNTIME_KEY
+
+    def test_render_matches_daemon_registered_runtime(self) -> None:
+        """Single-source guard: the compose runtime name and the daemon.json
+        registration key are the same value (cross-module), so they cannot drift."""
+        from core.setup.l6_daemon_json import _RESERVED_RUNTIME_KEY
+
+        assert RESERVED_RUNTIME_KEY == _RESERVED_RUNTIME_KEY
 
 
 class TestRenderTemplates:
@@ -904,6 +1052,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         **ips,
         "proxy_password": "testpass",
         "proxy_url_core": "http://proxyuser:testpass@proxy:3128",
+        "dnsdist_console_key": "dGVzdC1kbnNkaXN0LWNvbnNvbGUta2V5LTAwMDAwMDA=",
         "core_base_image": "cgr.dev/chainguard/wolfi-base:latest",
         "core_distro_family": "wolfi",
         "host_uid": "1000",
@@ -912,7 +1061,8 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         "core_mem_limit": "8gb",
         "core_memswap_limit": "8gb",
         "core_cpus": "4.0",
-        "runtime": "runsc",
+        "admin_cpus": "4.0",
+        "runtime": RESERVED_RUNTIME_KEY,
         "dns_image": IMAGE_REGISTRY["coredns"].pinned,
         "proxy_image": IMAGE_REGISTRY["squid"].pinned,
         "dnsdist_image": IMAGE_REGISTRY["dnsdist"].pinned,
@@ -1693,6 +1843,60 @@ def _render_extras(tmp_path: Path, filename: str) -> str:
         undefined=jinja2.StrictUndefined,
     )
     return env.from_string(template_content).render(ctx)
+
+
+def _render_dnsdist_conf(tmp_path: Path) -> str:
+    """Render config/dnsdist/dnsdist.conf through Jinja2 with StrictUndefined."""
+    import jinja2
+
+    ctx = _build_test_context(str(tmp_path / "inst"))
+    template_content = (
+        Path(__file__).parent.parent.parent.parent / "src" / "templates" / "config" / "dnsdist" / "dnsdist.conf"
+    ).read_text()
+    env = jinja2.Environment(loader=jinja2.BaseLoader(), undefined=jinja2.StrictUndefined)
+    return env.from_string(template_content).render(ctx)
+
+
+class TestDnsdistGvisorOprootlessFixes:
+    """dnsdist under operator-rootless gVisor: seccomp opt-out + console-key healthcheck.
+
+    F-057-class follow-up. Under gVisor with --oci-seccomp, dnsdist dies at startup
+    ('Operation not permitted' — the OCI-seccomp layer EPERMs its clone3 thread spawn),
+    and its `dnsdist -e` healthcheck cannot pass without a console key. Both are fixed:
+    the dnsdist container opts out of the OCI seccomp profile (gVisor Sentry still
+    confines it), and dnsdist.conf sets a per-hydration console key.
+    """
+
+    def test_console_key_in_context_is_valid_base64_32_bytes(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        ctx = build_jinja_context(config=config, base_index=0, proxy_password="p", instance_dir=str(tmp_path))
+        key = ctx["dnsdist_console_key"]
+        assert isinstance(key, str) and key
+        assert len(base64.b64decode(key)) == 32
+
+    def test_console_key_is_per_hydration_unique(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "sandbox.toml"
+        toml_path.write_text(VALID_TOML)
+        config = InstanceConfig.from_toml(str(toml_path))
+        a = build_jinja_context(config=config, base_index=0, proxy_password="p", instance_dir=str(tmp_path))
+        b = build_jinja_context(config=config, base_index=0, proxy_password="p", instance_dir=str(tmp_path))
+        assert a["dnsdist_console_key"] != b["dnsdist_console_key"]
+
+    def test_dnsdist_conf_renders_setkey(self, tmp_path: Path) -> None:
+        rendered = _render_dnsdist_conf(tmp_path)
+        # the test context's console key, interpolated into setKey(...)
+        assert 'setKey("dGVzdC1kbnNkaXN0LWNvbnNvbGUta2V5LTAwMDAwMDA=")' in rendered
+        assert 'controlSocket("127.0.0.1:5199")' in rendered
+
+    def test_dnsdist_service_opts_out_of_oci_seccomp(self, tmp_path: Path) -> None:
+        rendered = _render_compose(tmp_path)
+        # isolate the dnsdist service block (up to the next top-level service)
+        dnsdist_block = rendered.split("\n  dnsdist:\n", 1)[1].split("\n  proxy:\n", 1)[0]
+        assert "seccomp:unconfined" in dnsdist_block
+        # no-new-privileges is preserved (the override re-states it)
+        assert "no-new-privileges:true" in dnsdist_block
 
 
 class TestComposeSecurityBaseline:

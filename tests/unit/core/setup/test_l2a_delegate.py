@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup.l2a_delegate import PHASE, render_delegate_dropin
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -53,6 +57,10 @@ def test_phase_identity_and_deps() -> None:
     assert PHASE.depends_on == ("l2",)
     assert PHASE.identity == Identity.ROOT
     assert PHASE.rollback is None
+    # separate-user only: the Delegate drop-in is host-root, so in operator-rootless
+    # it is owned by the host_batch DELEGATE item + _bootstrap-host escalation
+    # (D5a/O3); the runner reports the phase skipped there.
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})
 
 
 def test_render_delegate() -> None:

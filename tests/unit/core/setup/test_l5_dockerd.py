@@ -16,7 +16,11 @@ import subprocess
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 from core.setup import l5_dockerd as l5
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -179,6 +183,61 @@ def test_act_enables_linger_and_installs_dockerd(
     assert "installed" in detail
     assert any("enable-linger" in c for c in world.calls)
     assert any("dockerd-rootless-setuptool.sh install" in c for c in world.calls)
+
+
+def test_act_separate_user_install_crosses_via_machinectl_sentinel(
+    monkeypatch: pytest.MonkeyPatch, ctx: SetupContext
+) -> None:
+    """C-009 §3.7 guard: the L5 ROOT crossing stays machinectl + ``sentinel=True``.
+
+    L5 runs as root BEFORE the operator sudoers rule exists, so it crosses into
+    the sandbox user via ``daemon_owner_crossing`` (``machinectl_cmd`` in
+    separate-user) with the orchestrator-injected sentinel ON (``machinectl
+    shell`` masks the inner exit) — NOT the operator pipe / ``framed=True`` path
+    L3a/L8 switched to. It neither uses nor depends on the operator pipe
+    ``Cmnd_Spec``, so it MUST NOT be touched.
+    """
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: _present_pw())
+    seen: list[tuple[list[str], object]] = []
+    installed = False
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal installed
+        joined = " ".join(cmd)
+        seen.append((cmd, kw.get("sentinel")))
+        if "show-user" in cmd and "--property=Linger" in joined:
+            return subprocess.CompletedProcess(cmd, 0, "Linger=yes\n", "")
+        if "enable-linger" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "systemctl is-active user@" in joined:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "docker info" in joined:
+            if not installed:
+                raise SandboxExecutionError("docker info failed")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        if "dockerd-rootless-setuptool.sh install" in joined:
+            installed = True
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected command: {joined}")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    l5.PHASE.act(ctx)
+
+    install = [
+        (c, s)
+        for c, s in seen
+        if "dockerd-rootless-setuptool.sh install" in " ".join(c)
+    ]
+    assert len(install) == 1
+    cmd, sentinel = install[0]
+    # ROOT machinectl crossing into the sandbox user, sentinel ON.
+    assert "machinectl" in cmd
+    assert sentinel is True
+    # NOT the operator pipe path (L3a/L8 own that, not the root phases).
+    assert "systemd-run" not in cmd
 
 
 def test_act_skips_install_when_dockerd_already_up(
@@ -364,3 +423,114 @@ def test_act_raises_when_user_manager_never_ready(
     assert not any(
         "dockerd-rootless-setuptool.sh install" in c for c in world.calls
     )
+
+
+# ── operator-rootless: LOCAL crossing, no machinectl, no linger (§6.2) ────────
+
+
+def _oprootless_ctx() -> SetupContext:
+    return SetupContext(
+        host_config=minimal_host_config(
+            "sandboxuser",
+            MachinectlAuth.SUDO,
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+        ),
+        operator="alice",
+    )
+
+
+def _alice_pw() -> pwd.struct_passwd:
+    return pwd.struct_passwd(("alice", "x", 5000, 5000, "", "/home/alice", "/bin/bash"))
+
+
+# The op-rootless LOCAL crossing prefix (finding 8.11): the sterile Executor scrubs
+# the session env, so it must be re-injected for rootless docker + systemctl --user.
+_OPRL_ENV = [
+    "env",
+    "HOME=/home/alice",
+    "XDG_RUNTIME_DIR=/run/user/5000",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/5000/bus",
+    "DOCKER_HOST=unix:///run/user/5000/docker.sock",
+]
+
+
+def test_act_operator_rootless_local_no_linger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """op-rootless act installs dockerd LOCAL (no machinectl), no linger/readiness gate,
+    with the operator's session env injected (finding 8.11).
+
+    Linger is host-root-batch-owned in operator-rootless (the ``LINGER`` item) — so L5
+    does NOT ``enable-linger``, does NOT poll ``user@<uid>.service``. The crossing is a
+    LOCAL ``env HOME=… XDG_RUNTIME_DIR=… DBUS…=… DOCKER_HOST=…`` prefix (sentinel off —
+    a local command's exit is not masked), so the sterile Executor doesn't strip the
+    session env rootless docker needs.
+    """
+    monkeypatch.setattr("core.setup.phase_runner.pwd.getpwnam", lambda _n: _alice_pw())
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        if "dockerd-rootless-setuptool.sh install" in " ".join(cmd):
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        # docker info: not-up before install (force install), up after.
+        installed = any(
+            "dockerd-rootless-setuptool.sh install" in " ".join(c) for c, _ in seen
+        )
+        if not installed:
+            raise SandboxExecutionError("docker info failed")
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    detail = l5.PHASE.act(_oprootless_ctx())
+
+    joined = [" ".join(c) for c, _ in seen]
+    assert not any("enable-linger" in j for j in joined)
+    assert not any("user@" in j for j in joined)
+    assert not any("machinectl" in j for j in joined)
+    install = [
+        (c, s) for c, s in seen if "dockerd-rootless-setuptool.sh install" in " ".join(c)
+    ]
+    assert len(install) == 1
+    cmd, sentinel = install[0]
+    # LOCAL env-injected prefix, then bash -c — NOT a bare bash (8.11 regression).
+    assert cmd[: len(_OPRL_ENV)] == _OPRL_ENV
+    assert cmd[len(_OPRL_ENV)] == "/bin/bash"
+    assert sentinel is False
+    assert "alice" in detail
+
+
+def test_probe_operator_rootless_local_skips_linger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """op-rootless probe checks only LOCAL dockerd reachability (owner = operator),
+    via the env-injected crossing — no machinectl, no ``loginctl show-user`` (linger).
+
+    The not-yet-created-user guard and the linger check are separate-user-only; the
+    crossing legitimately resolves the operator's uid/home for the session env.
+    """
+    monkeypatch.setattr("core.setup.phase_runner.pwd.getpwnam", lambda _n: _alice_pw())
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(
+        _self: object, cmd: list[str], *_a: object, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((cmd, kw.get("sentinel")))
+        if "docker info" in " ".join(cmd):
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        raise AssertionError(f"unexpected command: {' '.join(cmd)}")
+
+    monkeypatch.setattr("core.executor.Executor.run", fake_run)
+
+    result, detail = l5.PHASE.probe(_oprootless_ctx())
+
+    assert result == PhaseResult.ALREADY_CORRECT
+    assert "alice" in detail
+    joined = [" ".join(c) for c, _ in seen]
+    assert all("show-user" not in j for j in joined)
+    assert all("machinectl" not in j for j in joined)
+    assert all(s is False for _, s in seen)
+    # the docker info crossing carries the injected session env.
+    (info_cmd, _), = seen
+    assert info_cmd[: len(_OPRL_ENV)] == _OPRL_ENV

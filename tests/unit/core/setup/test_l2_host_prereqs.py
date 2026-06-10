@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup import l2_host_prereqs
 from core.setup.l2_host_prereqs import PHASE
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -104,6 +104,10 @@ def test_phase_identity_and_deps() -> None:
     assert PHASE.id == "l2"
     assert PHASE.depends_on == ("l1",)
     assert PHASE.identity == Identity.ROOT
+    # separate-user only: every L2 mutation is inapplicable or host-root-batch-
+    # owned in operator-rootless (D5a/O3), so the runner reports it skipped there
+    # — joining the M2 crossing-only phases (L3/L3a/L6.5/L8).
+    assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})
 
 
 # ── probe ────────────────────────────────────────────────────────────────────
@@ -379,6 +383,182 @@ def test_operator_in_group_primary_lookup_keyerror(
 
     monkeypatch.setattr("pwd.getpwnam", _boom)
     assert l2_host_prereqs._operator_in_group("ghost", "sb-ws") is False
+
+
+def test_user_admin_groups_supplementary_and_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``alice`` is a supplementary member of ``sudo`` and her primary gid is
+    # ``wheel``'s gid → both surface; ``admin`` is absent from /etc/group.
+    class _Gr:
+        def __init__(self, gid: int, mem: list[str]) -> None:
+            self.gr_gid = gid
+            self.gr_mem = mem
+
+    groups = {"sudo": _Gr(27, ["alice"]), "wheel": _Gr(10, [])}
+
+    def _getgrnam(name: str) -> object:
+        if name not in groups:
+            raise KeyError(name)
+        return groups[name]
+
+    monkeypatch.setattr("grp.getgrnam", _getgrnam)
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: type("P", (), {"pw_gid": 10})())
+    assert l2_host_prereqs._user_admin_groups("alice") == ["sudo", "wheel"]
+
+
+def test_user_admin_groups_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("grp.getgrnam", lambda _n: type("G", (), {"gr_gid": 27, "gr_mem": []})())
+    monkeypatch.setattr("pwd.getpwnam", lambda _n: type("P", (), {"pw_gid": 1000})())
+    assert l2_host_prereqs._user_admin_groups("sandbox") == []
+
+
+def test_user_admin_groups_unknown_user_no_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The user is absent from /etc/passwd (no primary gid) but is listed as a
+    # supplementary member of ``sudo`` — that membership still surfaces.
+    def _getgrnam(name: str) -> object:
+        if name == "sudo":
+            return type("G", (), {"gr_gid": 27, "gr_mem": ["ghost"]})()
+        raise KeyError(name)
+
+    def _boom(_n: str) -> object:
+        raise KeyError(_n)
+
+    monkeypatch.setattr("grp.getgrnam", _getgrnam)
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+    assert l2_host_prereqs._user_admin_groups("ghost") == ["sudo"]
+
+
+class _Proc:
+    """Minimal fake of ``subprocess.run``'s CompletedProcess."""
+
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def _patch_sudo(monkeypatch: pytest.MonkeyPatch, proc: _Proc) -> list[list[str]]:
+    """Capture the ``sudo -n -l`` argv and return ``proc`` for every run."""
+    calls: list[list[str]] = []
+
+    def _run(argv: list[str], **_k: object) -> _Proc:
+        calls.append(argv)
+        return proc
+
+    monkeypatch.setattr("subprocess.run", _run)
+    return calls
+
+
+def test_sudoers_grant_not_allowed_no_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_sudo(
+        monkeypatch,
+        _Proc(stderr="Sorry, user bob is not allowed to run sudo on host.", returncode=1),
+    )
+    g = l2_host_prereqs._user_sudoers_grant("bob", self_query=True)
+    assert g.determinable is True
+    assert g.granted is False
+    assert g.nopasswd is False
+
+
+def test_sudoers_grant_self_query_omits_dash_u(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_sudo(
+        monkeypatch,
+        _Proc(stderr="user is not allowed to run sudo", returncode=1),
+    )
+    l2_host_prereqs._user_sudoers_grant("alice", self_query=True)
+    assert calls == [["sudo", "-n", "-l"]]
+
+
+def test_sudoers_grant_other_user_adds_dash_u(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_sudo(
+        monkeypatch,
+        _Proc(stdout="User sandbox may run the following commands:\n  (ALL) ALL"),
+    )
+    g = l2_host_prereqs._user_sudoers_grant("sandbox", self_query=False)
+    assert calls == [["sudo", "-n", "-l", "-U", "sandbox"]]
+    assert g.granted is True
+    assert g.nopasswd is False
+    assert g.determinable is True
+
+
+def test_sudoers_grant_nopasswd_drop_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The cloud-init drop-in shape (90-cloud-init-users): NOPASSWD: ALL.
+    _patch_sudo(
+        monkeypatch,
+        _Proc(
+            stdout=(
+                "Matching Defaults entries for ubuntu on host:\n"
+                "    env_reset\n\n"
+                "User ubuntu may run the following commands on host:\n"
+                "    (ALL) NOPASSWD: ALL"
+            )
+        ),
+    )
+    g = l2_host_prereqs._user_sudoers_grant("ubuntu", self_query=True)
+    assert g.granted is True
+    assert g.nopasswd is True
+    assert g.determinable is True
+
+
+def test_sudoers_grant_case_insensitive_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Version/casing tolerance: a singular "command" + upper-case NOPASSWD parse.
+    _patch_sudo(
+        monkeypatch,
+        _Proc(stdout="User x may run the following command:\n  (ALL) NOPASSWD: /bin/ls"),
+    )
+    g = l2_host_prereqs._user_sudoers_grant("x", self_query=True)
+    assert g.granted is True
+    assert g.nopasswd is True
+
+
+def test_sudoers_grant_password_gated_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ``-n`` refuses to prompt for the password the user WOULD be asked for:
+    # the user CAN sudo, but it is password-gated (no NOPASSWD listing).
+    _patch_sudo(
+        monkeypatch,
+        _Proc(stderr="sudo: a password is required", returncode=1),
+    )
+    g = l2_host_prereqs._user_sudoers_grant("dave", self_query=True)
+    assert g.granted is True
+    assert g.nopasswd is False
+    assert g.determinable is True
+
+
+def test_sudoers_grant_may_not_list_indeterminate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Non-root ``-U <other>`` refusal: we could not query → determinable=False,
+    # NEVER inferred as a grant.
+    _patch_sudo(
+        monkeypatch,
+        _Proc(stderr="Sorry, user alice may not list user sandbox's privileges", returncode=1),
+    )
+    g = l2_host_prereqs._user_sudoers_grant("sandbox", self_query=False)
+    assert g.determinable is False
+    assert g.granted is False
+    assert g.nopasswd is False
+
+
+def test_sudoers_grant_clean_exit_unparseable_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Exit 0 with no recognizable marker — do not guess.
+    _patch_sudo(monkeypatch, _Proc(stdout="", returncode=0))
+    g = l2_host_prereqs._user_sudoers_grant("x", self_query=True)
+    assert g.determinable is False
+    assert g.granted is False
+
+
+def test_sudoers_grant_oserror_indeterminate(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_a: object, **_k: object) -> object:
+        raise OSError
+
+    monkeypatch.setattr("subprocess.run", _boom)
+    g = l2_host_prereqs._user_sudoers_grant("x", self_query=True)
+    assert g.determinable is False
+    assert g.granted is False
+    assert g.nopasswd is False
 
 
 def test_machined_active_subprocess_error(

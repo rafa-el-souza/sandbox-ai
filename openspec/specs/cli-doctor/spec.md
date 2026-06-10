@@ -3,15 +3,19 @@
 This specification defines the `sandbox doctor` diagnostic command, which validates host readiness for sandbox operation by executing a dependency-ordered check pipeline covering binary availability, user existence, service state, Docker configuration, filesystem capabilities, and tooling plane integrity.
 ## Requirements
 ### Requirement: Doctor Command Interface
-The system SHALL provide a `sandbox doctor --user <name>` command that validates host readiness for sandbox operation. The `--user` parameter SHALL be mandatory with no default value. The doctor module SHALL also expose a programmatic subset API for use by other commands.
+The system SHALL provide a `sandbox doctor [--user <name>]` command that validates host readiness for sandbox operation. The execution mode is resolved first (the marker; see "Execution-Mode-Aware Doctor Checks"), then the user to validate: an explicit `--user` always wins; otherwise in **`separate-user`** mode `--user` is **mandatory** (else the dedicated `docker_unprivileged_user` from the toml, else an error), while in **`operator-rootless`** mode `--user` is **optional** — when omitted, doctor resolves the daemon owner as the invoking operator (`resolve_daemon_owner` = the current user) **toml-free**, reading neither the toml nor `docker_unprivileged_user`. The doctor module SHALL also expose a programmatic subset API for use by other commands.
 
 #### Scenario: Doctor invoked with user parameter
 - **WHEN** the operator runs `sandbox doctor --user sandbox`
-- **THEN** the system executes all 15 diagnostic checks and reports results grouped by category
+- **THEN** the system executes the mode-applicable diagnostic checks and reports results grouped by category
 
-#### Scenario: Doctor invoked without user parameter
-- **WHEN** the operator runs `sandbox doctor` without `--user`
-- **THEN** the CLI exits with an error indicating that `--user` is required
+#### Scenario: separate-user doctor without `--user` and no toml errors
+- **WHEN** the operator runs `sandbox doctor` without `--user` in `separate-user` mode with no toml present
+- **THEN** the CLI exits with an error indicating that `--user` is required (or a toml with `[host].docker_unprivileged_user`)
+
+#### Scenario: operator-rootless doctor without `--user` resolves the operator toml-free
+- **WHEN** the operator runs `sandbox doctor` without `--user` on an `operator-rootless` host (no toml present)
+- **THEN** doctor resolves the daemon owner as the invoking operator and runs the mode-applicable checks — it does NOT error, and does NOT read the toml / `docker_unprivileged_user`
 
 ### Requirement: Binary Availability Checks
 The system SHALL verify that `sudo`, `machinectl`, and `setfacl` are present on the host PATH. These are root checks with no dependencies.
@@ -53,21 +57,21 @@ The system SHALL verify that the `systemd-machined` service is active.
 - **THEN** the check reports FAIL with `sudo systemctl enable --now systemd-machined` as the remediation command
 
 ### Requirement: machinectl Shell Reachability
-The system SHALL verify that the operator can shell into the unprivileged user via `sudo machinectl shell <user>@.host`. The probe SHALL use a 10-second timeout to detect sudoers misconfiguration (password prompt hang).
+The system SHALL verify that the operator can cross the privilege boundary into the unprivileged user by running the `auth-probe` dispatcher op via `core.dispatch.probe("auth-probe", …)` — the same seam `sandbox start`'s preflight reuses. The crossing primitive is auth-mode-selected per the "Doctor Cross-Boundary Invocation Routing" requirement (separate-user + SUDO → `sudo_pipe_cmd`, separate-user + POLKIT → `machinectl_cmd(user, POLKIT)`, operator-rootless → local), NOT a hardcoded `sudo machinectl shell`. The probe SHALL use a 10-second timeout to detect a sudoers/polkit misconfiguration (password prompt hang). (The check retains its historical name "machinectl reachable" in code.)
 
-**Dependencies:** sudo binary, machinectl binary, Unprivileged User Existence, systemd-machined Service
+**Dependencies:** sudo binary (SUDO mode); the auth-mode crossing launcher (`systemd-run` for SUDO, `machinectl` for POLKIT); Unprivileged User Existence; systemd-machined Service
 
-#### Scenario: Shell reachable
-- **WHEN** `sudo machinectl shell <user>@.host -- /bin/bash -c "echo ok"` completes successfully within 10 seconds
+#### Scenario: Crossing reachable
+- **WHEN** `core.dispatch.probe("auth-probe", [], …)` completes successfully (`ok=True`) within 10 seconds — the cross-boundary argv being the auth-mode-selected form (e.g. SUDO `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "<dispatch> auth-probe"]`)
 - **THEN** the check reports PASS
 
-#### Scenario: Shell unreachable due to timeout
-- **WHEN** the machinectl probe does not complete within 10 seconds
-- **THEN** the check reports FAIL with guidance that the timeout likely indicates a sudoers password prompt, and provides remediation for passwordless machinectl access
+#### Scenario: Crossing unreachable due to timeout
+- **WHEN** the `auth-probe` crossing does not complete within 10 seconds (`timed_out=True`)
+- **THEN** the check reports FAIL with guidance that the timeout likely indicates a sudoers/polkit password prompt, and provides remediation for passwordless boundary access
 
-#### Scenario: Shell unreachable due to error
-- **WHEN** the machinectl probe fails with a non-zero exit code
-- **THEN** the check reports FAIL with the stderr output and guidance on common causes (user not found by machined, service not running)
+#### Scenario: Crossing unreachable due to error
+- **WHEN** the `auth-probe` crossing fails with a non-zero recovered exit (`ok=False`)
+- **THEN** the check reports FAIL with the stderr output and guidance on common causes (user not found by machined, service not running, rule not granting the op)
 
 ### Requirement: Docker Availability
 The system SHALL verify that Docker is installed and accessible to the unprivileged user via machinectl.
@@ -630,11 +634,11 @@ All `sandbox doctor` checks that cross the `dev → <sandbox-user>` privilege bo
 - **Image Digest Resolvability Check**: routes through `docker-manifest-inspect`, invoked **twice per `IMAGE_REGISTRY` entry** — once with the entry's `.pinned` digest ref `<name>@sha256:<64hex>` (stale-digest detection) and once with its `.tagged` tag ref `<name>:<tag>` (best-effort tag-drift detection); each call passes exactly one ref, drawn from the op's Q7 membership domain `{pin.pinned} ∪ {pin.tagged}`. (Source `supply_chain.py:check_image_digests` loops `IMAGE_REGISTRY` and runs `docker manifest inspect` on BOTH `pin.pinned` AND `pin.tagged`; the dual-ref domain is the runtime-dispatcher spec's Q7 resolution.)
 - **Compose status / compose-related doctor checks** (e.g., compose-ls within Privilege Boundary chain): route through `compose-ls`.
 
-The semantic content of each affected doctor check (what it verifies, what PASS/WARN/FAIL means, the 10-second timeout for the auth probe, the format-string expectations, the cascading-skip dependencies) is preserved unchanged. Only the underlying boundary-crossing mechanism shifts from inline machinectl-cmd-built argv to dispatcher-routed typed ops.
+The semantic content of each affected doctor check (what it verifies, what PASS/WARN/FAIL means, the 10-second timeout for the auth probe, the format-string expectations, the cascading-skip dependencies) is preserved unchanged. Only the underlying boundary-crossing mechanism shifts from inline machinectl-cmd-built argv to dispatcher-routed typed ops. The cross-boundary argv each routed invocation ultimately emits depends on the auth mode of the host (per `build_invocation`): under separate-user + SUDO it is `[*sudo_pipe_cmd(<user>), …]`, under separate-user + POLKIT it is `[*machinectl_cmd(<user>, POLKIT), …]`, and under operator-rootless it is the bare local target argv with no crossing prefix.
 
 #### Scenario: machinectl Shell Reachability uses the auth-probe op
-- **WHEN** the `machinectl Shell Reachability` doctor check executes its probe
-- **THEN** the check invokes `core.dispatch.invoke("auth-probe", [], host_config)` (with a 10-second timeout from the check's invocation context); the dispatcher's target argv is `["/bin/bash", "-c", "echo ok"]` per `runtime-dispatcher`'s op contract; the resulting cross-boundary argv is `[*machinectl_cmd(<user>, <auth>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]`
+- **WHEN** the `machinectl Shell Reachability` doctor check executes its probe on a separate-user + SUDO host
+- **THEN** the check invokes `core.dispatch.invoke("auth-probe", [], host_config)` (with a 10-second timeout from the check's invocation context); the dispatcher's target argv is `["/bin/bash", "-c", "echo ok"]` per `runtime-dispatcher`'s op contract; the resulting cross-boundary argv is `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` (under POLKIT the prefix is `machinectl_cmd(<user>, POLKIT)` instead)
 
 #### Scenario: gVisor Runtime Registration uses docker-info runtimes preset
 - **WHEN** the `gVisor Runtime Registration` doctor check executes its probe
@@ -730,15 +734,16 @@ The doctor SHALL include a check `setup_invariants` that performs a read-only au
 - The operator is a member of `sb-ws` (per `/etc/group`, NOT per running-process supplementary groups — the latter is a different check `dev_in_workspace_bridge_group` and may show stale state pre-relogin).
 - `/usr/local/libexec/sandbox-ai/` directory exists with mode 0755 root:root.
 - **rule-shape agreement** (F-022): the privilege-boundary drop-in installed on disk matches the auth mode the operator toml selects. When the toml selects SUDO, no `/etc/polkit-1/rules.d/49-sandbox-ai-machinectl.rules` SHALL also be present; when it selects POLKIT, no `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` SHALL also be present. If the opposite-mode rule *is* present, the toml and the installed rule shape disagree (the operator likely flipped `machinectl_authentication` after a setup run, or ran setup under one mode while the toml requests the other) → WARN naming the stray rule, since the operator's runtime crossings would use one mechanism while the rule grants the other. (The per-operator state tree `<sandbox_ai_home()>/{config,state,instances,workspaces}` is NOT audited here — it is `sandbox init`'s artifact, covered by the separate per-user-tree checks; round-9/F-021.)
-- **machinectl-path stability**: `machinectl` resolved on the sudoers `secure_path` basis still equals the absolute path pinned in the installed sudoers drop-in's `Cmnd_Spec` entries. Detects post-setup drift (e.g. an operator installed a shadowing `machinectl` earlier on secure_path) that would silently break the orchestrator's `sudo machinectl …` grant even though the drop-in is present and well-formed. This is the steady-state counterpart of L3a's setup-time relative-form probe (B-3 defense).
-- **sudoers rule-body content audit** (the F-004 `sudoers_rule_shape` audit, folded here rather than a standalone check — same data source, same WARN policy): re-render the expected `SANDBOX_OPS` body from the current `core.dispatch.Op` enum + operator + hostname + resolved `MACHINECTL_PATH`, and compare against the installed `/etc/sudoers.d/sandbox-ai-machinectl-<operator>`. Specifically assert: (a) the enumerated op set exactly equals `core.dispatch.Op` (neither under- nor over-enumerated — catches a wheel upgrade that added/removed an op without a setup re-run); (b) ZERO `"` (double-quote) characters appear in any `Cmnd_Spec` body (the F-004 silent-footgun shape — a drop-in that passes `visudo -cf` but matches nothing at runtime); (c) every op-name segment matches `[a-z0-9-]+` and embedded whitespace is backslash-escaped (not quoted). On any mismatch: WARN `sudoers drop-in content drifted from canonical (F-004 / op-enum drift): <specifics>. Run 'sudo sandbox setup' to regenerate.`
+- **machinectl-path stability** (`_audit_machinectl_stability`): `machinectl` resolves uniquely on the sudoers `secure_path` basis (inode-deduped per F-005). Post-C-009-D4 the operator SUDO drop-in is **pipe-only** — its per-op `Cmnd_Spec` pins the `systemd-run` byte-pipe launcher (`SYSTEMD_RUN_PATH`), NOT `machinectl` — so there is **no `machinectl` path in the drop-in to match against** (that drop-in match moved to the systemd-run-path-stability sub-check below). This sub-check is therefore **resolve/shadow-only**: it reuses L0's single-source `resolve_machinectl_path` and WARNs only if `machinectl` is absent or non-unique on secure_path. `machinectl` remains load-bearing for the **root L5/L6/L7 setup crossings** (which are not in the operator rule), so an absent / non-unique `machinectl` is still a real stability problem — the resolver raising IS the check. (Matching `machinectl` against the operator drop-in would false-WARN on every healthy C-009 host, since that drop-in no longer contains a `machinectl` path — D-pathstab.)
+- **systemd-run-path stability** (`_audit_systemd_run_stability` — the new C-009-D4 sub-check, see the ADDED requirement below): the re-resolved `systemd-run` byte-pipe launcher (`resolve_systemd_run_path`, on the same `secure_path` basis) equals the absolute path pinned in the installed SUDO drop-in's pipe `Cmnd_Spec` entries. Detects post-setup drift (a second/shadowing `systemd-run` earlier on secure_path) that would silently break the orchestrator's `sudo systemd-run --pipe …` op grant even though the drop-in is present and well-formed. This is the steady-state counterpart of L3a's setup-time relative-form pipe probe (B-3 defense), and is the SUDO-mode analogue of what the machinectl-path-stability check did before the pipe switch.
+- **sudoers rule-body content audit** (the F-004 `sudoers_rule_shape` audit, folded here rather than a standalone check — same data source, same WARN policy): re-render the expected `SANDBOX_OPS` body from the current `core.dispatch.Op` enum + operator + hostname + resolved `SYSTEMD_RUN_PATH` (NOT `MACHINECTL_PATH` — the SUDO operator rule renders the per-op **pipe** `Cmnd_Spec` keyed on the `systemd-run` launcher), and compare against the installed `/etc/sudoers.d/sandbox-ai-machinectl-<operator>`. Specifically assert: (a) the enumerated op set exactly equals `core.dispatch.Op` (the twelve-op enum, including `preflight` and the streaming `fwd` — neither under- nor over-enumerated, catching a wheel upgrade that added/removed an op without a setup re-run; a drop-in missing the `fwd` spec is exactly the stale-host state that breaks separate-user SUDO attach, so this WARN is the named remedy surface for C-010's migration); (b) ZERO `"` (double-quote) characters appear in any `Cmnd_Spec` body (the F-004 silent-footgun shape — a drop-in that passes `visudo -cf` but matches nothing at runtime); (c) every op-name segment matches `[a-z0-9-]+` and embedded whitespace is backslash-escaped (not quoted). On any mismatch: WARN `sudoers drop-in content drifted from canonical (F-004 / op-enum drift): <specifics>. Run 'sudo sandbox setup' to regenerate.`
 - **sudo-version floor**: parse `sudo --version`; the rule shape is empirically validated on sudo **1.9.5p2 → 1.9.17p2** (V9c/V9e/V9e-2, 11 distro images incl. the RHEL 8.10 / Rocky 8.9 floor). If the host's sudo is **older than 1.9.5p2** (only EOL distros — RHEL 7 = 1.8.23, Debian 10 = 1.8.27), WARN: `sudo <version> predates the validated floor 1.9.5p2; the V9 sudoers rule shape is unverified on this version and 'Defaults fast_glob' may be load-bearing-and-unconfirmed here. Supported enterprise distros ship ≥1.9.5p2.` This is the steady-state surface of the same check L0 performs at setup time; it WARNs (does not FAIL) consistent with this check's policy and because sub-floor sudo only occurs on out-of-support EOL distros.
 
 The check SHALL report PASS if all invariants hold. For any missing/wrong invariant, the check SHALL report WARN (not FAIL — drift may be operator-intentional) with detail naming the specific invariant violated and remediation `run 'sudo sandbox setup' to restore canonical setup state`.
 
 **Operator resolution under `sandbox doctor`.** The audit needs the operator identity to locate the per-operator drop-in and check `sb-ws` membership. It first tries setup's strict `resolve_operator()` (precedence `$SUDO_USER` → `$PKEXEC_UID` → `--operator` → refuse). Under a **plain `sandbox doctor`** — run by the operator AS THEMSELVES, not via `sudo` — that precedence has no context and raises; the check MUST then fall back to the **current real user** (`pwd.getpwuid(os.getuid())`), which IS the operator in that invocation, and run the full audit. It MUST NOT short-circuit with an "operator unresolvable" WARN (that left the audit dead in doctor's normal, non-sudo invocation). `resolve_operator()` itself stays strict for `setup` (which MUST refuse without explicit context — no current-user heuristic).
 
-**Root-only drop-in under a non-root invocation.** The per-operator sudoers drop-in is `0440 root:root` inside a `0750` `/etc/sudoers.d/`, so a plain `sandbox doctor` (running as the operator) cannot read it. Reading it MUST raise no uncaught exception (a `PermissionError` MUST NOT crash the doctor run): the check treats an unreadable-but-present drop-in as **NOT missing** (no "missing" violation) and **skips** the rule-body + machinectl-stability audits that need its content, returning the operator-readable invariants' verdict with a note that the rule is validated at install time by setup's L3a per-op probe. (`sudo sandbox doctor` is NOT a fuller path — post round-9/F-021 it resolves root's home, not the operator's, and exits without a config.) The operator-readable invariants (reserved-dir mode/ownership, subuid/subgid ranges, `sb-ws` group membership, sudo-version floor) are still audited.
+**Root-only drop-in under a non-root invocation.** The per-operator sudoers drop-in is `0440 root:root` inside a `0750` `/etc/sudoers.d/`, so a plain `sandbox doctor` (running as the operator) cannot read it. Reading it MUST raise no uncaught exception (a `PermissionError` MUST NOT crash the doctor run): the check treats an unreadable-but-present drop-in as **NOT missing** (no "missing" violation) and **skips** the rule-body + systemd-run-stability audits that need its content, returning the operator-readable invariants' verdict with a note that the rule is validated at install time by setup's L3a per-op probe. (The machinectl-path-stability sub-check still runs — it is resolve/shadow-only and needs no drop-in content. `sudo sandbox doctor` is NOT a fuller path — post round-9/F-021 it resolves root's home, not the operator's, and exits without a config.) The operator-readable invariants (reserved-dir mode/ownership, subuid/subgid ranges, `sb-ws` group membership, sudo-version floor, machinectl-path resolution) are still audited.
 
 **Dependencies:** filesystem readability; presence of `getent`, `stat`, `sudo` (for `sudo --version`); importability of `core.dispatch.Op` (for the rule-body op-enum comparison).
 
@@ -752,15 +757,19 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 
 #### Scenario: Root-only sudoers drop-in under a plain (operator) `sandbox doctor`
 - **WHEN** a plain `sandbox doctor` (operator, not root) audits invariants and reading the `0440 root:root` per-operator sudoers drop-in raises `PermissionError`
-- **THEN** the check does NOT crash and does NOT report the drop-in "missing"; it skips the rule-body + machinectl-stability audits and reports PASS (assuming the operator-readable invariants hold) with a note that the rule is validated at install time by setup's L3a per-op probe
+- **THEN** the check does NOT crash and does NOT report the drop-in "missing"; it skips the rule-body + systemd-run-stability audits (which need the drop-in content) and reports PASS (assuming the operator-readable invariants hold) with a note that the rule is validated at install time by setup's L3a per-op probe
 
 #### Scenario: Drop-in file removed by operator
 - **WHEN** an operator manually `rm`s `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` and runs `sandbox doctor`
 - **THEN** the check reports WARN with detail `sudoers drop-in /etc/sudoers.d/sandbox-ai-machinectl-<operator> missing. Run 'sudo sandbox setup' to restore.`
 
 #### Scenario: Second machinectl appears on secure_path post-setup
-- **WHEN** post-setup a second executable `machinectl` appears on secure_path (e.g. `/usr/local/bin/machinectl`, earlier than the L0-resolved path the drop-in pinned) and the operator runs `sandbox doctor`
-- **THEN** the check reports WARN naming the machinectl-path-stability invariant, with version-accurate detail: a second `machinectl` (`<found-path>`) now exists on secure_path while the sudoers rule pins `<pinned-path>`. On sudo ≥1.9.15 this *breaks* the orchestrator's `sudo machinectl …` grant (availability failure — the operator will hit password prompts); on sudo 1.9.5p2 the grant still works (sudo runs the pinned binary, V9e-2) but the unexpected binary is a hygiene concern. Remediation either way: `remove the unexpected '<found-path>' (the orchestrator expects only the systemd '<pinned-path>'), or run 'sudo sandbox setup' to re-evaluate`. WARN (not FAIL) per the check's policy — and because on the enterprise floor it is not a functional break.
+- **WHEN** post-setup a second executable `machinectl` appears on secure_path (e.g. `/usr/local/bin/machinectl`) and the operator runs `sandbox doctor`
+- **THEN** the machinectl-path-stability sub-check reports WARN (the F-005 resolver refuses a non-unique `machinectl`): a second `machinectl` (`<found-path>`) now exists on secure_path. `machinectl` is load-bearing for setup's root L5/L6/L7 crossings, so the non-unique state is a hygiene/availability concern; remediation: `remove the unexpected '<found-path>' (the orchestrator expects only the systemd-provided '/usr/bin/machinectl'), or run 'sudo sandbox setup' to re-evaluate`. WARN (not FAIL) per the check's policy. NOTE: a second `machinectl` no longer breaks the operator **op** crossings — under C-009 those cross via `sudo systemd-run --pipe`, so the operator rule pins `SYSTEMD_RUN_PATH`, not `MACHINECTL_PATH`; a shadowing **`systemd-run`** is what would break an op grant (see the systemd-run-path-stability sub-check).
+
+#### Scenario: Shadowing systemd-run drifts from the pinned pipe Cmnd_Spec
+- **WHEN** post-setup the re-resolved `systemd-run` (on the secure_path basis) is no longer the absolute path pinned in the installed SUDO drop-in's pipe `Cmnd_Spec` entries (e.g. a second `systemd-run` appeared earlier on secure_path) and the operator runs `sandbox doctor`
+- **THEN** the systemd-run-path-stability sub-check reports WARN naming the drift (`re-resolved systemd-run '<found>' is not the '<pinned>' pinned in the SUDO drop-in's pipe Cmnd_Spec; this drift breaks the orchestrator's sudo_pipe_cmd op crossings`), with remediation to remove the unexpected copy or re-run setup. WARN (not FAIL) per the check's policy
 
 #### Scenario: Operator removed from sb-ws
 - **WHEN** an admin runs `gpasswd -d <operator> sb-ws` and the operator runs `sandbox doctor`
@@ -781,4 +790,120 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 #### Scenario: Host sudo predates the validated floor
 - **WHEN** `sandbox doctor` runs on a host whose `sudo --version` is older than 1.9.5p2 (e.g. an EOL RHEL 7 with sudo 1.8.23)
 - **THEN** the sudo-version-floor invariant reports WARN: `sudo 1.8.23 predates the validated floor 1.9.5p2; the V9 sudoers rule shape is unverified on this version (supported enterprise distros ship ≥1.9.5p2; only EOL distros are below).` — WARN not FAIL (out-of-support EOL territory, not a functional break per V9c knowledge)
+
+### Requirement: Execution-Mode-Aware Doctor Checks
+
+`sandbox doctor` SHALL honor the active execution mode, which is the **marker-resolved** value (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector" requirement) overlaid onto `host_config.host.docker_execution_mode` — it is NOT a toml field, and the doctor runner's callers (including `sandbox init`'s and `sandbox start`'s pre-flight `run_check_subset`) SHALL thread the resolved mode and the `resolve_daemon_owner` owner so the checks evaluate against the real mode rather than a defaulted/mode-less config. In `operator-rootless` mode `sandbox doctor` itself SHALL resolve the daemon owner as the invoking operator (`resolve_daemon_owner`) **toml-free** — reading neither the toml nor `docker_unprivileged_user` (the D7 owner-read discipline) — so a missing toml is not an error in operator-rootless. In `operator-rootless` mode it SHALL skip the checks that only make sense for the `machinectl` crossing — machinectl Shell Reachability, systemd-machined Service Check, Unprivileged User Existence (the dedicated daemon user), and the dispatcher-integrity checks (dispatcher-sha drift / the setup-invariants machinectl-stability + sudoers-rule-body audit) — and SHALL run the docker/runsc/supply-chain/compose-collision checks **locally** (these route through `core.dispatch.probe`, which takes the local path in `operator-rootless`). In `separate-user` mode every check SHALL behave exactly as before. A check that does not apply in the active mode SHALL report an explicit mode-skip status; it SHALL NOT report PASS (no false green).
+
+#### Scenario: crossing checks skipped in operator-rootless
+
+- **WHEN** `sandbox doctor` runs with `docker_execution_mode == operator-rootless`
+- **THEN** the machinectl-reachability, systemd-machined, dedicated-user-existence, and dispatcher-integrity checks report a mode-skip status (not PASS), and the docker/runsc/supply-chain checks run as local `docker …` queries with no `machinectl` crossing
+
+#### Scenario: all checks unchanged in separate-user
+
+- **WHEN** `sandbox doctor` runs with `docker_execution_mode == separate-user`
+- **THEN** every check behaves exactly as before this change (including the crossing and dispatcher-integrity checks)
+
+### Requirement: Daemon User Privilege Invariant (separate-user)
+
+In `separate-user` mode, `sandbox doctor` SHALL verify that the dedicated daemon user (`docker_unprivileged_user`) has **no path to root via sudo** — neither (a) membership in a privilege-granting group (`sudo`, `wheel`, or other admin group) NOR (b) a sudoers-**policy** grant (an `/etc/sudoers.d/` drop-in or a `NOPASSWD` rule), detected by parsing `sudo -n -l -U <user>`. This no-privilege property is what makes the separate-user blast-radius reduction load-bearing: a container/runtime escape that reaches the daemon owner lands on a dead-end account only if that account cannot escalate. The sudoers-policy query (`-U <user>`) requires root; under a non-root `sandbox doctor` it is **not determinable**, so the check falls back to group membership only and notes that the full audit needs `sudo sandbox doctor` — it SHALL NOT emit a false WARN on the indeterminate case. The check SHALL be WARN severity (an operator who deliberately privileged the daemon user should be told, not hard-blocked). It MAY be implemented as a standalone check or folded into the existing `setup_invariants` check.
+
+#### Scenario: daemon user with no sudo path passes
+
+- **WHEN** `sandbox doctor` runs in `separate-user` mode and the daemon user is in no `sudo`/`wheel`/admin group and (where determinable) the sudoers policy grants it no sudo
+- **THEN** the invariant check passes
+
+#### Scenario: daemon user with a group OR policy sudo grant warns
+
+- **WHEN** the dedicated daemon user is a member of `sudo` (or `wheel`/admin), OR the sudoers policy grants it sudo (a drop-in / NOPASSWD rule)
+- **THEN** the check emits a WARN explaining that a privileged daemon user defeats the separate-user blast-radius reduction, and how to remove the grant
+
+#### Scenario: non-root doctor cannot query another user's sudoers policy
+
+- **WHEN** `sandbox doctor` runs as a non-root user (so `sudo -n -l -U <daemon-user>` is not permitted) and the daemon user is in no admin group
+- **THEN** the check passes on the group evidence and notes that the sudoers-policy audit was not checked (run `sudo sandbox doctor` for the full audit) — it does NOT emit a false WARN
+
+### Requirement: Sudoer Daemon-Owner Warning (operator-rootless)
+
+In `operator-rootless` mode, `sandbox doctor` SHALL WARN when the operator account that owns rootless Docker is a sudoer — detected by **either** (a) membership in `sudo`/`wheel`/admin, **or** (b) a sudoers-**policy** grant (an `/etc/sudoers.d/` drop-in or `NOPASSWD` rule), determined by parsing `sudo -n -l` for the invoking operator (a self-query needing no root). NOPASSWD is the instant-escalation, common cloud-VM / cloud-init case, so it MUST be detected even when the operator is in no admin group. The WARN SHALL name the detected path (admin group(s), and/or passwordless-via-the-sudoers-policy / drop-in), explain that because the daemon owner can `sudo` a (rare, gVisor-fronted) escape reaching it could escalate to root, and point to two remedies: run sandboxes as a dedicated **non-sudo** operator account, or set `docker_execution_mode = separate-user`. This SHALL be WARN severity, never FAIL — it is an informed-tradeoff signal, not a misconfiguration.
+
+#### Scenario: group-sudoer operator owner warns
+
+- **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is a member of `sudo`/`wheel`/admin
+- **THEN** a WARN is emitted naming the escalation tradeoff and the two remedies (dedicated non-sudo operator, or `separate-user` mode)
+
+#### Scenario: drop-in / NOPASSWD operator owner warns (no admin group)
+
+- **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is in **no** admin group but the sudoers policy grants it sudo via an `/etc/sudoers.d/` drop-in or NOPASSWD rule
+- **THEN** a WARN is emitted naming the passwordless-sudo-via-the-sudoers-policy path and the two remedies
+
+#### Scenario: non-sudo operator owner is clean
+
+- **WHEN** `sandbox doctor` runs in `operator-rootless` mode and the operator account is in no `sudo`/`wheel`/admin group **and** the sudoers policy grants it no sudo
+- **THEN** no sudoer-owner WARN is emitted
+
+### Requirement: Host CPU Capacity Check
+
+`sandbox doctor` SHALL include a check that, for each registered instance with a rendered `compose.yml`, compares every service's `cpus` limit against the host's CPU count (obtained as in the `hydration-pipeline` capability) and emits a WARN-severity status when any rendered `cpus` exceeds the host count. The check SHALL source the limits from the instance's rendered `compose.yml` (the authoritative artifact), not from re-spelled constants. The warning SHALL name the offending service, its `cpus` value, and the host CPU count, so the operator sees an actionable message in place of Docker's `range of CPUs is from 0.01 to N.NN` error. Instances without a rendered `compose.yml` SHALL be skipped.
+
+Because hydration clamps CPU limits at render, this check primarily guards on-disk divergence — compose rendered before host-aware clamping existed, rendered on a larger host and relocated, or hand-edited.
+
+#### Scenario: Rendered CPU limit exceeds host count
+
+- **WHEN** an instance's rendered `compose.yml` requests `cpus: "4.0"` for a service and the host has 2 CPUs
+- **THEN** `sandbox doctor` reports a WARN naming the service, `4.0`, and the host's `2`
+
+#### Scenario: Rendered CPU limits fit the host
+
+- **WHEN** every service's rendered `cpus` is at or below the host CPU count
+- **THEN** the check reports OK (no warning)
+
+#### Scenario: Instance without rendered compose is skipped
+
+- **WHEN** a registered instance has no rendered `compose.yml`
+- **THEN** the CPU capacity check skips that instance without error
+
+### Requirement: Instance Memory Over-Commit Check
+
+`sandbox doctor` SHALL include a check that, for each registered instance with a rendered `compose.yml`, sums the services' `mem_limit` values and emits a WARN-severity status when the total exceeds the host's physical RAM. Host RAM SHALL be read locally (e.g. `os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")`). The limits SHALL be sourced from the rendered `compose.yml`, parsed from Docker size strings (e.g. `"8gb"`, `"512m"`) to bytes. The warning SHALL name the summed request, the host RAM, and the consequence (containers may be OOM-killed under memory pressure). This is advisory only — a WARN does not, by itself, flip the doctor exit contract to failure. Instances without a rendered `compose.yml` SHALL be skipped.
+
+Memory limits are not clamped (a `mem_limit` above host RAM over-commits rather than failing `start`); this check provides visibility only.
+
+#### Scenario: Summed memory request exceeds host RAM
+
+- **WHEN** an instance's rendered services sum to a `mem_limit` total greater than the host's physical RAM
+- **THEN** `sandbox doctor` reports a WARN naming the summed request, the host RAM, and the OOM-under-pressure consequence
+
+#### Scenario: Summed memory request fits host RAM
+
+- **WHEN** the summed `mem_limit` total is at or below the host's physical RAM
+- **THEN** the check reports OK (no warning)
+
+#### Scenario: Over-commit warning is advisory
+
+- **WHEN** the memory over-commit check emits a WARN
+- **THEN** the WARN alone does not change the doctor exit code to a failure (consistent with the existing Warn Severity Status contract)
+
+### Requirement: systemd-run Path-Stability Sub-Check (`_audit_systemd_run_stability`)
+
+`setup_invariants` SHALL include a `_audit_systemd_run_stability` sub-check that confirms the byte-pipe launcher pinned in the installed SUDO drop-in is still the one that resolves on the host. Post-C-009-D4 the operator SUDO drop-in is the `sudo_pipe_cmd` crossing, so each per-op `Cmnd_Spec` pins the absolute `SYSTEMD_RUN_PATH`. If the re-resolved `systemd-run` is no longer the one pinned in the installed drop-in (a second copy, a shadow earlier on secure_path), the SUDO op grant breaks even though the drop-in is present and well-formed. The sub-check SHALL:
+
+- resolve `systemd-run` on the sudoers `secure_path` basis via L0's single-source `resolve_systemd_run_path` (the same `secure_path` / inode-dedupe basis the renderer used), surfacing a resolver refusal (absent / non-unique) as a WARN;
+- when the drop-in content is available, assert the resolved absolute path is present in the installed drop-in's pipe `Cmnd_Spec` bodies; on drift, WARN naming the resolved-vs-pinned mismatch and that it breaks the orchestrator's `sudo_pipe_cmd` op crossings;
+- skip the drop-in match (without a "missing" violation) when the drop-in content is unavailable (the `0440 root:root` unreadable-under-plain-doctor case), consistent with the parent check's content-skip policy.
+
+This is the SUDO-mode steady-state counterpart of L3a's setup-time relative-form pipe probe and the analogue of the machinectl-path-stability check before the pipe switch. It is WARN-not-FAIL per the parent check's policy.
+
+#### Scenario: systemd-run resolves and matches the pinned pipe Cmnd_Spec
+- **WHEN** `systemd-run` resolves uniquely on secure_path to the same absolute path pinned in the installed SUDO drop-in's pipe `Cmnd_Spec` entries
+- **THEN** the sub-check passes (no WARN contributed)
+
+#### Scenario: systemd-run resolution drift breaks the op grant
+- **WHEN** the re-resolved `systemd-run` differs from the path pinned in the drop-in's pipe `Cmnd_Spec` (a second/shadowing copy earlier on secure_path)
+- **THEN** the sub-check WARNs naming the resolved-vs-pinned mismatch and that it breaks the orchestrator's `sudo_pipe_cmd` op crossings; remediation: remove the unexpected copy or run `sudo sandbox setup`
+
+#### Scenario: drop-in content unavailable under a plain doctor
+- **WHEN** the SUDO drop-in is present but unreadable (`0440 root:root`, plain operator `sandbox doctor`)
+- **THEN** the sub-check still resolves `systemd-run` (resolve/shadow signal) but skips the drop-in `Cmnd_Spec` match without contributing a "missing" violation
 

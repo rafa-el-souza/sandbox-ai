@@ -780,8 +780,9 @@ workspace_paths, *, volumes, auth) -> list[str]` invoked by both
 `sandbox stop` and `sandbox destroy` (D5+D6 phase). The sequence runs
 exactly three phases in this order:
 
-1. `_compose_down(..., volumes=<arg>, ...)` — `docker compose down [-v]`
-   via `machinectl shell`. May raise `SandboxExecutionError`.
+1. `_compose_down(..., volumes=<arg>, ...)` — the dispatcher `compose-down` op
+   (`docker compose down [-v]`), crossed per auth mode (`sudo_pipe_cmd` under SUDO,
+   `machinectl_cmd` under POLKIT). May raise `SandboxExecutionError`.
 2. `_phase_stop_unlink_consumer_files(instance_dir, host_user)` —
    unlinks every helper-cp-managed file enumerated in
    `_helper_cp_chown_plan`. Fault-isolated; returns warning strings.

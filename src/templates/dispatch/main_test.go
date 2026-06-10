@@ -611,9 +611,41 @@ func TestEncodeJournalFieldsNewlineBranch(t *testing.T) {
 
 func TestWrapSentinel(t *testing.T) {
 	got := wrapSentinel("echo ok", "deadbeef")
-	want := "( echo ok ); echo __SANDBOX_EXIT_deadbeef_$?"
+	want := "__PFNONCE=deadbeef; ( echo ok ); echo __SANDBOX_EXIT_deadbeef_$?"
 	if got != want {
 		t.Fatalf("wrapSentinel = %q, want %q", got, want)
+	}
+}
+
+// TestWrapSentinelBindsPreflightMarkersToNonce guards H-1: the preflight bundle
+// inner references ${__PFNONCE}, and wrapSentinel assigns __PFNONCE=<nonce>
+// (the SAME nonce as the BEGIN/EXIT frame) before the subshell — so at
+// shell-expansion time the rendered markers carry the per-crossing nonce.
+// Untrusted op output cannot forge a verdict because it cannot learn the nonce.
+// Run under /bin/sh (busybox in the golang:1.23-alpine compile container).
+func TestWrapSentinelBindsPreflightMarkersToNonce(t *testing.T) {
+	wrapped := wrapSentinel(preflightInner, "deadbeefcafef00d")
+	out, err := exec.Command("/bin/sh", "-c", wrapped).Output()
+	if err != nil {
+		// docker/compose are absent in the test container; the queries fail, but
+		// the begin/rc echo markers still expand. Tolerate the non-nil exit and
+		// inspect stdout.
+		if len(out) == 0 {
+			t.Fatalf("sh -c %q produced no stdout: %v", wrapped, err)
+		}
+	}
+	for _, want := range []string{
+		"__PREFLIGHT_Q_deadbeefcafef00d_auth-probe__",
+		"__PREFLIGHT_RC_deadbeefcafef00d_auth-probe_",
+		"__PREFLIGHT_Q_deadbeefcafef00d_compose-ls__",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("rendered markers missing %q; stdout=%q", want, out)
+		}
+	}
+	// The literal template token must NOT survive into the output (it expanded).
+	if strings.Contains(string(out), "${__PFNONCE}") {
+		t.Fatalf("unexpanded ${__PFNONCE} in stdout=%q", out)
 	}
 }
 
@@ -715,5 +747,215 @@ func TestDispatchSuccessFramesViaSubprocess(t *testing.T) {
 	}
 	if !strings.Contains(s, "ok") {
 		t.Fatalf("auth-probe output 'ok' missing (op did not run before the trailer): %q", s)
+	}
+}
+
+// ─── fwd streaming op (C-010 "Streaming Op Class" / "fwd Op Wire Expansion") ─
+
+// fwdWire builds the post-expansion fwd wire form `<inst> --project <P> --ip
+// <IP>` for driving buildFwdArgv / dispatch().
+func fwdWire(inst, project, ip string) []string {
+	return []string{inst, "--project", project, "--ip", ip}
+}
+
+// TestBuildFwdArgvShape pins the direct docker-exec target argv (spec "fwd
+// constructs the direct docker-exec argv (no bash -c)" / "Verb, target binary,
+// and port are not wire-controllable"): exactly
+// ["/usr/bin/docker","exec","-i","<P>-admin-1","/fwd","<IP>:9999"] with no
+// /bin/bash, no -c, and the instance token returned for journald.
+func TestBuildFwdArgvShape(t *testing.T) {
+	argv, inst, err := buildFwdArgv(fwdWire("myinst", "dev-myinst", "10.100.0.7"))
+	if err != nil {
+		t.Fatalf("buildFwdArgv errored: %v", err)
+	}
+	want := []string{"/usr/bin/docker", "exec", "-i", "dev-myinst-admin-1", "/fwd", "10.100.0.7:9999"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("fwd argv = %#v, want %#v", argv, want)
+	}
+	if argv[0] == "/bin/bash" {
+		t.Fatalf("fwd argv must NOT be a /bin/bash -c wrapper: %#v", argv)
+	}
+	if inst != "myinst" {
+		t.Fatalf("fwd instance token = %q, want myinst", inst)
+	}
+}
+
+// TestFwdWireRejections covers the wire-validation rejections (spec "fwd Op
+// Wire Expansion" + the "Stream-invocation validation failure is stderr-only"
+// scenario at the unit level): project-suffix, IP-superblock, unknown /
+// duplicate / missing flags, and extra positionals. Each must error before any
+// argv is produced.
+func TestFwdWireRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		wire []string
+		want string
+	}{
+		{"project not ending -inst", fwdWire("myinst", "evil", "10.100.0.7"), "must end with -myinst"},
+		{"project other suffix", fwdWire("myinst", "other-inst", "10.100.0.7"), "must end with -myinst"},
+		{"project bad charset", fwdWire("myinst", "Dev-myinst", "10.100.0.7"), "must match"},
+		{"ip out of superblock low", fwdWire("myinst", "dev-myinst", "10.0.0.1"), "IPAM superblock"},
+		{"ip out of superblock other", fwdWire("myinst", "dev-myinst", "192.168.1.50"), "IPAM superblock"},
+		{"ip second octet 99", fwdWire("myinst", "dev-myinst", "10.99.0.1"), "IPAM superblock"},
+		{"ip hostname", fwdWire("myinst", "dev-myinst", "evil.example.com"), "IPAM superblock"},
+		{"ip with port", fwdWire("myinst", "dev-myinst", "10.100.0.7:22"), "IPAM superblock"},
+		{"ip ipv6", fwdWire("myinst", "dev-myinst", "::1"), "IPAM superblock"},
+		{"ip five octets", fwdWire("myinst", "dev-myinst", "10.100.0.7.1"), "IPAM superblock"},
+		{"ip octet over 255", fwdWire("myinst", "dev-myinst", "10.100.0.256"), "IPAM superblock"},
+		{"ip leading-zero first octet", fwdWire("myinst", "dev-myinst", "010.100.0.7"), "IPAM superblock"},
+		{"ip leading-zero inner octet", fwdWire("myinst", "dev-myinst", "10.100.00.7"), "IPAM superblock"},
+		{"unknown flag", []string{"myinst", "--project", "dev-myinst", "--ip", "10.100.0.7", "--evil", "x"}, "unrecognized flag"},
+		{"duplicate project", []string{"myinst", "--project", "dev-myinst", "--project", "dev-myinst", "--ip", "10.100.0.7"}, "--project given more than once"},
+		{"duplicate ip", []string{"myinst", "--project", "dev-myinst", "--ip", "10.100.0.7", "--ip", "10.100.0.8"}, "--ip given more than once"},
+		{"missing project", []string{"myinst", "--ip", "10.100.0.7"}, "--project is required"},
+		{"missing ip", []string{"myinst", "--project", "dev-myinst"}, "--ip is required"},
+		{"flag missing value", []string{"myinst", "--project"}, "missing its value"},
+		{"empty wire", []string{}, "missing <instance>"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			argv, _, err := buildFwdArgv(c.wire)
+			if err == nil {
+				t.Fatalf("expected rejection, got argv %#v", argv)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error %q missing substring %q", err.Error(), c.want)
+			}
+		})
+	}
+}
+
+// TestFwdAcceptsSuperblockEdges asserts the second-octet boundary 100..255 is
+// inclusive on both ends (spec "fwd Op Wire Expansion" IPAM superblock
+// 10.100.0.0–10.255.255.0).
+func TestFwdAcceptsSuperblockEdges(t *testing.T) {
+	for _, ip := range []string{"10.100.0.0", "10.255.255.0", "10.100.0.7", "10.200.13.42"} {
+		if _, _, err := buildFwdArgv(fwdWire("myinst", "dev-myinst", ip)); err != nil {
+			t.Fatalf("expected %s accepted (in superblock), got %v", ip, err)
+		}
+	}
+}
+
+// TestIsStreamInvocation pins the framed/streaming classification (spec
+// "Streaming Op Class"): only `fwd` with wire args is a stream invocation; a
+// lone `fwd --check` and every non-fwd op are framed.
+func TestIsStreamInvocation(t *testing.T) {
+	cases := []struct {
+		op   string
+		rest []string
+		want bool
+	}{
+		{"fwd", []string{"myinst", "--project", "dev-myinst", "--ip", "10.100.0.7"}, true},
+		{"fwd", []string{"--check"}, false},
+		{"fwd", nil, true},
+		{"compose-up", []string{"myinst"}, false},
+		{"auth-probe", nil, false},
+	}
+	for _, c := range cases {
+		if got := isStreamInvocation(c.op, c.rest); got != c.want {
+			t.Errorf("isStreamInvocation(%q, %v) = %v, want %v", c.op, c.rest, got, c.want)
+		}
+	}
+}
+
+// TestStreamValidationFailureIsStderrOnly covers spec scenario "Stream-
+// invocation validation failure is stderr-only": a fwd wire that fails the
+// project-suffix rule exits non-zero, writes a diagnostic naming the rejected
+// operand to stderr, and writes ZERO bytes to stdout (no frames, no partial
+// output).
+func TestStreamValidationFailureIsStderrOnly(t *testing.T) {
+	var out, errOut bytes.Buffer
+	argv := append([]string{"dispatch"}, append([]string{"fwd"}, fwdWire("myinst", "evil", "10.100.0.7")...)...)
+	code := dispatch(argv, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for invalid fwd wire, got 0")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stream validation failure wrote %d stdout bytes (must be zero): %q", out.Len(), out.String())
+	}
+	if !strings.Contains(errOut.String(), "must end with -myinst") {
+		t.Fatalf("stderr must name the project-suffix rejection, got %q", errOut.String())
+	}
+}
+
+// TestStreamIPRejectionIsStderrOnly mirrors the above for the IP-superblock
+// rejection (spec "IP outside the IPAM superblock is rejected").
+func TestStreamIPRejectionIsStderrOnly(t *testing.T) {
+	var out, errOut bytes.Buffer
+	argv := append([]string{"dispatch"}, append([]string{"fwd"}, fwdWire("myinst", "dev-myinst", "192.168.1.50")...)...)
+	code := dispatch(argv, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for out-of-superblock IP, got 0")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("IP rejection wrote %d stdout bytes (must be zero): %q", out.Len(), out.String())
+	}
+	if !strings.Contains(errOut.String(), "IPAM superblock") {
+		t.Fatalf("stderr must name the IPAM-superblock rejection, got %q", errOut.String())
+	}
+}
+
+// TestFwdCheckRidesFramedPath covers spec scenario "Streaming op --check rides
+// the framed path": a lone `dispatch fwd --check` is NOT a stream invocation —
+// it emits __SANDBOX_BEGIN_<nonce> + __SANDBOX_EXIT_<nonce>_0 (exit 0, no side
+// effect) exactly like every framed op's --check, so L3a/L8 probe fwd with the
+// same framed recovery as the other eleven ops.
+func TestFwdCheckRidesFramedPath(t *testing.T) {
+	beginRe := regexp.MustCompile(`^__SANDBOX_BEGIN_([0-9a-f]{16})$`)
+	var out, errOut bytes.Buffer
+	code := dispatch([]string{"dispatch", "fwd", "--check"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("lone `fwd --check` exit = %d, want 0", code)
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	m := beginRe.FindStringSubmatch(lines[0])
+	if m == nil {
+		t.Fatalf("first stdout line is not a BEGIN nonce (fwd --check must be framed): %q", out.String())
+	}
+	nonce := m[1]
+	wantExit := "__SANDBOX_EXIT_" + nonce + "_0"
+	if lines[len(lines)-1] != wantExit {
+		t.Fatalf("last stdout line = %q, want %q (framed, nonce-bound)", lines[len(lines)-1], wantExit)
+	}
+}
+
+// TestStreamInvocationExecsDirectArgvNoFraming is the canonical proof of spec
+// scenario "Stream invocation emits no framing": a valid fwd stream invocation
+// driven through dispatch() (a) writes ZERO bytes to stdout (no
+// __SANDBOX_BEGIN_/__SANDBOX_EXIT_ framing) and (b) replaces the process image
+// — via the execFn seam — with the docker-exec target argv DIRECTLY (no
+// /bin/bash, no -c, no sentinel wrap). The execFn seam intercepts the (target,
+// argv) handed to exec without actually replacing the test process (a real
+// syscall.Exec never returns, so it would kill the test binary); returning nil
+// from the stub makes execTarget fall through to translateExecError(nil, …),
+// but we assert on the captured argv, not the post-exec return.
+func TestStreamInvocationExecsDirectArgvNoFraming(t *testing.T) {
+	var gotTarget string
+	var gotArgv []string
+	orig := execFn
+	execFn = func(target string, argv []string, _ []string) error {
+		gotTarget = target
+		gotArgv = argv
+		return syscall.ENOENT // benign: only returns on a real exec failure
+	}
+	t.Cleanup(func() { execFn = orig })
+
+	var out, errOut bytes.Buffer
+	argv := append([]string{"dispatch"}, append([]string{"fwd"}, fwdWire("myinst", "dev-myinst", "10.100.0.7")...)...)
+	_ = dispatch(argv, &out, &errOut)
+
+	if out.Len() != 0 {
+		t.Fatalf("stream invocation wrote %d stdout bytes (must be zero): %q", out.Len(), out.String())
+	}
+	if strings.Contains(out.String(), "__SANDBOX_BEGIN_") || strings.Contains(out.String(), "__SANDBOX_EXIT_") {
+		t.Fatalf("stream invocation emitted framing on stdout: %q", out.String())
+	}
+	if gotTarget != "/usr/bin/docker" {
+		t.Fatalf("exec target = %q, want /usr/bin/docker (direct exec, no /bin/bash)", gotTarget)
+	}
+	wantArgv := []string{"/usr/bin/docker", "exec", "-i", "dev-myinst-admin-1", "/fwd", "10.100.0.7:9999"}
+	if !reflect.DeepEqual(gotArgv, wantArgv) {
+		t.Fatalf("exec argv = %#v, want %#v (no -c, no sentinel wrap)", gotArgv, wantArgv)
 	}
 }

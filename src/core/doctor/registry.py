@@ -13,8 +13,18 @@ import functools
 from collections import defaultdict, deque
 
 from core.doctor.checks.binary_integrity_posture import check_binary_integrity_posture
+from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 from core.doctor.checks.dispatcher_sha_drift import check_dispatcher_sha_drift
-from core.doctor.checks.filesystem import check_acl_support, check_ancestor_traverse, check_setfacl
+from core.doctor.checks.filesystem import (
+    check_acl_support,
+    check_ancestor_traverse,
+    check_cgroup_v2,
+    check_setfacl,
+)
+from core.doctor.checks.instance_resources import (
+    check_host_cpu_capacity,
+    check_instance_memory_overcommit,
+)
 from core.doctor.checks.per_user_tree import (
     check_legacy_cwd_files,
     check_legacy_registry_shape,
@@ -54,11 +64,27 @@ from core.doctor.checks.workspace_bridge import (
     check_workspace_path_in_walker_boundary,
 )
 from core.doctor.types import Check, CheckResult
-from core.host_config import MachinectlAuth
+from core.host_config import DockerExecutionMode, MachinectlAuth
+
+# The crossing-only checks that have no meaning in ``operator-rootless`` mode
+# (there is no machinectl crossing / dedicated daemon user / sudoers rule to
+# audit). These are gated to ``separate-user`` via ``Check.applies_in`` so the
+# runner emits an explicit mode-skip rather than a false green (design D2).
+_SEPARATE_USER_ONLY = frozenset({DockerExecutionMode.SEPARATE_USER})
+
+# The sudoer-daemon-owner WARN has meaning ONLY in ``operator-rootless`` (where
+# the daemon owner is the invoking operator, who may be a sudoer); in
+# ``separate-user`` the owner is the dedicated dead-end user covered by the
+# no-sudo invariant folded into ``setup_invariants`` (design D4). Gated to
+# ``operator-rootless`` so the runner mode-skips it in ``separate-user``.
+_OPERATOR_ROOTLESS_ONLY = frozenset({DockerExecutionMode.OPERATOR_ROOTLESS})
 
 
-def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> list[Check]:
-    """Build the doctor check registry with auth-mode-aware machinectl checks.
+def build_check_registry(
+    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+) -> list[Check]:
+    """Build the doctor check registry with auth-mode- and execution-mode-aware checks.
 
     When ``auth_mode == MachinectlAuth.POLKIT``, the `sudo` binary check is
     omitted from the registry and the `machinectl_reachable` check no longer
@@ -66,6 +92,15 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
     ``auth_mode`` so they cross the privilege boundary via
     ``core.dispatch.probe``, which builds the command prefix from the threaded
     auth mode.
+
+    ``mode`` (the marker-resolved :class:`DockerExecutionMode`) is partial-bound
+    into the closure of every check that builds ``minimal_host_config(...)`` so
+    its ``dispatch.probe(...)`` routes locally in ``operator-rootless`` (C-003,
+    no dispatch change needed — just thread the mode). The five crossing-only
+    checks (``machinectl_reachable``, ``systemd_machined``, ``user_exists``,
+    ``dispatcher_sha_drift``) carry ``applies_in=separate-user`` so the runner
+    mode-skips them in ``operator-rootless``; ``setup_invariants`` stays
+    both-mode and branches internally.
     """
     is_sudo = auth_mode == MachinectlAuth.SUDO
     machinectl_reachable_deps = (
@@ -111,6 +146,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 depends_on=[],
                 run=check_user_exists,
                 remediation="",
+                applies_in=_SEPARATE_USER_ONLY,
             ),
             Check(
                 id="systemd_machined",
@@ -119,21 +155,23 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 depends_on=["machinectl"],
                 run=check_systemd_machined,
                 remediation="",
+                applies_in=_SEPARATE_USER_ONLY,
             ),
             Check(
                 id="machinectl_reachable",
                 name="machinectl reachable",
                 category="Privilege Boundary",
                 depends_on=machinectl_reachable_deps,
-                run=functools.partial(check_machinectl_reachable, auth_mode=auth_mode),
+                run=functools.partial(check_machinectl_reachable, auth_mode=auth_mode, mode=mode),
                 remediation="",
+                applies_in=_SEPARATE_USER_ONLY,
             ),
             Check(
                 id="docker_available",
                 name="Docker available",
                 category="Privilege Boundary",
                 depends_on=["machinectl_reachable"],
-                run=functools.partial(check_docker_available, auth_mode=auth_mode),
+                run=functools.partial(check_docker_available, auth_mode=auth_mode, mode=mode),
                 remediation="",
             ),
             Check(
@@ -141,7 +179,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 name="Docker rootless",
                 category="Privilege Boundary",
                 depends_on=["docker_available"],
-                run=functools.partial(check_docker_rootless, auth_mode=auth_mode),
+                run=functools.partial(check_docker_rootless, auth_mode=auth_mode, mode=mode),
                 remediation="",
             ),
             Check(
@@ -149,7 +187,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 name="gVisor runsc",
                 category="Privilege Boundary",
                 depends_on=["docker_available"],
-                run=functools.partial(check_runsc_registered, auth_mode=auth_mode),
+                run=functools.partial(check_runsc_registered, auth_mode=auth_mode, mode=mode),
                 remediation="",
             ),
             Check(
@@ -157,7 +195,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 name="runsc runtimeArgs",
                 category="Privilege Boundary",
                 depends_on=["runsc"],
-                run=functools.partial(check_runsc_runtimeargs, auth_mode=auth_mode),
+                run=functools.partial(check_runsc_runtimeargs, auth_mode=auth_mode, mode=mode),
                 remediation="",
             ),
             Check(
@@ -165,7 +203,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 name="--host-uds=none",
                 category="Privilege Boundary",
                 depends_on=["runsc"],
-                run=functools.partial(check_host_uds, auth_mode=auth_mode),
+                run=functools.partial(check_host_uds, auth_mode=auth_mode, mode=mode),
                 remediation="",
             ),
             Check(
@@ -173,7 +211,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
                 name="compose project name collision",
                 category="Privilege Boundary",
                 depends_on=["machinectl_reachable"],
-                run=functools.partial(check_compose_project_name_collision, auth_mode=auth_mode),
+                run=functools.partial(check_compose_project_name_collision, auth_mode=auth_mode, mode=mode),
                 remediation="",
             ),
         ]
@@ -198,12 +236,24 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             run=check_acl_support,
             remediation="",
         ),
+        # cgroup-v2 is a genuine runtime prerequisite in BOTH modes (rootless
+        # dockerd needs the unified hierarchy). C-004 gated setup's L1 cgroup-v2
+        # verify OUT of op-rootless setup, so doctor MUST still surface it here
+        # — hence the default both-mode ``applies_in`` (NOT separate-user-only).
+        Check(
+            id="cgroup_v2",
+            name="cgroup v2",
+            category="Filesystem",
+            depends_on=[],
+            run=check_cgroup_v2,
+            remediation="",
+        ),
         Check(
             id="ancestor_traverse",
             name="ancestor traverse",
             category="Filesystem",
             depends_on=["acl_support"],
-            run=functools.partial(check_ancestor_traverse, auth_mode=auth_mode),
+            run=functools.partial(check_ancestor_traverse, auth_mode=auth_mode, mode=mode),
             remediation="",
         ),
         # Chain 3: repo integrity
@@ -229,7 +279,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             name="image digests",
             category="Supply Chain",
             depends_on=["docker_available"],
-            run=functools.partial(check_image_digests, auth_mode=auth_mode),
+            run=functools.partial(check_image_digests, auth_mode=auth_mode, mode=mode),
             remediation="",
         ),
         # Chain 5: per-user tree
@@ -362,6 +412,25 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             run=check_legacy_registry_shape,
             remediation="",
         ),
+        # Chain 6.5: per-instance host-resource capacity (advisory WARN-only).
+        # Both-mode + dependency-free: each scans the registry and reads the
+        # rendered compose.yml, which is install-mode independent.
+        Check(
+            id="host_cpu_capacity",
+            name="host CPU capacity",
+            category="Instance Resources",
+            depends_on=[],
+            run=check_host_cpu_capacity,
+            remediation="",
+        ),
+        Check(
+            id="instance_memory_overcommit",
+            name="instance memory over-commit",
+            category="Instance Resources",
+            depends_on=[],
+            run=check_instance_memory_overcommit,
+            remediation="",
+        ),
         # Chain 7: setup integrity (sandbox-setup Group 9).
         # Independent filesystem/local probes — no doctor-internal deps
         # (spec "runsc Pinned Match Check" / "Dispatcher Sha Drift Check" /
@@ -374,7 +443,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             name="runsc pinned match",
             category="Setup Integrity",
             depends_on=[],
-            run=functools.partial(check_runsc_pinned_match, auth_mode=auth_mode),
+            run=functools.partial(check_runsc_pinned_match, auth_mode=auth_mode, mode=mode),
             remediation="",
         ),
         Check(
@@ -384,6 +453,7 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             depends_on=[],
             run=check_dispatcher_sha_drift,
             remediation="",
+            applies_in=_SEPARATE_USER_ONLY,
         ),
         Check(
             id="binary_integrity_posture",
@@ -398,8 +468,17 @@ def build_check_registry(auth_mode: MachinectlAuth = MachinectlAuth.SUDO) -> lis
             name="setup invariants",
             category="Setup Integrity",
             depends_on=[],
-            run=functools.partial(check_setup_invariants, auth_mode=auth_mode),
+            run=functools.partial(check_setup_invariants, auth_mode=auth_mode, mode=mode),
             remediation="",
+        ),
+        Check(
+            id="daemon_owner_sudo",
+            name="daemon owner sudo",
+            category="Setup Integrity",
+            depends_on=[],
+            run=functools.partial(check_daemon_owner_sudo, auth_mode=auth_mode, mode=mode),
+            remediation="",
+            applies_in=_OPERATOR_ROOTLESS_ONLY,
         ),
     ]
 
@@ -434,15 +513,42 @@ def run_checks(
     checks: list[Check],
     user: str,
     distro: str | None,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[CheckResult]:
-    """Execute checks in topological order with cascading skip on failed deps."""
+    """Execute checks in topological order with mode gating + cascading skip.
+
+    A check whose ``applies_in`` EXCLUDES ``mode`` is mode-skipped BEFORE it
+    runs, with a mode-based detail (``"skipped (operator-rootless)"``) — never
+    PASS, so a crossing-only check never reads as a false green (design D2). A
+    mode-skip is "not applicable", NOT a failure: it does NOT cascade-skip its
+    dependents (mirrors ``Phase.applies_in``). The pre-existing
+    dependency-cascade skip (a dep that genuinely failed or was skipped for
+    dependency reasons) is preserved and distinct.
+    """
     ordered = topological_sort(checks)
     results: dict[str, CheckResult] = {}
+    mode_skipped: set[str] = set()
     output: list[CheckResult] = []
 
     for check in ordered:
-        # Check if any dependency failed
-        failed_deps = [dep for dep in check.depends_on if dep in results and results[dep].status in ("fail", "skip")]
+        if mode not in check.applies_in:
+            result = CheckResult(
+                status="skip",
+                name=check.name,
+                detail=f"skipped ({mode.value})",
+            )
+            mode_skipped.add(check.id)
+            results[check.id] = result
+            output.append(result)
+            continue
+
+        # A dependency blocks only if it genuinely failed / dependency-skipped;
+        # a mode-skipped dependency is "not applicable" and does NOT block.
+        failed_deps = [
+            dep
+            for dep in check.depends_on
+            if dep in results and dep not in mode_skipped and results[dep].status in ("fail", "skip")
+        ]
 
         if failed_deps:
             dep_names = ", ".join(failed_deps)
@@ -467,6 +573,7 @@ def run_check_subset(
     *,
     exclude_ids: set[str] | None = None,
     auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[CheckResult]:
     """Execute a filtered subset of doctor checks by category.
 
@@ -482,6 +589,10 @@ def run_check_subset(
             Excluded checks are removed *before* the cross-chain invariant
             validation. Checks that ``depends_on`` an excluded ID will be
             auto-skipped by the dependency engine.
+        auth_mode: Active machinectl auth mode (threaded into each check).
+        mode: Active :class:`DockerExecutionMode` (threaded into each check's
+            ``minimal_host_config(...)`` and used by the runner for mode-skip
+            gating).
 
     Raises:
         ValueError: If any ``depends_on`` reference in the filtered subset
@@ -490,7 +601,7 @@ def run_check_subset(
     if not categories:
         return []
 
-    registry = build_check_registry(auth_mode)
+    registry = build_check_registry(auth_mode, mode)
     category_set = set(categories)
     excluded = exclude_ids or set()
     subset = [c for c in registry if c.category in category_set and c.id not in excluded]
@@ -506,7 +617,7 @@ def run_check_subset(
                     f"dependencies are not supported in subset execution."
                 )
 
-    return run_checks(subset, user, distro)
+    return run_checks(subset, user, distro, mode)
 
 
 __all__ = [

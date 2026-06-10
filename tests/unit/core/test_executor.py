@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.executor import Executor
+from core.executor import Executor, normalize_captured_output
 
 # ── Existing tests (backward compatibility) ──────────────────────────────────
 
@@ -561,3 +561,70 @@ class TestSentinelFramedGuards:
             )
             result = Executor().run(["echo", "hi"], sentinel=True)
             assert result.stdout == "plain\n"
+
+
+class TestNormalizeCapturedOutput:
+    """Shared captured-output normalizer (single source of truth)."""
+
+    def test_strips_ansi(self) -> None:
+        """ANSI CSI escape sequences are removed."""
+        assert normalize_captured_output("\x1b[37mhi\x1b[0m") == "hi"
+
+    def test_removes_carriage_returns(self) -> None:
+        """\\r bytes (PTY ONLCR artifact) are removed."""
+        assert normalize_captured_output("a\r\nb\r\n") == "a\nb\n"
+
+    def test_collapses_three_or_more_newlines_to_two(self) -> None:
+        """Runs of 3+ consecutive newlines collapse to exactly 2."""
+        assert normalize_captured_output("x\n\n\n\n\ny") == "x\n\ny"
+
+    def test_preserves_two_newlines(self) -> None:
+        """Exactly two consecutive newlines are preserved."""
+        assert normalize_captured_output("x\n\ny") == "x\n\ny"
+
+    def test_combined_artifacts(self) -> None:
+        """All three steps compose on mixed input."""
+        assert normalize_captured_output("\x1b[1mB\x1b[0m\r\n\r\n\r\n\r\nE\r\n") == "B\n\nE\n"
+
+    def test_idempotent(self) -> None:
+        """Applying the normalizer to already-normalized output is a no-op."""
+        once = normalize_captured_output("\x1b[1mB\x1b[0m\r\n\r\n\r\n\r\nE\r\n")
+        assert normalize_captured_output(once) == once
+
+    def test_sanitize_pty_output_delegates_to_normalizer(self) -> None:
+        """_sanitize_pty_output is a thin delegator: byte-identical to the shared helper.
+
+        This locks the framed/recovery path's normalization to the single
+        source of truth — refactoring the extraction must not change any byte
+        of recovered output.
+        """
+        for raw in ["\x1b[37mclean\x1b[0m\r\noutput\r\n\r\n\r\n\r\n", "plain\n", "", "a\r\nb"]:
+            assert Executor._sanitize_pty_output(raw) == normalize_captured_output(raw)
+
+
+class TestDefaultPathContract:
+    """framed=False default path: native exit returned; raw stdout; timeout discriminable.
+
+    Locks the contract the operator-rootless runtime path relies on
+    (orchestrator-executor spec: the default path returns RAW stdout and the
+    timeout error's __cause__ is a subprocess.TimeoutExpired).
+    """
+
+    def test_native_exit_returned(self) -> None:
+        """A framed=False success returns the process's own returncode and stdout."""
+        with patch("core.executor.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["ok"], returncode=0, stdout="real\r\nout\n", stderr=""
+            )
+            result = Executor().run(["ok"], framed=False)
+            assert result.returncode == 0
+            # Raw stdout: no normalization applied by the default path (CR kept).
+            assert result.stdout == "real\r\nout\n"
+
+    def test_timeout_cause_is_timeout_expired(self) -> None:
+        """A timeout raises SandboxExecutionError whose __cause__ is subprocess.TimeoutExpired."""
+        with patch("core.executor.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["slow"], timeout=1.0)
+            with pytest.raises(SandboxExecutionError) as exc:
+                Executor().run(["slow"], framed=False, timeout=1.0)
+            assert isinstance(exc.value.__cause__, subprocess.TimeoutExpired)

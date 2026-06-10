@@ -1,4 +1,4 @@
-"""Filesystem-related doctor checks: setfacl binary, ACL probe, ancestor traverse."""
+"""Filesystem-related doctor checks: setfacl binary, ACL probe, cgroup-v2, ancestor traverse."""
 
 from __future__ import annotations
 
@@ -7,12 +7,18 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import MachinectlAuth, minimal_host_config, sandbox_ai_home
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config, sandbox_ai_home
 
 _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
+
+# The unified cgroup-v2 hierarchy mounts ``cgroup2`` at ``/sys/fs/cgroup`` and
+# exposes ``cgroup.controllers`` at the root. Same probe basis as setup's L1
+# ``_cgroup_v2_active`` (core.setup.l1_kernel) — kept in parity.
+_CGROUP_V2_CONTROLLERS = Path("/sys/fs/cgroup/cgroup.controllers")
 
 
 def check_setfacl(user: str, distro: str | None) -> CheckResult:
@@ -57,6 +63,30 @@ def check_acl_support(user: str, distro: str | None) -> CheckResult:
     )
 
 
+def check_cgroup_v2(user: str, distro: str | None) -> CheckResult:
+    """Check that the unified cgroup-v2 hierarchy is mounted.
+
+    A genuine runtime prerequisite in BOTH execution modes (rootless dockerd
+    requires the unified hierarchy + delegation). C-004 gated setup's L1 phase
+    — which carries the verify-only cgroup-v2 probe — OUT of operator-rootless
+    setup (its sysctl mutation is host-root-batch-owned), so doctor MUST still
+    surface a missing-cgroup-v2 host in operator-rootless. Pure read; no
+    mutation. Mirrors setup's ``l1_kernel._cgroup_v2_active``.
+    """
+    if _CGROUP_V2_CONTROLLERS.exists():
+        return CheckResult(
+            status="pass",
+            name="cgroup v2",
+            detail="Unified cgroup v2 hierarchy active",
+        )
+    return CheckResult(
+        status="fail",
+        name="cgroup v2",
+        detail=f"Unified cgroup v2 hierarchy not active ({_CGROUP_V2_CONTROLLERS} absent)",
+        remediation="Boot with the unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1)",
+    )
+
+
 def _has_acl_exec(directory: str, user: str) -> bool:
     """Probe getfacl for a named-user ACL entry granting execute on *directory*.
 
@@ -89,7 +119,10 @@ def _has_acl_exec(directory: str, user: str) -> bool:
 
 
 def check_ancestor_traverse(
-    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+    user: str,
+    distro: str | None,
+    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that all ancestor directories of sandboxes/ are traversable by the sandbox user.
 
@@ -152,20 +185,20 @@ def check_ancestor_traverse(
                 remediation=f"Verify directory exists and is accessible: ls -la {directory}",
             )
 
-        mode = st.st_mode
+        st_mode = st.st_mode
         has_exec = False
         if st.st_uid == target_uid:
-            has_exec = bool(mode & stat.S_IXUSR)
+            has_exec = bool(st_mode & stat.S_IXUSR)
         elif st.st_gid == target_gid:
-            has_exec = bool(mode & stat.S_IXGRP)
+            has_exec = bool(st_mode & stat.S_IXGRP)
         else:
-            has_exec = bool(mode & stat.S_IXOTH)
+            has_exec = bool(st_mode & stat.S_IXOTH)
 
         if not has_exec:
             has_exec = _has_acl_exec(directory, user)
 
         if not has_exec:
-            if _no_sandbox_running(user, auth_mode):
+            if _no_sandbox_running(user, auth_mode, mode):
                 return CheckResult(
                     status="skip",
                     name="ancestor traverse",
@@ -197,7 +230,7 @@ def check_ancestor_traverse(
     )
 
 
-def _no_sandbox_running(user: str, auth_mode: MachinectlAuth) -> bool:
+def _no_sandbox_running(user: str, auth_mode: MachinectlAuth, mode: DockerExecutionMode) -> bool:
     """``True`` iff the sandbox daemon reports zero compose projects.
 
     Distinguishes "no sandbox started yet" (traverse-absent is expected — the
@@ -206,7 +239,7 @@ def _no_sandbox_running(user: str, auth_mode: MachinectlAuth) -> bool:
     (docker down / probe failure / unparseable output), return ``False`` so the
     caller reports the real traverse gap rather than hiding it behind a SKIP.
     """
-    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, auth_mode), timeout=15)
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, auth_mode, mode), timeout=15)
     if not outcome.ok:
         return False
     try:
@@ -219,5 +252,6 @@ def _no_sandbox_running(user: str, auth_mode: MachinectlAuth) -> bool:
 __all__ = [
     "check_acl_support",
     "check_ancestor_traverse",
+    "check_cgroup_v2",
     "check_setfacl",
 ]

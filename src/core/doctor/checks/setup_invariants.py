@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.doctor.types import CheckResult
 from core.host_config import (
+    DockerExecutionMode,
     MachinectlAuth,
     minimal_host_config,
     parse_subgid_for_user,
@@ -122,14 +123,75 @@ def _audit_subid_and_group(
         )
 
 
-def _audit_machinectl_stability(
-    host_config: HostConfig, drop_in_text: str | None, violations: list[str]
-) -> None:
-    """Re-resolved machinectl path == the path pinned in the drop-in Cmnd_Spec.
+def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) -> None:
+    """Dedicated daemon user is a member of NO privilege-granting group (D3).
 
-    Version-accurate detail per V9e-2: on sudo ≥1.9.15 a second machinectl
-    breaks the grant (availability); on 1.9.5p2 the pinned binary still runs
-    (hygiene only). WARN either way per this check's policy.
+    Separate-user only (the caller runs this sub-audit only on the separate-user
+    branch — the dedicated user exists only there). The no-privilege property is
+    what makes the separate-user blast-radius reduction load-bearing: a
+    container/runtime escape that reaches the daemon owner lands on a dead-end
+    account only if that account cannot escalate. WARN (never FAIL) — an operator
+    who deliberately privileged the daemon user should be told, not hard-blocked.
+
+    Reuses L2's single-source admin-group resolver ``_user_admin_groups`` (lazy
+    import — see the module-top NOTE on the import-time cycle) so this audit and
+    the operator-rootless sudoer-owner WARN cannot disagree on what counts as an
+    admin group.
+    """
+    from core.setup import l2_host_prereqs as l2
+
+    daemon_user = host_config.host.docker_unprivileged_user
+    admin_groups = l2._user_admin_groups(daemon_user)
+    # The owner here is a *different* user (the dedicated daemon account), so the
+    # policy query is ``sudo -n -l -U <daemon_user>`` — which needs root.
+    # setup_invariants may run as the operator (plain ``sandbox doctor``) or as
+    # root (``sudo sandbox doctor``); when not root the ``-U`` query is
+    # indeterminate. Best-effort: WARN on a determinable grant, otherwise fall
+    # back to group-only and note the gap — NEVER false-WARN on indeterminate.
+    policy = l2._user_sudoers_grant(daemon_user, self_query=False)
+
+    if not admin_groups and not (policy.determinable and policy.granted):
+        if not policy.determinable:
+            violations.append(
+                f"dedicated daemon user {daemon_user!r} is in no privilege-granting "
+                f"group (sudoers-policy not checked — run 'sudo sandbox doctor' for "
+                f"the full audit)"
+            )
+        return
+
+    paths: list[str] = []
+    if admin_groups:
+        groups = ", ".join(admin_groups)
+        paths.append(f"is a member of privilege-granting group(s) {groups}")
+    if policy.determinable and policy.granted:
+        if policy.nopasswd:
+            paths.append(
+                "is granted passwordless sudo by the sudoers policy "
+                "(e.g. a /etc/sudoers.d/ drop-in)"
+            )
+        else:
+            paths.append("is granted sudo by the sudoers policy")
+    remedy_groups = ", ".join(admin_groups) if admin_groups else "<group>"
+    violations.append(
+        f"dedicated daemon user {daemon_user!r} {' and '.join(paths)}; a privileged "
+        f"daemon user defeats the separate-user blast-radius reduction (a runtime "
+        f"escape reaching the daemon owner could escalate). Remove the membership: "
+        f"'sudo gpasswd -d {daemon_user} {remedy_groups}' (or 'sudo deluser "
+        f"{daemon_user} <group>'), and revoke any /etc/sudoers.d/ grant for "
+        f"{daemon_user!r}."
+    )
+
+
+def _audit_machinectl_stability(host_config: HostConfig, violations: list[str]) -> None:
+    """machinectl path resolves uniquely on the sudoers ``secure_path`` basis.
+
+    Post-C-009-D4 the operator SUDO drop-in is pipe-only — the per-op
+    ``Cmnd_Spec`` pins the ``pipe_cmd`` byte-pipe launcher (``SYSTEMD_RUN_PATH``),
+    NOT machinectl — so there is no machinectl path in the drop-in to match
+    against (that match moved to :func:`_audit_systemd_run_stability`). machinectl
+    is still load-bearing for the root L5/L6/L7 setup crossings, so a shadowed /
+    absent / non-unique machinectl is still a real stability problem: the
+    resolver raising IS the check. WARN per this check's policy.
 
     Reuses L0's single-source ``resolve_machinectl_path`` (lazy import — see
     the module-top NOTE on the import-time cycle).
@@ -137,19 +199,40 @@ def _audit_machinectl_stability(
     from core.setup import l0_identity as l0
 
     try:
-        resolved = l0.resolve_machinectl_path(host_config)
+        l0.resolve_machinectl_path(host_config)
     except l0.MachinectlResolutionError as exc:
         violations.append(f"machinectl-path-stability: {exc}")
+
+
+def _audit_systemd_run_stability(
+    host_config: HostConfig, drop_in_text: str | None, violations: list[str]
+) -> None:
+    """Re-resolved byte-pipe launcher == the path pinned in the pipe Cmnd_Spec.
+
+    Post-C-009-D4 the operator SUDO drop-in is the ``sudo_pipe_cmd`` crossing, so
+    the per-op ``Cmnd_Spec`` pins the absolute ``SYSTEMD_RUN_PATH`` byte-pipe
+    launcher sudo resolves on its ``secure_path``. If the re-resolved launcher is
+    no longer the one pinned in the installed drop-in (a second copy, a shadow),
+    the SUDO op grant breaks. WARN per this check's policy.
+
+    Reuses L0's single-source ``resolve_systemd_run_path`` (lazy import — see
+    the module-top NOTE on the import-time cycle).
+    """
+    from core.setup import l0_identity as l0
+
+    try:
+        resolved = l0.resolve_systemd_run_path(host_config)
+    except l0.SystemdRunResolutionError as exc:
+        violations.append(f"pipe-launcher-path-stability: {exc}")
         return
     if drop_in_text is None:
         return
     if resolved not in drop_in_text:
         violations.append(
-            f"machinectl-path-stability: resolved secure_path machinectl "
-            f"{resolved!r} is not the path pinned in the installed sudoers "
-            f"drop-in. On sudo ≥1.9.15 this breaks the orchestrator's "
-            f"'sudo machinectl …' grant (availability); on 1.9.5p2 the pinned "
-            f"binary still runs (hygiene). Remove the unexpected copy or run "
+            f"pipe-launcher-path-stability: the resolved secure_path byte-pipe "
+            f"launcher {resolved!r} is not the launcher pinned in the installed "
+            f"pipe Cmnd_Spec. This drift breaks the orchestrator's sudo_pipe_cmd "
+            f"SUDO op grant. Remove the unexpected copy or run "
             f"'sudo sandbox setup' to re-evaluate."
         )
 
@@ -163,23 +246,29 @@ def _audit_rule_body(
     (c) op-name segment shape (the L3 renderer raises ``RuleRenderError`` on a
     non-conforming op — surfaced as a WARN, not an exception).
 
-    Reuses L0's ``resolve_machinectl_path`` + L3's ``render_sudoers_rule``
-    (lazy import — see the module-top NOTE on the import-time cycle).
+    The L3 rule body now renders the per-op byte-pipe ``Cmnd_Spec`` keyed on the
+    transient-unit launcher path (the ``sudo_pipe_cmd`` crossing — C-009 D4), so
+    the expected body is rendered against L0's ``resolve_systemd_run_path``, NOT
+    ``resolve_machinectl_path``. (The machinectl-path *stability* audit is a
+    separate check — the root L5/L6/L7 crossings still use machinectl — and is
+    unchanged.) Reuses L3's ``render_sudoers_rule`` (lazy import — see the
+    module-top NOTE on the import-time cycle).
     """
     from core.setup import l0_identity as l0
     from core.setup import l3_sudoers_polkit as l3
 
     sandbox_user = host_config.host.docker_unprivileged_user
     try:
-        machinectl_path = l0.resolve_machinectl_path(host_config)
-    except l0.MachinectlResolutionError:
-        # Stability audit already recorded the resolution failure; without a
-        # resolvable path we cannot re-render, so skip the body comparison.
+        systemd_run_path = l0.resolve_systemd_run_path(host_config)
+    except l0.SystemdRunResolutionError:
+        # Without a resolvable launcher path we cannot re-render the pipe rule
+        # body, so skip the body comparison (same guard as the machinectl-path
+        # resolution failure the stability audit records separately).
         return
 
     try:
         expected = l3.render_sudoers_rule(
-            machinectl_path, operator, socket.gethostname(), sandbox_user
+            systemd_run_path, operator, socket.gethostname(), sandbox_user
         )
     except l3.RuleRenderError as exc:
         violations.append(
@@ -280,18 +369,29 @@ def _audit_rule_shape_agreement(is_sudo: bool, operator: str, violations: list[s
 
 
 def check_setup_invariants(
-    user: str, distro: str | None, auth_mode: MachinectlAuth = MachinectlAuth.SUDO
+    user: str,
+    distro: str | None,
+    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
+    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Read-only steady-state audit of setup's owned-namespace artifacts.
 
     PASS iff every enumerated invariant holds; WARN (never FAIL — drift may be
     operator-intentional / re-runnable) naming each violated invariant.
+
+    Mode-aware (design D2/D5): in ``operator-rootless`` there is no machinectl
+    crossing and no sudoers/polkit privilege-boundary rule, so the drop-in read,
+    the rule-shape-agreement audit, the machinectl-stability audit, the
+    rule-body audit, and the sudo-floor audit are ALL skipped — only the
+    mode-applicable sub-audits (reserved dir + subid/subgid/bridge-group) run.
+    The check itself is NOT mode-skipped (it stays both-mode); it branches
+    internally so its applicable invariants still green in operator-rootless.
     """
     from core.setup import l0_identity as l0
     from core.setup import l3_sudoers_polkit as l3
 
     del distro
-    host_config = minimal_host_config(user, auth_mode)
+    host_config = minimal_host_config(user, auth_mode, mode)
     bridge_group = host_config.host.workspace_bridge_group
     violations: list[str] = []
 
@@ -309,6 +409,26 @@ def check_setup_invariants(
 
     _audit_reserved_dir(violations)
     _audit_subid_and_group(user, operator, bridge_group, violations)
+
+    if mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        # No machinectl crossing / sudoers-or-polkit rule exists in this mode:
+        # the drop-in read + rule/stability/floor audits are not applicable.
+        if not violations:
+            return CheckResult(
+                status="pass",
+                name="setup invariants",
+                detail=(
+                    f"operator-rootless setup invariants hold (operator={operator}); "
+                    f"machinectl-stability + sudoers-rule audits not applicable "
+                    f"(no privilege-boundary crossing in operator-rootless)"
+                ),
+            )
+        return CheckResult(
+            status="warn",
+            name="setup invariants",
+            detail="; ".join(violations),
+            remediation="run 'sudo sandbox setup' to restore canonical setup state",
+        )
 
     drop_in_path = l3._drop_in_path(host_config, operator)
     is_sudo = auth_mode == MachinectlAuth.SUDO
@@ -337,9 +457,11 @@ def check_setup_invariants(
         drop_in_readable = False
 
     _audit_rule_shape_agreement(is_sudo, operator, violations)
+    _audit_daemon_user_no_admin(host_config, violations)
 
     if is_sudo:
-        _audit_machinectl_stability(host_config, drop_in_text, violations)
+        _audit_machinectl_stability(host_config, violations)
+        _audit_systemd_run_stability(host_config, drop_in_text, violations)
         if drop_in_text is not None:
             _audit_rule_body(host_config, operator, drop_in_text, violations)
         _audit_sudo_floor(violations)

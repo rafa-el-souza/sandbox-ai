@@ -38,6 +38,7 @@ import gzip
 import io
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import tarfile
@@ -50,10 +51,18 @@ from typing import TYPE_CHECKING
 
 from core.compose import compose_project_name
 from core.exceptions import SandboxExecutionError
-from core.executor import Executor
+from core.executor import Executor, normalize_captured_output
 from core.helper_container import _hardened_docker_run
-from core.host_config import machinectl_cmd, pipe_cmd
+from core.host_config import (
+    MachinectlAuth,
+    is_operator_rootless,
+    machinectl_cmd,
+    pipe_cmd,
+    sudo_pipe_cmd,
+)
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
+from core.ipam import IPAMLedger, derive_static_ips
+from core.journal_audit import emit_op_audit
 from core.registry import InstanceRegistry
 
 if TYPE_CHECKING:
@@ -87,12 +96,19 @@ _COMPILE_INNER = (
 
 
 class Op(StrEnum):
-    """The ten typed ops the dispatcher accepts as ``argv[1]``.
+    """The twelve typed ops the dispatcher accepts as ``argv[1]``.
 
     The enum *value* is the wire name (hyphenated) passed to the dispatcher
     binary; the member identifier is the Python-legal upper-snake form. The
     surface is byte-faithful to the existing ``machinectl_cmd(...)`` callsites
-    it replaces (spec "Typed Op Surface").
+    it replaces (spec "Typed Op Surface") — with two exceptions: ``preflight``,
+    a read-only *bundle* of the ``start`` privilege-boundary preflight queries
+    (C-009 D6) rather than a single-callsite enumeration, and ``fwd``, the one
+    **streaming** op — the separate-user attach ProxyCommand payload, routed
+    through the dispatcher by C-010 ``attach-fwd-dispatch-op`` (F-060). The
+    streaming op is reachable ONLY via :func:`proxy_argv` (it constructs but
+    never executes); :func:`invoke`/:func:`probe` reject it (see the
+    "Streaming ProxyCommand Entrypoint" requirement).
     """
 
     AUTH_PROBE = "auth-probe"
@@ -105,6 +121,16 @@ class Op(StrEnum):
     DOCKER_MANIFEST_INSPECT = "docker-manifest-inspect"
     HELPER_CHOWN_FILES = "helper-chown-files"
     HELPER_MKDIR_CHOWN_DIRS = "helper-mkdir-chown-dirs"
+    PREFLIGHT = "preflight"
+    FWD = "fwd"
+
+
+# The streaming (frameless) op class (C-010 D3). A stream invocation carries a
+# raw SSH byte stream and so emits no framing; it is unreachable via
+# invoke()/probe() and is produced ONLY by proxy_argv. Today exactly one op is
+# streaming; the set keeps the classification explicit rather than special-casing
+# ``Op.FWD`` inline.
+_STREAMING_OPS: frozenset[Op] = frozenset({Op.FWD})
 
 
 # A validator inspects the op's args and raises on malformed input; it returns
@@ -148,6 +174,65 @@ class DispatchValidationError(ValueError):
     """
 
 
+class StreamingOpError(ValueError):
+    """A streaming op was passed to :func:`invoke`/:func:`probe` (C-010 D3).
+
+    A streaming op (``fwd``) carries a raw byte stream with no orchestrator-
+    interpreted output, so the orchestrator must never capture (and therefore
+    never branch on) its result. It is reachable ONLY via :func:`proxy_argv`,
+    which constructs the crossing argv for the ssh client to execute and never
+    runs it. The error message names :func:`proxy_argv` as the sanctioned path
+    (spec "Streaming ProxyCommand Entrypoint").
+    """
+
+
+# ─── Streaming-op classification guard (C-010 D3) ────────────────────────────
+#
+# One predicate + one symmetric guard pair, co-located with ``_STREAMING_OPS``
+# and :class:`StreamingOpError`, shared by both sides of the carve-out: the
+# framed path (:func:`build_invocation` / :func:`invoke` / :func:`probe`) must
+# REJECT a streaming op, and :func:`proxy_argv` (the sole streaming-op argv
+# producer) must reject a non-streaming (framed) op.
+
+
+def _is_streaming_op(op: Op | str) -> bool:
+    """Return ``True`` iff ``op`` is a streaming (frameless) op (C-010 D3)."""
+    return Op(op) in _STREAMING_OPS
+
+
+def _require_framed_op(op: Op | str) -> None:
+    """Raise :class:`StreamingOpError` if ``op`` is a streaming op (C-010 D3).
+
+    The guard at the head of the framed construction/execution path
+    (:func:`build_invocation`, and therefore :func:`invoke`/:func:`probe`). A
+    streaming op carries no orchestrator-interpreted output, so the orchestrator
+    must never construct a captured crossing for it — it is reachable only via
+    :func:`proxy_argv`.
+    """
+    if _is_streaming_op(op):
+        raise StreamingOpError(
+            f"op {Op(op).value!r} is a streaming op and cannot be run via "
+            "invoke()/probe() (its output is a raw byte stream with no "
+            "orchestrator-interpreted content); use core.dispatch.proxy_argv() "
+            "to construct the ProxyCommand crossing argv instead"
+        )
+
+
+def _require_streaming_op(op: Op | str) -> None:
+    """Raise :class:`StreamingOpError` if ``op`` is NOT a streaming op (C-010 D3).
+
+    The guard at the head of :func:`proxy_argv`, the sole producer of
+    streaming-op crossing argv — a framed op belongs on
+    :func:`invoke`/:func:`probe`.
+    """
+    if not _is_streaming_op(op):
+        raise StreamingOpError(
+            f"op {Op(op).value!r} is not a streaming op; proxy_argv() "
+            "constructs ProxyCommand argv only for streaming ops — run framed "
+            "ops via invoke()/probe()"
+        )
+
+
 @dataclass(frozen=True)
 class ProbeOutcome:
     """Typed result of a non-raising :func:`probe` call (design Q8).
@@ -173,12 +258,19 @@ class ProbeOutcome:
             (carrying its informative exit-status / ``OSError`` context).
             Probe-style callers interpolate this into their operator-facing
             ``detail`` so the pre-refactor diagnostic fidelity is preserved.
+        preflight_nonce: For a ``preflight`` bundle outcome (H-1), the
+            per-crossing nonce the markers are bound to — the dispatcher's begin
+            nonce on the separate-user framed path, or the locally-minted nonce
+            on the operator-rootless path. ``None`` for every non-preflight
+            outcome and for a failed/timed-out preflight crossing;
+            :func:`parse_preflight_outcome` fails closed when it is absent.
     """
 
     ok: bool
     timed_out: bool
     stdout: str
     message: str
+    preflight_nonce: str | None = None
 
 
 # ─── Shared argument-shape predicates ───────────────────────────────────────
@@ -412,7 +504,8 @@ def _resolve_compose_state(inst: str) -> tuple[str, list[str], str]:
 #
 # Q6 splits the compose path so compose target-argv is a *pure function of the
 # wire inputs* (and therefore lives in the one shared fixture alongside the
-# seven deterministic ops):
+# eight non-compose deterministic ops, incl. the read-only ``preflight``
+# bundle):
 #
 #   (a) ``_expand_compose_wire`` — the wire-expansion *producer*. It takes the
 #       typed args ``[<inst>]`` (+ ``["--volumes"]`` for a compose-down
@@ -553,21 +646,205 @@ def _bash_c(inner: str) -> list[str]:
     return ["/bin/bash", "-c", inner]
 
 
+# ─── Read-only op bare-inner SSOT ────────────────────────────────────────────
+#
+# The bare ``/bin/bash -c`` inner string of each read-only op is factored into
+# one of these helpers/constants. BOTH the individual op builder AND the
+# ``preflight`` bundle (:func:`_build_preflight`) consume them, so the bundled
+# inner can never re-spell a query string that has drifted from its individual
+# op. The ``docker info`` formats come from ``_DOCKER_INFO_PRESETS`` (already
+# the single source for the preset → Go-template-format mapping).
+
+_AUTH_PROBE_INNER = "echo ok"
+_COMPOSE_LS_INNER = "docker compose ls --format json --all"
+_DOCKER_VERSION_INNER = "docker version --format '{{.Server.Version}}'"
+
+
+def _docker_info_inner(preset: str) -> str:
+    """Bare inner for the ``docker-info`` op at ``preset`` (SSOT for the format)."""
+    return f"docker info --format '{_DOCKER_INFO_PRESETS[preset]}'"
+
+
 def _build_auth_probe(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    return _bash_c("echo ok")
+    return _bash_c(_AUTH_PROBE_INNER)
 
 
 def _build_compose_ls(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    return _bash_c("docker compose ls --format json --all")
+    return _bash_c(_COMPOSE_LS_INNER)
 
 
 def _build_docker_version(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    return _bash_c("docker version --format '{{.Server.Version}}'")
+    return _bash_c(_DOCKER_VERSION_INNER)
 
 
 def _build_docker_info(args: Sequence[str], host_config: HostConfig) -> list[str]:
-    fmt = _DOCKER_INFO_PRESETS[args[0]]
-    return _bash_c(f"docker info --format '{fmt}'")
+    return _bash_c(_docker_info_inner(args[0]))
+
+
+# ─── preflight: the burst-collapse read-only bundle (C-009 D6, F-065) ────────
+#
+# The DISTINCT read-only health queries backing ``sandbox start``'s
+# privilege-boundary preflight, run ONCE EACH in one crossing. ``;``-sequenced
+# (NOT ``&&``/``set -e``): one query's failure must neither abort the others nor
+# forge their success (F-065). Each query is prefixed with a per-query begin
+# marker (``__PREFLIGHT_Q_<name>__``) on its own line, has its stderr merged
+# (``2>&1``) into the attributed segment, and is followed by a per-query exit
+# marker (``__PREFLIGHT_RC_<name>_$?__`` — ``$?`` is the query's own exit,
+# unaffected by the redirection; the trailing RC echo still runs because
+# segments are ``;``-joined). So the orchestrator (M4b cli-start) can split the
+# bundled output and reconstruct each segment's stdout, merged stderr, and
+# exit code per check. The ``docker info`` runtimes query appears ONCE — the
+# intrinsic dedup feeding the runsc / runsc-runtimeArgs / host-uds checks.
+#
+# Ordered list of (attribution-marker query name, bare inner) — the marker name
+# is the wire identity of the query, NOT necessarily an op name (the two
+# ``docker-info`` presets share the op but are distinct queries).
+_PREFLIGHT_QUERY_MARKER_PREFIX = "__PREFLIGHT_Q_"
+# Per-query trailing exit-code marker prefix. Each query is followed by
+# ``echo __PREFLIGHT_RC_<name>_$?__`` so the orchestrator can recover each
+# query's exit code (the ``;``-joiner keeps ``$?`` the query's own exit, and the
+# trailing RC echo still runs even when the query failed — F-065).
+_PREFLIGHT_RC_MARKER_PREFIX = "__PREFLIGHT_RC_"
+
+
+def _preflight_query_segments() -> list[tuple[str, str]]:
+    """The ordered (marker-name, bare-inner) preflight queries (SSOT-sourced)."""
+    return [
+        (Op.AUTH_PROBE.value, _AUTH_PROBE_INNER),
+        (Op.DOCKER_VERSION.value, _DOCKER_VERSION_INNER),
+        ("docker-info-security-options", _docker_info_inner("security-options")),
+        ("docker-info-runtimes", _docker_info_inner("runtimes")),
+        (Op.COMPOSE_LS.value, _COMPOSE_LS_INNER),
+    ]
+
+
+def _preflight_inner() -> str:
+    """Build the ``;``-sequenced, per-query-attributed preflight bundle inner.
+
+    Each marker is bound to the ``${__PFNONCE}`` shell variable (H-1): the
+    variable is assigned post-authorization — by the dispatcher's
+    :func:`wrapSentinel` on the framed path, or by ``core.dispatch`` injecting
+    ``__PFNONCE=<nonce>; `` onto the inner on the operator-rootless local path —
+    so the bundle inner this builder emits is byte-static (the literal
+    ``${__PFNONCE}`` token, NOT a concrete nonce), keeping the Python↔Go fixture
+    parity intact. At shell-expansion time each marker carries the per-crossing
+    nonce, so untrusted op output cannot forge a verdict by emitting a
+    byte-perfect marker copy: it cannot learn the nonce.
+    """
+    parts = [
+        f"echo {_PREFLIGHT_QUERY_MARKER_PREFIX}${{__PFNONCE}}_{name}__; {inner} 2>&1; "
+        f"echo {_PREFLIGHT_RC_MARKER_PREFIX}${{__PFNONCE}}_{name}_$?__"
+        for name, inner in _preflight_query_segments()
+    ]
+    return " ; ".join(parts)
+
+
+def _build_preflight(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    return _bash_c(_preflight_inner())
+
+
+def parse_preflight_outcome(outcome: ProbeOutcome) -> dict[str, ProbeOutcome]:
+    """Split a ``preflight`` bundle :class:`ProbeOutcome` into per-query outcomes.
+
+    The ``preflight`` op (C-009 D6) bundles the distinct read-only health queries
+    into ONE crossing; its ``stdout`` is the ``;``-sequenced, per-query-attributed
+    blob built by :func:`_preflight_inner`:
+
+        ``__PREFLIGHT_Q_<name>__\\n<segment, stderr-merged>\\n__PREFLIGHT_RC_<name>_<rc>__``
+
+    This is the orchestrator-side inverse: it returns, per query *name* (the wire
+    identity from :func:`_preflight_query_segments`), a :class:`ProbeOutcome` whose
+
+    - ``ok`` is ``True`` iff that query's recovered exit code ``<rc>`` was ``0``,
+    - ``stdout`` is the stripped segment between the query's begin marker and its
+      RC marker (the query's own stdout + merged stderr),
+    - ``timed_out`` mirrors the WHOLE crossing's ``outcome.timed_out`` (a
+      per-query timeout is not meaningful inside a single bundled crossing), and
+    - ``message`` is ``""`` on success, else a short diagnostic naming the query
+      and its recovered exit code (or that its segment was missing/garbled).
+
+    The markers are derived from the :data:`_PREFLIGHT_QUERY_MARKER_PREFIX` /
+    :data:`_PREFLIGHT_RC_MARKER_PREFIX` constants (SSOT for the bundle format —
+    never hand-typed) and bound to ``outcome.preflight_nonce`` (H-1): the
+    per-crossing nonce minted by the dispatcher's begin frame (separate-user) or
+    by ``core.dispatch`` on the operator-rootless local path. The parser is
+    uniformly **fail-closed**:
+
+    - **Nonce-absent** (a failed/timed-out crossing, or any path that did not
+      surface a nonce) → every query is returned not-ok. A failed/timed-out
+      crossing is already caught by ``start``'s reachability gate before parse,
+      so ``None`` → fail-closed is the correct posture.
+    - **Sequential scan** (Layer 1): each query's begin marker is searched
+      starting *after* the previous query's RC-marker index and must be the next
+      begin marker found — the scan never skips past untrusted bytes to a marker
+      a later position, so an attacker cannot pre-seed a forged marker upstream.
+    - **Reject-duplicate** (Layer 2): if a query's begin OR rc marker appears
+      more than once in the blob the query is ambiguous → not-ok.
+
+    A query whose begin marker, RC marker, or exit code is absent, duplicated,
+    or unparseable is returned as a not-ok outcome with an empty ``stdout`` so
+    each interpret fn sees a clean failure rather than partial data.
+    """
+    text = outcome.stdout
+    nonce = outcome.preflight_nonce
+    result: dict[str, ProbeOutcome] = {}
+    if not nonce:
+        # Fail closed: no per-crossing nonce ⇒ no marker we emit can be trusted.
+        for name, _inner in _preflight_query_segments():
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} unverifiable: preflight nonce absent",
+            )
+        return result
+
+    cursor = 0
+    for name, _inner in _preflight_query_segments():
+        q_marker = f"{_PREFLIGHT_QUERY_MARKER_PREFIX}{nonce}_{name}__"
+        rc_prefix = f"{_PREFLIGHT_RC_MARKER_PREFIX}{nonce}_{name}_"
+        # Layer 2: a duplicated begin or rc marker makes the query ambiguous.
+        if text.count(q_marker) > 1 or text.count(rc_prefix) > 1:
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} marker appears more than once (ambiguous)",
+            )
+            continue
+        # Layer 1: scan strictly forward from the prior query's RC index.
+        q_idx = text.find(q_marker, cursor)
+        rc_idx = text.find(rc_prefix, q_idx + len(q_marker)) if q_idx != -1 else -1
+        if q_idx == -1 or rc_idx == -1:
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} segment missing from bundle",
+            )
+            continue
+        segment = text[q_idx + len(q_marker) : rc_idx].strip()
+        rc_tail = text[rc_idx + len(rc_prefix) :]
+        rc_token = rc_tail.split("__", 1)[0].strip()
+        try:
+            rc = int(rc_token)
+        except ValueError:
+            result[name] = ProbeOutcome(
+                ok=False,
+                timed_out=outcome.timed_out,
+                stdout="",
+                message=f"preflight query {name!r} exit code unparseable ({rc_token!r})",
+            )
+            continue
+        cursor = rc_idx + len(rc_prefix)
+        ok = rc == 0
+        result[name] = ProbeOutcome(
+            ok=ok,
+            timed_out=outcome.timed_out,
+            stdout=segment if ok else "",
+            message="" if ok else f"preflight query {name!r} exited {rc}: {segment}",
+        )
+    return result
 
 
 def _build_docker_manifest_inspect(args: Sequence[str], host_config: HostConfig) -> list[str]:
@@ -601,6 +878,113 @@ def _build_helper_mkdir_chown_dirs(args: Sequence[str], host_config: HostConfig)
         "done"
     )
     return _bash_c(_hardened_docker_run(image, parent, inner))
+
+
+# ─── fwd: the streaming attach-ProxyCommand op (C-010) ───────────────────────
+#
+# ``fwd`` is the one STREAMING op (D3): its target argv carries a raw SSH byte
+# stream, so the dispatcher execs docker DIRECTLY — there is NO ``/bin/bash -c``
+# wrapper and NO sentinel/framing on the stream path (stream hygiene: zero
+# interpreters between the dispatcher and the byte stream). It is also the one
+# op whose operands (compose project name + core IPC IP) are operator-side
+# state the dispatcher cannot re-derive, so — like the compose ops (Q6) —
+# callers pass only ``[<inst>]`` and ``core.dispatch`` expands the named-flag
+# wire form ``fwd <inst> --project <P> --ip <IP>`` (:func:`_expand_fwd_wire`).
+# The Go binary validates the wire and assembles the op-hardcoded target argv;
+# the Python builder below mirrors that assembly byte-for-byte for the shared
+# fixture. Verb (``exec -i``), the ``/fwd`` path, the ``-admin-1`` suffix, and
+# port ``9999`` are op-hardcoded and never read from the wire.
+
+_DOCKER_BINARY = "/usr/bin/docker"
+_FWD_PORT = "9999"
+
+
+def resolve_fwd_state(inst: str) -> tuple[str, str]:
+    """Return ``(project_name, core_ipc_ip)`` for ``inst``.
+
+    The SSOT for the ``fwd`` operator-side resolution: the compose project name
+    via :func:`compose_project_name`, and the instance's core IPC IP via a
+    read-only IPAM ledger peek (attach never mutates IPAM state, per
+    ``cli-attach``). Both :func:`_expand_fwd_wire` (the ProxyCommand wire
+    payload) and ``cli.main._build_attach_argv`` (its own session-log directory
+    name + ``agent@<ip>`` ssh destination) consume this same resolver, so a
+    single source of truth exists. The two invocations per attach are
+    deterministic for an allocated instance: :meth:`IPAMLedger.peek_next_slot`
+    is read-only and the warm gate guarantees the instance is already allocated
+    by the time this argv is built.
+    """
+    project_name = compose_project_name(inst)
+    base_index, _existing = IPAMLedger().peek_next_slot(inst)
+    core_ipc_ip = derive_static_ips(base_index)["core_ipc_ip"]
+    return project_name, core_ipc_ip
+
+
+def _expand_fwd_wire(args: Sequence[str]) -> list[str]:
+    """Expand the typed ``fwd`` args ``[<inst>]`` to the named-flag wire form.
+
+    Returns ``[<inst>, "--project", P, "--ip", IP]`` — the operator-side-resolved
+    operands the dispatcher cannot re-derive (the ``--project``/``--ip`` flags are
+    NEVER caller-supplied; the typed validator rejects any second positional).
+    """
+    inst = args[0]
+    project_name, core_ipc_ip = resolve_fwd_state(inst)
+    return [inst, "--project", project_name, "--ip", core_ipc_ip]
+
+
+def _parse_fwd_wire(wire: Sequence[str]) -> tuple[str, str]:
+    """Parse the post-expansion ``fwd`` wire form (mirrors the Go parser).
+
+    Returns ``(project, ip)``. Raises :class:`DispatchValidationError` for a
+    missing/duplicated/illegal flag or extra positional — the same rejections
+    the Go binary performs (kept in lockstep so the fixture exercises one shared
+    shape).
+    """
+    if not wire:
+        raise DispatchValidationError("fwd: missing <instance> in wire form")
+    rest = list(wire[1:])
+    project: str | None = None
+    ip: str | None = None
+    i = 0
+    while i < len(rest):
+        flag = rest[i]
+        if i + 1 >= len(rest):
+            raise DispatchValidationError(f"fwd: flag {flag!r} is missing its value")
+        value = rest[i + 1]
+        if flag == "--project":
+            if project is not None:
+                raise DispatchValidationError("fwd: --project given more than once")
+            project = value
+        elif flag == "--ip":
+            if ip is not None:
+                raise DispatchValidationError("fwd: --ip given more than once")
+            ip = value
+        else:
+            raise DispatchValidationError(f"fwd: unrecognized flag {flag!r}")
+        i += 2
+    if project is None:
+        raise DispatchValidationError("fwd: --project is required exactly once")
+    if ip is None:
+        raise DispatchValidationError("fwd: --ip is required exactly once")
+    return project, ip
+
+
+def _build_fwd(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    """Build the ``fwd`` target argv from its named-flag wire form.
+
+    The ONE op whose target argv is NOT a ``/bin/bash -c`` wrapper: the
+    dispatcher execs docker directly (D3 stream hygiene). The admin container
+    name is derived from ``--project`` (``<P>-admin-1``); the ``exec -i`` verb,
+    the ``/fwd`` path, and port ``9999`` are op-hardcoded.
+    """
+    project, ip = _parse_fwd_wire(args)
+    return [
+        _DOCKER_BINARY,
+        "exec",
+        "-i",
+        f"{project}-admin-1",
+        "/fwd",
+        f"{ip}:{_FWD_PORT}",
+    ]
 
 
 # Wire every Op to an OpSpec with real per-op bounds, validator, and builder.
@@ -675,6 +1059,22 @@ OP_SPECS: dict[Op, OpSpec] = {
         validate=_validate_helper_mkdir_chown_dirs,
         build_target_argv=_build_helper_mkdir_chown_dirs,
     ),
+    Op.PREFLIGHT: OpSpec(
+        name=Op.PREFLIGHT.value,
+        min_args=0,
+        max_args=0,
+        validate=_validate_nullary,
+        build_target_argv=_build_preflight,
+    ),
+    Op.FWD: OpSpec(
+        name=Op.FWD.value,
+        # Typed callers pass exactly ``[<inst>]``; the --project/--ip wire flags
+        # are produced operator-side by _expand_fwd_wire, never caller-supplied.
+        min_args=1,
+        max_args=1,
+        validate=_validate_one_instance,
+        build_target_argv=_build_fwd,
+    ),
 }
 
 
@@ -703,6 +1103,38 @@ def build_target_argv(op: Op | str, args: Sequence[str], host_config: HostConfig
     return OP_SPECS[resolved].build_target_argv(args, host_config)
 
 
+def dispatch_payload(op_value: str, wire_args: Sequence[str]) -> str:
+    """Build the bare ``<dispatch-binary> <op> <wire…>`` payload string.
+
+    The single source of truth for the ``/bin/bash -c <payload>`` inner the
+    privilege boundary crosses (C-009 design D4). It is consumed by BOTH
+    :func:`build_invocation` (the runtime crossing) and the L3 sudoers renderer
+    (the per-op ``Cmnd_Spec`` derivation), so the authorized grant and the
+    actual invocation are built from ONE construction and provably cannot drift.
+    ``wire_args`` is empty for the L3 grant derivation (the rule appends the
+    F-004-escaped ``\\ *`` / exact shape itself) and the expanded Q6 wire form at
+    runtime; both share this prefix.
+    """
+    return f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+
+
+def sudo_pipe_crossing_argv(launcher_path: str, user: str) -> list[str]:
+    """The post-``sudo`` byte-pipe crossing argv with an absolute launcher.
+
+    Derived from :func:`core.host_config.sudo_pipe_cmd` (NOT a re-typed literal)
+    so the runtime crossing prefix and the L3 ``Cmnd_Spec`` share one source
+    (C-009 design D4 SSOT). ``sudo_pipe_cmd(user)`` is
+    ``["sudo", <launcher>, "-q", "--pipe", f"--uid={user}"]``; sudo matches the
+    argv *after* ``sudo`` and resolves the relative launcher to an absolute path
+    via ``secure_path``, so the rule's ``Cmnd_Spec`` must name that absolute
+    path. This drops the leading ``"sudo"`` (index 0) and substitutes the
+    L0-resolved absolute ``launcher_path`` for the relative launcher (index 1)
+    **by list position** — exactly as the machinectl rule abspaths its launcher.
+    """
+    post_sudo = sudo_pipe_cmd(user)[1:]
+    return [launcher_path, *post_sudo[1:]]
+
+
 def build_invocation(
     op: Op | str,
     args: Sequence[str],
@@ -713,24 +1145,50 @@ def build_invocation(
     This is the single command-construction seam (anti-hack rules 4 + 7): it
     performs everything :func:`invoke` does *except* the
     :class:`~core.executor.Executor` run — per-op validation, the Q6 compose
-    wire-expansion / deterministic passthrough, the ``dispatch <op> <wire>``
-    inner string, and the ``machinectl_cmd`` + ``bash -c`` crossing. :func:`invoke`
-    is exactly ``Executor().run(build_invocation(...), framed=True,
-    timeout=...)``; the
-    ``sandbox start --dry-run`` preview and :class:`core.actions.ComposeUpAction`
-    derive their displayed/executed command from this same function so no
-    parallel argv/inner construction exists anywhere.
+    wire-expansion / deterministic passthrough, and the mode-appropriate argv
+    assembly. :func:`invoke` is exactly ``Executor().run(build_invocation(...),
+    …)``; the ``sandbox start --dry-run`` preview and
+    :class:`core.actions.ComposeUpAction` derive their displayed/executed
+    command from this same function so no parallel argv/inner construction
+    exists anywhere.
 
-    Returns the argv list ``[*machinectl_cmd(user, auth), "/bin/bash", "-c",
-    "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` (design D2 — the outer
-    argv shape is preserved so operators' existing sudoers rule still matches).
+    The validation + wire-expansion pipeline is shared across all execution
+    modes (C-003 design D1/D4); ONLY the crossing prefix differs:
+
+    - ``separate-user`` + SUDO (C-009 design D2): returns
+      ``[*sudo_pipe_cmd(user), "/bin/bash", "-c",
+      "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` — the crossing rides
+      the privileged byte-pipe (``sudo_pipe_cmd``) rather than ``machinectl``
+      shell, because the byte-pipe reliably delivers stdout on every distro
+      (the ``machinectl`` PTY path does not on the Debian family — F-063). The
+      bare ``dispatch <op>`` payload is byte-identical to the ``machinectl``
+      path's, so the per-op sudoers ``Cmnd_Spec`` (derived from this same
+      ``sudo_pipe_cmd`` prefix) still matches; no ``--unit``/``--description``
+      is added.
+    - ``separate-user`` + POLKIT (UNCHANGED): returns
+      ``[*machinectl_cmd(user, POLKIT), "/bin/bash", "-c",
+      "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` — the POLKIT
+      action-level grant cannot inspect argv, so the ``machinectl`` crossing
+      is retained as-is.
+    - ``operator-rootless``: returns the op's target-argv **directly** (the same
+      ``["/bin/bash", "-c", "<inner>"]`` / hardened ``docker run`` the per-op
+      builder produces) with NO ``machinectl_cmd`` prefix and NO
+      ``<dispatch-binary> <op>`` indirection — the Go dispatcher is bypassed and
+      the op runs as a plain local subprocess.
+
+    A streaming op (``fwd``) is NOT reachable here: it emits no framing and
+    carries a raw byte stream the orchestrator must never capture, so it is
+    rejected before any crossing argv is built (its sole sanctioned producer is
+    :func:`proxy_argv`).
 
     Raises:
+        StreamingOpError: ``op`` is a streaming op (use :func:`proxy_argv`).
         DispatchValidationError: the typed args are malformed for ``op`` (raised
             before any boundary-crossing argv is built).
         ValueError: ``op`` is not a known :class:`Op`.
     """
     resolved = Op(op)
+    _require_framed_op(resolved)
     op_value = resolved.value
     validate_args(resolved, args)
     wire_args = (
@@ -738,12 +1196,84 @@ def build_invocation(
         if op_value in _COMPOSE_VERB
         else list(args)
     )
-    inner = f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+    if is_operator_rootless(host_config):
+        return build_target_argv(resolved, wire_args, host_config)
+    inner = dispatch_payload(op_value, wire_args)
+    user = host_config.host.docker_unprivileged_user
+    auth = host_config.host.machinectl_authentication
+    # SUDO crossings ride the privileged byte-pipe (design D2); POLKIT keeps
+    # the machinectl shell crossing. The inner payload is byte-identical in
+    # both — only the prefix differs.
+    crossing = (
+        sudo_pipe_cmd(user)
+        if auth == MachinectlAuth.SUDO
+        else machinectl_cmd(user, auth)
+    )
     return [
-        *machinectl_cmd(
-            host_config.host.docker_unprivileged_user,
-            host_config.host.machinectl_authentication,
-        ),
+        *crossing,
+        "/bin/bash",
+        "-c",
+        inner,
+    ]
+
+
+def proxy_argv(
+    op: Op | str,
+    args: Sequence[str],
+    host_config: HostConfig,
+) -> list[str]:
+    """Construct (NEVER execute) the streaming-op crossing argv (C-010 D3).
+
+    The streaming entrypoint, distinct from :func:`invoke`/:func:`probe`: it
+    builds the full crossing argv for a streaming op (``fwd``) and **returns**
+    it for the caller to embed as the ssh ``-o ProxyCommand=…`` value. The
+    *ssh client* executes the argv; the orchestrator never runs it and never
+    sees its stdout — so the invariant "the orchestrator branches only on
+    framed, nonce-bound signals; streaming ops carry zero orchestrator-
+    interpreted content" is enforced by shape, not discipline (spec "Streaming
+    ProxyCommand Entrypoint").
+
+    Per mode (mirrors :func:`build_invocation`'s prefix selection, with the bare
+    ``dispatch fwd <wire>`` payload the per-op sudoers ``Cmnd_Spec`` matches):
+
+    - ``separate-user`` + SUDO → ``[*sudo_pipe_cmd(user), "/bin/bash", "-c",
+      "<dispatch> fwd <wire>"]`` — the privileged byte-pipe; headless-capable
+      (the F-060 fix).
+    - ``separate-user`` + POLKIT → ``[*pipe_cmd(user), "/bin/bash", "-c",
+      "<dispatch> fwd <wire>"]`` — the unprivileged pipe; the polkit
+      ``manage-units`` wall is unchanged (interactive-only).
+    - ``operator-rootless`` → the op's **target argv directly**
+      (``["/usr/bin/docker", "exec", "-i", "<P>-admin-1", "/fwd", "<IP>:9999"]``)
+      — no crossing, no dispatcher indirection.
+
+    Callers pass only ``[<inst>]``; the named-flag wire (``--project``/``--ip``)
+    is resolved operator-side here via :func:`_expand_fwd_wire`. The validators
+    and wire-expansion run BEFORE the crossing prefix is applied, so only the
+    prefix differs by mode (exactly as :func:`build_invocation`).
+
+    Raises:
+        DispatchValidationError: the typed args are malformed for ``op``.
+        StreamingOpError: ``op`` is NOT a streaming op (this entrypoint is the
+            sole producer of streaming-op argv — a framed op belongs on
+            :func:`invoke`/:func:`probe`).
+        ValueError: ``op`` is not a known :class:`Op`.
+    """
+    resolved = Op(op)
+    _require_streaming_op(resolved)
+    validate_args(resolved, args)
+    wire_args = _expand_fwd_wire(args)
+    if is_operator_rootless(host_config):
+        return build_target_argv(resolved, wire_args, host_config)
+    inner = dispatch_payload(resolved.value, wire_args)
+    user = host_config.host.docker_unprivileged_user
+    auth = host_config.host.machinectl_authentication
+    crossing = (
+        sudo_pipe_cmd(user)
+        if auth == MachinectlAuth.SUDO
+        else pipe_cmd(user)
+    )
+    return [
+        *crossing,
         "/bin/bash",
         "-c",
         inner,
@@ -800,6 +1330,18 @@ def invoke(
     error) and the doctor verdicts depend on the recovered inner exit being
     faithful.
 
+    ``framed=True`` is REQUIRED on the privileged-byte-pipe path too (C-009
+    design D3): the inner op's exit is recovered from the dispatcher's
+    ``__SANDBOX_EXIT_<nonce>`` frame, NOT from the privileged byte-pipe's native
+    exit — F-064 ground-truthed that the native exit is unreliable (a failing op
+    surfaced native ``0`` while its dispatcher frame correctly carried ``_1``).
+    The frame is authoritative, so a native-exit recovery path would be a
+    correctness bug. This needs no executor/dispatcher change: the byte-pipe
+    forwards the dispatcher's stdout faithfully, so the same
+    ``__SANDBOX_BEGIN_``/``__SANDBOX_EXIT_`` framing rides the pipe and the
+    existing recovery strips + recovers it exactly as on the ``machinectl``
+    path.
+
     Flow (Q6):
 
     1. Resolve + validate the *typed* args (the unchanged "Per-Op Argument
@@ -820,12 +1362,76 @@ def invoke(
     The command construction (validate -> Q6 wire-expand / passthrough ->
     inner -> crossed argv) lives in :func:`build_invocation`; :func:`invoke`
     is exactly that argv handed to the sterile :class:`~core.executor.Executor`
-    with ``framed=True`` (anti-hack rules 4 + 7 — one seam, no parallel
-    construction).
+    (anti-hack rules 4 + 7 — one seam, no parallel construction).
+
+    Operator-rootless mode (C-003 design D4) takes the local branch:
+    :func:`build_invocation` returns the bare op argv (no dispatcher
+    indirection), so there is no ``machinectl shell`` PTY masking the inner exit
+    — the Executor runs with ``framed=False`` and recovers the result from the
+    local process's native exit code. Before spawning, a structured journald
+    audit record is emitted (mirroring the Go dispatcher's per-op entry that the
+    bypassed dispatcher would otherwise have written), carrying the op name, the
+    typed args summary, and the instance token (the first typed arg for the
+    three compose ops; ``""`` otherwise — mirroring the Go ``instanceForOp``).
+    The captured stdout is run through the SAME
+    :func:`~core.executor.normalize_captured_output` helper the ``separate-user``
+    framing path applies, so callers see identically-normalized output in both
+    modes; normalization is applied here (NOT in ``Executor.run``'s default
+    ``framed=False`` path, which other callers rely on for raw output). The
+    raise-on-failure contract is preserved automatically: ``framed=False`` runs
+    with ``check=True``, so a non-zero exit / timeout raises
+    :class:`~core.exceptions.SandboxExecutionError` before any normalization
+    runs.
     """
-    return Executor().run(
-        build_invocation(op, args, host_config), framed=True, timeout=timeout
-    )
+    cp, _ = _invoke_with_nonce(op, args, host_config, timeout=timeout)
+    return cp
+
+
+def _invoke_with_nonce(
+    op: Op | str,
+    args: list[str],
+    host_config: HostConfig,
+    *,
+    timeout: float | None = None,
+) -> tuple[subprocess.CompletedProcess[str], str | None]:
+    """Run the dispatcher and surface the per-crossing preflight nonce (H-1).
+
+    The shared body behind :func:`invoke` and :func:`probe`. Returns the
+    :class:`subprocess.CompletedProcess` plus the per-crossing nonce the
+    ``preflight`` bundle's markers are bound to (``None`` for every other op and
+    for both modes when ``op`` is not ``preflight``):
+
+    - **separate-user (framed)** — the dispatcher mints the nonce for its
+      ``__SANDBOX_BEGIN_<nonce>`` frame; the :class:`~core.executor.Executor`
+      stashes the recovered begin nonce on ``_last_frame_nonce`` (its public
+      ``CompletedProcess`` contract is unchanged), which we surface here.
+    - **operator-rootless (local)** — there is no dispatcher to mint a nonce, so
+      for a ``preflight`` crossing we mint one locally (``secrets.token_hex(8)``,
+      the project CSPRNG idiom) and inject ``__PFNONCE=<nonce>; `` onto the bash
+      inner *after* :func:`emit_op_audit` has logged the CLEAN argv (so journald
+      records no nonce), then run ``framed=False`` and return the minted nonce.
+    """
+    _require_framed_op(op)
+    argv = build_invocation(op, args, host_config)
+    if is_operator_rootless(host_config):
+        op_value = Op(op).value
+        instance = args[0] if op_value in _COMPOSE_VERB else ""
+        # Audit the CLEAN argv first so journald logs no nonce.
+        emit_op_audit(op_value, list(args), argv, instance)
+        nonce: str | None = None
+        if op_value == Op.PREFLIGHT.value:
+            nonce = secrets.token_hex(8)
+            # Assign __PFNONCE outside the bundle inner so the markers expand to
+            # the per-crossing nonce; the assignment emits no stdout.
+            argv = [*argv[:-1], f"__PFNONCE={nonce}; {argv[-1]}"]
+        cp = Executor().run(argv, framed=False, timeout=timeout)
+        normalized = subprocess.CompletedProcess(
+            cp.args, cp.returncode, normalize_captured_output(cp.stdout), cp.stderr
+        )
+        return normalized, nonce
+    ex = Executor()
+    cp = ex.run(argv, framed=True, timeout=timeout)
+    return cp, ex._last_frame_nonce
 
 
 def probe(
@@ -856,15 +1462,20 @@ def probe(
         to surface in their operator-facing ``detail``.
     """
     try:
-        cp = invoke(op, args, host_config, timeout=timeout)
+        cp, nonce = _invoke_with_nonce(op, args, host_config, timeout=timeout)
     except SandboxExecutionError as exc:
+        # A failed/timed-out crossing surfaces no usable nonce; leaving
+        # preflight_nonce=None makes parse_preflight_outcome fail closed (the
+        # crossing is already caught by start's reachability gate before parse).
         return ProbeOutcome(
             ok=False,
             timed_out=isinstance(exc.__cause__, subprocess.TimeoutExpired),
             stdout="",
             message=str(exc),
         )
-    return ProbeOutcome(ok=True, timed_out=False, stdout=cp.stdout, message="")
+    return ProbeOutcome(
+        ok=True, timed_out=False, stdout=cp.stdout, message="", preflight_nonce=nonce
+    )
 
 
 # ─── Offline reproducible compile recipe ────────────────────────────────────
@@ -1071,11 +1682,11 @@ def compile_dispatcher(
 
     The host embeds the dispatcher source (gzip+base64 tar) in a single
     ``bash -c`` payload crossed via :func:`~core.host_config.pipe_cmd` — NOT
-    :func:`~core.host_config.machinectl_cmd`. The 10 runtime ops
-    (:func:`invoke`/:func:`probe`) cross via ``machinectl_cmd`` because they
-    carry small text results; this compile recipe carries a multi-MB **binary
-    frame** (the built dispatcher binary, base64'd on stdout), so it MUST use
-    the byte-pipe primitive: ``machinectl_cmd`` allocates a PTY where
+    :func:`~core.host_config.machinectl_cmd`. The 11 runtime ops
+    (:func:`invoke`/:func:`probe`) cross via ``sudo_pipe_cmd`` (SUDO) or
+    ``machinectl_cmd`` (POLKIT) and carry small text results; this compile
+    recipe carries a multi-MB **binary frame** (the built dispatcher binary,
+    base64'd on stdout), so it MUST use the byte-pipe primitive: ``machinectl_cmd`` allocates a PTY where
     ``stdout ≡ stderr`` and whose ``onlcr`` line discipline would corrupt the
     stream, while ``pipe_cmd`` is a real byte pipe with distinct stdout/stderr
     and no ``onlcr`` (see :func:`~core.host_config.pipe_cmd` for the underlying
