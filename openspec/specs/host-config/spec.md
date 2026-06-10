@@ -91,7 +91,7 @@ The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl
 
 ### Requirement: Pipe Command Helper
 
-The system SHALL provide a `pipe_cmd(user)` function in `core.host_config` that returns the byte-pipe-capable boundary-crossing prefix as a `list[str]`. The function SHALL return `["systemd-run", "-q", "--pipe", f"--uid={user}"]`. All non-PTY byte-pipe boundary-crossings (e.g., the `ProxyCommand` constructed by `cli.attach`) SHALL use this function instead of constructing the prefix directly. The discipline "Never hardcode `sudo machinectl`" extends to "Never hardcode `systemd-run`."
+The system SHALL provide a `pipe_cmd(user)` function in `core.host_config` that returns the byte-pipe-capable boundary-crossing prefix as a `list[str]`. The function SHALL return `["systemd-run", "-q", "--pipe", f"--uid={user}"]`. All unprivileged non-PTY byte-pipe boundary-crossings (e.g., the POLKIT-mode attach `ProxyCommand` prefix — the SUDO-mode attach ProxyCommand crosses via `sudo_pipe_cmd`, C-010) SHALL use this function instead of constructing the prefix directly. The discipline "Never hardcode `sudo machinectl`" extends to "Never hardcode `systemd-run`."
 
 #### Scenario: Pipe command prefix for sandbox user
 - **WHEN** `pipe_cmd("sandbox")` is called
@@ -101,17 +101,17 @@ The system SHALL provide a `pipe_cmd(user)` function in `core.host_config` that 
 - **WHEN** `pipe_cmd("claude-sandbox")` is called
 - **THEN** it returns `["systemd-run", "-q", "--pipe", "--uid=claude-sandbox"]`
 
-#### Scenario: Attach ProxyCommand uses pipe_cmd helper
-- **WHEN** the `cli.attach` implementation that constructs the ssh `ProxyCommand` argument is inspected
-- **THEN** it composes the boundary-crossing prefix via `pipe_cmd(host_config.host.docker_unprivileged_user)` rather than embedding the literal string `"systemd-run"` or its flags directly in the argv
+#### Scenario: Attach ProxyCommand composes the pipe primitives, never literals
+- **WHEN** the implementation that constructs the attach ssh `ProxyCommand` argument (the `core.dispatch` streaming entrypoint) is inspected
+- **THEN** it composes the crossing prefix via `sudo_pipe_cmd(host_config.host.docker_unprivileged_user)` (SUDO mode) or `pipe_cmd(host_config.host.docker_unprivileged_user)` (POLKIT mode) rather than embedding the literal string `"systemd-run"` or its flags directly in the argv
 
 ### Requirement: Pipe Command vs Machinectl Command Distinction
 
 The system SHALL maintain three distinct boundary-crossing primitives in `core.host_config`:
 
 - `machinectl_cmd(user, auth)` — for paths that require a PTY (e.g., the interactive `docker exec -it` handover) AND for POLKIT-mode dispatcher op crossings + the root setup-phase crossings (L5/L6/L7).
-- `pipe_cmd(user)` — the **unprivileged** byte-pipe primitive `["systemd-run", "-q", "--pipe", f"--uid={user}"]`, for non-PTY byte pipes crossed by an already-privileged caller (the SSH `ProxyCommand` in the new attach path, the root setup-phase operator-state crossings). It takes no `auth` argument — `systemd-run`'s `manage-units` polkit action is the only authorization layer.
-- `sudo_pipe_cmd(user)` — the **privileged**, per-op-sudoers-authorized sibling of `pipe_cmd`, returning `["sudo", *pipe_cmd(user)]` (i.e. `["sudo", "systemd-run", "-q", "--pipe", f"--uid={user}"]`). It **delegates** to `pipe_cmd` (it never re-spells the `systemd-run` literal — `pipe_cmd` stays the single sanctioned home for it). It is the SUDO-mode dispatcher-op crossing: an unprivileged operator crosses via a per-op sudoers rule that authorizes exactly this argv (separate-user + SUDO dispatch routing — design D2). It takes only `user` (no `auth` argument — the per-op sudoers rule is the only authorization layer on this path) and appends no `--unit`/`--description` (the argv must stay byte-identical to the per-op `Cmnd_Spec` the rule matches).
+- `pipe_cmd(user)` — the **unprivileged** byte-pipe primitive `["systemd-run", "-q", "--pipe", f"--uid={user}"]`, for non-PTY byte pipes crossed by an already-privileged caller (the POLKIT-mode attach SSH `ProxyCommand`, the root setup-phase operator-state crossings). It takes no `auth` argument — `systemd-run`'s `manage-units` polkit action is the only authorization layer.
+- `sudo_pipe_cmd(user)` — the **privileged**, per-op-sudoers-authorized sibling of `pipe_cmd`, returning `["sudo", *pipe_cmd(user)]` (i.e. `["sudo", "systemd-run", "-q", "--pipe", f"--uid={user}"]`). It **delegates** to `pipe_cmd` (it never re-spells the `systemd-run` literal — `pipe_cmd` stays the single sanctioned home for it). It is the SUDO-mode dispatcher-op crossing — both the framed ops via `build_invocation` (separate-user + SUDO dispatch routing — design D2) and the streaming `fwd` op's attach ProxyCommand via the streaming entrypoint (C-010): an unprivileged operator crosses via a per-op sudoers rule that authorizes exactly this argv. It takes only `user` (no `auth` argument — the per-op sudoers rule is the only authorization layer on this path) and appends no `--unit`/`--description` (the argv must stay byte-identical to the per-op `Cmnd_Spec` the rule matches).
 
 The choice of primitive at each call site SHALL be principled and load-bearing: PTY-needed call sites SHALL use `machinectl_cmd`; unprivileged byte-pipe call sites SHALL use `pipe_cmd`; SUDO-mode dispatcher-op crossings SHALL use `sudo_pipe_cmd`.
 
@@ -355,25 +355,30 @@ stay byte-identical to the per-op `Cmnd_Spec` the sudoers rule matches).
 
 #### Scenario: Distinct from the unprivileged pipe
 - **WHEN** `sudo_pipe_cmd(u)` and `pipe_cmd(u)` are compared
-- **THEN** `sudo_pipe_cmd` is `pipe_cmd` prefixed with `sudo` (the unprivileged `pipe_cmd` — attach's
-  `manage-units`-authorized ProxyCommand — is unchanged)
+- **THEN** `sudo_pipe_cmd` is `pipe_cmd` prefixed with `sudo` (the unprivileged `pipe_cmd` — the
+  POLKIT-mode attach ProxyCommand's `manage-units`-authorized prefix — is unchanged)
 
 ### Requirement: Crossing-primitive selection by (mode, auth, op-kind)
 
 The crossing primitive for an orchestrator→sandbox op SHALL be selected as: operator-rootless → no crossing
-(local subprocess); separate-user + SUDO + non-interactive op → `sudo_pipe_cmd(user)`; separate-user + POLKIT →
-`machinectl_cmd(user, polkit)` (unchanged). The interactive `attach` ProxyCommand SHALL continue to use the
-unprivileged `pipe_cmd(user)` regardless of auth mode (it is auth-mode-independent and out of scope).
+(local subprocess); separate-user + SUDO + non-interactive (framed) op → `sudo_pipe_cmd(user)`;
+separate-user + POLKIT + non-interactive (framed) op → `machinectl_cmd(user, polkit)` (unchanged). The
+**streaming** `fwd` op (the attach ProxyCommand — a binary byte stream, so `machinectl_cmd` is never an
+option in either auth mode) SHALL cross via `sudo_pipe_cmd(user)` under SUDO (sudoers-authorized,
+headless-capable — C-010/F-060) and via the unprivileged `pipe_cmd(user)` under POLKIT
+(`manage-units`-authorized, interactive-only).
 
 #### Scenario: SUDO separate-user op uses the privileged pipe
 - **WHEN** a non-interactive dispatcher op runs under separate-user + SUDO auth
 - **THEN** the crossing prefix is `sudo_pipe_cmd(<docker_unprivileged_user>)`, not `machinectl_cmd(...)`
 
-#### Scenario: POLKIT mode is unchanged
-- **WHEN** a non-interactive op runs under separate-user + POLKIT auth
+#### Scenario: POLKIT mode framed ops are unchanged
+- **WHEN** a non-interactive framed op runs under separate-user + POLKIT auth
 - **THEN** the crossing prefix remains `machinectl_cmd(user, POLKIT)`
 
-#### Scenario: attach is untouched
-- **WHEN** `sandbox attach` builds its SSH ProxyCommand under separate-user (either auth mode)
-- **THEN** it still uses `pipe_cmd(user)` (unprivileged `systemd-run`), not `sudo_pipe_cmd`
+#### Scenario: attach ProxyCommand prefix selected by auth mode
+- **WHEN** `sandbox attach` builds its SSH ProxyCommand under separate-user
+- **THEN** the crossing prefix is `sudo_pipe_cmd(user)` when `machinectl_authentication` is `"sudo"` and
+  `pipe_cmd(user)` when it is `"polkit"`; the crossed payload (`dispatch fwd <wire>`) is identical in both
+  modes, and `machinectl_cmd` is used in neither (the PTY's `onlcr` would corrupt the SSH stream)
 
