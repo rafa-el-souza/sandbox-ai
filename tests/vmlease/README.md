@@ -41,6 +41,21 @@ never mutated:
 | Builder | Derives | Adds vs. the baseline |
 |---|---|---|
 | `build_acceptance_separate_user_sudo.py` | `acceptance-separate-user-sudo.json` | `start` gates on the product's own `up --wait` "containers healthy" verdict (not a `machinectl shell` PTY crossing); a `core-running` probe reads docker via the reliable NON-PTY `sudo -u` crossing; a `preflight-crossing-count` probe asserts the C-009 8→2 burst-collapse |
+| `build_acceptance_attach_fwd.py` | `acceptance-attach-fwd.json` | the C-010 derivation: reuses the C-009 builder's `build()` wholesale (so the start/`core-running`/`preflight-crossing-count` deltas are inherited verbatim — single source of truth, loaded by file path since `tests/vmlease` is not a package) and flips ONLY the `attach` probe from the F-060 expected-FAIL baseline (`vmlease-c009acc2` attach FAIL x4) to expected-PASS |
+
+Why the C-010 attach flip (F-060 → fixed): the baseline `attach` probe drives an *interactive* PTY (`script(1)` →
+`sandbox attach`) whose separate-user ProxyCommand is the unprivileged `systemd-run --pipe …` — headless-blocked
+by polkit `manage-units` on all 4 distros (F-060). C-010 routes attach's `/fwd` through the new `fwd` dispatcher
+op so the crossing becomes the per-op-sudoers-authorized `sudo systemd-run --pipe … /bin/bash -c 'dispatch fwd
+<wire>'` — headless-capable. The acceptance probe exercises a **non-interactive command-mode** attach in the
+validated `pipe-attach` shape: it obtains the ProxyCommand from the **product surface** on the leased host
+(`core.dispatch.proxy_argv(Op.FWD, ['smoke'], host_config)` — the single sanctioned `dispatch fwd <wire>`
+producer, NOT a hand-typed mirror, F-019), then runs `ssh -T` (no PTY, no `tlog-rec`) with the per-instance
+key/known_hosts + the hardened client options the product pins, executing a remote `whoami` sentinel instead of
+`bash -l`. The `__ATTACH_OK_agent_0__` sentinel returning proves the whole chain authorized + streamed
+headlessly (sudo → dispatcher stream → admin `/fwd` → core sshd → auth → exec). The rest of the battery is
+byte-identical to `acceptance-separate-user-sudo.json`, so the matrix stays directly comparable to the
+`vmlease-c009acc2` baseline.
 
 Why the substitutions (F-097): the baseline's `start`/`core` assertions cross into the sandbox user via an
 interactive `machinectl shell` PTY, which returns *empty* when run inside the same session that just ran
@@ -55,6 +70,9 @@ gitignored run area and point `vmlease` at it:
 ```sh
 uv run python tests/vmlease/build_acceptance_separate_user_sudo.py \
   --out <gitignored-results-dir>/acceptance-separate-user-sudo.json
+# C-010 attach-fwd acceptance (attach expected-PASS):
+uv run python tests/vmlease/build_acceptance_attach_fwd.py \
+  --out <gitignored-results-dir>/acceptance-attach-fwd.json
 # then `vmlease run --battery <that path> …` exactly as below
 ```
 
