@@ -1421,11 +1421,11 @@ def compile_dispatcher(
 
     The host embeds the dispatcher source (gzip+base64 tar) in a single
     ``bash -c`` payload crossed via :func:`~core.host_config.pipe_cmd` — NOT
-    :func:`~core.host_config.machinectl_cmd`. The 10 runtime ops
-    (:func:`invoke`/:func:`probe`) cross via ``machinectl_cmd`` because they
-    carry small text results; this compile recipe carries a multi-MB **binary
-    frame** (the built dispatcher binary, base64'd on stdout), so it MUST use
-    the byte-pipe primitive: ``machinectl_cmd`` allocates a PTY where
+    :func:`~core.host_config.machinectl_cmd`. The 11 runtime ops
+    (:func:`invoke`/:func:`probe`) cross via ``sudo_pipe_cmd`` (SUDO) or
+    ``machinectl_cmd`` (POLKIT) and carry small text results; this compile
+    recipe carries a multi-MB **binary frame** (the built dispatcher binary,
+    base64'd on stdout), so it MUST use the byte-pipe primitive: ``machinectl_cmd`` allocates a PTY where
     ``stdout ≡ stderr`` and whose ``onlcr`` line discipline would corrupt the
     stream, while ``pipe_cmd`` is a real byte pipe with distinct stdout/stderr
     and no ``onlcr`` (see :func:`~core.host_config.pipe_cmd` for the underlying

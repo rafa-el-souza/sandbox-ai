@@ -148,8 +148,8 @@ def _cmnd_specs(systemd_run_path: str, sandbox_user: str, op: Op) -> list[str]:
 
     - **arg ops** → one spec ``…<dispatch>\\ <op>\\ *`` — the trailing ``\\ *``
       matches the op's runtime args AND the ``--check`` probe arg.
-    - **no-arg ops** (``auth-probe``, ``compose-ls``, ``docker-version``) → two
-      EXACT specs (no ``\\ *`` wildcard, so arg-smuggling stays denied — V9 B7):
+    - **no-arg ops** (``auth-probe``, ``compose-ls``, ``docker-version``,
+      ``preflight``) → two EXACT specs (no ``\\ *`` wildcard, so arg-smuggling stays denied — V9 B7):
       ``…<dispatch>\\ <op>`` (the operator's runtime invocation) AND
       ``…<dispatch>\\ <op>\\ --check`` (L3a's per-op probe target — every op
       accepts ``--check`` as its no-op-success probe shape, so the rule must

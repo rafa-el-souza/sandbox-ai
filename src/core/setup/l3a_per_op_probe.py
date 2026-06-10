@@ -46,9 +46,9 @@ byte-identical to the rendered ``Cmnd_Spec`` per op (setup converges).
 
 **Inner-exit recovery (C-001 Finding-J / F-004 — load-bearing, do NOT
 simplify).** Each op is probed via
-``sudo_as_operator(<operator>) → sudo -n <SYSTEMD_RUN_PATH> -q --pipe
---uid=<user> /bin/bash -c '<dispatch> <op> --check'`` with the **relative**
-transient-unit launcher (byte-identical to ``core.host_config.pipe_cmd()``'s
+``sudo_as_operator(<operator>) → sudo -n <launcher> -q --pipe
+--uid=<user> /bin/bash -c '<dispatch> <op> --check'`` with ``<launcher>`` the
+**relative** transient-unit launcher (byte-identical to ``core.host_config.pipe_cmd()``'s
 runtime output — an absolute ``<SYSTEMD_RUN_PATH>`` would spuriously MATCH on a
 host where the real relative-form orchestrator call fails, the exact footgun
 this probe defeats). The ``--uid`` transient unit **masks the inner ``/bin/bash -c``
