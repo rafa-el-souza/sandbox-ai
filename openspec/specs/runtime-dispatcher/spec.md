@@ -17,7 +17,7 @@ The system SHALL install the dispatcher binary at the absolute reserved path `/u
 
 ### Requirement: Typed Op Surface
 
-The dispatcher SHALL accept exactly the following ten ops as the first positional argument (`argv[1]`). The op surface is derived from — and byte-faithful to — the existing `machinectl_cmd(...)` callsites it replaces (the "op surface = enumeration of existing behavior" non-goal); each op below cites its originating callsite.
+The dispatcher SHALL accept exactly the following **eleven** ops as the first positional argument (`argv[1]`). The op surface is derived from — and byte-faithful to — the existing `machinectl_cmd(...)` callsites it replaces (the "op surface = enumeration of existing behavior" non-goal); each op below cites its originating callsite. (`preflight` is the one op NOT a faithful single-callsite enumeration — it is a read-only *bundle* of the `start` privilege-boundary preflight queries, added by this change to collapse the preflight crossing burst; see the "preflight read-only op" requirement.)
 
 1. `auth-probe` — no further args. (Source: `doctor/checks/privilege_boundary.py:108`, `cli/main.py:2188`.)
 2. `compose-up` — one arg: `<instance-name>`. (Source: `actions/compose.py:42` via `_compose_up_cmd_plan`.)
@@ -29,25 +29,30 @@ The dispatcher SHALL accept exactly the following ten ops as the first positiona
 8. `docker-manifest-inspect` — one arg: an image reference that MUST be a member of the set `{pin.pinned} ∪ {pin.tagged}` over `IMAGE_REGISTRY` (i.e. either a digest ref `<ref>@sha256:<64-hex>` OR the tag ref `<ref>:<tag>` of some registry entry). (Source: `doctor/checks/supply_chain.py:check_image_digests` — the caller loops `IMAGE_REGISTRY` and runs `docker manifest inspect` BOTH on `pin.pinned` (stale-digest detection) AND on `pin.tagged` (best-effort tag-drift detection); the op itself takes exactly one ref. Q7: an earlier draft modelled only the `.pinned` call and a digest-only regex, which left the `.tagged` call unable to route through the op — see design "Resolved Design Questions" Q7.)
 9. `helper-chown-files` — `<parent-path>` `<mode-octal>` `<uid>` `<gid>` `<file-name...>` (one or more file names). (Source: `helper_container.py:108`.)
 10. `helper-mkdir-chown-dirs` — `<parent-path>` `<uid>` `<gid>` `<leaf-name...>` (one or more leaf names). (Source: `helper_container.py:146`.)
+11. `preflight` — no further args. Read-only. Its target argv bundles the DISTINCT read-only health queries backing `sandbox start`'s privilege-boundary preflight — `echo ok`, `docker version`, `docker info` (security-options), `docker info` (runtimes — one query, deduped), `docker compose ls` — `;`-sequenced, with each query's output individually attributable orchestrator-side. (Source: this change — collapses the `start` `run_check_subset(["Privilege Boundary"])` crossing burst; see the "preflight read-only op" requirement for the full contract.)
 
-> **Renamed from an earlier draft:** op 8 was `docker-inspect-image <digest...>` mapping to `docker inspect <digest...>`. That was a content error — the only callsite (`supply_chain.py:27`) runs `docker **manifest** inspect <pinned-ref>` (a registry-manifest query, not a local-object inspect) once per `IMAGE_REGISTRY` pin. The op is renamed `docker-manifest-inspect`, takes a single image ref (not bare `sha256:` digests), and `docker-version` was added (op 6) because `privilege_boundary.py:155` runs `docker version`, which no prior op covered. Op count is therefore 10, not 9.
+> **Renamed from an earlier draft:** op 8 was `docker-inspect-image <digest...>` mapping to `docker inspect <digest...>`. That was a content error — the only callsite (`supply_chain.py:27`) runs `docker **manifest** inspect <pinned-ref>` (a registry-manifest query, not a local-object inspect) once per `IMAGE_REGISTRY` pin. The op is renamed `docker-manifest-inspect`, takes a single image ref (not bare `sha256:` digests), and `docker-version` was added (op 6) because `privilege_boundary.py:155` runs `docker version`, which no prior op covered. That brought the count to 10; this change adds `preflight` (op 11) for the burst-collapse, so the surface is now **eleven** ops.
 
 Any other op MUST be rejected by the dispatcher with exit code non-zero and a clear error message naming the invalid op.
 
-Every op SHALL additionally accept a single `--check` flag as its lone argument: when present, the dispatcher SHALL validate the op name, log the invocation to journald (with `check=1`), and exit 0 WITHOUT performing the op's side effect. The `--check` flag enables the sister change `sandbox-setup`'s L3a per-op probe (validates each op in `SANDBOX_OPS` resolves to MATCH at the sudoers layer without actually running compose-up / docker / helper-chown).
+Every op SHALL additionally accept a single `--check` flag as its lone argument: when present, the dispatcher SHALL validate the op name, log the invocation to journald (with `check=1`), and exit 0 WITHOUT performing the op's side effect. The `--check` flag enables the sister change `sandbox-setup`'s L3a per-op probe (validates each op in `SANDBOX_OPS` resolves to MATCH at the sudoers layer without actually running compose-up / docker / helper-chown / the preflight bundle).
 
-**Sister-change carry-forward (C-002 `sandbox-setup` L3a — F-004 / F-018 silent-footgun class).** When the sister change's L3a per-op probe (and the L8 fresh-session re-probe, and `core.dispatch.invoke()`/`probe()` at runtime **in separate-user mode**) crosses the operator's privilege-boundary rule to run `dispatch <op> [--check]`, it MUST recover the inner exit via the **dispatcher-emitted begin/exit framing** (`core.executor.Executor(...).run(..., framed=True)`), per the "Dispatcher-Emitted Exit Framing" requirement — NOT via an orchestrator-injected `sentinel=True` wrap. In operator-rootless mode `invoke()`/`probe()` take the local path with native exit recovery (no machinectl crossing, no framing), per the "Operator-Rootless Local Invocation Mode" and "Native Exit Recovery for Operator-Rootless invoke/probe" requirements. The wrap injected `{ <cmd>; }; echo __SANDBOX_EXIT_<tok>_$?` INTO the crossed payload, which no per-op `Cmnd_Spec` could match, so it silently broke the probe (and the runtime grant) for every SUDO-mode password-operator while NOPASSWD-blanket / POLKIT operators masked it (F-018). `framed=True` keeps the crossed payload the bare `dispatch <op>` the rule matches and recovers the exit from the dispatcher's nonce-bound trailer. `machinectl shell` does NOT propagate the inner `/bin/bash -c` exit code, so without this framing a dispatcher *reject* (op-name validation failure → non-zero exit) would be masked as a sudoers *MATCH* — the probe would report a misconfigured rule as healthy. L3a MUST branch on the **recovered inner exit code**, never on journald presence: journald (the `check=1` structured entry) is the **audit channel**, not a control-flow signal — a journald entry is written for both the short-circuit-success path and is independent of the process exit, so presence/absence of a journal line says nothing about whether the rule resolved to MATCH. (The root setup-phase crossings L5/L6/L7 run as root with no rule to match and so keep the orchestrator-injected `sentinel=True` wrap, now token-validated per the `orchestrator-executor` capability.)
+**Sister-change carry-forward (C-002 `sandbox-setup` L3a — F-004 / F-018 silent-footgun class).** When the sister change's L3a per-op probe (and the L8 fresh-session re-probe, and `core.dispatch.invoke()`/`probe()` at runtime **in separate-user mode**) crosses the operator's privilege-boundary rule to run `dispatch <op> [--check]`, it MUST recover the inner exit via the **dispatcher-emitted begin/exit framing** (`core.executor.Executor(...).run(..., framed=True)`), per the "Dispatcher-Emitted Exit Framing" requirement — NOT via an orchestrator-injected `sentinel=True` wrap, and NOT via the `systemd-run --pipe` native exit (unreliable — F-064). In operator-rootless mode `invoke()`/`probe()` take the local path with native exit recovery (no crossing, no framing), per the "Operator-Rootless Local Invocation Mode" and "Native Exit Recovery for Operator-Rootless invoke/probe" requirements. The wrap injected `{ <cmd>; }; echo __SANDBOX_EXIT_<tok>_$?` INTO the crossed payload, which no per-op `Cmnd_Spec` could match, so it silently broke the probe (and the runtime grant) for every SUDO-mode password-operator while NOPASSWD-blanket / POLKIT operators masked it (F-018). `framed=True` keeps the crossed payload the bare `dispatch <op>` the rule matches and recovers the exit from the dispatcher's nonce-bound trailer. Both `machinectl shell` (PTY-masked) and `sudo systemd-run --pipe` (native exit unreliable, F-064) fail to faithfully propagate the inner `/bin/bash -c` exit, so without this framing a dispatcher *reject* (op-name validation failure → non-zero exit) would be masked as a sudoers *MATCH* — the probe would report a misconfigured rule as healthy. L3a MUST branch on the **recovered inner exit code**, never on journald presence: journald (the `check=1` structured entry) is the **audit channel**, not a control-flow signal — a journald entry is written for both the short-circuit-success path and is independent of the process exit, so presence/absence of a journal line says nothing about whether the rule resolved to MATCH. (The root setup-phase crossings L5/L6/L7 run as root with no rule to match and so keep the orchestrator-injected `sentinel=True` wrap, now token-validated per the `orchestrator-executor` capability.)
 
 #### Scenario: Known op accepted
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch auth-probe`
 - **THEN** the dispatcher does not reject the op for being unknown (proceeds to build the target argv and spawn)
+
+#### Scenario: preflight op accepted
+- **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch preflight`
+- **THEN** the dispatcher does not reject the op for being unknown (it is the eleventh valid op)
 
 #### Scenario: Unknown op rejected
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch hypothetical-not-a-real-op`
 - **THEN** the dispatcher exits non-zero with stderr containing `unknown op: hypothetical-not-a-real-op` and the list of valid ops
 
 #### Scenario: --check flag short-circuits to exit 0 without side effect
-- **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch <any-known-op> --check` (e.g., `dispatch compose-up --check`, `dispatch helper-chown-files --check`) — exactly one trailing argument, equal to literal `--check`
+- **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch <any-known-op> --check` (e.g., `dispatch compose-up --check`, `dispatch preflight --check`) — exactly one trailing argument, equal to literal `--check`
 - **THEN** the dispatcher exits 0; no target argv is built; no `os.execv` is performed; journald records the invocation with `check=1`; the on-host state is unchanged (the begin/exit framing carrying `_0` is still emitted per the "Dispatcher-Emitted Exit Framing" requirement)
 
 #### Scenario: --check in a non-lone position does NOT short-circuit
@@ -110,16 +115,16 @@ The dispatcher binary itself SHALL NOT re-run these validators; it trusts upstre
 
 ### Requirement: Compose Op Wire Expansion
 
-The seven deterministic ops (`auth-probe`, `compose-ls`, `docker-version`, `docker-info`, `docker-manifest-inspect`, `helper-chown-files`, `helper-mkdir-chown-dirs`) cross the boundary with their typed args verbatim (`dispatch <op> <typed-args>`). The three compose ops (`compose-up`, `compose-down`, `compose-ps`) MUST NOT, because their target argv embeds project name / compose-file paths / env-file path that are **dev-context state the dispatcher cannot re-derive** (the dispatcher executes inside the `[host].docker_unprivileged_user` session: `compose_project_name` resolves via `getpwuid(getuid())` → the wrong user there; the compose-file and `.sandbox.env` absolute paths live under the operator's `sandbox_ai_home()`).
+The eight deterministic ops (`auth-probe`, `compose-ls`, `docker-version`, `docker-info`, `docker-manifest-inspect`, `helper-chown-files`, `helper-mkdir-chown-dirs`, `preflight`) cross the boundary with their typed args verbatim (`dispatch <op> <typed-args>`; `preflight` and `auth-probe` take no args). The three compose ops (`compose-up`, `compose-down`, `compose-ps`) MUST NOT, because their target argv embeds project name / compose-file paths / env-file path that are **dev-context state the dispatcher cannot re-derive** (the dispatcher executes inside the `[host].docker_unprivileged_user` session: `compose_project_name` resolves via `getpwuid(getuid())` → the wrong user there; the compose-file and `.sandbox.env` absolute paths live under the operator's `sandbox_ai_home()`).
 
-For the compose ops, `core.dispatch.invoke(...)` SHALL, AFTER per-op validation of the typed args, resolve the dev-context state operator-side (`core.dispatch._resolve_compose_state(inst)` → project name via `core.compose.compose_project_name`, the compose-file list, the `<instance_dir>/.sandbox.env` path) and expand the crossed command line (**in separate-user mode**, where the wire form is what crosses via `machinectl_cmd`) to the **wire form**:
+For the compose ops, `core.dispatch.invoke(...)` SHALL, AFTER per-op validation of the typed args, resolve the dev-context state operator-side (`core.dispatch._resolve_compose_state(inst)` → project name via `core.compose.compose_project_name`, the compose-file list, the `<instance_dir>/.sandbox.env` path) and expand the crossed command line to the **wire form**:
 
 ```
 /usr/local/libexec/sandbox-ai/dispatch <compose-op> <inst> \
     --project <P> --env-file <E> --compose-file <f1> [--compose-file <f2> …] [--volumes]
 ```
 
-`--volumes` appears only for `compose-down` when the destroy path requested it. The typed `invoke()` API (and thus the "Typed Op Surface" and "Per-Op Argument Validation" requirements) is unchanged: callers pass `[<inst>]` (plus `["--volumes"]` for a `compose-down` destroy); the named-flag expansion is internal to `invoke()` and occurs only after the typed args validate. The wire-form expansion itself is mode-agnostic; in operator-rootless mode the same wire form is invoked locally with no machinectl crossing, per the "Operator-Rootless Local Invocation Mode" requirement.
+`--volumes` appears only for `compose-down` when the destroy path requested it. The typed `invoke()` API (and thus the "Typed Op Surface" and "Per-Op Argument Validation" requirements) is unchanged: callers pass `[<inst>]` (plus `["--volumes"]` for a `compose-down` destroy); the named-flag expansion is internal to `invoke()` and occurs only after the typed args validate. The SUDO-mode crossing carrying this wire (and every other op's bare payload) is now `sudo_pipe_cmd(user)` (the privileged byte-pipe, C-009 design D2), not `machinectl_cmd(user, SUDO)`; the POLKIT-mode crossing is still `machinectl_cmd(user, POLKIT)`. The wire form itself is identical across crossings — only the prefix differs.
 
 The dispatcher binary SHALL, for a compose op, parse the named flags (`--project` once, `--env-file` once, `--compose-file` one-or-more, `--volumes` boolean for `compose-down` only), reject any unrecognized flag or a flag illegal for the op, and construct the target argv with an **op-hardcoded verb** that is NEVER taken from the wire. The dispatcher SHALL NOT re-derive `<P>`, the compose-file paths, or `<E>`.
 
@@ -161,9 +166,9 @@ Any failure SHALL cause a non-zero exit with stderr naming the offending operand
 - **WHEN** every component from the `instances/<inst>` boundary downward is a real directory/file, but an ancestor ABOVE `instances` (e.g. `/home` → `/var/home` on the host) is a symlink
 - **THEN** the structural + symlink checks pass (ancestors above the `instances` boundary are intentionally not symlink-checked) and the dispatcher proceeds to construct the op-hardcoded target argv
 
-#### Scenario: invoke() expands compose-up to the named-flag wire form (separate-user mode)
-- **WHEN** `core.dispatch.invoke("compose-up", ["myinst"], host_config)` is called for a registered instance with `docker_execution_mode == separate-user`
-- **THEN** the command crossed via `machinectl_cmd` is `[…, "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-up myinst --project <P> --env-file <E> --compose-file <f1> …"]` where `<P>`, `<E>`, and each `<f>` are the operator-side-resolved project name, `.sandbox.env` path, and compose-file paths for `myinst`
+#### Scenario: invoke() expands compose-up to the named-flag wire form
+- **WHEN** `core.dispatch.invoke("compose-up", ["myinst"], host_config)` is called for a registered instance under separate-user + SUDO auth
+- **THEN** the command crossed via `sudo_pipe_cmd(user)` is `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-up myinst --project <P> --env-file <E> --compose-file <f1> …"]` where `<P>`, `<E>`, and each `<f>` are the operator-side-resolved project name, `.sandbox.env` path, and compose-file paths for `myinst` (under POLKIT the same wire crosses via `machinectl_cmd(user, POLKIT)`)
 
 #### Scenario: compose-down destroy carries --volumes in the wire form
 - **WHEN** `core.dispatch.invoke("compose-down", ["myinst", "--volumes"], host_config)` is called
@@ -183,13 +188,13 @@ The dispatcher SHALL translate each op's validated args into a target argv per a
 
 **Verification scoping (honest, per phase-3 review C-e; compose-op refinement per Q6).** The Python `core.dispatch` target-argv builders are the source of truth and are verified in the **standard CI gate** (`make test`/`make coverage`) against the shared fixture `src/templates/dispatch/fixtures/target_argv_cases.json`. The Go binary's matching output is verified against the **same fixture** by `src/templates/dispatch/main_test.go` via `go test ./...` inside the pinned `golang:1.23-alpine` image — there is **no host Go toolchain, so this is NOT part of the standard `make test`/`make coverage` gate**.
 
-The fixture is keyed on each op's **wire form** (what crosses the boundary): for the seven deterministic ops that is the typed args; for the three compose ops that is the Q6 named-flag expansion (`<inst> --project <P> --env-file <E> --compose-file <f>…`). Keyed this way, every op's target argv — including compose — is a pure function of its wire inputs, so all ten ops live in the one shared fixture and the Python↔Go lockstep covers compose. The operator-side resolution of `<P>/<E>/<files>` from `<inst>` (`_resolve_compose_state`) depends on a seeded registered instance, not a static fixture, and is therefore covered by the standard gate's dynamic Python tests rather than by `target_argv_cases.json`.
+The fixture is keyed on each op's **wire form** (what crosses the boundary): for the eight deterministic ops that is the typed args; for the three compose ops that is the Q6 named-flag expansion (`<inst> --project <P> --env-file <E> --compose-file <f>…`). Keyed this way, every op's target argv — including compose — is a pure function of its wire inputs, so all eleven ops live in the one shared fixture and the Python↔Go lockstep covers compose. The operator-side resolution of `<P>/<E>/<files>` from `<inst>` (`_resolve_compose_state`) depends on a seeded registered instance, not a static fixture, and is therefore covered by the standard gate's dynamic Python tests rather than by `target_argv_cases.json`.
 
 To make "byte-for-byte" an actually-enforced invariant rather than an unenforced convention, `core.dispatch.compile_dispatcher` SHALL run `go test ./...` inside the pinned image **before** `go build`, in the same `docker run --network none` invocation, and SHALL fail the compile (and therefore `sandbox-setup`'s L6.5 dispatcher-install phase) if the Go fixture test fails. A Python↔Go argv drift is then caught deterministically at dispatcher-compile time — the only place a Go toolchain is available — and a drifted dispatcher binary is never installed. The guarantee is precisely: *Python side — standard-gate-enforced; Go side — compile-time-enforced (compile fails on fixture mismatch); the two stay in lockstep because both consume the one fixture file*. It is a compile-time invariant, not something the orchestrator's pure-Python `make test` gate proves end-to-end (it cannot — no Go toolchain there).
 
 The mappings (with `<...>` denoting substituted args):
 
-Every compose op's inner string carries the exact env prefix the source builders use — `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<proj>` and `--ansi never` — because dropping any of it changes observable behavior (BuildKit progress format, ANSI in captured output, the compose project name). For the compose ops, `<proj>` / `<compose-files>` / `<env>` are the operator-side-resolved operands delivered to the dispatcher via the Q6 named flags (`--project` / `--compose-file`… / `--env-file`); the dispatcher substitutes them into the template below but the compose **verb** (`up -d --build --wait` / `down[ -v]` / `ps --format json`) is op-hardcoded in the dispatcher and never sourced from the wire. The seven deterministic ops below take no such expansion.
+Every compose op's inner string carries the exact env prefix the source builders use — `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<proj>` and `--ansi never` — because dropping any of it changes observable behavior (BuildKit progress format, ANSI in captured output, the compose project name). For the compose ops, `<proj>` / `<compose-files>` / `<env>` are the operator-side-resolved operands delivered to the dispatcher via the Q6 named flags (`--project` / `--compose-file`… / `--env-file`); the dispatcher substitutes them into the template below but the compose **verb** (`up -d --build --wait` / `down[ -v]` / `ps --format json`) is op-hardcoded in the dispatcher and never sourced from the wire. The eight deterministic ops below take no such expansion.
 
 - `auth-probe` → `["/bin/bash", "-c", "echo ok"]`
 - `compose-up <inst>` → `["/bin/bash", "-c", "TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<proj> docker compose <compose-files> --ansi never --env-file <env> up -d --build --wait"]` (byte-faithful to `cli/main.py:_compose_up_cmd_plan`)
@@ -201,6 +206,7 @@ Every compose op's inner string carries the exact env prefix the source builders
 - `docker-manifest-inspect <ref>` → `["/bin/bash", "-c", "docker manifest inspect <ref>"]` (byte-faithful to `supply_chain.py:27`; the caller loops over `IMAGE_REGISTRY` and invokes the op once per pinned ref)
 - `helper-chown-files <parent> <mode> <uid> <gid> <files...>` → the hardened-`docker run` invocation per `core/helper_container.py` with the chown inner script
 - `helper-mkdir-chown-dirs <parent> <uid> <gid> <leaves...>` → the hardened-`docker run` invocation per `core/helper_container.py` with the mkdir+chown inner script
+- `preflight` → `["/bin/bash", "-c", "<bundle>"]` where `<bundle>` is the `;`-sequenced read-only health bundle backing `sandbox start`'s privilege-boundary preflight (C-009 D6): per DISTINCT query a `echo __PREFLIGHT_Q_${__PFNONCE}_<name>__; <query> 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_<name>_$?__` segment (the `${__PFNONCE}` token binds every marker to the per-crossing nonce — see the ADDED "preflight read-only op" requirement's forge-rejection contract) — for the queries `echo ok`, `docker version`, `docker info` security-options, `docker info` runtimes (one query, deduped — feeds the runsc/runsc-runtimeArgs/host-uds checks), and `docker compose ls`. The query inners are SSOT-shared with the individual read-only op builders (so they cannot drift); the segments are `;`-joined (NOT `&&`/`set -e`) so one query's failure neither aborts the others nor forges their success (F-065). A `preflight` fixture row + Go case were added in this change so the bundle is covered by the Python↔Go byte-parity contract.
 
 #### Scenario: auth-probe constructs canonical echo ok argv
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch auth-probe`
@@ -209,6 +215,10 @@ Every compose op's inner string carries the exact env prefix the source builders
 #### Scenario: docker-info preset 'runtimes' constructs the runtimes-format argv
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch docker-info runtimes`
 - **THEN** the target argv constructed before process replacement is `["/bin/bash", "-c", "docker info --format '{{json .Runtimes}}'"]`
+
+#### Scenario: preflight constructs the sequenced read-only health bundle
+- **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch preflight`
+- **THEN** the target argv constructed before process replacement is `["/bin/bash", "-c", "<bundle>"]` where `<bundle>` is the `;`-sequenced per-query (`__PREFLIGHT_Q_${__PFNONCE}_<name>__` / query `2>&1` / `__PREFLIGHT_RC_${__PFNONCE}_<name>_$?__`) form over the deduped read-only queries (`echo ok`, `docker version`, `docker info` security-options, `docker info` runtimes, `docker compose ls`); the `preflight` fixture row in `target_argv_cases.json` captures this nonce-bound marker form (with the literal `${__PFNONCE}` placeholder) for the Python↔Go parity test
 
 #### Scenario: helper-chown-files target argv is byte-faithful to the existing hardened helper
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch helper-chown-files /srv/cache 0644 1000 1000 a.log b.log`
@@ -304,19 +314,24 @@ The nonce binds the trailer: untrusted op output (a malicious image, `docker-man
 
 ### Requirement: Operator-Rootless Local Invocation Mode
 
-When `host_config.host.docker_execution_mode == operator-rootless`, `core.dispatch.build_invocation(op, args, host_config)` SHALL return the op's target-argv **directly** — the same `["/bin/bash", "-c", "<inner>"]` (or hardened `docker run`) produced by the existing per-op target-argv builder — with **no `machinectl_cmd(...)` prefix** and **no `<dispatch-binary> <op>` indirection**. The Go dispatcher binary SHALL NOT be invoked in this mode. The 10-op surface, per-op argument validators, and per-op target-argv builders SHALL be reused unchanged across both modes. The operator-rootless path SHALL still perform the same upstream steps before the builder as the `separate-user` path — per-op argument validation AND, for the compose ops, the Q6 operator-side wire-expansion (`_expand_compose_wire`, which resolves dev-context project/compose-file/env-file state the pure builder cannot re-derive) — so that **only the crossing prefix is dropped**, not the validation/expansion pipeline.
+When `host_config.host.docker_execution_mode == operator-rootless`, `core.dispatch.build_invocation(op, args, host_config)` SHALL return the op's target-argv **directly** — the same `["/bin/bash", "-c", "<inner>"]` (or hardened `docker run`) produced by the existing per-op target-argv builder — with **no `machinectl_cmd(...)` prefix** and **no `<dispatch-binary> <op>` indirection**. The Go dispatcher binary SHALL NOT be invoked in this mode. The eleven-op surface, per-op argument validators, and per-op target-argv builders SHALL be reused unchanged across both modes. The operator-rootless path SHALL still perform the same upstream steps before the builder as the `separate-user` path — per-op argument validation AND, for the compose ops, the Q6 operator-side wire-expansion (`_expand_compose_wire`, which resolves dev-context project/compose-file/env-file state the pure builder cannot re-derive) — so that **only the crossing prefix is dropped**, not the validation/expansion pipeline.
 
-In `separate-user` mode `build_invocation` behavior SHALL remain exactly as before (the `machinectl_cmd(user, auth)` prefix + bare `dispatch <op>` payload).
+In `separate-user` mode `build_invocation` behavior SHALL keep the bare `dispatch <op>` payload, with the crossing prefix selected by auth mode: SUDO → `sudo_pipe_cmd(user)` (the privileged byte-pipe, C-009 design D2); POLKIT → `machinectl_cmd(user, POLKIT)` (unchanged).
 
 #### Scenario: build_invocation emits bare argv in operator-rootless mode
 
 - **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == operator-rootless`
 - **THEN** the returned argv begins with `/bin/bash`, `-c` (no `sudo`/`machinectl`/`systemd-run` prefix and no `/usr/local/libexec/sandbox-ai/dispatch` token), and the `<inner>` string is byte-identical to the op's target-argv builder output
 
-#### Scenario: separate-user mode unchanged
+#### Scenario: separate-user SUDO mode crosses via sudo_pipe_cmd
 
-- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user`
-- **THEN** the returned argv is the existing `machinectl_cmd(user, auth) + ["/bin/bash", "-c", "<dispatch> compose-up …"]` form
+- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user` and `machinectl_authentication == sudo`
+- **THEN** the returned argv is `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "<dispatch> compose-up …"]` (the bare `dispatch <op>` payload over the privileged byte-pipe — no `machinectl` prefix)
+
+#### Scenario: separate-user POLKIT mode unchanged
+
+- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user` and `machinectl_authentication == polkit`
+- **THEN** the returned argv is the existing `[*machinectl_cmd(user, POLKIT), "/bin/bash", "-c", "<dispatch> compose-up …"]` form
 
 ### Requirement: Native Exit Recovery for Operator-Rootless invoke/probe
 
@@ -375,4 +390,88 @@ Every orchestrator call site that invokes a dispatcher op for a lifecycle comman
 #### Scenario: status and warm-check compose-ps run locally in operator-rootless
 - **WHEN** a `sandbox status` query or a lifecycle warm-check runs `compose-ps` with `docker_execution_mode == operator-rootless`
 - **THEN** the `compose-ps` op runs as a local `docker compose ps` subprocess with no `machinectl` crossing
+
+### Requirement: `build_invocation` routes SUDO separate-user ops onto the privileged pipe
+
+For separate-user + SUDO auth, `core.dispatch.build_invocation` SHALL assemble the crossing as
+`[*sudo_pipe_cmd(user), "/bin/bash", "-c", "<dispatch-binary> <op> <wire-args>"]` — the SAME bare
+`dispatch <op>` payload it crosses today (so the per-op `Cmnd_Spec` matches), with only the prefix changed
+from `machinectl_cmd(...)` to `sudo_pipe_cmd(...)`. The validation + compose-wire-expansion pipeline (Q6) and
+the operator-rootless and POLKIT branches SHALL be unchanged. No `--unit`/`--description` is added.
+
+#### Scenario: SUDO separate-user prefix swap
+- **WHEN** `build_invocation(op, args, host_config)` runs with separate-user + SUDO
+- **THEN** the argv is `["sudo","systemd-run","-q","--pipe","--uid=<user>","/bin/bash","-c","<dispatch> <op> <wire>"]`
+- **AND** the inner `<dispatch> <op> <wire>` string is byte-identical to the machinectl-path payload it replaced
+
+#### Scenario: other modes unchanged
+- **WHEN** the host is operator-rootless
+- **THEN** `build_invocation` returns the local target-argv (no crossing prefix), as today
+- **AND WHEN** the host is separate-user + POLKIT, the prefix is still `machinectl_cmd(user, POLKIT)`
+
+### Requirement: Frame-based exit recovery on the pipe path (`framed=True`)
+
+On the `sudo_pipe_cmd` path the inner op's exit SHALL be recovered from the dispatcher's
+`__SANDBOX_EXIT_<nonce>_<rc>` frame (`framed=True`), exactly as on the `machinectl` path — NOT from
+`systemd-run --pipe`'s native exit. F-064 ground-truthed that the native `systemd-run --pipe` exit is
+**unreliable** (a failing op returned native `0` while its dispatcher frame correctly showed `_1`); the frame
+is authoritative, so a native-exit recovery path would be a correctness bug. This needs **zero
+executor/dispatcher change**: the Go dispatcher frames unconditionally (`main.go`), the frame rides the byte
+pipe (stdout forwarded faithfully), and the existing `_recover_inner_exit` strips + recovers it. The op's
+stdout SHALL be returned free of any `__SANDBOX_BEGIN_`/`__SANDBOX_EXIT_` framing markers (the existing strip).
+
+#### Scenario: non-zero op exit surfaces from the frame
+- **WHEN** a dispatcher op exits non-zero across the `sudo_pipe_cmd` path
+- **THEN** the orchestrator recovers that non-zero exit from the `__SANDBOX_EXIT_<nonce>_<rc>` frame (raise for
+  `invoke`, `ok=False` for `probe`), independent of the possibly-`0` native `systemd-run` exit
+- **AND** the returned stdout contains no `__SANDBOX_BEGIN_`/`__SANDBOX_EXIT_` marker text
+
+#### Scenario: probe-style callers still branch correctly
+- **WHEN** `dispatch.probe("auth-probe", …)` runs over the pipe path on a working host
+- **THEN** it returns `ok=True`; on a failing crossing it returns `ok=False` (never an unhandled raise)
+
+### Requirement: `preflight` read-only op bundles the `start` preflight health queries
+
+`core.dispatch` SHALL define an 11th op, `preflight` (no-arg, read-only), whose target-argv runs the
+**distinct** read-only health queries that back `sandbox start`'s privilege-boundary preflight — `echo ok`,
+`docker version`, `docker info` (security-options), `docker info` (runtimes — **a single query** feeding the
+runsc/runsc-runtimeArgs/host-uds checks), and `docker compose ls` — in **one** crossing, emitting each
+query's output in an orchestrator-parseable, individually-attributable form. Each query SHALL run under `;`
+sequencing (NOT `&&`/`set -e`) so one query's failure neither aborts the others nor forges their success. The
+op SHALL NOT take per-instance state (it is instance-agnostic; `compose-ps` stays a separate crossing). All
+check *interpretation* + per-check diagnostics remain orchestrator-side; the op only carries the raw query
+outputs. The op crosses via the same path as every other op (`build_invocation`: `sudo_pipe_cmd` under SUDO,
+local under operator-rootless, `machinectl_cmd` under POLKIT) and recovers exit via the frame (`framed=True`).
+
+Each query SHALL be attributed by a begin marker, its **stderr merged** (`2>&1`), and a trailing per-query
+**exit marker** (`__PREFLIGHT_RC_<…>_<rc>__`), so the orchestrator reconstructs a per-query outcome
+(stdout + recovered exit), not just the whole-op exit. The per-query markers SHALL be **bound to a
+per-crossing nonce** (unguessable, dispatcher-minted on the framed path and reused from the F-018 frame;
+Python-minted on the operator-rootless local path) so untrusted query output cannot forge a marker and flip a
+verdict (the F-018 bar). The orchestrator parser SHALL be **fail-closed**: a missing/garbled segment, an
+absent/mismatched nonce, or a duplicated marker SHALL yield a not-ok outcome for that query, never a forged
+pass.
+
+#### Scenario: one crossing carries every health query
+- **WHEN** `dispatch.probe("preflight", [], host_config)` runs on a separate-user host
+- **THEN** it performs exactly one boundary crossing
+- **AND** its stdout carries each distinct health query's output (stderr-merged) with a recoverable per-query
+  exit code, individually attributable to its check
+
+#### Scenario: forged marker cannot flip a verdict
+- **WHEN** an untrusted query's output contains a byte-perfect copy of another query's marker spelled WITHOUT
+  the per-crossing nonce
+- **THEN** the parser does not match the forged marker (it derives every marker from the crossing's nonce), so
+  the real verdict stands and the forgery cannot turn a FAIL into a PASS
+- **AND** if the nonce is absent or mismatched, every query is reported not-ok (fail-closed)
+
+#### Scenario: a failing query is isolated, not masking the rest
+- **WHEN** one bundled query fails (e.g. the daemon is unreachable)
+- **THEN** that query's failure is recoverable from the output while the other queries' outputs are still
+  present (the orchestrator can surface the specific failing check)
+
+#### Scenario: deduped runtimes query
+- **WHEN** the `preflight` op runs
+- **THEN** `docker info` (runtimes) is queried once, and the runsc / runsc-runtimeArgs / host-uds checks are
+  all derived from that single output (no repeated crossing)
 

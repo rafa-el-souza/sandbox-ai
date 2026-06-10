@@ -158,13 +158,17 @@ The helper container SHALL bind-mount the parent directory containing the target
 
 ### Requirement: Helper Invocation via machinectl
 
-The helper container SHALL be launched via the same `machinectl shell <docker_unprivileged_user>@.host /usr/bin/docker run …` boundary used by the rest of the orchestrator, with the auth mode taken from the `machinectl_auth` argument (sourced from `HostConfig.host.machinectl_authentication`).
+The helper container SHALL be launched across the same privilege boundary used by the rest of the orchestrator — by routing through `core.dispatch` (the `helper-chown-files` / `helper-mkdir-chown-dirs` ops), whose `core.dispatch.build_invocation` selects the crossing primitive by execution mode + auth: separate-user + SUDO crosses via `sudo_pipe_cmd(user)` (the privileged byte-pipe), separate-user + POLKIT crosses via `machinectl_cmd(user, POLKIT)`, and operator-rootless runs the hardened `docker run` locally with no crossing prefix. The helper SHALL NOT wrap a raw `machinectl shell <user>@.host /usr/bin/docker run …` itself; the boundary crossing is owned by `build_invocation` and the per-op target argv is the hardened `docker run` invocation from `core.helper_container`.
 
-#### Scenario: Helper crosses the privilege boundary
-- **WHEN** any helper primitive is invoked
-- **THEN** the docker run command is wrapped in `machinectl shell` per the auth mode (sudo or polkit), matching `core.host_config.machinectl_cmd()`
+#### Scenario: Helper crosses the privilege boundary (separate-user, sudo mode)
+- **WHEN** any helper primitive is invoked under separate-user + SUDO auth
+- **THEN** the hardened `docker run` target argv is crossed via `sudo_pipe_cmd(<user>)` (`build_invocation` → `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch helper-… …"]`), not a raw `machinectl shell` wrap
+
+#### Scenario: Helper crosses the privilege boundary (separate-user, polkit mode)
+- **WHEN** any helper primitive is invoked under separate-user + POLKIT auth
+- **THEN** the same helper op is crossed via `machinectl_cmd(<user>, POLKIT)` (no `sudo` prefix), per `build_invocation`'s POLKIT branch
 
 #### Scenario: No bare docker invocation
-- **WHEN** the codebase is searched for direct `docker run` calls without a machinectl wrapper
-- **THEN** none exist in helper-related code paths
+- **WHEN** the codebase is searched for direct `docker run` calls without routing through `core.dispatch`
+- **THEN** none exist in helper-related code paths (the crossing is owned by `build_invocation`, which prefixes `sudo_pipe_cmd` / `machinectl_cmd` per mode, or runs locally under operator-rootless)
 

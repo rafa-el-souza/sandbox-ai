@@ -75,7 +75,7 @@ The system SHALL provide a `machinectl_cmd(user, auth)` function that returns th
 
 ### Requirement: Module Location
 
-The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl_cmd` function, `pipe_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. The legacy `_resolve_sandbox_ai_home()` helper is removed.
+The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl_cmd` function, `pipe_cmd` function, `sudo_pipe_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. The legacy `_resolve_sandbox_ai_home()` helper is removed.
 
 #### Scenario: Import path
 - **WHEN** other modules need host config, machinectl prefix building, pipe-cmd prefix building, subuid resolution, or bridge-group resolution
@@ -87,7 +87,7 @@ The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl
 
 #### Scenario: Public symbols enumerated
 - **WHEN** the public surface of `core.host_config` is inspected
-- **THEN** it includes `HostConfig`, `MachinectlAuth`, `HostSettings`, `machinectl_cmd`, `pipe_cmd`, the subuid/subgid parsers, the forward/inverse userns mappers, `workspace_bridge_gid`, and `autodetect_workspace_bridge_gid_recommendation`
+- **THEN** it includes `HostConfig`, `MachinectlAuth`, `HostSettings`, `machinectl_cmd`, `pipe_cmd`, `sudo_pipe_cmd`, the subuid/subgid parsers, the forward/inverse userns mappers, `workspace_bridge_gid`, and `autodetect_workspace_bridge_gid_recommendation`
 
 ### Requirement: Pipe Command Helper
 
@@ -107,17 +107,27 @@ The system SHALL provide a `pipe_cmd(user)` function in `core.host_config` that 
 
 ### Requirement: Pipe Command vs Machinectl Command Distinction
 
-The system SHALL maintain two distinct boundary-crossing primitives in `core.host_config`: `machinectl_cmd(user, auth)` for paths that require a PTY (e.g., the interactive `docker exec -it` handover, helper-container exec where stdin is a real TTY) and `pipe_cmd(user)` for paths that require a non-PTY byte pipe (e.g., the `ProxyCommand` in the new attach path). The choice of primitive at each call site SHALL be principled and load-bearing: PTY-needed call sites SHALL use `machinectl_cmd`; byte-pipe-needed call sites SHALL use `pipe_cmd`.
+The system SHALL maintain three distinct boundary-crossing primitives in `core.host_config`:
 
-The `pipe_cmd` primitive SKIPS PAM by design — `systemd-run`'s `manage-units` polkit action does not invoke the PAM stack. PAM-enforced policies on the `dev → <sbuser>` transition (e.g., `pam_limits.conf` resource ceilings, custom session-class restrictions, audit subsystem login UID via `pam_loginuid`) DO NOT apply to `pipe_cmd` invocations. This trade-off SHALL be documented in `CLAUDE.md`'s "Privilege boundary" section alongside the existing `machinectl_cmd` discipline.
+- `machinectl_cmd(user, auth)` — for paths that require a PTY (e.g., the interactive `docker exec -it` handover) AND for POLKIT-mode dispatcher op crossings + the root setup-phase crossings (L5/L6/L7).
+- `pipe_cmd(user)` — the **unprivileged** byte-pipe primitive `["systemd-run", "-q", "--pipe", f"--uid={user}"]`, for non-PTY byte pipes crossed by an already-privileged caller (the SSH `ProxyCommand` in the new attach path, the root setup-phase operator-state crossings). It takes no `auth` argument — `systemd-run`'s `manage-units` polkit action is the only authorization layer.
+- `sudo_pipe_cmd(user)` — the **privileged**, per-op-sudoers-authorized sibling of `pipe_cmd`, returning `["sudo", *pipe_cmd(user)]` (i.e. `["sudo", "systemd-run", "-q", "--pipe", f"--uid={user}"]`). It **delegates** to `pipe_cmd` (it never re-spells the `systemd-run` literal — `pipe_cmd` stays the single sanctioned home for it). It is the SUDO-mode dispatcher-op crossing: an unprivileged operator crosses via a per-op sudoers rule that authorizes exactly this argv (separate-user + SUDO dispatch routing — design D2). It takes only `user` (no `auth` argument — the per-op sudoers rule is the only authorization layer on this path) and appends no `--unit`/`--description` (the argv must stay byte-identical to the per-op `Cmnd_Spec` the rule matches).
 
-#### Scenario: CLAUDE.md documents both primitives
+The choice of primitive at each call site SHALL be principled and load-bearing: PTY-needed call sites SHALL use `machinectl_cmd`; unprivileged byte-pipe call sites SHALL use `pipe_cmd`; SUDO-mode dispatcher-op crossings SHALL use `sudo_pipe_cmd`.
+
+Both `pipe_cmd` and `sudo_pipe_cmd` SKIP PAM by design — `systemd-run`'s `manage-units` polkit action does not invoke the PAM stack. PAM-enforced policies on the `dev → <sbuser>` transition (e.g., `pam_limits.conf` resource ceilings, custom session-class restrictions, audit subsystem login UID via `pam_loginuid`) DO NOT apply to `pipe_cmd`/`sudo_pipe_cmd` invocations. This trade-off SHALL be documented in `CLAUDE.md`'s "Privilege boundary" section alongside the existing `machinectl_cmd` discipline.
+
+#### Scenario: CLAUDE.md documents the primitives
 - **WHEN** the project's `CLAUDE.md` "Privilege boundary" section is inspected
-- **THEN** it names both `machinectl_cmd(user, auth)` (for PTY paths) and `pipe_cmd(user)` (for byte-pipe paths), and states that `pipe_cmd` skips PAM whereas `machinectl_cmd` runs the full PAM stack
+- **THEN** it names `machinectl_cmd(user, auth)` (for PTY paths + POLKIT/setup-root crossings), `pipe_cmd(user)` (unprivileged byte-pipe), and `sudo_pipe_cmd(user)` (the privileged SUDO-mode op crossing that delegates to `pipe_cmd`), and states that the pipe primitives skip PAM whereas `machinectl_cmd` runs the full PAM stack
 
-#### Scenario: Hardcoded systemd-run forbidden outside helper
+#### Scenario: sudo_pipe_cmd delegates to pipe_cmd
+- **WHEN** `sudo_pipe_cmd(u)` and `pipe_cmd(u)` are compared
+- **THEN** `sudo_pipe_cmd(u) == ["sudo", *pipe_cmd(u)]` (it prepends `sudo` to the unprivileged `pipe_cmd` rather than re-spelling the `systemd-run` literal), and contains no `--unit`, `--description`, or quoting of the uid
+
+#### Scenario: Hardcoded systemd-run forbidden outside pipe_cmd
 - **WHEN** the codebase outside `core/host_config.py` is searched for the literal string `"systemd-run"`
-- **THEN** no hits appear in source paths that construct boundary-crossing argv (the only references permitted are inside `pipe_cmd` itself or in tests asserting `pipe_cmd`'s return value)
+- **THEN** no hits appear in source paths that construct boundary-crossing argv (the only references permitted are inside `pipe_cmd` itself — `sudo_pipe_cmd` delegates to it — or in tests asserting the primitives' return values)
 
 ### Requirement: Subuid/Subgid Range Parsers
 
@@ -329,4 +339,41 @@ The runtime commands (`init`, `start`, `stop`, `status`, `attach`, `destroy`, an
 
 - **WHEN** any runtime command (e.g. `sandbox start`) is invoked with `euid == 0`
 - **THEN** it refuses with a "run as your operator account, not root" message and creates no `/root/.sandbox-ai` tree
+
+### Requirement: Privileged byte-pipe crossing primitive `sudo_pipe_cmd`
+
+`core.host_config` SHALL provide `sudo_pipe_cmd(user)` returning
+`["sudo", "systemd-run", "-q", "--pipe", f"--uid={user}"]` — the privileged, per-op-sudoers-authorized
+byte-pipe sibling of the unprivileged `pipe_cmd`. It SHALL NOT accept an auth argument (the SUDO sudoers rule
+is the only authorization layer on this path) and SHALL NOT append `--unit` or `--description` (the argv must
+stay byte-identical to the per-op `Cmnd_Spec` the sudoers rule matches).
+
+#### Scenario: Prefix shape
+- **WHEN** `sudo_pipe_cmd("sandbox")` is called
+- **THEN** it returns `["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]`
+- **AND** the list contains no `--unit`, `--description`, or quoting of the uid
+
+#### Scenario: Distinct from the unprivileged pipe
+- **WHEN** `sudo_pipe_cmd(u)` and `pipe_cmd(u)` are compared
+- **THEN** `sudo_pipe_cmd` is `pipe_cmd` prefixed with `sudo` (the unprivileged `pipe_cmd` — attach's
+  `manage-units`-authorized ProxyCommand — is unchanged)
+
+### Requirement: Crossing-primitive selection by (mode, auth, op-kind)
+
+The crossing primitive for an orchestrator→sandbox op SHALL be selected as: operator-rootless → no crossing
+(local subprocess); separate-user + SUDO + non-interactive op → `sudo_pipe_cmd(user)`; separate-user + POLKIT →
+`machinectl_cmd(user, polkit)` (unchanged). The interactive `attach` ProxyCommand SHALL continue to use the
+unprivileged `pipe_cmd(user)` regardless of auth mode (it is auth-mode-independent and out of scope).
+
+#### Scenario: SUDO separate-user op uses the privileged pipe
+- **WHEN** a non-interactive dispatcher op runs under separate-user + SUDO auth
+- **THEN** the crossing prefix is `sudo_pipe_cmd(<docker_unprivileged_user>)`, not `machinectl_cmd(...)`
+
+#### Scenario: POLKIT mode is unchanged
+- **WHEN** a non-interactive op runs under separate-user + POLKIT auth
+- **THEN** the crossing prefix remains `machinectl_cmd(user, POLKIT)`
+
+#### Scenario: attach is untouched
+- **WHEN** `sandbox attach` builds its SSH ProxyCommand under separate-user (either auth mode)
+- **THEN** it still uses `pipe_cmd(user)` (unprivileged `systemd-run`), not `sudo_pipe_cmd`
 

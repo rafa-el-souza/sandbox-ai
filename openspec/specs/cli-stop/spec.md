@@ -19,15 +19,15 @@ This specification defines the `sandbox stop` command lifecycle, governing conta
 - **THEN** stop exits with a "Backup in progress" error and exit code 1
 
 ### Requirement: Container Shutdown via machinectl
-The system SHALL shut down the sandbox's containers by running `docker compose down` as the `docker_unprivileged_user` via `machinectl shell`, using the configured machinectl authentication mode from host config.
+The system SHALL shut down the sandbox's containers by running the dispatcher `compose-down` op as the `docker_unprivileged_user` across the privilege boundary (via `core.dispatch.invoke("compose-down", [<inst>], host_config)`, which resolves the dev-context compose state operator-side and crosses the bare `dispatch compose-down <inst> …` payload — NOT an inline `"docker compose down"` string). The crossing primitive is selected by the configured `machinectl_authentication` mode: SUDO crosses via `sudo_pipe_cmd` (the privileged byte-pipe), POLKIT via `machinectl_cmd(user, POLKIT)`.
 
 #### Scenario: Warm sandbox stopped cleanly (sudo mode)
 - **WHEN** `sandbox stop` is invoked, containers are running, and `machinectl_authentication` is `"sudo"`
-- **THEN** `sudo machinectl shell <user>@.host /bin/bash -c "docker compose down"` is executed
+- **THEN** `core.dispatch.invoke("compose-down", [<inst>], host_config)` crosses via `sudo_pipe_cmd(<user>)` — i.e. `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-down <inst> --project <P> --env-file <E> --compose-file <f>…"]` (the dispatcher's op-hardcoded verb is `down`, no `--volumes` for plain stop)
 
 #### Scenario: Warm sandbox stopped cleanly (polkit mode)
 - **WHEN** `sandbox stop` is invoked, containers are running, and `machinectl_authentication` is `"polkit"`
-- **THEN** `machinectl shell <user>@.host /bin/bash -c "docker compose down"` is executed without `sudo` prefix
+- **THEN** the same `compose-down <inst>` crossing is performed via `machinectl_cmd(<user>, POLKIT)` (no `sudo` prefix) — `[*machinectl_cmd(<user>, POLKIT), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-down <inst> …"]`
 
 #### Scenario: Cold sandbox reports warning and exits
 - **WHEN** `sandbox stop` is invoked and `docker compose ps -q` returns no output

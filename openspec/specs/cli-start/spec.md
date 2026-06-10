@@ -445,3 +445,33 @@ silently shipping under a refactor.
   modifies this requirement; ad-hoc flips in a refactor are
   prohibited
 
+### Requirement: `start` preflight health crossings collapse to one (plus the compose-ps warm-check)
+
+`sandbox start`'s preflight SHALL perform its instance-agnostic read-only health checks (the 7-check
+privilege-boundary doctor chain — `machinectl_reachable`, `docker_available`, `docker_rootless`, `runsc`,
+`runsc_runtimeargs`, `host_uds`, `compose_project_name_collision`) in a **single** `preflight`-op crossing
+whose result is parsed orchestrator-side, instead of one crossing per check. (Reachability, formerly the
+`machinectl_reachable`/`auth-probe` check, is established by the `preflight` crossing itself succeeding — its
+`echo ok` query.) The instance-stateful `compose-ps` warm-check (Q6 —
+operator-resolved project/compose-file/env-file) SHALL remain its own crossing. So the read-only preflight
+collapses from 8 crossings to **two** (one `preflight` + one `compose-ps`). The bundle SHALL be read-only and
+SHALL preserve each check's individual pass/fail signal + its specific diagnostic in the parsed result. The
+explicit (init-path) `auth-probe`'s redundancy with the chain's `machinectl_reachable` check SHALL be removed
+(the crossing succeeding is the reachability signal).
+
+#### Scenario: one health crossing, not a burst
+- **WHEN** `sandbox start <inst>` runs its preflight on a separate-user host
+- **THEN** the instance-agnostic health checks perform exactly one boundary crossing (the `preflight` op), not
+  one per check
+- **AND** the `compose-ps` warm-check is the only other read-only crossing
+- **AND** each bundled check's pass/fail is still surfaced individually to the operator
+
+#### Scenario: a failing preflight check still aborts with its own message
+- **WHEN** a bundled preflight check fails (e.g. the privilege boundary is misconfigured)
+- **THEN** `start` aborts with that check's specific diagnostic, not a generic bundle failure
+
+#### Scenario: behavior parity off the burst
+- **WHEN** the preflight passes
+- **THEN** `start` proceeds to `compose-up` exactly as before (the bundling changes crossing count, not the
+  set of checks performed)
+

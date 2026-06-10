@@ -101,22 +101,22 @@ CWD-based instance discovery is removed: the `<inst>` argument is positional and
 - **THEN** the CLI exits with a typer "missing argument" error
 
 ### Requirement: Init-Time Auth Mode Probe
-The system SHALL validate that the resolved machinectl authentication mode works at init time by executing a probe command against the resolved docker unprivileged user. The probe SHALL use a 5-second timeout.
+The system SHALL validate that the resolved machinectl authentication mode works at init time by executing the dispatcher `auth-probe` op against the resolved docker unprivileged user (via `core.dispatch.probe("auth-probe", [], host_config)` — which crosses the bare `dispatch auth-probe` payload, NOT an inline `"echo ok"` string; the dispatcher's `auth-probe` target argv is `["/bin/bash", "-c", "echo ok"]`). The crossing primitive is selected by the resolved `machinectl_authentication` mode: SUDO crosses via `sudo_pipe_cmd` (the privileged byte-pipe), POLKIT via `machinectl_cmd(user, POLKIT)`. The probe SHALL use a 5-second timeout.
 
 #### Scenario: Sudo mode probe succeeds
-- **WHEN** init resolves `machinectl_authentication = "sudo"` and `sudo machinectl shell <user>@.host /bin/bash -c "echo ok"` returns exit code 0 within 5 seconds
+- **WHEN** init resolves `machinectl_authentication = "sudo"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `sudo_pipe_cmd(<user>)` as `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
 - **THEN** init proceeds normally
 
 #### Scenario: Polkit mode probe succeeds
-- **WHEN** init resolves `machinectl_authentication = "polkit"` and `machinectl shell <user>@.host /bin/bash -c "echo ok"` returns exit code 0 within 5 seconds
+- **WHEN** init resolves `machinectl_authentication = "polkit"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `machinectl_cmd(<user>, POLKIT)` as `[*machinectl_cmd(<user>, POLKIT), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
 - **THEN** init proceeds normally
 
 #### Scenario: Sudo mode probe fails with timeout
-- **WHEN** the sudo probe times out after 5 seconds
+- **WHEN** the sudo probe times out after 5 seconds (`probe(...)` returns `timed_out=True`)
 - **THEN** init exits with an error including remediation: "Configure passwordless machinectl access in /etc/sudoers.d/"
 
 #### Scenario: Polkit mode probe fails
-- **WHEN** the polkit probe returns a non-zero exit code or times out
+- **WHEN** the polkit probe returns `ok=False` or times out
 - **THEN** init exits with an error including remediation: "Configure polkit rules for org.freedesktop.machine1.shell"
 
 ### Requirement: Init Doctor Pre-Flight Auth Mode Awareness
