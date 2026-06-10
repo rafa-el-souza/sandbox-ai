@@ -57,21 +57,21 @@ The system SHALL verify that the `systemd-machined` service is active.
 - **THEN** the check reports FAIL with `sudo systemctl enable --now systemd-machined` as the remediation command
 
 ### Requirement: machinectl Shell Reachability
-The system SHALL verify that the operator can shell into the unprivileged user via `sudo machinectl shell <user>@.host`. The probe SHALL use a 10-second timeout to detect sudoers misconfiguration (password prompt hang).
+The system SHALL verify that the operator can cross the privilege boundary into the unprivileged user by running the `auth-probe` dispatcher op via `core.dispatch.probe("auth-probe", …)` — the same seam `sandbox start`'s preflight reuses. The crossing primitive is auth-mode-selected per the "Doctor Cross-Boundary Invocation Routing" requirement (separate-user + SUDO → `sudo_pipe_cmd`, separate-user + POLKIT → `machinectl_cmd(user, POLKIT)`, operator-rootless → local), NOT a hardcoded `sudo machinectl shell`. The probe SHALL use a 10-second timeout to detect a sudoers/polkit misconfiguration (password prompt hang). (The check retains its historical name "machinectl reachable" in code.)
 
-**Dependencies:** sudo binary, machinectl binary, Unprivileged User Existence, systemd-machined Service
+**Dependencies:** sudo binary (SUDO mode); the auth-mode crossing launcher (`systemd-run` for SUDO, `machinectl` for POLKIT); Unprivileged User Existence; systemd-machined Service
 
-#### Scenario: Shell reachable
-- **WHEN** `sudo machinectl shell <user>@.host -- /bin/bash -c "echo ok"` completes successfully within 10 seconds
+#### Scenario: Crossing reachable
+- **WHEN** `core.dispatch.probe("auth-probe", [], …)` completes successfully (`ok=True`) within 10 seconds — the cross-boundary argv being the auth-mode-selected form (e.g. SUDO `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "<dispatch> auth-probe"]`)
 - **THEN** the check reports PASS
 
-#### Scenario: Shell unreachable due to timeout
-- **WHEN** the machinectl probe does not complete within 10 seconds
-- **THEN** the check reports FAIL with guidance that the timeout likely indicates a sudoers password prompt, and provides remediation for passwordless machinectl access
+#### Scenario: Crossing unreachable due to timeout
+- **WHEN** the `auth-probe` crossing does not complete within 10 seconds (`timed_out=True`)
+- **THEN** the check reports FAIL with guidance that the timeout likely indicates a sudoers/polkit password prompt, and provides remediation for passwordless boundary access
 
-#### Scenario: Shell unreachable due to error
-- **WHEN** the machinectl probe fails with a non-zero exit code
-- **THEN** the check reports FAIL with the stderr output and guidance on common causes (user not found by machined, service not running)
+#### Scenario: Crossing unreachable due to error
+- **WHEN** the `auth-probe` crossing fails with a non-zero recovered exit (`ok=False`)
+- **THEN** the check reports FAIL with the stderr output and guidance on common causes (user not found by machined, service not running, rule not granting the op)
 
 ### Requirement: Docker Availability
 The system SHALL verify that Docker is installed and accessible to the unprivileged user via machinectl.
