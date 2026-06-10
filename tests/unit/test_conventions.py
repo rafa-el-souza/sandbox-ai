@@ -459,14 +459,12 @@ _STREAMING_DISPATCH_MODULE = "src/core/dispatch.py"
 # docker-exec ``"/fwd"`` argv element is the dial.
 _FWD_PAYLOAD_SUBSTR = "dispatch fwd"
 _FWD_TARGET_BINARY = "/fwd"
-# Transitional exemption (C-010 wave): cli.main._build_attach_argv + the
-# start dry-run preview still hold the inline ``/fwd`` docker-exec argv until
-# the sibling milestone (group 3) rewrites the ProxyCommand to call
-# core.dispatch.proxy_argv. Tech-debt anchor — REMOVE this entry when that
-# rewrite lands (the module will then hold no fwd payload/argv literal). The
-# ``dispatch fwd`` PAYLOAD substring is NOT exempted anywhere: it does not yet
-# exist outside core.dispatch and must never be hand-built.
-_FWD_PAYLOAD_ALLOWLIST: frozenset[str] = frozenset({"src/cli/main.py"})
+# Zero exemptions. The C-010 group-3 rewrite landed: cli.main._build_attach_argv
+# and the start dry-run preview now obtain the ProxyCommand from
+# core.dispatch.proxy_argv, so no module outside core.dispatch holds a ``/fwd``
+# docker-exec argv or a ``dispatch fwd`` payload literal. core.dispatch is the
+# single sanctioned producer; the allowlist is intentionally empty.
+_FWD_PAYLOAD_ALLOWLIST: frozenset[str] = frozenset()
 
 
 def _fwd_invoke_probe_call_lines(tree: ast.AST) -> list[int]:

@@ -3,6 +3,8 @@ tlog-rec
 --file-path=/tmp/sandbox-test/sessions/dev-test-inst/20260510T000000Z.log
 --
 ssh
+-F
+/dev/null
 -i
 /tmp/sandbox-test/instances/test-inst/secrets/ipc_ssh_key
 -o
@@ -10,7 +12,19 @@ UserKnownHostsFile=/tmp/sandbox-test/instances/test-inst/secrets/ipc_known_hosts
 -o
 StrictHostKeyChecking=yes
 -o
-ProxyCommand=systemd-run -q --pipe --uid=claude-sandbox /usr/bin/docker exec -i dev-test-inst-admin-1 /fwd 10.100.4.3:9999
+IdentitiesOnly=yes
+-o
+IdentityAgent=none
+-o
+ForwardAgent=no
+-o
+ForwardX11=no
+-o
+ClearAllForwardings=yes
+-o
+PermitLocalCommand=no
+-o
+ProxyCommand=sudo systemd-run -q --pipe --uid=claude-sandbox /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd test-inst --project dev-test-inst --ip 10.100.4.3'
 -p
 9999
 -t

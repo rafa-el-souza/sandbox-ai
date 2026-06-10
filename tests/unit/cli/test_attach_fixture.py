@@ -9,10 +9,14 @@ but insufficient; this fixture-diff catches regressions that field-level
 assertions miss (token order, quoting drift, accidental flag insertion,
 etc.).
 
-The two fixture files are byte-identical because :func:`pipe_cmd` is
-auth-mode-independent (per design D2) — the ``ProxyCommand`` shape does
-not vary with ``host.machinectl_authentication``. A dedicated cross-mode
-invariant test pins this property.
+The two fixture files DIVERGE by auth mode (C-010): the separate-user
+``ProxyCommand`` is obtained from ``core.dispatch.proxy_argv(Op.FWD, …)``,
+whose crossing prefix is auth-mode-selected — **SUDO** crosses via
+``sudo_pipe_cmd`` (the privileged byte-pipe, the F-060 headless fix) and
+**POLKIT** via the unprivileged ``pipe_cmd``. The crossed ``dispatch fwd
+<wire>`` payload and the surrounding ssh argv (incl. the ``-F /dev/null``
+hardening pins) are identical; only the ``sudo`` prefix on the ProxyCommand
+differs. A dedicated cross-mode divergence test pins this property.
 
 Determinism strategy mirrors ``test_dry_run_fixture.py``:
 
@@ -163,23 +167,37 @@ class TestAttachArgvFixtureGate:
         argv = _capture_argv(monkeypatch, tmp_path, "polkit")
         _assert_or_regen(_argv_to_text(argv), FIXTURE_POLKIT)
 
-    def test_attach_argv_cross_mode_invariant(self) -> None:
-        """The argv MUST be byte-identical across auth modes.
+    def test_attach_argv_cross_mode_diverges_only_on_sudo_prefix(self) -> None:
+        """The two fixtures differ ONLY by the ``sudo`` prefix on the ProxyCommand.
 
-        Per design D2, ``pipe_cmd`` (used in the ``ProxyCommand``) is
-        auth-mode-independent — it always emits ``systemd-run --pipe
-        --uid=<user>`` and never the ``sudo machinectl`` form. The
-        attach argv therefore does not vary with ``machinectl_authentication``.
-        Pinning this as a load-bearing invariant via the fixtures
-        themselves catches any future drift that re-introduces a sudo
-        prefix on one mode but not the other.
+        Per C-010, the separate-user ProxyCommand comes from
+        ``core.dispatch.proxy_argv(Op.FWD, …)``, whose crossing prefix is
+        auth-mode-selected: SUDO → ``sudo_pipe_cmd`` (``sudo systemd-run
+        --pipe …``), POLKIT → the unprivileged ``pipe_cmd`` (``systemd-run
+        --pipe …``). Everything else — the crossed ``dispatch fwd <wire>``
+        payload and the entire surrounding ssh argv (incl. the ``-F
+        /dev/null`` hardening pins) — is identical. This pins the divergence
+        to exactly the ``sudo`` token so a future change that leaks any other
+        per-mode difference into the attach argv fails the gate.
         """
-        assert FIXTURE_SUDO.read_text() == FIXTURE_POLKIT.read_text(), (
-            "argv_sudo.txt and argv_polkit.txt diverged — `_build_attach_argv` "
-            "is supposed to be auth-mode-independent (admin-reframe D2). If "
-            "this divergence is intentional, update the design doc and remove "
-            "this invariant test."
+        sudo_lines = FIXTURE_SUDO.read_text().splitlines()
+        polkit_lines = FIXTURE_POLKIT.read_text().splitlines()
+        assert len(sudo_lines) == len(polkit_lines), (
+            "argv_sudo.txt and argv_polkit.txt have different element counts — "
+            "the only sanctioned per-mode difference is the ProxyCommand's "
+            "``sudo`` prefix, which does not change the element count."
         )
+        diffs = [(s, p) for s, p in zip(sudo_lines, polkit_lines, strict=True) if s != p]
+        assert len(diffs) == 1, (
+            f"expected exactly one differing argv element (the ProxyCommand); got {diffs!r}"
+        )
+        sudo_proxy, polkit_proxy = diffs[0]
+        assert sudo_proxy.startswith("ProxyCommand=")
+        assert polkit_proxy.startswith("ProxyCommand=")
+        # The SUDO ProxyCommand value is the POLKIT one with a leading ``sudo``.
+        sudo_val = sudo_proxy[len("ProxyCommand=") :]
+        polkit_val = polkit_proxy[len("ProxyCommand=") :]
+        assert sudo_val == "sudo " + polkit_val
 
 
 class TestAttachArgvStructural:
@@ -201,6 +219,19 @@ class TestAttachArgvStructural:
         assert argv[0] == "tlog-rec"
         assert "--writer=file" in argv
 
+    def test_argv_ssh_ignores_operator_config_via_dash_capital_f_devnull(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Hardened ssh client (cli-attach "Hardened ssh Client Invocation"):
+        # ``-F /dev/null`` precedes any ``-o`` option so no ~/.ssh/config or
+        # system ssh_config stanza can alter the connection's posture.
+        argv = self._argv(monkeypatch, tmp_path)
+        ssh_idx = argv.index("ssh")
+        assert argv[ssh_idx + 1] == "-F"
+        assert argv[ssh_idx + 2] == "/dev/null"
+        first_o = next(i for i, a in enumerate(argv) if a == "-o")
+        assert argv.index("-F") < first_o
+
     def test_argv_ssh_identity_points_at_ipc_ssh_key(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -220,37 +251,53 @@ class TestAttachArgvStructural:
         argv = self._argv(monkeypatch, tmp_path)
         assert "StrictHostKeyChecking=yes" in argv
 
-    def test_argv_proxy_command_uses_systemd_run_not_sudo(
+    def test_argv_forwarding_and_agent_access_pinned_off(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # cli-attach "Forwarding and agent access pinned off" scenario.
         argv = self._argv(monkeypatch, tmp_path)
-        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
-        assert "systemd-run" in proxy
-        assert "sudo" not in proxy
+        for opt in (
+            "ForwardAgent=no",
+            "ForwardX11=no",
+            "ClearAllForwardings=yes",
+            "IdentitiesOnly=yes",
+            "IdentityAgent=none",
+            "PermitLocalCommand=no",
+        ):
+            assert opt in argv, f"missing hardening option {opt!r}"
 
-    def test_argv_proxy_command_uses_unprivileged_pipe_cmd_not_sudo_pipe_cmd(
+    def test_argv_proxy_command_sudo_mode_uses_sudo_pipe_cmd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        # C-009 routed SUDO separate-user *dispatch* crossings onto the
-        # privileged byte-pipe (``sudo_pipe_cmd`` = ``["sudo", *pipe_cmd]``),
-        # but attach's ProxyCommand is UNTOUCHED: it crosses via the
-        # unprivileged ``pipe_cmd`` (polkit ``manage-units``), so its
-        # ProxyCommand begins with a bare ``systemd-run --pipe --uid=`` and
-        # never the ``sudo``-prefixed ``sudo_pipe_cmd`` form. Asserted in SUDO
-        # mode — the auth mode where the dispatch path *does* add ``sudo`` —
-        # to prove attach does not share that routing.
-        from core.host_config import pipe_cmd, sudo_pipe_cmd
+        # C-010 / F-060: SUDO separate-user attach crosses via the privileged
+        # ``sudo_pipe_cmd`` (the headless-capable byte-pipe), carrying the bare
+        # ``dispatch fwd <wire>`` payload that the per-op sudoers Cmnd_Spec matches.
+        from core.host_config import sudo_pipe_cmd
 
         argv = self._argv(monkeypatch, tmp_path)
         proxy = next(a for a in argv if a.startswith("ProxyCommand="))
         proxy_value = proxy[len("ProxyCommand=") :]
         proxy_tokens = shlex.split(proxy_value)
-        unpriv = pipe_cmd(_STABLE_SBUSER)
         priv = sudo_pipe_cmd(_STABLE_SBUSER)
-        # The unprivileged prefix leads the ProxyCommand verbatim …
+        assert proxy_tokens[: len(priv)] == priv
+        # The crossed payload is the bare dispatch fwd wire, never a hand-built
+        # docker-exec argv here (proxy_argv is the sole producer).
+        assert "/usr/local/libexec/sandbox-ai/dispatch fwd" in proxy_value
+
+    def test_argv_polkit_mode_proxy_command_has_no_sudo_prefix(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # POLKIT separate-user attach crosses via the unprivileged ``pipe_cmd``
+        # (polkit ``manage-units``); no ``sudo`` prefix on the ProxyCommand.
+        from core.host_config import pipe_cmd
+
+        argv = _capture_argv(monkeypatch, tmp_path, "polkit")
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        proxy_value = proxy[len("ProxyCommand=") :]
+        proxy_tokens = shlex.split(proxy_value)
+        unpriv = pipe_cmd(_STABLE_SBUSER)
         assert proxy_tokens[: len(unpriv)] == unpriv
-        # … and the privileged ``sudo``-prefixed prefix does NOT.
-        assert proxy_tokens[: len(priv)] != priv
+        assert proxy_tokens[0] != "sudo"
 
     def test_argv_target_port_is_9999(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

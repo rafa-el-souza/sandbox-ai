@@ -61,7 +61,6 @@ from core.host_config import (
     host_id_for_in_container,
     is_operator_rootless,
     minimal_host_config,
-    pipe_cmd,
     resolve_daemon_owner,
     resolve_daemon_owner_settings,
     sandbox_ai_home,
@@ -1646,27 +1645,55 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     """Build the canonical PTY-handover argv for ``sandbox attach`` / ``sandbox start``.
 
     The invocation: ``tlog-rec`` wraps a host-side ssh client whose
-    ``ProxyCommand`` uses :func:`pipe_cmd` to cross the privilege boundary
-    via the byte-pipe primitive, then dials ``/fwd`` inside admin's net
-    namespace, which forwards stdio↔TCP to core's sshd on ipc_net. The PTY lives at the host ssh layer; admin
-    is a dumb byte pipe (per `admin-reframe` design D1 — Shape 2). Workspace
-    cwd is set via the ssh remote-command suffix (per design D9), not via
-    ``docker exec -w``.
+    ``ProxyCommand`` crosses (in separate-user mode) the privilege boundary
+    into the unprivileged docker user and runs the streaming dispatcher op
+    ``fwd``, which execs ``docker exec -i <project>-admin-1 /fwd <ip>:9999``
+    inside admin's net namespace to forward stdio↔TCP to core's sshd on
+    ipc_net. The PTY lives at the host ssh layer; admin is a dumb byte pipe
+    (per `admin-reframe` design D1 — Shape 2). Workspace cwd is set via the
+    ssh remote-command suffix (per design D9), not via ``docker exec -w``.
 
-    The ``ProxyCommand`` uses :func:`pipe_cmd` (polkit-authenticated via
-    ``manage-units``) regardless of the host's ``machinectl_authentication``
-    mode — ``pipe_cmd`` is auth-mode-independent (per design D2). The ssh
-    client itself runs as the operator (dev) with no boundary crossing.
+    The ``ProxyCommand`` value is the single sanctioned producer
+    :func:`core.dispatch.proxy_argv` (``Op.FWD``) — ``cli.main`` never
+    hand-assembles the crossing prefix, the streaming-op wire payload, or the
+    docker-exec argv (C-010). ``proxy_argv`` selects the per-mode crossing:
+
+    - **separate-user + SUDO** → the ``fwd`` dispatcher wire payload over
+      ``sudo_pipe_cmd`` (the privileged byte-pipe, authorized non-interactively
+      by the per-op sudoers ``Cmnd_Spec`` — headless-capable, the F-060 fix).
+    - **separate-user + POLKIT** → the same payload over ``pipe_cmd`` (the
+      unprivileged byte-pipe, polkit ``manage-units``-authorized — interactive
+      polkit agent required; headless POLKIT attach is unsupported).
+    - **operator-rootless** → the bare local
+      ``docker exec -i <project>-admin-1 /fwd <ip>:9999`` (no crossing, no
+      dispatcher indirection — the operator owns dockerd, per design D5/D7).
+
+    A ``machinectl_cmd`` crossing is NEVER used for the ProxyCommand in any
+    mode (the PTY's ``onlcr`` would corrupt the SSH binary stream). The IPAM
+    read on the separate-user / operator-rootless paths is the existing
+    read-only ledger peek (no allocation) inside the ``fwd`` wire expansion.
+
+    The ssh client is hardened in every mode: ``-F /dev/null`` (ignores the
+    operator's ``~/.ssh/config`` and system ``ssh_config``) plus the
+    non-escalation pins ``-o ForwardAgent=no -o ForwardX11=no
+    -o ClearAllForwardings=yes -o IdentitiesOnly=yes -o IdentityAgent=none
+    -o PermitLocalCommand=no`` and the per-instance host-key pins
+    ``-o UserKnownHostsFile=<secrets>/ipc_known_hosts
+    -o StrictHostKeyChecking=yes``. The session endpoint lives inside the
+    untrusted sandbox plane, so attach guarantees not a trustworthy view of
+    the plane but that the session cannot reach back into the operator (per
+    cli-attach's "Hardened ssh Client Invocation").
 
     The ``--file-path`` value is the operator-side ``tlog-rec`` session log
     path; it lives at ``<sandbox_ai_home()>/sessions/<inst>/<UTC-ts>.log``
     and is created on demand.
 
     Args:
-        inst: Instance name (used for the admin container name and the
-            sessions log directory).
+        inst: Instance name (used for the sessions log directory and the
+            ``fwd`` wire expansion the ProxyCommand carries).
         ws: Workspace name (used for the remote-command ``cd`` target).
-        host_config: Per-host config (used for ``docker_unprivileged_user``).
+        host_config: Per-host config (drives the per-mode ProxyCommand
+            crossing and the core IPC IP resolution).
 
     Returns:
         The argv to pass to :func:`subprocess.run` (no shell needed).
@@ -1676,14 +1703,10 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     secrets = inst_dir / "secrets"
 
     # Container name uses the compose project name (sanitized-username
-    # prefix), not the bare instance name. Mismatching this produces
-    # ``Error response from daemon: No such container: <inst>-admin-1``
-    # at attach time — verified empirically during admin-reframe smoke.
+    # prefix), not the bare instance name; ``core_ipc_ip`` is a read-only
+    # ledger peek (no allocation; instance is already started by the time
+    # this argv is built). Per cli-attach: attach does not mutate IPAM state.
     project_name = compose_project_name(inst)
-
-    # Core IPC IP — read-only ledger peek (no allocation; instance is
-    # already started by the time this argv is built). Per cli-attach
-    # spec: attach does not mutate IPAM state.
     base_index, _existing = IPAMLedger().peek_next_slot(inst)
     core_ipc_ip = derive_static_ips(base_index)["core_ipc_ip"]
 
@@ -1696,33 +1719,13 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     session_log = session_log_dir / f"{timestamp}.log"
 
-    # ProxyCommand: docker exec -i <admin> /fwd <ip>:9999, optionally
-    # crossing the privilege boundary via ``pipe_cmd``.
-    # Joined via shlex.join so the value can be passed as a single
-    # ``-o ProxyCommand=...`` token to ssh.
-    #
-    # In operator-rootless mode (per design D5) the dockerd runs under the
-    # operator itself, so there is no boundary to cross: the ProxyCommand is
-    # the bare local ``docker exec`` with no ``systemd-run --pipe --uid=``
-    # prefix. In separate-user mode the ``pipe_cmd`` byte-pipe prefix crosses
-    # into the unprivileged sandbox user as before.
-    docker_exec_argv = [
-        "/usr/bin/docker",
-        "exec",
-        "-i",
-        f"{project_name}-admin-1",
-        "/fwd",
-        f"{core_ipc_ip}:9999",
-    ]
-    # separate-user crosses into the sandbox user via pipe_cmd; operator-rootless
-    # runs the bare local docker exec (the operator owns dockerd — no crossing, so
-    # docker_unprivileged_user is never read on this path, D7).
-    proxy_argv = (
-        docker_exec_argv
-        if is_operator_rootless(host_config)
-        else [*pipe_cmd(host_config.host.docker_unprivileged_user), *docker_exec_argv]
-    )
-    proxy_command = shlex.join(proxy_argv)
+    # ProxyCommand — the SINGLE sanctioned producer is
+    # ``core.dispatch.proxy_argv(Op.FWD, [inst], host_config)``: it selects
+    # the per-mode crossing prefix (sudo_pipe_cmd / pipe_cmd / none) and emits
+    # the bare ``dispatch fwd <wire>`` payload (or, operator-rootless, the bare
+    # local docker-exec target argv). ``cli.main`` does NOT branch on the mode
+    # or re-spell any prefix/payload/docker-exec literal here (C-010).
+    proxy_command = shlex.join(dispatch.proxy_argv(dispatch.Op.FWD, [inst], host_config))
 
     return [
         "tlog-rec",
@@ -1730,12 +1733,26 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
         f"--file-path={session_log}",
         "--",
         "ssh",
+        "-F",
+        "/dev/null",
         "-i",
         str(secrets / "ipc_ssh_key"),
         "-o",
         f"UserKnownHostsFile={secrets / 'ipc_known_hosts'}",
         "-o",
         "StrictHostKeyChecking=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
         "-o",
         f"ProxyCommand={proxy_command}",
         "-p",
@@ -1854,8 +1871,6 @@ def _dry_run_pipeline(inst: str) -> None:
     host_settings = host_config.host
     host_user = resolve_daemon_owner(host_config)
 
-    project_name = compose_project_name(inst)
-
     # ── IPAM preview ─────────────────────────────────────────────────────
     ledger = IPAMLedger()
     try:
@@ -1970,39 +1985,15 @@ def _dry_run_pipeline(inst: str) -> None:
     console.print(f"    $ {compose_cmd}", style="dim")
 
     # Handover — admin-reframe D1: tlog-rec → ssh → ProxyCommand → /fwd into core.
-    # The full argv is constructed by `_build_attach_argv` at runtime; the
-    # dry-run preview shows the canonical shape rather than re-deriving it
-    # (the IPAM peek + sessions log mkdir are runtime-only side effects).
+    # ONE generator (C-010 D4): the preview is the live builder
+    # ``_build_attach_argv`` itself, rendered via ``shlex.join`` — NOT a parallel
+    # hand-assembled string. The per-mode ProxyCommand therefore comes from
+    # ``core.dispatch``'s streaming entrypoint exactly as the executed handover
+    # does, so the previewed and executed argvs cannot drift (the IPAM peek is
+    # read-only; the sessions-log mkdir is a benign idempotent dry-run touch).
     workspace_names = sorted(config.workspaces.keys())
     ws_preview = workspace_names[0] if len(workspace_names) == 1 else "<ws>"
-    sbuser = host_user
-    # Branch the preview exactly like ``_build_attach_argv`` so the dry-run does
-    # not misrepresent the runtime command (design D2 / anti-hack rule 7): in
-    # operator-rootless mode the ProxyCommand is the bare local ``docker exec``
-    # with no ``pipe_cmd`` (``systemd-run --pipe --uid=``) prefix.
-    proxy_docker_exec = [
-        "/usr/bin/docker",
-        "exec",
-        "-i",
-        f"{project_name}-admin-1",
-        "/fwd",
-        "<core_ipc_ip>:9999",
-    ]
-    proxy_argv_preview = (
-        proxy_docker_exec
-        if is_operator_rootless(preview_host_config)
-        else [*pipe_cmd(sbuser), *proxy_docker_exec]
-    )
-    proxy_cmd_preview = shlex.join(proxy_argv_preview)
-    handover_preview = (
-        f"tlog-rec --writer=file --file-path=<sessions>/{project_name}/<UTC>.log -- "
-        f"ssh -i <inst>/secrets/ipc_ssh_key "
-        f"-o UserKnownHostsFile=<inst>/secrets/ipc_known_hosts "
-        f"-o StrictHostKeyChecking=yes "
-        f"-o ProxyCommand={shlex.quote(proxy_cmd_preview)} "
-        f"-p 9999 -t agent@<core_ipc_ip> "
-        f"'cd /workspaces/{ws_preview} && exec bash -l'"
-    )
+    handover_preview = shlex.join(_build_attach_argv(inst, ws_preview, preview_host_config))
     console.print(f"    $ {handover_preview}", style="dim")
 
     console.print("\n  [green bold]Dry-run complete — all validations passed[/green bold]\n")

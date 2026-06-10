@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, call, patch
 import cli.main as _cli_main_module
 import pytest
 import typer
-from core.host_config import DockerExecutionMode
+from core.host_config import DockerExecutionMode, MachinectlAuth
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
@@ -1498,6 +1498,95 @@ class TestAttachCold:
             assert "not running" in result.output.lower()
 
 
+class TestAttachWarmGateOrdering:
+    """C-010: the framed ``compose-ps`` warm gate completes successfully BEFORE
+    the streaming handover invocation is built or executed.
+
+    The attach/no-attach decision rides a framed, nonce-bound verdict; only
+    after it passes does the (content-free) streaming ProxyCommand crossing
+    open. A stopped sandbox must refuse with NO ssh subprocess and NO argv
+    build (per cli-attach "Warm State Verification Before Attach").
+    """
+
+    def test_cold_sandbox_builds_no_handover_and_spawns_no_ssh(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        with (
+            patch("cli.main._warm_check", return_value=False) as mock_warm,
+            patch("cli.main._build_attach_argv") as mock_build,
+            patch("cli.main.subprocess.run") as mock_run,
+        ):
+            result = runner.invoke(app, ["attach", inst])
+
+        assert result.exit_code == 1
+        assert "not running" in result.output.lower()
+        mock_warm.assert_called_once()
+        # The handover argv is never built and ssh is never spawned when the
+        # framed warm gate refuses.
+        mock_build.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_warm_gate_runs_before_handover_build_and_exec(self, runner: CliRunner) -> None:
+        inst = "myproject"
+        _register_instance(inst)
+
+        from cli.main import app
+
+        calls: list[str] = []
+
+        def _warm(*_a: object, **_k: object) -> bool:
+            calls.append("warm")
+            return True
+
+        def _build(*_a: object, **_k: object) -> list[str]:
+            calls.append("build")
+            return ["/bin/true"]
+
+        def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[bytes]:
+            calls.append("run")
+            return subprocess.CompletedProcess(args=["/bin/true"], returncode=0)
+
+        with (
+            patch("cli.main._warm_check", side_effect=_warm),
+            patch("cli.main._build_attach_argv", side_effect=_build),
+            patch("cli.main.subprocess.run", side_effect=_run),
+        ):
+            result = runner.invoke(app, ["attach", inst])
+
+        assert result.exit_code == 0
+        # The framed warm check completes FIRST, then the handover is built,
+        # then ssh is spawned — never the other way around.
+        assert calls == ["warm", "build", "run"]
+
+    @pytest.mark.no_warm_mock
+    def test_warm_check_verdict_drives_attach_decision(self, tmp_path: Path) -> None:
+        # The warm gate's crossing is the FRAMED compose-ps-backed container
+        # status (a nonce-bound verdict), distinct from the content-free
+        # streaming fwd op the handover later uses. Assert the REAL _warm_check
+        # returns the running/stopped verdict the attach gate branches on.
+        # Marked no_warm_mock so the conftest autouse _warm_check patch is off.
+        from cli.main import ContainerInfo, _warm_check
+
+        compose = tmp_path / "docker" / "compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("version: '3'")
+
+        running = [
+            ContainerInfo(name="t-admin-1", service="admin", state="running", health=None, status="Up"),
+        ]
+        with (
+            patch("cli.main._load_config"),
+            patch("cli.main._container_status") as mock_status,
+        ):
+            mock_status.return_value = running
+            assert _warm_check(str(tmp_path), "sandbox") is True
+            mock_status.return_value = []
+            assert _warm_check(str(tmp_path), "sandbox") is False
+
+
 # ── sandbox destroy ──────────────────────────────────────────────────────────
 
 
@@ -2152,6 +2241,7 @@ class TestBuildAttachArgv:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+        auth: MachinectlAuth = MachinectlAuth.SUDO,
     ) -> list[str]:
         from cli.main import _build_attach_argv
         from core.host_config import HostConfig, HostSettings
@@ -2165,11 +2255,15 @@ class TestBuildAttachArgv:
 
         # Redirect SANDBOX_AI_HOME so sessions log dir lands under tmp.
         home = tmp_path / "home"
-        (home / "instances" / "myproj" / "secrets").mkdir(parents=True)
+        (home / "instances" / "myproj" / "secrets").mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("SANDBOX_AI_HOME", str(home))
 
         cfg = HostConfig(
-            host=HostSettings(docker_unprivileged_user="sandbox", docker_execution_mode=mode)
+            host=HostSettings(
+                docker_unprivileged_user="sandbox",
+                docker_execution_mode=mode,
+                machinectl_authentication=auth,
+            )
         )
         return _build_attach_argv("myproj", "main", cfg)
 
@@ -2195,44 +2289,76 @@ class TestBuildAttachArgv:
         assert "ipc_known_hosts" in joined
         assert "StrictHostKeyChecking=yes" in joined
 
-    def test_argv_proxy_command_uses_pipe_cmd_not_sudo(
+    def test_argv_proxy_command_separate_user_sudo_uses_sudo_pipe_cmd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        # Default mode is separate-user — ProxyCommand crosses via pipe_cmd.
-        argv = self._invoke(monkeypatch, tmp_path)
+        # C-010 / F-060: separate-user SUDO crosses via the privileged
+        # ``sudo_pipe_cmd`` (headless-capable byte-pipe), carrying the bare
+        # ``dispatch fwd <wire>`` payload (the docker-exec argv is derived
+        # dispatcher-side, never hand-built in cli.main).
+        argv = self._invoke(monkeypatch, tmp_path, auth=MachinectlAuth.SUDO)
         proxy = next(a for a in argv if a.startswith("ProxyCommand="))
-        # pipe_cmd shape: systemd-run -q --pipe --uid=<sbuser>
-        assert "systemd-run" in proxy
-        assert "--pipe" in proxy
-        assert "--uid=sandbox" in proxy
-        # MUST NOT be prefixed with sudo (admin-reframe D2 — pipe_cmd is
-        # auth-mode-independent and uses polkit's manage-units action).
+        assert proxy.startswith("ProxyCommand=sudo systemd-run -q --pipe --uid=sandbox ")
+        assert "/usr/local/libexec/sandbox-ai/dispatch fwd myproj --project " in proxy
+        assert "--ip " in proxy
+        # The bare docker-exec dial is NOT hand-assembled into the ProxyCommand
+        # in separate-user mode — only the dispatch wire payload is crossed.
+        assert "/usr/bin/docker exec" not in proxy
+
+    def test_argv_proxy_command_separate_user_polkit_has_no_sudo_prefix(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # POLKIT separate-user crosses via the unprivileged ``pipe_cmd``
+        # (polkit ``manage-units``); no ``sudo`` prefix.
+        argv = self._invoke(monkeypatch, tmp_path, auth=MachinectlAuth.POLKIT)
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        assert proxy.startswith("ProxyCommand=systemd-run -q --pipe --uid=sandbox ")
         assert "sudo" not in proxy
-        # /fwd into the admin container.
-        assert "/fwd" in proxy
-        assert "myproj-admin-1" in proxy
-        assert ":9999" in proxy
+        assert "dispatch fwd myproj --project " in proxy
 
     def test_argv_proxy_command_operator_rootless_has_no_pipe_cmd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # Operator-rootless mode (C-003 §5 / design D5): the ProxyCommand is
         # the bare local ``docker exec`` with NO ``systemd-run --pipe --uid=``
-        # byte-pipe prefix — the dockerd runs under the operator, so there is
-        # no boundary to cross.
+        # byte-pipe prefix and NO dispatcher indirection — the dockerd runs
+        # under the operator, so there is no boundary to cross.
         argv = self._invoke(
             monkeypatch, tmp_path, mode=DockerExecutionMode.OPERATOR_ROOTLESS
         )
         proxy = next(a for a in argv if a.startswith("ProxyCommand="))
         assert "systemd-run" not in proxy
         assert "--uid=" not in proxy
-        # Still the same bare docker exec -i <project>-admin-1 /fwd <ip>:9999
-        # (matching the separate-user test's loose substring assertions; the
-        # project name carries the sanitized-username prefix, e.g. dev-myproj).
+        assert "sudo" not in proxy
+        assert "/usr/local/libexec/sandbox-ai/dispatch" not in proxy
+        # Bare docker exec -i <project>-admin-1 /fwd <ip>:9999 (the project
+        # name carries the sanitized-username prefix, e.g. dev-myproj).
         assert "/usr/bin/docker exec -i " in proxy
         assert "myproj-admin-1" in proxy
         assert "/fwd" in proxy
         assert ":9999" in proxy
+
+    def test_argv_ssh_hardening_options_present_every_mode(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # cli-attach "Hardened ssh Client Invocation": -F /dev/null + the
+        # non-escalation pins are present in EVERY execution mode.
+        for mode in (
+            DockerExecutionMode.SEPARATE_USER,
+            DockerExecutionMode.OPERATOR_ROOTLESS,
+        ):
+            argv = self._invoke(monkeypatch, tmp_path, mode=mode)
+            ssh_idx = argv.index("ssh")
+            assert argv[ssh_idx + 1 : ssh_idx + 3] == ["-F", "/dev/null"]
+            for opt in (
+                "ForwardAgent=no",
+                "ForwardX11=no",
+                "ClearAllForwardings=yes",
+                "IdentitiesOnly=yes",
+                "IdentityAgent=none",
+                "PermitLocalCommand=no",
+            ):
+                assert opt in argv, f"{opt!r} missing in mode {mode}"
 
     def test_argv_target_port_user_and_remote_command(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
