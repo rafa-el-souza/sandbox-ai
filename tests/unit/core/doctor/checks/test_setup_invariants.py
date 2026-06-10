@@ -66,7 +66,8 @@ def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
     monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_daemon_user_no_admin", lambda hc, v: None)
-    monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
+    monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
+    monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
 
@@ -145,7 +146,7 @@ class TestTopLevelVerdicts:
         called: dict[str, bool] = {"stability": False, "body": False, "floor": False}
         monkeypatch.setattr(
             f"{_MOD}._audit_machinectl_stability",
-            lambda hc, t, v: called.__setitem__("stability", True),
+            lambda hc, v: called.__setitem__("stability", True),
         )
         monkeypatch.setattr(
             f"{_MOD}._audit_rule_body",
@@ -502,7 +503,8 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
         monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
-        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
         monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
@@ -525,7 +527,8 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
         monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
-        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
         monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
@@ -569,6 +572,11 @@ class TestDaemonUserNoAdminInCheck:
 
 
 class TestAuditMachinectlStability:
+    """Post-C-009-D4 the operator drop-in is pipe-only (no machinectl path), so
+    this audit checks ONLY that machinectl resolves uniquely on the sudoers
+    ``secure_path`` basis — the resolver raising IS the check. There is no
+    drop-in match (that moved to :class:`TestAuditSystemdRunStability`)."""
+
     def _hc(self) -> Any:
         from core.host_config import minimal_host_config
 
@@ -583,37 +591,102 @@ class TestAuditMachinectlStability:
 
         monkeypatch.setattr("core.setup.l0_identity.resolve_machinectl_path", boom)
         v: list[str] = []
-        m._audit_machinectl_stability(self._hc(), "text", v)
+        m._audit_machinectl_stability(self._hc(), v)
         assert any("machinectl-path-stability" in x for x in v)
 
-    def test_drift_path_not_in_drop_in(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-
-        monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/local/bin/machinectl"
-        )
-        v: list[str] = []
-        m._audit_machinectl_stability(self._hc(), "rule pins /usr/bin/machinectl", v)
-        assert any("not the path pinned" in x for x in v)
-
-    def test_drop_in_none_no_violation(self, monkeypatch: Any) -> None:
+    def test_resolvable_no_violation(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
             "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
         )
         v: list[str] = []
-        m._audit_machinectl_stability(self._hc(), None, v)
+        m._audit_machinectl_stability(self._hc(), v)
+        assert v == []
+
+    def test_no_false_warn_on_pipe_drop_in_without_machinectl(self, monkeypatch: Any) -> None:
+        """Pre-fix RED (the C-009 false-WARN this fix removes): the operator pipe
+        drop-in legitimately contains NO machinectl path (it pins the
+        ``systemd-run`` launcher). A *resolvable* machinectl must therefore NOT
+        WARN — the resolver succeeding is the only stability signal.
+
+        Pre-fix verification protocol (CLAUDE.md): against the pre-fix
+        ``_audit_machinectl_stability`` (which still did
+        ``if resolved_machinectl not in drop_in_text: WARN(...)``) this assertion
+        was RED on every C-009 host — the resolved ``/usr/bin/machinectl`` is
+        absent from the pipe drop_in_text, so the stale match false-WARNed
+        ``machinectl-path-stability: … not the path pinned …`` (observed: the
+        violations list was non-empty, ``assert [] == []`` failed). Removing the
+        stale drop-in match makes the resolvable-machinectl case clean, proving
+        the test catches the false-WARN regression."""
+        from core.doctor.checks import setup_invariants as m
+        from core.setup.l3_sudoers_polkit import render_sudoers_rule
+
+        monkeypatch.setattr(
+            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+        )
+        # A REAL pipe drop-in: rendered against the systemd-run launcher, so it
+        # carries no machinectl path at all.
+        pipe_drop_in = render_sudoers_rule(
+            "/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox"
+        )
+        assert "/usr/bin/machinectl" not in pipe_drop_in
+        v: list[str] = []
+        m._audit_machinectl_stability(self._hc(), v)
+        assert v == []
+
+
+class TestAuditSystemdRunStability:
+    """Post-C-009-D4 the pipe ``Cmnd_Spec`` pins the systemd-run launcher; the
+    re-resolved path must equal the one in the installed drop-in (the drift
+    match that used to live on the machinectl audit moved here)."""
+
+    def _hc(self) -> Any:
+        from core.host_config import minimal_host_config
+
+        return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+
+    def test_resolution_error(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+        from core.setup.l0_identity import SystemdRunResolutionError
+
+        def boom(hc: Any) -> str:
+            raise SystemdRunResolutionError("zero launcher")
+
+        monkeypatch.setattr("core.setup.l0_identity.resolve_systemd_run_path", boom)
+        v: list[str] = []
+        m._audit_systemd_run_stability(self._hc(), "text", v)
+        assert any("pipe-launcher-path-stability" in x for x in v)
+
+    def test_drift_path_not_in_drop_in(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr(
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/local/bin/systemd-run"
+        )
+        v: list[str] = []
+        m._audit_systemd_run_stability(self._hc(), "rule pins /usr/bin/systemd-run", v)
+        assert any("pipe-launcher-path-stability" in x for x in v)
+        assert any("not the launcher pinned" in x for x in v)
+
+    def test_drop_in_none_no_violation(self, monkeypatch: Any) -> None:
+        from core.doctor.checks import setup_invariants as m
+
+        monkeypatch.setattr(
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
+        )
+        v: list[str] = []
+        m._audit_systemd_run_stability(self._hc(), None, v)
         assert v == []
 
     def test_path_present_no_violation(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
+            "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
         v: list[str] = []
-        m._audit_machinectl_stability(self._hc(), "x /usr/bin/machinectl x", v)
+        m._audit_systemd_run_stability(self._hc(), "x /usr/bin/systemd-run x", v)
         assert v == []
 
 
@@ -836,7 +909,8 @@ class TestWarnAggregation:
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: v.append("A bad"))
         monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: v.append("B bad"))
         monkeypatch.setattr(f"{_MOD}._audit_daemon_user_no_admin", lambda hc, v: None)
-        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, t, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
+        monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "x")

@@ -182,14 +182,16 @@ def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) 
     )
 
 
-def _audit_machinectl_stability(
-    host_config: HostConfig, drop_in_text: str | None, violations: list[str]
-) -> None:
-    """Re-resolved machinectl path == the path pinned in the drop-in Cmnd_Spec.
+def _audit_machinectl_stability(host_config: HostConfig, violations: list[str]) -> None:
+    """machinectl path resolves uniquely on the sudoers ``secure_path`` basis.
 
-    Version-accurate detail per V9e-2: on sudo ≥1.9.15 a second machinectl
-    breaks the grant (availability); on 1.9.5p2 the pinned binary still runs
-    (hygiene only). WARN either way per this check's policy.
+    Post-C-009-D4 the operator SUDO drop-in is pipe-only — the per-op
+    ``Cmnd_Spec`` pins the ``pipe_cmd`` byte-pipe launcher (``SYSTEMD_RUN_PATH``),
+    NOT machinectl — so there is no machinectl path in the drop-in to match
+    against (that match moved to :func:`_audit_systemd_run_stability`). machinectl
+    is still load-bearing for the root L5/L6/L7 setup crossings, so a shadowed /
+    absent / non-unique machinectl is still a real stability problem: the
+    resolver raising IS the check. WARN per this check's policy.
 
     Reuses L0's single-source ``resolve_machinectl_path`` (lazy import — see
     the module-top NOTE on the import-time cycle).
@@ -197,19 +199,40 @@ def _audit_machinectl_stability(
     from core.setup import l0_identity as l0
 
     try:
-        resolved = l0.resolve_machinectl_path(host_config)
+        l0.resolve_machinectl_path(host_config)
     except l0.MachinectlResolutionError as exc:
         violations.append(f"machinectl-path-stability: {exc}")
+
+
+def _audit_systemd_run_stability(
+    host_config: HostConfig, drop_in_text: str | None, violations: list[str]
+) -> None:
+    """Re-resolved byte-pipe launcher == the path pinned in the pipe Cmnd_Spec.
+
+    Post-C-009-D4 the operator SUDO drop-in is the ``sudo_pipe_cmd`` crossing, so
+    the per-op ``Cmnd_Spec`` pins the absolute ``SYSTEMD_RUN_PATH`` byte-pipe
+    launcher sudo resolves on its ``secure_path``. If the re-resolved launcher is
+    no longer the one pinned in the installed drop-in (a second copy, a shadow),
+    the SUDO op grant breaks. WARN per this check's policy.
+
+    Reuses L0's single-source ``resolve_systemd_run_path`` (lazy import — see
+    the module-top NOTE on the import-time cycle).
+    """
+    from core.setup import l0_identity as l0
+
+    try:
+        resolved = l0.resolve_systemd_run_path(host_config)
+    except l0.SystemdRunResolutionError as exc:
+        violations.append(f"pipe-launcher-path-stability: {exc}")
         return
     if drop_in_text is None:
         return
     if resolved not in drop_in_text:
         violations.append(
-            f"machinectl-path-stability: resolved secure_path machinectl "
-            f"{resolved!r} is not the path pinned in the installed sudoers "
-            f"drop-in. On sudo ≥1.9.15 this breaks the orchestrator's "
-            f"'sudo machinectl …' grant (availability); on 1.9.5p2 the pinned "
-            f"binary still runs (hygiene). Remove the unexpected copy or run "
+            f"pipe-launcher-path-stability: the resolved secure_path byte-pipe "
+            f"launcher {resolved!r} is not the launcher pinned in the installed "
+            f"pipe Cmnd_Spec. This drift breaks the orchestrator's sudo_pipe_cmd "
+            f"SUDO op grant. Remove the unexpected copy or run "
             f"'sudo sandbox setup' to re-evaluate."
         )
 
@@ -437,7 +460,8 @@ def check_setup_invariants(
     _audit_daemon_user_no_admin(host_config, violations)
 
     if is_sudo:
-        _audit_machinectl_stability(host_config, drop_in_text, violations)
+        _audit_machinectl_stability(host_config, violations)
+        _audit_systemd_run_stability(host_config, drop_in_text, violations)
         if drop_in_text is not None:
             _audit_rule_body(host_config, operator, drop_in_text, violations)
         _audit_sudo_floor(violations)

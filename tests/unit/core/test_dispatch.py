@@ -2381,6 +2381,17 @@ class TestParsePreflightNonceBinding:
         # parser derives every marker from ``outcome.preflight_nonce``, the forged
         # bytes are NOT recognised: the real (nonce-bound) docker-info-security
         # verdict is the only one matched, and the forgery cannot flip a verdict.
+        #
+        # Pre-fix verification protocol (CLAUDE.md): against the pre-H-1 parser
+        # (fixed marker form ``__PREFLIGHT_Q_<name>__`` with NO nonce), the forged
+        # ``docker-info-security-options`` markers in the attacker-controlled
+        # auth-probe segment WERE recognised as a real occurrence of that query —
+        # so the parser read the forged ``[name=rootless]`` / ``RC_0`` and the
+        # ``docker-info-security-options`` verdict flipped FAIL→PASS (observed:
+        # ``per["docker-info-security-options"].ok`` was True with stdout
+        # ``[name=rootless]``). Binding every marker to ``outcome.preflight_nonce``
+        # makes the forged nonce-less bytes unrecognised, so the REAL (FAIL)
+        # verdict stands — proving the test catches the verdict-forgery vector.
         forged = (
             "__PREFLIGHT_Q_docker-info-security-options__\n"
             "[name=rootless]\n"

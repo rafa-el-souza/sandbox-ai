@@ -10,7 +10,7 @@ import json
 import re
 import shutil
 import subprocess
-from typing import Any, cast, overload
+from typing import Any, NamedTuple, cast, overload
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
@@ -454,16 +454,10 @@ def check_compose_project_name_collision(
     (``<sanitized-dev-username>-<inst>`` per ``instance-registry``).
     """
     del distro
-    from core.doctor.checks.workspace_bridge import _read_registry_raw
-
-    if not list(_read_registry_raw().keys()):
-        return CheckResult(
-            status="pass",
-            name="compose project name collision",
-            detail="no registered instances; nothing to check",
-            category="Privilege Boundary",
-        )
-
+    # The empty-registry PASS is owned solely by
+    # ``_interpret_compose_project_name_collision`` (it reproduces it "for
+    # totality"); the public check does not re-guard it, so the registry is read
+    # exactly once per invocation.
     outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, auth_mode, mode), timeout=15)
     return _interpret_compose_project_name_collision(outcome)
 
@@ -570,8 +564,56 @@ def interpret_preflight_reachability(
     return _interpret_machinectl_reachable(outcome, user, auth_mode)
 
 
+class PreflightGate(NamedTuple):
+    """The once-parsed reachability verdict for a ``preflight`` crossing.
+
+    ``sandbox start`` and ``sandbox init`` both gate on the preflight crossing
+    being reachable before interpreting the downstream checks (the old
+    ``machinectl_reachable`` short-circuit — C-009 D6). Both used to parse the
+    bundle once for the gate and then re-parse it inside
+    :func:`interpret_preflight_bundle`; this groups the single parse + the gate
+    so the blob is parsed exactly once per ``start`` / ``init``.
+
+    Attributes:
+        reachable: ``True`` iff the crossing itself succeeded AND its
+            ``auth-probe`` segment is present and ok.
+        reach_outcome: When NOT reachable, the most-specific failing outcome to
+            feed a reachability diagnostic — the whole-crossing outcome on a
+            crossing failure (timeout / non-zero op exit), else the parsed
+            (not-ok) ``auth-probe`` segment. Equal to the whole-crossing
+            ``outcome`` when reachable (unused on that path).
+        per_op: The once-parsed per-query segments, reused by
+            :func:`interpret_preflight_bundle` so the bundle is not re-parsed.
+    """
+
+    reachable: bool
+    reach_outcome: dispatch.ProbeOutcome
+    per_op: dict[str, dispatch.ProbeOutcome]
+
+
+def evaluate_preflight_gate(outcome: dispatch.ProbeOutcome) -> PreflightGate:
+    """Parse a ``preflight`` outcome ONCE and compute the reachability gate.
+
+    Shared by ``sandbox start`` and ``sandbox init`` (C-009 D6 / F3): both parse
+    the bundle for the crossing-as-reachability gate, then ``start`` re-parsed it
+    inside :func:`interpret_preflight_bundle`. This returns the gate result, the
+    most-specific failing outcome, and the parsed ``per_op`` map so the blob is
+    parsed exactly once.
+    """
+    per_op = dispatch.parse_preflight_outcome(outcome)
+    # ``parse_preflight_outcome`` returns every query name (a not-ok segment for a
+    # failed/garbled/nonce-absent crossing), so ``auth-probe`` is always present.
+    auth_probe_segment = per_op["auth-probe"]
+    reachable = not outcome.timed_out and outcome.ok and auth_probe_segment.ok
+    # The most-specific failing outcome: the whole-crossing outcome carries the
+    # timeout / op-failure message on a crossing failure, else the parsed
+    # (not-ok) ``auth-probe`` segment.
+    reach_outcome = outcome if (outcome.timed_out or not outcome.ok) else auth_probe_segment
+    return PreflightGate(reachable=reachable, reach_outcome=reach_outcome, per_op=per_op)
+
+
 def interpret_preflight_bundle(
-    outcome: dispatch.ProbeOutcome,
+    per_op: dict[str, dispatch.ProbeOutcome],
     user: str,
     auth_mode: MachinectlAuth,
 ) -> list[CheckResult]:
@@ -581,17 +623,16 @@ def interpret_preflight_bundle(
     read-only crossings into ONE ``preflight``-op crossing (C-009 D6). The caller
     has already established boundary reachability (the crossing itself
     succeeding is the reachability signal — the old ``machinectl_reachable``
-    role) before calling this; here the bundle is split per query via
-    :func:`dispatch.parse_preflight_outcome` and each existing interpret fn is
-    applied to its own segment, preserving every check's individual pass/fail +
-    specific diagnostic.
+    role) before calling this; it passes the ALREADY-PARSED ``per_op`` map (from
+    :func:`evaluate_preflight_gate`) so the bundle is parsed exactly once per
+    ``start`` — each existing interpret fn is applied to its own segment,
+    preserving every check's individual pass/fail + specific diagnostic.
 
     The single ``docker-info-runtimes`` segment feeds three checks
     (``runsc_registered`` / ``runsc_runtimeargs`` / ``host_uds``) — the intrinsic
     dedup. Results are returned in the doctor-chain order so the operator sees
     the same sequence as the per-crossing chain.
     """
-    per_op = dispatch.parse_preflight_outcome(outcome)
     runtimes = per_op["docker-info-runtimes"]
     return [
         _interpret_machinectl_reachable(per_op["auth-probe"], user, auth_mode),
@@ -605,6 +646,7 @@ def interpret_preflight_bundle(
 
 
 __all__ = [
+    "PreflightGate",
     "check_compose_project_name_collision",
     "check_docker_available",
     "check_docker_rootless",
@@ -617,6 +659,7 @@ __all__ = [
     "check_systemd_machined",
     "check_tlog",
     "check_user_exists",
+    "evaluate_preflight_gate",
     "interpret_compose_collision_segment",
     "interpret_preflight_bundle",
     "interpret_preflight_reachability",

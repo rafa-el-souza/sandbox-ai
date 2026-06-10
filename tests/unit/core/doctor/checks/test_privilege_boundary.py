@@ -71,6 +71,8 @@ def test_module_exposes_check_and_interpret_functions() -> None:
         "check_tlog",
         "check_user_exists",
         # C-009 D6: the preflight-bundle interpret seams used by cli-start/init.
+        "PreflightGate",
+        "evaluate_preflight_gate",
         "interpret_compose_collision_segment",
         "interpret_preflight_bundle",
         "interpret_preflight_reachability",
@@ -671,12 +673,18 @@ class TestAuthModeThreadedToDispatch:
 
 
 class TestCheckComposeProjectNameCollision:
-    def test_pass_when_no_registered_instances(self, isolated_sandbox_ai_home: Any) -> None:
+    def test_pass_when_no_registered_instances(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_compose_project_name_collision
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True)
         (state / "instances.json").write_text("{}")
+        # The empty-registry PASS verdict is now owned solely by the interpret
+        # fn (the public check no longer short-circuits on an empty registry, so
+        # the registry is read once). The probe outcome is irrelevant to the
+        # verdict — the interpret fn returns PASS before inspecting it — but the
+        # crossing still fires, so it is mocked here.
+        monkeypatch.setattr("core.dispatch._invoke_with_nonce", lambda *a, **k: _okn("[]"))
         result = check_compose_project_name_collision("u", None)
         assert result.status == "pass"
         assert "no registered" in result.detail
@@ -1305,15 +1313,81 @@ class TestInterpretComposeCollisionSegment:
         assert result.status == "skip"
 
 
+class TestEvaluatePreflightGate:
+    """F3: the once-parsed reachability gate shared by ``start`` and ``init``."""
+
+    def test_reachable_bundle_parses_once_and_passes_gate(self) -> None:
+        from core.doctor import evaluate_preflight_gate
+
+        gate = evaluate_preflight_gate(_bundle_outcome(_ALL_OK_SEGMENTS))
+        assert gate.reachable is True
+        # ``per_op`` carries the parsed segments for ``interpret_preflight_bundle``.
+        assert gate.per_op["auth-probe"].ok is True
+        assert set(gate.per_op) >= {
+            "auth-probe",
+            "docker-version",
+            "docker-info-security-options",
+            "docker-info-runtimes",
+            "compose-ls",
+        }
+
+    def test_timed_out_crossing_fails_gate_with_whole_outcome(self) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor import evaluate_preflight_gate
+
+        timed_out = ProbeOutcome(ok=False, timed_out=True, stdout="", message="timed out")
+        gate = evaluate_preflight_gate(timed_out)
+        assert gate.reachable is False
+        # The whole-crossing outcome (carries the timeout message) is the most
+        # specific failing outcome.
+        assert gate.reach_outcome is timed_out
+
+    def test_failed_crossing_fails_gate_with_whole_outcome(self) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor import evaluate_preflight_gate
+
+        failed = ProbeOutcome(ok=False, timed_out=False, stdout="", message="op exit 1")
+        gate = evaluate_preflight_gate(failed)
+        assert gate.reachable is False
+        assert gate.reach_outcome is failed
+
+    def test_ok_crossing_but_auth_probe_segment_not_ok_fails_gate(self) -> None:
+        from core.doctor import evaluate_preflight_gate
+
+        segments = dict(_ALL_OK_SEGMENTS)
+        segments["auth-probe"] = ("shell probe failed", 1)
+        gate = evaluate_preflight_gate(_bundle_outcome(segments))
+        assert gate.reachable is False
+        # The most specific failing outcome is the parsed (not-ok) auth-probe
+        # segment, not the whole (ok) crossing.
+        assert gate.reach_outcome.ok is False
+        assert gate.reach_outcome is gate.per_op["auth-probe"]
+
+    def test_ok_crossing_garbled_bundle_uses_not_ok_auth_probe_segment(self) -> None:
+        from core.dispatch import ProbeOutcome
+        from core.doctor import evaluate_preflight_gate
+
+        # An ok crossing whose bundle is garbled (no markers) → ``parse`` returns
+        # a not-ok ``auth-probe`` segment (still present in the map). The gate
+        # fails and feeds that segment as the most-specific failing outcome.
+        outcome = ProbeOutcome(ok=True, timed_out=False, stdout="garbled", message="", preflight_nonce="deadbeef")
+        gate = evaluate_preflight_gate(outcome)
+        assert gate.reachable is False
+        assert gate.reach_outcome.ok is False
+        assert gate.reach_outcome is gate.per_op["auth-probe"]
+
+
 class TestInterpretPreflightBundle:
     def test_all_ok_produces_seven_verdicts_in_chain_order(self, isolated_sandbox_ai_home: Any) -> None:
+        from core.dispatch import parse_preflight_outcome
         from core.doctor import interpret_preflight_bundle
         from core.host_config import MachinectlAuth
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True)
         (state / "instances.json").write_text("{}")
-        results = interpret_preflight_bundle(_bundle_outcome(_ALL_OK_SEGMENTS), "sandbox", MachinectlAuth.SUDO)
+        per_op = parse_preflight_outcome(_bundle_outcome(_ALL_OK_SEGMENTS))
+        results = interpret_preflight_bundle(per_op, "sandbox", MachinectlAuth.SUDO)
         names = [r.name for r in results]
         assert names == [
             "machinectl reachable",
@@ -1330,6 +1404,7 @@ class TestInterpretPreflightBundle:
         # A runtimes segment WITHOUT the reserved key fails runsc-registered and
         # warns the two derived checks — proving all three derive from the single
         # deduped segment.
+        from core.dispatch import parse_preflight_outcome
         from core.doctor import interpret_preflight_bundle
         from core.host_config import MachinectlAuth
 
@@ -1338,7 +1413,8 @@ class TestInterpretPreflightBundle:
         (state / "instances.json").write_text("{}")
         segments = dict(_ALL_OK_SEGMENTS)
         segments["docker-info-runtimes"] = (json.dumps({"runc": {}}), 0)
-        results = interpret_preflight_bundle(_bundle_outcome(segments), "sandbox", MachinectlAuth.SUDO)
+        per_op = parse_preflight_outcome(_bundle_outcome(segments))
+        results = interpret_preflight_bundle(per_op, "sandbox", MachinectlAuth.SUDO)
         by_name = {r.name: r for r in results}
         assert by_name["gVisor runsc"].status == "fail"
         # runtimeArgs + host-uds derive from the same segment (no reserved key →
@@ -1349,6 +1425,7 @@ class TestInterpretPreflightBundle:
     def test_single_failing_segment_surfaces_its_own_verdict(self, isolated_sandbox_ai_home: Any) -> None:
         # The docker-version query fails (rc!=0) → "Docker available" fails with
         # ITS specific diagnostic, not a generic bundle failure.
+        from core.dispatch import parse_preflight_outcome
         from core.doctor import interpret_preflight_bundle
         from core.host_config import MachinectlAuth
 
@@ -1357,7 +1434,8 @@ class TestInterpretPreflightBundle:
         (state / "instances.json").write_text("{}")
         segments = dict(_ALL_OK_SEGMENTS)
         segments["docker-version"] = ("Cannot connect to the Docker daemon", 1)
-        results = interpret_preflight_bundle(_bundle_outcome(segments), "sandbox", MachinectlAuth.SUDO)
+        per_op = parse_preflight_outcome(_bundle_outcome(segments))
+        results = interpret_preflight_bundle(per_op, "sandbox", MachinectlAuth.SUDO)
         by_name = {r.name: r for r in results}
         assert by_name["Docker available"].status == "fail"
         assert "Docker not accessible" in by_name["Docker available"].detail

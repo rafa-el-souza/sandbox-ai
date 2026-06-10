@@ -39,6 +39,7 @@ from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_pa
 from core.doctor import (
     build_check_registry,
     detect_distro,
+    evaluate_preflight_gate,
     interpret_compose_collision_segment,
     interpret_preflight_bundle,
     interpret_preflight_reachability,
@@ -3074,18 +3075,15 @@ def init(
         # bundled ``compose-ls`` segment feeds the compose-project-name collision
         # pre-flight, so init no longer fires a second ``compose-ls`` crossing.
         probe_outcome = dispatch.probe("preflight", [], probe_host_config, timeout=15)
-        init_segments = dispatch.parse_preflight_outcome(probe_outcome)
-        auth_probe_segment = init_segments.get("auth-probe")
-        crossing_reachable = (
-            not probe_outcome.timed_out
-            and probe_outcome.ok
-            and auth_probe_segment is not None
-            and auth_probe_segment.ok
-        )
-        if not crossing_reachable:
+        # Parse the bundle ONCE (F3) via the shared gate helper — the same
+        # reachability gate ``start`` uses; ``gate.per_op`` is reused for the
+        # compose-ls collision pre-flight below (no second parse).
+        gate = evaluate_preflight_gate(probe_outcome)
+        if not gate.reachable:
             if probe_outcome.timed_out:
                 _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 15 seconds")
             else:
+                auth_probe_segment = gate.per_op.get("auth-probe")
                 detail = probe_outcome.message or (
                     auth_probe_segment.message if auth_probe_segment is not None else "preflight crossing failed"
                 )
@@ -3113,7 +3111,7 @@ def init(
         # Compose-project-name collision pre-flight (per cli-doctor's
         # "Init pre-flight includes compose_project_name_collision"), fed by the
         # bundled ``compose-ls`` segment of the preflight crossing above.
-        collision_result = interpret_compose_collision_segment(init_segments.get("compose-ls"))
+        collision_result = interpret_compose_collision_segment(gate.per_op.get("compose-ls"))
         if collision_result.status == "fail":
             render_results([collision_result], console=console)
             raise typer.Exit(code=1)
@@ -3280,29 +3278,23 @@ def start(
     # do NOT interpret the downstream checks: they have no meaningful data, which
     # is how the old ``depends_on`` short-circuit is preserved without a
     # BLOCKED-BY cascade.
-    auth_probe_segment = dispatch.parse_preflight_outcome(preflight_outcome).get("auth-probe")
-    crossing_reachable = (
-        not preflight_outcome.timed_out
-        and preflight_outcome.ok
-        and auth_probe_segment is not None
-        and auth_probe_segment.ok
-    )
-    if not crossing_reachable:
+    # Parse the bundle ONCE (F3): the gate helper returns the reachability
+    # verdict, the most-specific failing outcome, and the parsed per-op map that
+    # ``interpret_preflight_bundle`` reuses (no second parse).
+    gate = evaluate_preflight_gate(preflight_outcome)
+    if not gate.reachable:
         # Feed the reachability interpret fn the most specific failing outcome:
         # the whole-crossing outcome (carries the timeout / op-failure message)
         # when the crossing itself failed, else the parsed (not-ok or absent)
         # ``auth-probe`` segment.
-        reach_outcome = preflight_outcome if (preflight_outcome.timed_out or not preflight_outcome.ok) else (
-            auth_probe_segment if auth_probe_segment is not None else preflight_outcome
-        )
-        reachability = interpret_preflight_reachability(reach_outcome, host_user, auth)
+        reachability = interpret_preflight_reachability(gate.reach_outcome, host_user, auth)
         render_results([reachability], console=console)
         raise typer.Exit(code=1)
 
     # The crossing succeeded → split the bundle and produce all seven verdicts
     # (the single ``docker-info-runtimes`` segment feeds the three
     # runsc/host-uds checks — the intrinsic dedup).
-    preflight_results = interpret_preflight_bundle(preflight_outcome, host_user, auth)
+    preflight_results = interpret_preflight_bundle(gate.per_op, host_user, auth)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)

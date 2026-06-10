@@ -29,6 +29,7 @@ from core.doctor.checks.per_user_tree import (
 )
 from core.doctor.checks.per_user_tree import check_per_user_tree_exists as check_per_user_tree_exists
 from core.doctor.checks.per_user_tree import check_per_user_tree_mode as check_per_user_tree_mode
+from core.doctor.checks.privilege_boundary import PreflightGate as PreflightGate
 from core.doctor.checks.privilege_boundary import (
     check_compose_project_name_collision as check_compose_project_name_collision,
 )
@@ -43,6 +44,7 @@ from core.doctor.checks.privilege_boundary import check_sudo as check_sudo
 from core.doctor.checks.privilege_boundary import check_systemd_machined as check_systemd_machined
 from core.doctor.checks.privilege_boundary import check_tlog as check_tlog
 from core.doctor.checks.privilege_boundary import check_user_exists as check_user_exists
+from core.doctor.checks.privilege_boundary import evaluate_preflight_gate as evaluate_preflight_gate
 from core.doctor.checks.privilege_boundary import (
     interpret_compose_collision_segment as interpret_compose_collision_segment,
 )
@@ -96,6 +98,7 @@ from core.doctor.types import get_install_cmd as get_install_cmd
 __all__ = [
     "Check",
     "CheckResult",
+    "PreflightGate",
     "build_check_registry",
     "check_acl_support",
     "check_ancestor_traverse",
@@ -136,6 +139,7 @@ __all__ = [
     "check_workspace_home_single_filesystem",
     "check_workspace_path_in_walker_boundary",
     "detect_distro",
+    "evaluate_preflight_gate",
     "get_install_cmd",
     "interpret_compose_collision_segment",
     "interpret_preflight_bundle",
