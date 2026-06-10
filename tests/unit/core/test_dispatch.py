@@ -26,7 +26,9 @@ from core.dispatch import (
     Op,
     OpSpec,
     ProbeOutcome,
+    StreamingOpError,
     _expand_compose_wire,
+    _expand_fwd_wire,
     _invoke_with_nonce,
     _preflight_inner,
     build_invocation,
@@ -36,6 +38,7 @@ from core.dispatch import (
     invoke,
     parse_preflight_outcome,
     probe,
+    proxy_argv,
     sudo_pipe_crossing_argv,
     validate_args,
 )
@@ -66,6 +69,7 @@ EXPECTED_OP_VALUES = {
     "helper-chown-files",
     "helper-mkdir-chown-dirs",
     "preflight",
+    "fwd",
 }
 
 _BUSYBOX_REF = "busybox@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213"
@@ -87,8 +91,8 @@ def host_config() -> HostConfig:
 
 
 class TestOpEnum:
-    def test_op_enum_has_exactly_eleven_members(self) -> None:
-        assert len(list(Op)) == 11
+    def test_op_enum_has_exactly_twelve_members(self) -> None:
+        assert len(list(Op)) == 12
 
     def test_op_enum_values_match_expected_wire_names(self) -> None:
         assert {op.value for op in Op} == EXPECTED_OP_VALUES
@@ -132,6 +136,7 @@ class TestOpEnum:
             Op.HELPER_CHOWN_FILES: (5, None),
             Op.HELPER_MKDIR_CHOWN_DIRS: (4, None),
             Op.PREFLIGHT: (0, 0),
+            Op.FWD: (1, 1),
         }
 
 
@@ -442,6 +447,41 @@ class TestValidateArgsUnknownOp:
         validate_args(Op.AUTH_PROBE, [])
 
 
+# ─── fwd: the streaming op (C-010) — validator (typed-arg surface) ──────────
+#
+# Typed callers pass ONLY ``[<inst>]``; the validator reuses the instance-name
+# rule (the same one the compose ops enforce) and rejects any second positional
+# (the --project/--ip flags are produced operator-side by _expand_fwd_wire,
+# never caller-supplied). Spec "Per-Op Argument Validation".
+
+
+class TestValidatorFwd:
+    def test_accepts_valid_instance_name(self) -> None:
+        validate_args("fwd", ["my-inst_01"])
+
+    def test_accepts_via_op_enum(self) -> None:
+        validate_args(Op.FWD, ["myinst"])
+
+    def test_rejects_zero_args(self) -> None:
+        with pytest.raises(DispatchValidationError, match="exactly one"):
+            validate_args("fwd", [])
+
+    def test_rejects_path_traversal_instance(self) -> None:
+        # ``fwd ../escape`` rejected by the instance-name regex.
+        with pytest.raises(DispatchValidationError, match=r"invalid characters|must not start"):
+            validate_args("fwd", ["../escape"])
+
+    def test_rejects_second_positional(self) -> None:
+        # A second positional (e.g. a caller smuggling the IP) is rejected:
+        # only [<inst>] is a legal typed arg.
+        with pytest.raises(DispatchValidationError, match="exactly one"):
+            validate_args("fwd", ["myinst", "10.100.0.7"])
+
+    def test_rejects_leading_dash(self) -> None:
+        with pytest.raises(DispatchValidationError, match="must not start"):
+            validate_args("fwd", ["-bad"])
+
+
 # ─── Target Argv Construction Per Op (fixture is the single source) ─────────
 
 
@@ -451,8 +491,8 @@ class TestTargetArgvFixture:
         # deterministic ops (incl. the read-only preflight bundle) that is the
         # typed args; for the three compose ops it is the post-expansion
         # named-flag form. Keyed this way every op's target argv is a pure
-        # function of its wire inputs, so all eleven ops live in the one shared
-        # fixture and the Python<->Go lockstep covers compose. (The
+        # function of its wire inputs, so all twelve ops live in the one shared
+        # fixture and the Python<->Go lockstep covers compose + fwd. (The
         # operator-side <inst>-><operands> resolution stays dynamically tested
         # below — it depends on a seeded instance.)
         ops_in_fixture = {cast("str", c["op"]) for c in _load_fixture()}
@@ -928,6 +968,262 @@ class TestComposeWireExpansion:
             _expand_compose_wire("compose-up", ["nonexistent"])
 
 
+# ─── fwd: operator-side wire expansion (seeded instance) ────────────────────
+#
+# Callers pass [<inst>]; _expand_fwd_wire resolves the compose project name
+# (compose_project_name) and the core IPC IP (read-only IPAM peek) — mirroring
+# the two lookups cli.main._build_attach_argv performs — and emits the named-
+# flag wire ``<inst> --project <P> --ip <IP>`` (spec "fwd Op Wire Expansion").
+
+
+def _expected_fwd_ip(inst: str) -> str:
+    """The core IPC IP _expand_fwd_wire resolves for an UNallocated ``inst``.
+
+    A seeded-but-not-IPAM-allocated instance peeks to the lowest free slot;
+    derived via the real ``core.ipam`` functions so the expectation tracks the
+    allocator, never a hardcoded literal."""
+    from core.ipam import IPAMLedger, derive_static_ips
+
+    base_index, _existing = IPAMLedger().peek_next_slot(inst)
+    return derive_static_ips(base_index)["core_ipc_ip"]
+
+
+class TestFwdWireExpansion:
+    def test_expands_to_named_flag_wire(self, isolated_sandbox_ai_home: Path) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        ip = _expected_fwd_ip("demo")
+        wire = _expand_fwd_wire(["demo"])
+        assert wire == ["demo", "--project", proj, "--ip", ip]
+
+    def test_ip_is_in_ipam_superblock(self, isolated_sandbox_ai_home: Path) -> None:
+        # Defense-in-depth invariant the Go side re-checks: the resolved IP is a
+        # dotted quad whose first octet is 10 and second is in 100..255.
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        ip = _expand_fwd_wire(["demo"])[-1]
+        octets = [int(o) for o in ip.split(".")]
+        assert len(octets) == 4
+        assert octets[0] == 10
+        assert 100 <= octets[1] <= 255
+
+    def test_round_trip_expansion_then_build_is_byte_faithful(
+        self, isolated_sandbox_ai_home: Path, host_config: HostConfig
+    ) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        ip = _expected_fwd_ip("demo")
+        wire = _expand_fwd_wire(["demo"])
+        argv = build_target_argv("fwd", wire, host_config)
+        assert argv == [
+            "/usr/bin/docker",
+            "exec",
+            "-i",
+            f"{proj}-admin-1",
+            "/fwd",
+            f"{ip}:9999",
+        ]
+
+
+# ─── fwd: target-argv builder (pure, fixture-keyed on the wire form) ────────
+#
+# The ONE op whose target argv is a DIRECT docker-exec argv (no /bin/bash -c
+# wrapper) — D3 stream hygiene. The fixture row pins the byte form the Go
+# sibling consumes unmodified; these add the spec-scenario assertions + the
+# wire parse-rejection paths the Go binary mirrors.
+
+
+_FWD_WIRE = ["myinst", "--project", "dev-myinst", "--ip", "10.100.0.7"]
+
+
+class TestFwdTargetArgvBuilder:
+    def test_builds_direct_docker_exec_argv_no_bash_c(
+        self, host_config: HostConfig
+    ) -> None:
+        # Spec scenario "fwd constructs the direct docker-exec argv (no bash -c)".
+        argv = build_target_argv("fwd", _FWD_WIRE, host_config)
+        assert argv == [
+            "/usr/bin/docker",
+            "exec",
+            "-i",
+            "dev-myinst-admin-1",
+            "/fwd",
+            "10.100.0.7:9999",
+        ]
+        assert "/bin/bash" not in argv
+        assert "-c" not in argv
+
+    def test_admin_container_name_derived_from_project(
+        self, host_config: HostConfig
+    ) -> None:
+        wire = ["other", "--project", "dev-other", "--ip", "10.200.0.3"]
+        argv = build_target_argv("fwd", wire, host_config)
+        assert argv[3] == "dev-other-admin-1"
+        assert argv[5] == "10.200.0.3:9999"
+
+    def test_missing_project_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="--project is required"):
+            build_target_argv("fwd", ["myinst", "--ip", "10.100.0.7"], host_config)
+
+    def test_missing_ip_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="--ip is required"):
+            build_target_argv("fwd", ["myinst", "--project", "dev-myinst"], host_config)
+
+    def test_unrecognized_flag_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="unrecognized flag"):
+            build_target_argv("fwd", [*_FWD_WIRE, "--port", "1234"], host_config)
+
+    def test_duplicate_project_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="--project given more than once"):
+            build_target_argv("fwd", [*_FWD_WIRE, "--project", "dev-myinst"], host_config)
+
+    def test_duplicate_ip_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="--ip given more than once"):
+            build_target_argv("fwd", [*_FWD_WIRE, "--ip", "10.100.0.8"], host_config)
+
+    def test_flag_missing_value_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="missing its value"):
+            build_target_argv("fwd", ["myinst", "--project"], host_config)
+
+    def test_empty_wire_rejected(self, host_config: HostConfig) -> None:
+        with pytest.raises(DispatchValidationError, match="missing <instance>"):
+            build_target_argv("fwd", [], host_config)
+
+
+# ─── fwd: the streaming ProxyCommand entrypoint (proxy_argv) ────────────────
+#
+# proxy_argv CONSTRUCTS but never executes the crossing argv (the ssh client
+# runs it). Per mode it returns: separate-user+SUDO -> sudo_pipe_cmd prefix +
+# bare ``dispatch fwd <wire>``; separate-user+POLKIT -> pipe_cmd prefix + the
+# identical payload; operator-rootless -> the bare docker-exec target argv.
+# invoke()/probe() reject Op.FWD (it carries zero orchestrator-interpreted
+# content). Spec "Streaming ProxyCommand Entrypoint".
+
+
+class TestFwdProxyArgv:
+    def test_sudo_mode_rides_sudo_pipe_cmd_with_bare_payload(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        ip = _expected_fwd_ip("demo")
+        argv = proxy_argv("fwd", ["demo"], _sudo_hc())
+        assert argv[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert argv[5:7] == ["/bin/bash", "-c"]
+        assert argv[7] == (
+            f"/usr/local/libexec/sandbox-ai/dispatch fwd demo "
+            f"--project {proj} --ip {ip}"
+        )
+
+    def test_polkit_mode_rides_pipe_cmd_no_sudo_same_payload(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        ip = _expected_fwd_ip("demo")
+        argv = proxy_argv("fwd", ["demo"], _polkit_hc())
+        # The unprivileged pipe prefix (no leading sudo), identical payload.
+        assert argv[:4] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]
+        assert "sudo" not in argv
+        assert "machinectl" not in argv
+        assert argv[4:6] == ["/bin/bash", "-c"]
+        assert argv[6] == (
+            f"/usr/local/libexec/sandbox-ai/dispatch fwd demo "
+            f"--project {proj} --ip {ip}"
+        )
+
+    def test_sudo_and_polkit_payloads_are_byte_identical(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        sudo_argv = proxy_argv("fwd", ["demo"], _sudo_hc())
+        polkit_argv = proxy_argv("fwd", ["demo"], _polkit_hc())
+        # The bare ``dispatch fwd <wire>`` payload is the last argv element on
+        # both paths; only the crossing prefix differs.
+        assert sudo_argv[-1] == polkit_argv[-1]
+        assert sudo_argv[-3:-1] == ["/bin/bash", "-c"]
+        assert polkit_argv[-3:-1] == ["/bin/bash", "-c"]
+
+    def test_operator_rootless_returns_bare_target_argv(
+        self, isolated_sandbox_ai_home: Path
+    ) -> None:
+        from core.compose import compose_project_name
+
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+        proj = compose_project_name("demo")
+        ip = _expected_fwd_ip("demo")
+        argv = proxy_argv("fwd", ["demo"], _rootless_hc())
+        assert argv == [
+            "/usr/bin/docker",
+            "exec",
+            "-i",
+            f"{proj}-admin-1",
+            "/fwd",
+            f"{ip}:9999",
+        ]
+        # No crossing prefix, no dispatcher indirection.
+        for token in argv:
+            assert "sudo" not in token
+            assert "systemd-run" not in token
+            assert "machinectl" not in token
+            assert "/usr/local/libexec/sandbox-ai/dispatch" not in token
+
+    def test_validates_instance_name_before_resolution(self) -> None:
+        # The typed-arg validator runs before any wire expansion / crossing.
+        with pytest.raises(DispatchValidationError):
+            proxy_argv("fwd", ["../escape"], _sudo_hc())
+
+    def test_rejects_non_streaming_op(self) -> None:
+        # proxy_argv is the SOLE producer of streaming-op argv; a framed op
+        # belongs on invoke()/probe().
+        with pytest.raises(StreamingOpError, match="not a streaming op"):
+            proxy_argv("auth-probe", [], _sudo_hc())
+
+    def test_never_executes(
+        self, isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # proxy_argv constructs only — it must never touch the Executor.
+        _seed_instance(isolated_sandbox_ai_home, "demo")
+
+        def fail_run(self: object, *a: object, **k: object) -> object:
+            raise AssertionError("proxy_argv must not execute")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fail_run)
+        proxy_argv("fwd", ["demo"], _rootless_hc())
+
+
+class TestStreamingOpRejectedByInvokeProbe:
+    def test_invoke_rejects_fwd(self) -> None:
+        with pytest.raises(StreamingOpError, match=r"proxy_argv"):
+            invoke(Op.FWD, ["myinst"], _sudo_hc())
+
+    def test_probe_rejects_fwd(self) -> None:
+        with pytest.raises(StreamingOpError, match=r"proxy_argv"):
+            probe(Op.FWD, ["myinst"], _sudo_hc())
+
+    def test_invoke_rejects_fwd_by_wire_name(self) -> None:
+        with pytest.raises(StreamingOpError):
+            invoke("fwd", ["myinst"], _rootless_hc())
+
+    def test_rejection_happens_before_any_crossing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The guard fires before build_invocation / the Executor is ever reached.
+        def fail_run(self: object, *a: object, **k: object) -> object:
+            raise AssertionError("invoke must reject the streaming op before crossing")
+
+        monkeypatch.setattr("core.dispatch.Executor.run", fail_run)
+        with pytest.raises(StreamingOpError):
+            invoke(Op.FWD, ["myinst"], _sudo_hc())
+
+
 # ─── invoke(): validate -> expand -> machinectl_cmd + bash -c -> Executor ──
 
 
@@ -1258,15 +1554,20 @@ def _valid_args_for(op: str) -> list[str]:
 
 
 _COMPOSE_OPS = {"compose-up", "compose-down", "compose-ps"}
-_ALL_OPS = sorted(op.value for op in Op)
+# The eleven FRAMED ops only — the build_invocation / invoke / probe surface.
+# The streaming op (``fwd``) is excluded: it is never routed through
+# build_invocation (invoke()/probe() reject it); its crossing argv is built by
+# proxy_argv and exercised by TestFwdProxyArgv below.
+_ALL_OPS = sorted(op.value for op in Op if op is not Op.FWD)
 
 
 class TestSudoSeparateUserRidesPipe:
-    def test_exactly_eleven_ops_exercised(self) -> None:
-        # Guard the op surface: exactly the eleven current ops (incl. the
-        # read-only ``preflight`` bundle), and every one has representative
-        # valid args wired into _valid_args_for.
+    def test_exactly_eleven_framed_ops_exercised(self) -> None:
+        # Guard the framed-op surface: exactly the eleven framed ops (incl. the
+        # read-only ``preflight`` bundle, excl. the streaming ``fwd``), and every
+        # one has representative valid args wired into _valid_args_for.
         assert len(_ALL_OPS) == 11
+        assert "fwd" not in _ALL_OPS
         assert all(isinstance(_valid_args_for(op), list) for op in _ALL_OPS)
 
     @pytest.mark.parametrize("op", _ALL_OPS)

@@ -197,5 +197,23 @@
       "-c",
       "echo __PREFLIGHT_Q_${__PFNONCE}_auth-probe__; echo ok 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_auth-probe_$?__ ; echo __PREFLIGHT_Q_${__PFNONCE}_docker-version__; docker version --format '{{.Server.Version}}' 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_docker-version_$?__ ; echo __PREFLIGHT_Q_${__PFNONCE}_docker-info-security-options__; docker info --format '{{.SecurityOptions}}' 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_docker-info-security-options_$?__ ; echo __PREFLIGHT_Q_${__PFNONCE}_docker-info-runtimes__; docker info --format '{{json .Runtimes}}' 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_docker-info-runtimes_$?__ ; echo __PREFLIGHT_Q_${__PFNONCE}_compose-ls__; docker compose ls --format json --all 2>&1; echo __PREFLIGHT_RC_${__PFNONCE}_compose-ls_$?__"
     ]
+  },
+  {
+    "op": "fwd",
+    "args": [
+      "myinst",
+      "--project",
+      "dev-myinst",
+      "--ip",
+      "10.100.0.7"
+    ],
+    "expected_target_argv": [
+      "/usr/bin/docker",
+      "exec",
+      "-i",
+      "dev-myinst-admin-1",
+      "/fwd",
+      "10.100.0.7:9999"
+    ]
   }
 ]

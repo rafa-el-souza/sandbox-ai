@@ -434,6 +434,168 @@ def test_machinectl_cmd_deliberate_violation_is_detected(
     assert str(rogue) in detail
 
 
+# ── 5. Streaming-op discipline: fwd is reachable ONLY via proxy_argv ─────────
+#
+# The runtime-dispatcher "Streaming ProxyCommand Entrypoint" requirement pins,
+# structurally (the test_machinectl_cmd_callers_restricted pattern), that:
+#   (a) no src/ call site passes a streaming op (Op.FWD / "fwd") to
+#       core.dispatch.invoke()/probe() — those capture output the orchestrator
+#       would branch on, and a streaming op carries zero such content; and
+#   (b) no src/ module OTHER than core.dispatch constructs a ``dispatch fwd``
+#       payload or its docker-exec target argv (the ``/fwd`` dial) directly —
+#       core.dispatch.proxy_argv is the single sanctioned producer.
+# A hand-rolled fwd payload elsewhere would reintroduce the forgery surface the
+# streaming carve-out narrowed; this guard fails the gate if it reappears.
+
+# core.dispatch is the sole sanctioned home for fwd payload/argv construction.
+_STREAMING_DISPATCH_MODULE = "src/core/dispatch.py"
+# The wire payload prefix that crosses the boundary, and the in-container dial
+# binary of the docker-exec target argv. The payload SUBSTRING appearing in any
+# literal, or a literal EQUAL to the standalone ``/fwd`` argv element, OUTSIDE
+# core.dispatch (and the transitional allowlist below) means a module is
+# hand-building the streaming crossing. The argv-element match is by EQUALITY
+# (not substring) so an unrelated path literal like ``docker/admin/fwd.go``
+# (which merely contains ``/fwd``) is not a false positive — only the discrete
+# docker-exec ``"/fwd"`` argv element is the dial.
+_FWD_PAYLOAD_SUBSTR = "dispatch fwd"
+_FWD_TARGET_BINARY = "/fwd"
+# Transitional exemption (C-010 wave): cli.main._build_attach_argv + the
+# start dry-run preview still hold the inline ``/fwd`` docker-exec argv until
+# the sibling milestone (group 3) rewrites the ProxyCommand to call
+# core.dispatch.proxy_argv. Tech-debt anchor — REMOVE this entry when that
+# rewrite lands (the module will then hold no fwd payload/argv literal). The
+# ``dispatch fwd`` PAYLOAD substring is NOT exempted anywhere: it does not yet
+# exist outside core.dispatch and must never be hand-built.
+_FWD_PAYLOAD_ALLOWLIST: frozenset[str] = frozenset({"src/cli/main.py"})
+
+
+def _fwd_invoke_probe_call_lines(tree: ast.AST) -> list[int]:
+    """Return line numbers of ``invoke(...)``/``probe(...)`` calls whose FIRST
+    positional argument names the streaming op (``Op.FWD`` attribute or the
+    ``"fwd"`` wire-name constant).
+
+    AST-only: the callee must be a bare ``invoke``/``probe`` name or a
+    ``….invoke``/``….probe`` attribute (e.g. ``dispatch.invoke``), and the first
+    arg is inspected for ``Op.FWD`` (``ast.Attribute`` ``attr == "FWD"``) or the
+    string constant ``"fwd"``.
+    """
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        callee = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else None
+        )
+        if callee not in {"invoke", "probe"}:
+            continue
+        first = node.args[0]
+        is_fwd = (isinstance(first, ast.Attribute) and first.attr == "FWD") or (
+            isinstance(first, ast.Constant) and first.value == "fwd"
+        )
+        if is_fwd:
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
+def _fwd_payload_literal_lines(tree: ast.AST) -> tuple[list[int], list[int]]:
+    """Return ``(payload_lines, target_argv_lines)`` for string-literal nodes.
+
+    ``payload_lines`` embed the ``dispatch fwd`` wire payload (never exempt);
+    ``target_argv_lines`` embed the bare ``/fwd`` docker-exec target binary
+    (transitionally exempt for the allowlisted module). AST-only
+    (``ast.Constant`` string nodes) so comments/docstrings that merely *mention*
+    the op in prose are NOT flagged — only real string literals a module would
+    interpolate into a crossing argv."""
+    payload_lines: list[int] = []
+    target_lines: list[int] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if _FWD_PAYLOAD_SUBSTR in node.value:
+            payload_lines.append(node.lineno)
+        elif node.value == _FWD_TARGET_BINARY:
+            target_lines.append(node.lineno)
+    return sorted(payload_lines), sorted(target_lines)
+
+
+def _streaming_op_violations(
+    files: Iterator[Path],
+) -> list[tuple[Path, str, list[int]]]:
+    """Scan ``files``; return ``(path, kind, linenos)`` for each violation.
+
+    ``kind`` is ``"invoke/probe"`` (a streaming op passed to invoke/probe — flagged
+    in EVERY scanned file incl. core.dispatch, which must never do it either) or
+    ``"payload"`` (a ``dispatch fwd`` / ``/fwd`` literal OUTSIDE core.dispatch).
+
+    Reusable detector seam (anti-hack rule 5): ``files`` is a parameter so the
+    deliberate-violation regression drives the same predicate."""
+    offenders: list[tuple[Path, str, list[int]]] = []
+    for src in files:
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        tree = ast.parse(src.read_text(), filename=str(src))
+        ip_lines = _fwd_invoke_probe_call_lines(tree)
+        if ip_lines:
+            offenders.append((src, "invoke/probe", ip_lines))
+        # Payload/argv construction is sanctioned ONLY in core.dispatch.
+        if rel != _STREAMING_DISPATCH_MODULE:
+            payload_lines, target_lines = _fwd_payload_literal_lines(tree)
+            if payload_lines:
+                # The ``dispatch fwd`` wire payload is never exempt anywhere.
+                offenders.append((src, "payload", payload_lines))
+            if target_lines and rel not in _FWD_PAYLOAD_ALLOWLIST:
+                # The bare ``/fwd`` docker-exec argv is transitionally exempt for
+                # the allowlisted module (cli.main, pre-group-3 rewrite).
+                offenders.append((src, "target-argv", target_lines))
+    return offenders
+
+
+def test_streaming_op_reachable_only_via_proxy_argv() -> None:
+    """``fwd`` (the streaming op) is reachable ONLY via core.dispatch.proxy_argv.
+
+    (a) No src/ call site passes ``Op.FWD``/``"fwd"`` to invoke()/probe(); (b) no
+    src/ module other than core.dispatch builds a ``dispatch fwd`` payload or its
+    ``/fwd`` docker-exec target argv. Enforces the runtime-dispatcher "Streaming
+    ProxyCommand Entrypoint" invariant structurally (C-010 D3).
+    """
+    offenders = _streaming_op_violations(_python_files(_SRC_ROOT))
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)} [{kind}]: line(s) {linenos}"
+            for p, kind, linenos in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} streaming-op discipline violation(s).\n{details}\n\n"
+            "Fix: route streaming-op crossings through core.dispatch.proxy_argv "
+            "(it constructs but never executes the ProxyCommand argv); never pass "
+            "a streaming op to invoke()/probe(), and never hand-build a "
+            "'dispatch fwd' payload or its '/fwd' docker-exec argv outside "
+            "core.dispatch (runtime-dispatcher 'Streaming ProxyCommand Entrypoint')."
+        )
+
+
+def test_streaming_op_deliberate_violations_are_detected(tmp_path: Path) -> None:
+    """Both violation kinds are caught by the shared detector (proves the guard
+    catches the bug class, not just the symptom's absence)."""
+    rogue_invoke = tmp_path / "rogue_invoke.py"
+    rogue_invoke.write_text("invoke(Op.FWD, ['myinst'], hc)\nprobe('fwd', ['x'], hc)\n")
+    rogue_payload = tmp_path / "rogue_payload.py"
+    rogue_payload.write_text('CMD = "/usr/local/libexec/sandbox-ai/dispatch fwd myinst"\n')
+
+    offenders = _streaming_op_violations(iter([rogue_invoke, rogue_payload]))
+    kinds_by_path = {(p, kind) for p, kind, _ in offenders}
+    assert (rogue_invoke, "invoke/probe") in kinds_by_path
+    assert (rogue_payload, "payload") in kinds_by_path
+
+
 # ── D7 regression guard: runtime owner resolved via resolve_daemon_owner ──────
 
 # host-config "Daemon Owner Resolution" (design D7): the runtime layer MUST resolve

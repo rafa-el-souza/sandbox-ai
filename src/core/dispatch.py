@@ -61,6 +61,7 @@ from core.host_config import (
     sudo_pipe_cmd,
 )
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
+from core.ipam import IPAMLedger, derive_static_ips
 from core.journal_audit import emit_op_audit
 from core.registry import InstanceRegistry
 
@@ -95,14 +96,19 @@ _COMPILE_INNER = (
 
 
 class Op(StrEnum):
-    """The eleven typed ops the dispatcher accepts as ``argv[1]``.
+    """The twelve typed ops the dispatcher accepts as ``argv[1]``.
 
     The enum *value* is the wire name (hyphenated) passed to the dispatcher
     binary; the member identifier is the Python-legal upper-snake form. The
     surface is byte-faithful to the existing ``machinectl_cmd(...)`` callsites
-    it replaces (spec "Typed Op Surface") — with the one exception of
-    ``preflight``, a read-only *bundle* of the ``start`` privilege-boundary
-    preflight queries (C-009 D6) rather than a single-callsite enumeration.
+    it replaces (spec "Typed Op Surface") — with two exceptions: ``preflight``,
+    a read-only *bundle* of the ``start`` privilege-boundary preflight queries
+    (C-009 D6) rather than a single-callsite enumeration, and ``fwd``, the one
+    **streaming** op — the separate-user attach ProxyCommand payload, routed
+    through the dispatcher by C-010 ``attach-fwd-dispatch-op`` (F-060). The
+    streaming op is reachable ONLY via :func:`proxy_argv` (it constructs but
+    never executes); :func:`invoke`/:func:`probe` reject it (see the
+    "Streaming ProxyCommand Entrypoint" requirement).
     """
 
     AUTH_PROBE = "auth-probe"
@@ -116,6 +122,15 @@ class Op(StrEnum):
     HELPER_CHOWN_FILES = "helper-chown-files"
     HELPER_MKDIR_CHOWN_DIRS = "helper-mkdir-chown-dirs"
     PREFLIGHT = "preflight"
+    FWD = "fwd"
+
+
+# The streaming (frameless) op class (C-010 D3). A stream invocation carries a
+# raw SSH byte stream and so emits no framing; it is unreachable via
+# invoke()/probe() and is produced ONLY by proxy_argv. Today exactly one op is
+# streaming; the set keeps the classification explicit rather than special-casing
+# ``Op.FWD`` inline.
+_STREAMING_OPS: frozenset[Op] = frozenset({Op.FWD})
 
 
 # A validator inspects the op's args and raises on malformed input; it returns
@@ -156,6 +171,18 @@ class DispatchValidationError(ValueError):
     crossed. The message names the rejected argument and the rule it violated
     (spec "Per-Op Argument Validation"). The Go dispatcher binary trusts these
     validators and does NOT re-run them (design D4).
+    """
+
+
+class StreamingOpError(ValueError):
+    """A streaming op was passed to :func:`invoke`/:func:`probe` (C-010 D3).
+
+    A streaming op (``fwd``) carries a raw byte stream with no orchestrator-
+    interpreted output, so the orchestrator must never capture (and therefore
+    never branch on) its result. It is reachable ONLY via :func:`proxy_argv`,
+    which constructs the crossing argv for the ssh client to execute and never
+    runs it. The error message names :func:`proxy_argv` as the sanctioned path
+    (spec "Streaming ProxyCommand Entrypoint").
     """
 
 
@@ -806,6 +833,110 @@ def _build_helper_mkdir_chown_dirs(args: Sequence[str], host_config: HostConfig)
     return _bash_c(_hardened_docker_run(image, parent, inner))
 
 
+# ─── fwd: the streaming attach-ProxyCommand op (C-010) ───────────────────────
+#
+# ``fwd`` is the one STREAMING op (D3): its target argv carries a raw SSH byte
+# stream, so the dispatcher execs docker DIRECTLY — there is NO ``/bin/bash -c``
+# wrapper and NO sentinel/framing on the stream path (stream hygiene: zero
+# interpreters between the dispatcher and the byte stream). It is also the one
+# op whose operands (compose project name + core IPC IP) are operator-side
+# state the dispatcher cannot re-derive, so — like the compose ops (Q6) —
+# callers pass only ``[<inst>]`` and ``core.dispatch`` expands the named-flag
+# wire form ``fwd <inst> --project <P> --ip <IP>`` (:func:`_expand_fwd_wire`).
+# The Go binary validates the wire and assembles the op-hardcoded target argv;
+# the Python builder below mirrors that assembly byte-for-byte for the shared
+# fixture. Verb (``exec -i``), the ``/fwd`` path, the ``-admin-1`` suffix, and
+# port ``9999`` are op-hardcoded and never read from the wire.
+
+_DOCKER_BINARY = "/usr/bin/docker"
+_FWD_PORT = "9999"
+
+
+def _resolve_fwd_state(inst: str) -> tuple[str, str]:
+    """Return ``(project_name, core_ipc_ip)`` for ``inst``.
+
+    Mirrors the two operator-side lookups ``cli.main._build_attach_argv``
+    performs (the compose project name via :func:`compose_project_name`, and the
+    instance's core IPC IP via a read-only IPAM ledger peek — attach never
+    mutates IPAM state, per ``cli-attach``). This is the SSOT for the ``fwd``
+    operator-side resolution; the inline original in ``cli.main`` is removed by
+    the sibling milestone that rewrites the ProxyCommand to call
+    :func:`proxy_argv`.
+    """
+    project_name = compose_project_name(inst)
+    base_index, _existing = IPAMLedger().peek_next_slot(inst)
+    core_ipc_ip = derive_static_ips(base_index)["core_ipc_ip"]
+    return project_name, core_ipc_ip
+
+
+def _expand_fwd_wire(args: Sequence[str]) -> list[str]:
+    """Expand the typed ``fwd`` args ``[<inst>]`` to the named-flag wire form.
+
+    Returns ``[<inst>, "--project", P, "--ip", IP]`` — the operator-side-resolved
+    operands the dispatcher cannot re-derive (the ``--project``/``--ip`` flags are
+    NEVER caller-supplied; the typed validator rejects any second positional).
+    """
+    inst = args[0]
+    project_name, core_ipc_ip = _resolve_fwd_state(inst)
+    return [inst, "--project", project_name, "--ip", core_ipc_ip]
+
+
+def _parse_fwd_wire(wire: Sequence[str]) -> tuple[str, str]:
+    """Parse the post-expansion ``fwd`` wire form (mirrors the Go parser).
+
+    Returns ``(project, ip)``. Raises :class:`DispatchValidationError` for a
+    missing/duplicated/illegal flag or extra positional — the same rejections
+    the Go binary performs (kept in lockstep so the fixture exercises one shared
+    shape).
+    """
+    if not wire:
+        raise DispatchValidationError("fwd: missing <instance> in wire form")
+    rest = list(wire[1:])
+    project: str | None = None
+    ip: str | None = None
+    i = 0
+    while i < len(rest):
+        flag = rest[i]
+        if i + 1 >= len(rest):
+            raise DispatchValidationError(f"fwd: flag {flag!r} is missing its value")
+        value = rest[i + 1]
+        if flag == "--project":
+            if project is not None:
+                raise DispatchValidationError("fwd: --project given more than once")
+            project = value
+        elif flag == "--ip":
+            if ip is not None:
+                raise DispatchValidationError("fwd: --ip given more than once")
+            ip = value
+        else:
+            raise DispatchValidationError(f"fwd: unrecognized flag {flag!r}")
+        i += 2
+    if project is None:
+        raise DispatchValidationError("fwd: --project is required exactly once")
+    if ip is None:
+        raise DispatchValidationError("fwd: --ip is required exactly once")
+    return project, ip
+
+
+def _build_fwd(args: Sequence[str], host_config: HostConfig) -> list[str]:
+    """Build the ``fwd`` target argv from its named-flag wire form.
+
+    The ONE op whose target argv is NOT a ``/bin/bash -c`` wrapper: the
+    dispatcher execs docker directly (D3 stream hygiene). The admin container
+    name is derived from ``--project`` (``<P>-admin-1``); the ``exec -i`` verb,
+    the ``/fwd`` path, and port ``9999`` are op-hardcoded.
+    """
+    project, ip = _parse_fwd_wire(args)
+    return [
+        _DOCKER_BINARY,
+        "exec",
+        "-i",
+        f"{project}-admin-1",
+        "/fwd",
+        f"{ip}:{_FWD_PORT}",
+    ]
+
+
 # Wire every Op to an OpSpec with real per-op bounds, validator, and builder.
 OP_SPECS: dict[Op, OpSpec] = {
     Op.AUTH_PROBE: OpSpec(
@@ -884,6 +1015,15 @@ OP_SPECS: dict[Op, OpSpec] = {
         max_args=0,
         validate=_validate_nullary,
         build_target_argv=_build_preflight,
+    ),
+    Op.FWD: OpSpec(
+        name=Op.FWD.value,
+        # Typed callers pass exactly ``[<inst>]``; the --project/--ip wire flags
+        # are produced operator-side by _expand_fwd_wire, never caller-supplied.
+        min_args=1,
+        max_args=1,
+        validate=_validate_one_instance,
+        build_target_argv=_build_fwd,
     ),
 }
 
@@ -1011,6 +1151,90 @@ def build_invocation(
         sudo_pipe_cmd(user)
         if auth == MachinectlAuth.SUDO
         else machinectl_cmd(user, auth)
+    )
+    return [
+        *crossing,
+        "/bin/bash",
+        "-c",
+        inner,
+    ]
+
+
+def _reject_streaming_op(op: Op | str) -> None:
+    """Raise :class:`StreamingOpError` if ``op`` is a streaming op (C-010 D3).
+
+    The guard at the head of the :func:`invoke`/:func:`probe` shared body. A
+    streaming op carries no orchestrator-interpreted output, so the orchestrator
+    must never capture it — it is reachable only via :func:`proxy_argv`.
+    """
+    if Op(op) in _STREAMING_OPS:
+        raise StreamingOpError(
+            f"op {Op(op).value!r} is a streaming op and cannot be run via "
+            "invoke()/probe() (its output is a raw byte stream with no "
+            "orchestrator-interpreted content); use core.dispatch.proxy_argv() "
+            "to construct the ProxyCommand crossing argv instead"
+        )
+
+
+def proxy_argv(
+    op: Op | str,
+    args: Sequence[str],
+    host_config: HostConfig,
+) -> list[str]:
+    """Construct (NEVER execute) the streaming-op crossing argv (C-010 D3).
+
+    The streaming entrypoint, distinct from :func:`invoke`/:func:`probe`: it
+    builds the full crossing argv for a streaming op (``fwd``) and **returns**
+    it for the caller to embed as the ssh ``-o ProxyCommand=…`` value. The
+    *ssh client* executes the argv; the orchestrator never runs it and never
+    sees its stdout — so the invariant "the orchestrator branches only on
+    framed, nonce-bound signals; streaming ops carry zero orchestrator-
+    interpreted content" is enforced by shape, not discipline (spec "Streaming
+    ProxyCommand Entrypoint").
+
+    Per mode (mirrors :func:`build_invocation`'s prefix selection, with the bare
+    ``dispatch fwd <wire>`` payload the per-op sudoers ``Cmnd_Spec`` matches):
+
+    - ``separate-user`` + SUDO → ``[*sudo_pipe_cmd(user), "/bin/bash", "-c",
+      "<dispatch> fwd <wire>"]`` — the privileged byte-pipe; headless-capable
+      (the F-060 fix).
+    - ``separate-user`` + POLKIT → ``[*pipe_cmd(user), "/bin/bash", "-c",
+      "<dispatch> fwd <wire>"]`` — the unprivileged pipe; the polkit
+      ``manage-units`` wall is unchanged (interactive-only).
+    - ``operator-rootless`` → the op's **target argv directly**
+      (``["/usr/bin/docker", "exec", "-i", "<P>-admin-1", "/fwd", "<IP>:9999"]``)
+      — no crossing, no dispatcher indirection.
+
+    Callers pass only ``[<inst>]``; the named-flag wire (``--project``/``--ip``)
+    is resolved operator-side here via :func:`_expand_fwd_wire`. The validators
+    and wire-expansion run BEFORE the crossing prefix is applied, so only the
+    prefix differs by mode (exactly as :func:`build_invocation`).
+
+    Raises:
+        DispatchValidationError: the typed args are malformed for ``op``.
+        StreamingOpError: ``op`` is NOT a streaming op (this entrypoint is the
+            sole producer of streaming-op argv — a framed op belongs on
+            :func:`invoke`/:func:`probe`).
+        ValueError: ``op`` is not a known :class:`Op`.
+    """
+    resolved = Op(op)
+    if resolved not in _STREAMING_OPS:
+        raise StreamingOpError(
+            f"op {resolved.value!r} is not a streaming op; proxy_argv() "
+            "constructs ProxyCommand argv only for streaming ops — run framed "
+            "ops via invoke()/probe()"
+        )
+    validate_args(resolved, args)
+    wire_args = _expand_fwd_wire(args)
+    if is_operator_rootless(host_config):
+        return build_target_argv(resolved, wire_args, host_config)
+    inner = dispatch_payload(resolved.value, wire_args)
+    user = host_config.host.docker_unprivileged_user
+    auth = host_config.host.machinectl_authentication
+    crossing = (
+        sudo_pipe_cmd(user)
+        if auth == MachinectlAuth.SUDO
+        else pipe_cmd(user)
     )
     return [
         *crossing,
@@ -1151,6 +1375,7 @@ def _invoke_with_nonce(
       inner *after* :func:`emit_op_audit` has logged the CLEAN argv (so journald
       records no nonce), then run ``framed=False`` and return the minted nonce.
     """
+    _reject_streaming_op(op)
     argv = build_invocation(op, args, host_config)
     if is_operator_rootless(host_config):
         op_value = Op(op).value
