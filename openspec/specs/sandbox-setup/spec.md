@@ -106,7 +106,7 @@ The interactive confirm prompt SHALL use the exact text `Proceed with apply? [y/
 - **THEN** the plan output is emitted; the prompt is NOT shown; setup proceeds directly into the apply pass
 
 #### Scenario: Apply pass continues past non-rollback failures
-- **WHEN** the apply pass encounters a phase failure that is NOT L3a (sudoers/polkit install + probe)
+- **WHEN** the apply pass encounters a phase failure that is NOT L3a (sudoers install + probe)
 - **THEN** that phase is marked FAIL, its dependents are marked BLOCKED-BY, and the apply pass continues with independent phases; final exit code is non-zero; finalization summary names each FAIL and BLOCKED-BY phase with remediation pointers
 
 #### Scenario: Plan summary line format
@@ -628,7 +628,7 @@ On `sandbox setup`: when the marker has no entry for the operator, setup SHALL p
 
 `sandbox setup` SHALL build its `host_config` exclusively from command-line flags and documented defaults, and SHALL NOT read `<sandbox_ai_home()>/config/sandbox-ai.toml` (`HostConfig.from_toml`) on the setup path — so setup never reads or depends on `/root/.sandbox-ai`. The operator is resolved by the existing precedence (`--operator` → `$SUDO_USER` → `$PKEXEC_UID`), never from a toml.
 
-Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}`, which **defaults to `operator-rootless`** when the flag is absent and the marker has no entry for the operator — operator-rootless is the default execution mode for a fresh host, and `separate-user` is the opt-in hardened posture (multi-tenant / adversarial-agent hosts). Setup SHALL also accept `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only), and `--workspace-bridge-group <name>` (default `sb-ws`). A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` or `--machinectl-auth` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
+Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}`, which **defaults to `operator-rootless`** when the flag is absent and the marker has no entry for the operator — operator-rootless is the default execution mode for a fresh host, and `separate-user` is the opt-in hardened posture (multi-tenant / adversarial-agent hosts). Setup SHALL also accept `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only), and `--workspace-bridge-group <name>` (default `sb-ws`). A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
 
 > Note (delta sequencing): the `--docker-execution-mode` flag + the execution-mode marker are introduced by change `operator-rootless-setup` (C-004) with the setup-time default `separate-user`; the present change (C-005) flips that default to `operator-rootless`. This is the single default-bearing edit. The default applies **only at setup time** when neither the flag nor a marker entry is present — the runtime still resolves the mode from the marker and **fails closed** (`ModeMarkerMissing`) when it is absent, per the `host-config` capability's "Docker Execution Mode Selector" requirement; there is no runtime default, and the mode is never a toml field.
 

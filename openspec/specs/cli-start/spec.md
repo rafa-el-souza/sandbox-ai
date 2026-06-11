@@ -116,11 +116,11 @@ The system SHALL hand over the terminal to **core** (as `agent`) using the same 
 - **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin (separate-user, SUDO mode)" scenario); the `ProxyCommand` is `sudo systemd-run -q --pipe --uid=<docker_unprivileged_user> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'`
 
 ### Requirement: Instance Pre-Flight Checks
-The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `machinectl_authentication` mode from host config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Per-instance file ownership matching for ro single-files (including the four IPC SSH secrets, all proxy ro files, dotfiles, and rendered service configs) SHALL occur during `_phase_helper_cp_chown_ro_files`, after ACL grants and the cache/log helper-recipe phase, via the disposable-helper-container primitive `helper_chown_files` (per the `helper-container` capability).
+The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `docker_execution_mode` (`DockerExecutionMode`) from host config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Per-instance file ownership matching for ro single-files (including the four IPC SSH secrets, all proxy ro files, dotfiles, and rendered service configs) SHALL occur during `_phase_helper_cp_chown_ro_files`, after ACL grants and the cache/log helper-recipe phase, via the disposable-helper-container primitive `helper_chown_files` (per the `helper-container` capability).
 
-#### Scenario: Doctor Chain 1 pre-flight with auth mode
+#### Scenario: Doctor Chain 1 pre-flight with execution mode
 - **WHEN** `sandbox start` is invoked
-- **THEN** the system loads `machinectl_authentication` from host config and passes it to `build_check_registry()`. All Chain 1 checks execute normally.
+- **THEN** the system loads the `docker_execution_mode` from host config and passes it to `build_check_registry()`. All Chain 1 checks execute normally.
 
 #### Scenario: Secret completeness gate
 - **WHEN** `sandbox start` is invoked and `.sandbox.env` is missing a secret required by the current `sandbox.toml` config (e.g., `FIRECRAWL_API_KEY` when `mcp_firecrawl = true`)
