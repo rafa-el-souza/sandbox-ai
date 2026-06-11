@@ -16,14 +16,13 @@ loader.)
 
 ## The reference baselines (per-command × distro × mode)
 
-One probe **per `sandbox` command**, run as a lifecycle, so each command maps to one matrix cell. The three
+One probe **per `sandbox` command**, run as a lifecycle, so each command maps to one matrix cell. The two
 bundles differ only in how `setup` provisions the host:
 
 | Bundle | Mode | Probes |
 |---|---|--:|
 | `baseline-op-rootless/` | operator-rootless (`setup --docker-execution-mode operator-rootless`, run as the operator) | 16 |
 | `baseline-separate-user-sudo/` | separate-user + sudo (`--docker-execution-mode separate-user --machinectl-auth sudo`) | 18 |
-| `baseline-separate-user-polkit/` | separate-user + polkit — tier 1 asserts `setup` *refuses* polkit; tier 2 installs the genuine `render_polkit_rule` + flips the toml, then runs the lifecycle | 18 |
 
 Lifecycle order (after `PREP`): `setup → init → doctor → status → workspace list/add/rename → start →
 status → attach → stop → workspace remove/restore → destroy`. Workspace mutations run while stopped.
@@ -95,8 +94,5 @@ billable and out-of-band; routine changes gate on `lint` + `plan` only.
 - **separate-user · sudo** — **green across the board** as of C-009 (`sudo systemd-run --pipe` crossing,
   fixing the apt `start`/`doctor` F-063 empty-crossing) + C-010 (`dispatch fwd` headless `attach`, fixing
   F-060 on all 4).
-- **separate-user · polkit** — red is the **durable** state: `setup` refuses to install a polkit rule, and
-  even with a genuine rule + polkitd up, every crossing op needs interactive `manage-units` auth and is
-  headless-blocked (F-060) — POLKIT-mode crossings require an interactive agent.
 
 See `baseline-matrix.md` for the per-cell snapshot + source runs.
