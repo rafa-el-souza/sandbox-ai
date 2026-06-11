@@ -2305,17 +2305,6 @@ class TestBuildAttachArgv:
         # in separate-user mode — only the dispatch wire payload is crossed.
         assert "/usr/bin/docker exec" not in proxy
 
-    def test_argv_proxy_command_separate_user_polkit_has_no_sudo_prefix(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        # POLKIT separate-user crosses via the unprivileged ``pipe_cmd``
-        # (polkit ``manage-units``); no ``sudo`` prefix.
-        argv = self._invoke(monkeypatch, tmp_path, auth=MachinectlAuth.POLKIT)
-        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
-        assert proxy.startswith("ProxyCommand=systemd-run -q --pipe --uid=sandbox ")
-        assert "sudo" not in proxy
-        assert "dispatch fwd myproj --project " in proxy
-
     def test_argv_proxy_command_operator_rootless_has_no_pipe_cmd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -2414,11 +2403,11 @@ class TestComposeDownDirect:
         from core.host_config import MachinectlAuth
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
-            _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.POLKIT)
+            _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.SUDO)
             (op, args, host_config), kwargs = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t", "--volumes"]
-            assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
+            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_compose_down_raises_on_failure(self) -> None:
         """`invoke()` (not `probe()`) — a non-zero exit propagates as
@@ -2759,29 +2748,7 @@ class TestDoctorHostConfig:
     def test_doctor_resolves_user_from_host_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, HostConfig, MachinectlAuth
-
-        mock_pc = HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "polkit"}}
-        )
-        results = [CheckResult(status="pass", name="ok", detail="")]
-        with (
-            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
-            patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results) as mock_run,
-            patch("cli.main.render_results"),
-        ):
-            r = runner.invoke(app, ["doctor"])
-            assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT, DockerExecutionMode.SEPARATE_USER)
-            mock_run.assert_called_once_with([], "fromtoml", None, DockerExecutionMode.SEPARATE_USER)
-
-    def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
-        from cli.main import app
-        from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, HostConfig, MachinectlAuth
+        from core.host_config import DockerExecutionMode, HostConfig
 
         mock_pc = HostConfig.model_validate(
             {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
@@ -2795,9 +2762,31 @@ class TestDoctorHostConfig:
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results"),
         ):
-            r = runner.invoke(app, ["doctor", "--user", "cliuser", "--machinectl-auth", "polkit"])
+            r = runner.invoke(app, ["doctor"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.POLKIT, DockerExecutionMode.SEPARATE_USER)
+            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
+            mock_run.assert_called_once_with([], "fromtoml", None, DockerExecutionMode.SEPARATE_USER)
+
+    def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode, HostConfig
+
+        mock_pc = HostConfig.model_validate(
+            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
+        )
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor", "--user", "cliuser"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
             mock_run.assert_called_once_with([], "cliuser", None, DockerExecutionMode.SEPARATE_USER)
 
     def test_doctor_no_config_no_flag_errors(self, runner: CliRunner) -> None:
@@ -2828,18 +2817,10 @@ class TestDoctorHostConfig:
         assert "docker_execution_mode is no longer" in r.output
         assert not isinstance(r.exception, ValueError)  # surfaced, not propagated
 
-    def test_doctor_invalid_auth_mode_errors(self, runner: CliRunner) -> None:
-        from cli.main import app
-
-        with patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError):
-            r = runner.invoke(app, ["doctor", "--user", "sandbox", "--machinectl-auth", "bogus"])
-        assert r.exit_code == 1
-        assert "invalid" in r.output.lower()
-
     def test_doctor_defaults_auth_to_sudo_when_no_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
@@ -2852,14 +2833,14 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
 
     def test_doctor_threads_marker_resolved_operator_rootless_mode(self, runner: CliRunner) -> None:
         """C-005 1.4: marker present → the resolved mode is threaded into the
         registry + runner."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
@@ -2872,7 +2853,7 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
             mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
     def test_doctor_falls_back_to_separate_user_when_marker_missing(self, runner: CliRunner) -> None:
@@ -2880,7 +2861,7 @@ class TestDoctorHostConfig:
         separate-user (the pre-flip default), no crash."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
         from core.setup_state import ModeMarkerMissing
 
         results = [CheckResult(status="pass", name="ok", detail="")]
@@ -2894,7 +2875,7 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
             mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.SEPARATE_USER)
 
     def test_doctor_op_rootless_no_toml_no_flag_resolves_operator(self, runner: CliRunner) -> None:
@@ -2904,7 +2885,7 @@ class TestDoctorHostConfig:
         mode into the registry + runner — so the op-rootless-only checks run."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
@@ -2919,14 +2900,14 @@ class TestDoctorHostConfig:
             r = runner.invoke(app, ["doctor"])
             assert r.exit_code == 0
             assert "no user specified" not in r.output.lower()
-            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
             mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
     def test_doctor_op_rootless_user_flag_overrides(self, runner: CliRunner) -> None:
         """--user wins even in operator-rootless mode (explicit override)."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
@@ -2940,7 +2921,7 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "cliuser"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
             mock_run.assert_called_once_with([], "cliuser", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
 
@@ -3660,7 +3641,7 @@ class TestInitHostConfigResolution:
             ),
             patch("cli.main._stdin_is_tty", return_value=True),
             # First prompt returns empty → re-prompt; second is non-empty user; third is auth.
-            patch("cli.main.typer.prompt", side_effect=["", "sandbox", "polkit"]),
+            patch("cli.main.typer.prompt", side_effect=["", "sandbox", "sudo"]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main._detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -3710,7 +3691,7 @@ class TestInitHostConfigResolution:
         from core.hydration import InstanceConfig
 
         ensure_per_user_state(isolated_sandbox_ai_home)
-        existing_body = '[host]\ndocker_unprivileged_user = "preserved"\nmachinectl_authentication = "polkit"\n'
+        existing_body = '[host]\ndocker_unprivileged_user = "preserved"\nmachinectl_authentication = "sudo"\n'
         cfg_path = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         cfg_path.write_text(existing_body)
 
@@ -3842,39 +3823,6 @@ class TestInitAuthProbe:
             assert result.exit_code == 1
             assert "probe timed out after 15 seconds" in result.output.lower()
 
-    def test_probe_polkit_mode_no_sudo(self, runner: CliRunner) -> None:
-        """Polkit mode probe — host_config carries POLKIT auth."""
-        from cli.main import app
-        from core.host_config import MachinectlAuth
-        from core.hydration import InstanceConfig
-
-        project_dir = "/home/user/polkit"
-        mock_config = InstanceConfig.model_validate(
-            {
-                "instance": {"name": "polkit", "host_uid": "1000"},
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
-            }
-        )
-
-        with (
-            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
-            patch("cli.main._detect_git_config", return_value=("", "")),
-            patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
-            patch("cli.main.create_instance_dirs"),
-            patch("cli.main.write_sandbox_toml"),
-            patch("cli.main._load_config", return_value=mock_config),
-            patch("cli.main.create_env_file"),
-            patch("cli.main.apply_default_acls"),
-            patch("cli.main.prompt_secrets"),
-            patch("cli.main.write_initialized_sentinel"),
-        ):
-            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
-            assert result.exit_code == 0
-            (op, args, host_config), kwargs = mock_probe.call_args
-            assert op == "preflight"
-            assert host_config.host.machinectl_authentication == MachinectlAuth.POLKIT
-
     def test_probe_mode_marker_missing_falls_back_to_separate_user(
         self, runner: CliRunner
     ) -> None:
@@ -3972,15 +3920,6 @@ class TestInitAuthProbe:
             subset_args, subset_kwargs = mock_subset.call_args
             assert subset_args[1] == operator
             assert subset_kwargs["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
-
-    def test_probe_polkit_failure_shows_polkit_remediation(self, runner: CliRunner) -> None:
-        """Polkit probe failure shows polkit-specific remediation."""
-        from cli.main import app
-
-        with patch("cli.main.dispatch.probe", return_value=self._fail()):
-            result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "polkit"])
-            assert result.exit_code == 1
-            assert "polkit" in result.output.lower()
 
     def test_invalid_machinectl_auth_value(self, runner: CliRunner) -> None:
         """Invalid --machinectl-auth value exits with error."""
@@ -6799,33 +6738,7 @@ class TestStatusIPAMExhausted:
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
 class TestDryRunAuthModePreview:
-    """Task 7.7: --dry-run preview reflects machinectl_authentication mode."""
-
-    def test_dry_run_preview_shows_polkit_command_without_sudo(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
-    ) -> None:
-        inst = "myproject"
-        _register_instance(inst)
-        _write_ipam("myproject", 0)
-        _create_tooling_plane(mock_sandbox_ai_home)
-
-        from cli.main import app
-
-        polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
-        with (
-            patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
-        ):
-            result = runner.invoke(app, ["start", inst, "--dry-run"])
-
-        assert result.exit_code == 0
-        # The previewed compose/handover commands must NOT include sudo
-        # but must still invoke machinectl shell.
-        assert "machinectl shell sandbox@.host" in result.output
-        # Command-preview lines should not start with `sudo machinectl`
-        for line in result.output.splitlines():
-            stripped = line.strip().lstrip("$").strip()
-            if stripped.startswith("sudo machinectl"):
-                raise AssertionError(f"polkit dry-run leaked sudo prefix: {line!r}")
+    """Task 7.7: --dry-run preview reflects the SUDO crossing prefix."""
 
     def test_dry_run_preview_shows_sudo_prefix_in_sudo_mode(
         self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
@@ -6848,49 +6761,6 @@ class TestDryRunAuthModePreview:
         # NOT machinectl shell — the preview shows the sudo_pipe_cmd prefix.
         assert "sudo systemd-run -q --pipe --uid=sandbox" in result.output
         assert "machinectl" not in result.output
-
-
-class TestPolkitEndToEnd:
-    """Task 7.8: polkit-mode commands construct subprocess calls without sudo."""
-
-    def test_status_polkit_mode_container_status_call_omits_sudo(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path, project_config_factory: HostConfigFactory
-    ) -> None:
-        """`status` under polkit mode invokes `_container_status` with auth=POLKIT.
-
-        The call list does not include `sudo` as the first argv element.
-        """
-        from cli.main import app
-        from core.host_config import MachinectlAuth
-
-        inst = "myproject"
-        _register_instance(inst)
-        _write_ipam("myproject", 0)
-
-        polkit_cfg = project_config_factory(user="sandbox", auth="polkit")
-        captured: dict[str, object] = {}
-
-        def fake_container_status(
-            instance_dir: str,
-            host_user: str,
-            config: object,
-            auth: MachinectlAuth,
-            mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
-        ) -> list[object]:
-            captured["host_user"] = host_user
-            captured["auth"] = auth
-            captured["mode"] = mode
-            return []
-
-        with (
-            patch("cli.main.HostConfig.from_toml", return_value=polkit_cfg),
-            patch("cli.main._container_status", side_effect=fake_container_status),
-        ):
-            result = runner.invoke(app, ["status", inst])
-
-        assert result.exit_code == 0
-        assert captured["host_user"] == "sandbox"
-        assert captured["auth"] == MachinectlAuth.POLKIT
 
 
 # ── Post-init commands fail loudly without sandbox-ai.toml ───────────────────

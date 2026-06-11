@@ -45,7 +45,7 @@ def project_config_factory() -> HostConfigFactory:
     Usage::
 
         def test_x(project_config_factory: HostConfigFactory) -> None:
-            pc = project_config_factory(user="sandbox", auth="polkit")
+            pc = project_config_factory(user="sandbox", auth="sudo")
     """
     from core.host_config import HostConfig
 

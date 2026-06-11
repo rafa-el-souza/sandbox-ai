@@ -77,7 +77,7 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
         owner_uid=166535,
         owner_gid=166535,
     )
-    action.execute(_ctx(MachinectlAuth.POLKIT))
+    action.execute(_ctx(MachinectlAuth.SUDO))
     assert invocations == [
         (
             "claude-sandbox",
@@ -85,7 +85,7 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
             ("core", "admin"),
             166535,
             166535,
-            MachinectlAuth.POLKIT,
+            MachinectlAuth.SUDO,
             DockerExecutionMode.SEPARATE_USER,
         )
     ]

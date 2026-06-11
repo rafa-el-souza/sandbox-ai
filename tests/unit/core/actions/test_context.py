@@ -38,9 +38,9 @@ def test_context_is_frozen() -> None:
         setattr(ctx, field_name, "other")
 
 
-def test_context_supports_polkit_auth() -> None:
-    ctx = _make_ctx(MachinectlAuth.POLKIT)
-    assert ctx.auth == MachinectlAuth.POLKIT
+def test_context_carries_sudo_auth() -> None:
+    ctx = _make_ctx(MachinectlAuth.SUDO)
+    assert ctx.auth == MachinectlAuth.SUDO
 
 
 def test_docker_execution_mode_defaults_to_separate_user() -> None:

@@ -270,7 +270,7 @@ def test_rollback_removes_drop_in(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit._SUDOERS_DIR", tmp_path
+        "core.setup.l3_sudoers._SUDOERS_DIR", tmp_path
     )
     drop_in = tmp_path / "sandbox-ai-machinectl-alice"
     drop_in.write_text("rule")
@@ -282,7 +282,7 @@ def test_rollback_idempotent_when_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit._SUDOERS_DIR", tmp_path
+        "core.setup.l3_sudoers._SUDOERS_DIR", tmp_path
     )
     l3a._rollback(_ctx())  # must not raise
 
@@ -299,7 +299,7 @@ def test_phase_runner_fires_rollback_on_fail(
     is fired by the runner (design D1), not called directly.
     """
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit._SUDOERS_DIR", tmp_path
+        "core.setup.l3_sudoers._SUDOERS_DIR", tmp_path
     )
     drop_in = tmp_path / "sandbox-ai-machinectl-alice"
     drop_in.write_text("rule that L3a will reject")

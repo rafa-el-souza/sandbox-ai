@@ -1177,7 +1177,7 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
     assert ctx.operator == "dev"
 
 
-# ── F-022: --machinectl-auth input + POLKIT fence (D2) ───────────────────────
+# ── --machinectl-auth input (sudo-only) ──────────────────────────────────────
 
 
 @pytest.mark.no_host_config_mock
@@ -1214,20 +1214,6 @@ def test_machinectl_auth_sudo_flag_accepted(runner: CliRunner) -> None:
         )
     assert result.exit_code == 0
     assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
-
-
-@pytest.mark.no_host_config_mock
-def test_machinectl_auth_polkit_flag_refused(runner: CliRunner) -> None:
-    """`--machinectl-auth polkit` is fenced (D2): refuse, exit 1, no plan pass."""
-    with (
-        patch("cli.main.os.geteuid", return_value=0),
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.run_plan_pass") as plan_mock,
-    ):
-        result = runner.invoke(app, ["setup", "--machinectl-auth", "polkit"])
-    assert result.exit_code == 1
-    assert "POLKIT auth mode is not yet supported" in result.output
-    plan_mock.assert_not_called()
 
 
 @pytest.mark.no_host_config_mock

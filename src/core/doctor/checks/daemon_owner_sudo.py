@@ -29,7 +29,6 @@ from core.host_config import (
 def check_daemon_owner_sudo(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.OPERATOR_ROOTLESS,
 ) -> CheckResult:
     """WARN when the operator account owning rootless Docker is a sudoer.
@@ -47,7 +46,7 @@ def check_daemon_owner_sudo(
     from core.setup import l2_host_prereqs as l2
 
     del distro
-    host_config = minimal_host_config(user, auth_mode, mode)
+    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
     owner = resolve_daemon_owner(host_config)
     admin_groups = l2._user_admin_groups(owner)
     # The owner IS the invoking operator (the current process user) in

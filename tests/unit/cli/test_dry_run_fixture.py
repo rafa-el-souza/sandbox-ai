@@ -3,8 +3,8 @@
 Section 5.1-5.3 of the ``refactor-plan-tuples-to-actions`` change.
 
 This is the load-bearing structural gate that pins the dry-run command
-preview output to a checked-in fixture for both ``machinectl_authentication``
-modes (``sudo`` / ``polkit``). Any unintended divergence in an Action's
+preview output to a checked-in fixture for the ``sudo``
+``machinectl_authentication`` mode. Any unintended divergence in an Action's
 ``.describe()`` rendering surfaces here as a byte-diff against the fixture.
 
 Determinism strategy:
@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 
 FIXTURE_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "dryrun"
 FIXTURE_SUDO = FIXTURE_DIR / "start_sudo.txt"
-FIXTURE_POLKIT = FIXTURE_DIR / "start_polkit.txt"
 
 # ANSI escape stripping (Rich emits CSI sequences when force_terminal is on).
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -229,7 +228,7 @@ def _assert_or_regen(captured: str, fixture_path: Path) -> None:
 
 
 class TestDryRunFixtureGate:
-    """Pin the dry-run output for both auth modes against a checked-in fixture."""
+    """Pin the dry-run output for the sudo auth mode against a checked-in fixture."""
 
     def test_dry_run_sudo_byte_equivalent(
         self,
@@ -241,12 +240,3 @@ class TestDryRunFixtureGate:
         captured = _capture_dry_run(runner, user_home, register, monkeypatch, "sudo")
         _assert_or_regen(captured, FIXTURE_SUDO)
 
-    def test_dry_run_polkit_byte_equivalent(
-        self,
-        runner: CliRunner,
-        user_home: Path,
-        register: Callable[..., Path],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        captured = _capture_dry_run(runner, user_home, register, monkeypatch, "polkit")
-        _assert_or_regen(captured, FIXTURE_POLKIT)

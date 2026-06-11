@@ -12,7 +12,6 @@ from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_c
 def check_image_digests(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
@@ -29,7 +28,7 @@ def check_image_digests(
     stale: list[str] = []
     drift: list[str] = []
 
-    host_config = minimal_host_config(user, auth_mode, mode)
+    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
     for key, pin in IMAGE_REGISTRY.items():
         pinned_outcome = dispatch.probe(
             "docker-manifest-inspect", [pin.pinned], host_config, timeout=2

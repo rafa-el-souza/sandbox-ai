@@ -1089,10 +1089,9 @@ class TestFwdTargetArgvBuilder:
 # ─── fwd: the streaming ProxyCommand entrypoint (proxy_argv) ────────────────
 #
 # proxy_argv CONSTRUCTS but never executes the crossing argv (the ssh client
-# runs it). Per mode it returns: separate-user+SUDO -> sudo_pipe_cmd prefix +
-# bare ``dispatch fwd <wire>``; separate-user+POLKIT -> pipe_cmd prefix + the
-# identical payload; operator-rootless -> the bare docker-exec target argv.
-# invoke()/probe() reject Op.FWD (it carries zero orchestrator-interpreted
+# runs it). Per mode it returns: separate-user -> sudo_pipe_cmd prefix +
+# bare ``dispatch fwd <wire>``; operator-rootless -> the bare docker-exec target
+# argv. invoke()/probe() reject Op.FWD (it carries zero orchestrator-interpreted
 # content). Spec "Streaming ProxyCommand Entrypoint".
 
 
@@ -1110,35 +1109,6 @@ class TestFwdProxyArgv:
             f"/usr/local/libexec/sandbox-ai/dispatch fwd demo "
             f"--project {proj} --ip {ip}"
         )
-
-    def test_polkit_mode_rides_pipe_cmd_no_sudo_same_payload(
-        self, isolated_sandbox_ai_home: Path
-    ) -> None:
-        _seed_instance(isolated_sandbox_ai_home, "demo")
-        proj = compose_project_name("demo")
-        ip = _expected_fwd_ip("demo")
-        argv = proxy_argv("fwd", ["demo"], _polkit_hc())
-        # The unprivileged pipe prefix (no leading sudo), identical payload.
-        assert argv[:4] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]
-        assert "sudo" not in argv
-        assert "machinectl" not in argv
-        assert argv[4:6] == ["/bin/bash", "-c"]
-        assert argv[6] == (
-            f"/usr/local/libexec/sandbox-ai/dispatch fwd demo "
-            f"--project {proj} --ip {ip}"
-        )
-
-    def test_sudo_and_polkit_payloads_are_byte_identical(
-        self, isolated_sandbox_ai_home: Path
-    ) -> None:
-        _seed_instance(isolated_sandbox_ai_home, "demo")
-        sudo_argv = proxy_argv("fwd", ["demo"], _sudo_hc())
-        polkit_argv = proxy_argv("fwd", ["demo"], _polkit_hc())
-        # The bare ``dispatch fwd <wire>`` payload is the last argv element on
-        # both paths; only the crossing prefix differs.
-        assert sudo_argv[-1] == polkit_argv[-1]
-        assert sudo_argv[-3:-1] == ["/bin/bash", "-c"]
-        assert polkit_argv[-3:-1] == ["/bin/bash", "-c"]
 
     def test_operator_rootless_returns_bare_target_argv(
         self, isolated_sandbox_ai_home: Path
@@ -1373,27 +1343,6 @@ class TestInvoke:
         cmd = cast("list[str]", captured["cmd"])
         assert cmd[7].endswith(" --volumes")
 
-    def test_polkit_auth_drops_sudo_prefix(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import subprocess
-
-        from core.host_config import MachinectlAuth
-
-        captured: dict[str, object] = {}
-
-        def fake_run(
-            self: object, cmd: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[str]:
-            captured["cmd"] = cmd
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-
-        monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
-        invoke("auth-probe", [], hc)
-        cmd = cast("list[str]", captured["cmd"])
-        assert cmd[:3] == ["machinectl", "shell", "sandbox@.host"]
-
     def test_invoke_validates_before_crossing(self) -> None:
         # A malformed typed arg is rejected by validate_args BEFORE the
         # boundary is crossed (no Executor call).
@@ -1538,25 +1487,18 @@ class TestSsotCrossingPrimitives:
         assert argv[-1] == dispatch_payload("auth-probe", [])
 
 
-# build_invocation splits the separate-user branch by auth mode (design D2):
-# SUDO → ``sudo_pipe_cmd(user)`` prefix (the privileged byte-pipe); POLKIT →
-# ``machinectl_cmd(user, POLKIT)`` (UNCHANGED). The inner ``dispatch <op>
-# <wire>`` payload is byte-identical across the swap, and the
-# operator-rootless branch is untouched. The pipe path keeps ``framed=True``
-# (design D3 / F-064): the inner exit is recovered from the dispatcher's
-# ``__SANDBOX_EXIT_<nonce>`` frame, NOT the native ``--pipe`` exit.
+# build_invocation crosses the separate-user branch via ``sudo_pipe_cmd(user)``
+# (the privileged byte-pipe; design D2). The inner ``dispatch <op> <wire>``
+# payload and the operator-rootless branch are independent of the crossing.
+# The pipe path keeps ``framed=True`` (design D3 / F-064): the inner exit is
+# recovered from the dispatcher's ``__SANDBOX_EXIT_<nonce>`` frame, NOT the
+# native ``--pipe`` exit.
 
 
 def _sudo_hc() -> HostConfig:
     from core.host_config import MachinectlAuth
 
     return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
-
-
-def _polkit_hc() -> HostConfig:
-    from core.host_config import MachinectlAuth
-
-    return cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
 
 
 # Representative valid typed args for the eleven framed ops.
@@ -1610,38 +1552,6 @@ class TestSudoSeparateUserRidesPipe:
         assert argv[5:7] == ["/bin/bash", "-c"]
         assert argv[7].startswith(f"/usr/local/libexec/sandbox-ai/dispatch {op}")
         assert "machinectl" not in argv
-
-    @pytest.mark.parametrize("op", _ALL_OPS)
-    def test_inner_payload_byte_identical_to_machinectl_payload(
-        self, op: str, isolated_sandbox_ai_home: Path
-    ) -> None:
-        # The bare ``dispatch <op> <wire>`` inner string is byte-identical
-        # between the SUDO-pipe path and the POLKIT-machinectl path it replaced
-        # (only the crossing prefix differs). Exercises the Q6 compose wire
-        # expansion for the compose ops.
-        if op in _COMPOSE_OPS:
-            _seed_instance(isolated_sandbox_ai_home, "demo")
-        args = _valid_args_for(op)
-        sudo_argv = build_invocation(op, args, _sudo_hc())
-        polkit_argv = build_invocation(op, args, _polkit_hc())
-        # Inner payload is the LAST argv element on both paths.
-        assert sudo_argv[-1] == polkit_argv[-1]
-        # And the bash-c wrapper token immediately precedes it on both.
-        assert sudo_argv[-3:-1] == ["/bin/bash", "-c"]
-        assert polkit_argv[-3:-1] == ["/bin/bash", "-c"]
-
-    @pytest.mark.parametrize("op", _ALL_OPS)
-    def test_polkit_argv_unchanged_machinectl_crossing(
-        self, op: str, isolated_sandbox_ai_home: Path
-    ) -> None:
-        # POLKIT keeps the machinectl shell crossing verbatim (no sudo_pipe_cmd).
-        if op in _COMPOSE_OPS:
-            _seed_instance(isolated_sandbox_ai_home, "demo")
-        argv = build_invocation(op, _valid_args_for(op), _polkit_hc())
-        assert argv[:3] == ["machinectl", "shell", "sandbox@.host"]
-        assert argv[3:5] == ["/bin/bash", "-c"]
-        assert "systemd-run" not in argv
-        assert "sudo" not in argv
 
     @pytest.mark.parametrize("op", _ALL_OPS)
     def test_operator_rootless_argv_unchanged(
@@ -2435,16 +2345,16 @@ class TestCompileDispatcher:
         assert '--mount type=bind,src="$DIR",dst=/build' in inner
         assert inner.rstrip().endswith('base64 -w0 "$DIR/dispatch"')
 
-    def test_pipe_cmd_prefix_is_auth_mode_independent(
+    def test_compile_crosses_via_unprivileged_pipe_cmd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import subprocess
 
         from core.host_config import MachinectlAuth
 
-        # pipe_cmd ignores machinectl_authentication entirely: the POLKIT
-        # config yields the SAME systemd-run prefix as the SUDO config (the
-        # default _fake_hc()), with no sudo and no machinectl.
+        # compile_dispatcher crosses via the unprivileged ``pipe_cmd`` byte-pipe
+        # (the multi-MB binary frame demands it) — the systemd-run prefix with
+        # no sudo and no machinectl.
         captured: dict[str, object] = {}
 
         def fake_run(
@@ -2454,7 +2364,7 @@ class TestCompileDispatcher:
             return subprocess.CompletedProcess(cmd, 0, _fake_binary_b64(), "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.POLKIT))
+        hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
         compile_dispatcher(str(tmp_path / "out"), hc)
         cmd = cast("list[str]", captured["cmd"])
         assert cmd[:4] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]

@@ -78,8 +78,8 @@ def test_render_command_base_default_delegates_to_describe_ignoring_host_config(
             return None
 
     inst = _Complete()
-    hc_sudo = minimal_host_config("alice", MachinectlAuth.SUDO)
-    hc_polkit = minimal_host_config("bob", MachinectlAuth.POLKIT)
-    assert inst.render_command(hc_sudo) == "identity-line"
-    assert inst.render_command(hc_polkit) == "identity-line"
-    assert inst.render_command(hc_sudo) == inst.describe()
+    hc_alice = minimal_host_config("alice", MachinectlAuth.SUDO)
+    hc_bob = minimal_host_config("bob", MachinectlAuth.SUDO)
+    assert inst.render_command(hc_alice) == "identity-line"
+    assert inst.render_command(hc_bob) == "identity-line"
+    assert inst.render_command(hc_alice) == inst.describe()

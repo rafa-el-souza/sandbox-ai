@@ -15,7 +15,7 @@ re-implemented here; a second copy would diverge and produce spurious WARNs):
 - ``core.setup.l0_identity.parse_sudo_version`` / ``_SUDO_FLOOR`` — the
   V9c-validated sudo floor;
 - ``core.setup.l0_identity.resolve_operator`` — operator resolution precedence;
-- ``core.setup.l3_sudoers_polkit.render_sudoers_rule`` / ``_cmnd_specs`` /
+- ``core.setup.l3_sudoers.render_sudoers_rule`` / ``_cmnd_specs`` /
   ``_OP_NAME_RE`` / ``_sudoers_path`` — the canonical rule renderer (the
   rule-body content audit re-renders via this exact code path);
 - ``core.setup.l2_host_prereqs`` subuid/subgid + group-membership helpers.
@@ -62,8 +62,7 @@ if TYPE_CHECKING:
 
 # Owned root:root drop-ins always present after a base ceremony, with their
 # canonical octal modes (spec "Reserved Namespace File Ownership"). The
-# auth-mode-specific privilege-boundary rule is audited separately (its path +
-# mode depend on SUDO vs POLKIT).
+# privilege-boundary sudoers drop-in is audited separately.
 _RESERVED_DIR = Path("/usr/local/libexec/sandbox-ai")
 
 # Extract each op-name segment from a rendered sudoers rule body. The L3
@@ -255,7 +254,7 @@ def _audit_rule_body(
     module-top NOTE on the import-time cycle).
     """
     from core.setup import l0_identity as l0
-    from core.setup import l3_sudoers_polkit as l3
+    from core.setup import l3_sudoers as l3
 
     sandbox_user = host_config.host.docker_unprivileged_user
     try:
@@ -332,46 +331,9 @@ def _audit_sudo_floor(violations: list[str]) -> None:
     )
 
 
-def _audit_rule_shape_agreement(is_sudo: bool, operator: str, violations: list[str]) -> None:
-    """WARN when the drop-in for the OTHER auth mode is also present (F-022).
-
-    The operator toml's ``machinectl_authentication`` determines which
-    privilege-boundary rule SHOULD be installed. If the opposite-mode rule is
-    *also* on disk, the toml and the installed rule shape disagree (Defect B):
-    the operator likely flipped ``machinectl_authentication`` after a setup run,
-    or ran setup under one mode while configuring the toml for the other — so
-    the operator's runtime commands cross the boundary one way while the rule
-    grants the other. WARN (never FAIL — it is operator-resolvable).
-
-    Reuses L3's path helpers (lazy import — see the module-top NOTE on the
-    import-time cycle).
-    """
-    from core.setup import l3_sudoers_polkit as l3
-
-    if is_sudo:
-        other = l3._POLKIT_RULE_PATH
-        if other.exists():
-            violations.append(
-                f"toml selects SUDO auth but a POLKIT rule is also installed at "
-                f"{other}; the installed rule shape disagrees with "
-                f"machinectl_authentication. Remove the stale rule, or reconcile "
-                f"the toml's auth mode with the rule you intend."
-            )
-    else:
-        other = l3._sudoers_path(operator)
-        if other.exists():
-            violations.append(
-                f"toml selects POLKIT auth but a SUDO sudoers drop-in is also "
-                f"installed at {other}; the installed rule shape disagrees with "
-                f"machinectl_authentication. Remove the stale drop-in, or "
-                f"reconcile the toml's auth mode with the rule you intend."
-            )
-
-
 def check_setup_invariants(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Read-only steady-state audit of setup's owned-namespace artifacts.
@@ -380,18 +342,18 @@ def check_setup_invariants(
     operator-intentional / re-runnable) naming each violated invariant.
 
     Mode-aware (design D2/D5): in ``operator-rootless`` there is no machinectl
-    crossing and no sudoers/polkit privilege-boundary rule, so the drop-in read,
-    the rule-shape-agreement audit, the machinectl-stability audit, the
+    crossing and no sudoers privilege-boundary rule, so the drop-in read,
+    the machinectl-stability audit, the
     rule-body audit, and the sudo-floor audit are ALL skipped — only the
     mode-applicable sub-audits (reserved dir + subid/subgid/bridge-group) run.
     The check itself is NOT mode-skipped (it stays both-mode); it branches
     internally so its applicable invariants still green in operator-rootless.
     """
     from core.setup import l0_identity as l0
-    from core.setup import l3_sudoers_polkit as l3
+    from core.setup import l3_sudoers as l3
 
     del distro
-    host_config = minimal_host_config(user, auth_mode, mode)
+    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
     bridge_group = host_config.host.workspace_bridge_group
     violations: list[str] = []
 
@@ -411,7 +373,7 @@ def check_setup_invariants(
     _audit_subid_and_group(user, operator, bridge_group, violations)
 
     if mode is DockerExecutionMode.OPERATOR_ROOTLESS:
-        # No machinectl crossing / sudoers-or-polkit rule exists in this mode:
+        # No machinectl crossing / sudoers rule exists in this mode:
         # the drop-in read + rule/stability/floor audits are not applicable.
         if not violations:
             return CheckResult(
@@ -431,7 +393,6 @@ def check_setup_invariants(
         )
 
     drop_in_path = l3._drop_in_path(host_config, operator)
-    is_sudo = auth_mode == MachinectlAuth.SUDO
     drop_in_text: str | None
     # ``drop_in_readable`` is False when the drop-in EXISTS but the current
     # (non-root) process cannot read it — the normal case under a plain
@@ -447,24 +408,21 @@ def check_setup_invariants(
         drop_in_text = drop_in_path.read_text()
     except FileNotFoundError:
         drop_in_text = None
-        kind = "sudoers" if is_sudo else "polkit"
         violations.append(
-            f"{kind} drop-in {drop_in_path} missing. Run 'sudo sandbox "
+            f"sudoers drop-in {drop_in_path} missing. Run 'sudo sandbox "
             f"setup' to restore."
         )
     except PermissionError:
         drop_in_text = None
         drop_in_readable = False
 
-    _audit_rule_shape_agreement(is_sudo, operator, violations)
     _audit_daemon_user_no_admin(host_config, violations)
 
-    if is_sudo:
-        _audit_machinectl_stability(host_config, violations)
-        _audit_systemd_run_stability(host_config, drop_in_text, violations)
-        if drop_in_text is not None:
-            _audit_rule_body(host_config, operator, drop_in_text, violations)
-        _audit_sudo_floor(violations)
+    _audit_machinectl_stability(host_config, violations)
+    _audit_systemd_run_stability(host_config, drop_in_text, violations)
+    if drop_in_text is not None:
+        _audit_rule_body(host_config, operator, drop_in_text, violations)
+    _audit_sudo_floor(violations)
 
     if not violations:
         if drop_in_readable:

@@ -131,7 +131,7 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     # these guards (esp. the Finding-H ``test -x dispatch`` guard below) fail
     # OPEN — absent infra read as present → the e2e tests run loud instead of
     # skipping cleanly pre-C-002.
-    echo_probe = [*machinectl_cmd(daemon_user, auth), "/bin/bash", "-c", "echo ok"]
+    echo_probe = [*machinectl_cmd(daemon_user), "/bin/bash", "-c", "echo ok"]
     try:
         Executor().run(echo_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
     except SandboxExecutionError as exc:
@@ -142,7 +142,7 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
 
     pin = IMAGE_REGISTRY["busybox_musl"].pinned
     inspect = [
-        *machinectl_cmd(daemon_user, auth),
+        *machinectl_cmd(daemon_user),
         "/bin/bash",
         "-c",
         f"docker image inspect {pin} > /dev/null",
@@ -155,7 +155,7 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
         pytest.skip(
             f"skipped: busybox image {pin} not present in {daemon_user}'s docker "
             f"(sentinel-recovered: {exc}); pre-pull with "
-            f"`{' '.join(machinectl_cmd(daemon_user, auth))} -- docker pull {pin}`"
+            f"`{' '.join(machinectl_cmd(daemon_user))} -- docker pull {pin}`"
         )
 
     # Post-C-001 the helper primitives cross the boundary as
@@ -167,7 +167,7 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
     # binary as present and fails OPEN, so the e2e tests run loud instead of a
     # clean pre-C-002 skip).
     dispatch_probe = [
-        *machinectl_cmd(daemon_user, auth),
+        *machinectl_cmd(daemon_user),
         "/bin/bash",
         "-c",
         f"test -x {_DISPATCH_BINARY}",

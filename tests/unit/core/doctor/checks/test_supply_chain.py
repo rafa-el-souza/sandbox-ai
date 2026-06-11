@@ -152,7 +152,7 @@ class TestCheckImageDigests:
         assert result.status == "pass"
         assert "tag drift detected" not in result.detail
 
-    def test_auth_mode_threaded_into_host_config(self, monkeypatch: Any) -> None:
+    def test_user_threaded_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
         from core.host_config import MachinectlAuth
 
@@ -163,7 +163,7 @@ class TestCheckImageDigests:
             return _ok()
 
         monkeypatch.setattr("core.dispatch.probe", capture)
-        check_image_digests("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+        check_image_digests("sandbox", None)
 
         assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
+        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO

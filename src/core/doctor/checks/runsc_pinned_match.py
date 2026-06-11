@@ -23,7 +23,6 @@ from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_c
 def check_runsc_pinned_match(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Verify the installed runsc sha512 matches the pinned registry value.
@@ -33,7 +32,7 @@ def check_runsc_pinned_match(
     is threaded only for caller uniformity.
     """
     del distro
-    host_config = minimal_host_config(user, auth_mode, mode)
+    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
     result = binary_install.verify_only("runsc", host_config)
 
     if result.status == "match":

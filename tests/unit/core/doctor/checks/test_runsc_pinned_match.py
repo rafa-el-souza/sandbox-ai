@@ -83,7 +83,7 @@ class TestCheckRunscPinnedMatch:
         result = check_runsc_pinned_match("sandbox", None)
         assert result.status == "pass"
 
-    def test_auth_mode_threaded_into_host_config(self, monkeypatch: Any) -> None:
+    def test_user_threaded_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor.checks.runsc_pinned_match import check_runsc_pinned_match
         from core.host_config import MachinectlAuth
 
@@ -94,6 +94,6 @@ class TestCheckRunscPinnedMatch:
             return _verify("match", "a" * 128, "a" * 128)
 
         monkeypatch.setattr("core.binary_install.verify_only", capture)
-        check_runsc_pinned_match("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+        check_runsc_pinned_match("sandbox", None)
         assert captured["hc"].host.docker_unprivileged_user == "sandbox"
-        assert captured["hc"].host.machinectl_authentication == MachinectlAuth.POLKIT
+        assert captured["hc"].host.machinectl_authentication == MachinectlAuth.SUDO
