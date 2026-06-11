@@ -1,6 +1,13 @@
-# E-005 baseline matrix — `sandbox` command × distro × mode
+# Baseline validation matrix — `sandbox` command × distro × mode
 
-Pre-fix baseline (code `acbd55f`, the clean E-005 unit — no B retry, no C gate). Generated from the per-run `.summary.json` companions via `vmlease summarize`. ✅ PASS · ❌ FAIL.
+The **reference baseline**'s current-state verdict snapshot: `sandbox` command × distro × mode, PASS/FAIL.
+This is a *living* current-state reference, refreshed at durable (shipped) milestones — not a permanent
+freeze (it is held fixed only for the duration of an in-flight change's validation; git `HEAD` is that
+freeze). Verdicts are generated from the per-run `*.summary.json` companions via `vmlease summarize`; each
+mode cites its source run + date below. ✅ PASS · ❌ FAIL.
+
+(Rows are per `sandbox` command; a battery may probe one command more than once — e.g. `status`,
+`workspace list` — and the per-mode totals count every probe run, so they exceed the visible row count.)
 
 ## op-rootless
 
@@ -22,17 +29,23 @@ Pre-fix baseline (code `acbd55f`, the clean E-005 unit — no B retry, no C gate
 
 ## separate-user · SUDO
 
+All green as of C-009 (`sudo systemd-run --pipe` crossing) + C-010 (`dispatch fwd` headless attach). The
+`core-running` and `preflight-crossing-count` rows are the C-009/C-010 verification probes folded into the
+reference baseline.
+
 | command | ubuntu | debian | fedora | arch |
 |---|:--:|:--:|:--:|:--:|
 | `setup` | ✅ | ✅ | ✅ | ✅ |
-| `doctor` | ❌ | ❌ | ✅ | ✅ |
+| `doctor` | ✅ | ✅ | ✅ | ✅ |
 | `init` | ✅ | ✅ | ✅ | ✅ |
 | `status` | ✅ | ✅ | ✅ | ✅ |
 | `workspace list` | ✅ | ✅ | ✅ | ✅ |
 | `workspace add` | ✅ | ✅ | ✅ | ✅ |
 | `workspace rename` | ✅ | ✅ | ✅ | ✅ |
-| `start` | ❌ | ❌ | ✅ | ✅ |
-| `attach` | ❌ | ❌ | ❌ | ❌ |
+| `start` | ✅ | ✅ | ✅ | ✅ |
+| `core-running` | ✅ | ✅ | ✅ | ✅ |
+| `preflight-crossing-count` | ✅ | ✅ | ✅ | ✅ |
+| `attach` | ✅ | ✅ | ✅ | ✅ |
 | `stop` | ✅ | ✅ | ✅ | ✅ |
 | `workspace remove` | ✅ | ✅ | ✅ | ✅ |
 | `workspace restore` | ✅ | ✅ | ✅ | ✅ |
@@ -58,12 +71,12 @@ Pre-fix baseline (code `acbd55f`, the clean E-005 unit — no B retry, no C gate
 
 ## Sources + totals
 
-- **op-rootless** — `results/vmlease-e005-base-oprootless-v3-20260609T134818Z.summary.json` — {'FAIL': 0, 'PASS': 64, 'PASS_NO_ASSERTIONS': 0, 'TIMEOUT': 0}
-- **separate-user · SUDO** — `results/vmlease-e005-base-su-sudo-v2-20260609T143818Z.summary.json` — {'FAIL': 8, 'PASS': 56, 'PASS_NO_ASSERTIONS': 0, 'TIMEOUT': 0}
-- **separate-user · POLKIT** — `results/vmlease-e005-base-su-polkit-20260609T144922Z.summary.json` — {'FAIL': 57, 'PASS': 15, 'PASS_NO_ASSERTIONS': 0, 'TIMEOUT': 0}
+- **op-rootless** — `vmlease-e005-base-oprootless-v3-20260609T134818Z.summary.json` (2026-06-09) — {FAIL: 0, PASS: 64} — battery unchanged since (no C-009/C-010 delta touches the op-rootless path).
+- **separate-user · SUDO** — `vmlease-c010acc1-20260610T190646Z.summary.json` (2026-06-10) — {FAIL: 0, PASS: 72} — the refreshed reference baseline (C-009 + C-010 deltas) run green across all 4 distros.
+- **separate-user · POLKIT** — `vmlease-e005-base-su-polkit-20260609T144922Z.summary.json` (2026-06-09) — {FAIL: 57, PASS: 15} — battery unchanged; the reds are a durable truth (see below).
 
-## Reading the reds (all confirmed real, not probe artifacts)
+## Reading the matrix
 
-- **op-rootless:** 64/64 green — the apt/CI mode, no privilege crossing.
-- **separate-user · SUDO:** `start`/`doctor` fail on **apt (ubuntu/debian)** — the F-063 `machinectl` PTY empty-crossing (`user-early` vs `user-light`, captured in the probe `_review` tokens); fedora/arch green. `attach` fails on **all 4** — its unprivileged `systemd-run` ProxyCommand needs `manage-units` polkit auth, **headlessly blocked (F-060)**, independent of the apt bug. `setup` **converges on all 4** (incl. apt) — refines F-055: the apt failure is runtime-only, not a setup wall.
-- **separate-user · POLKIT:** `setup` refuses polkit (correct); even with the genuine `machine1.shell` rule + polkitd running, every crossing op fails **headlessly** (*interactive authentication required*) — F-060 confirmed with the `polkit1`/`polkit2` confounds removed. (debian also lacks `polkit.service` on the minimal image.)
+- **op-rootless:** green on every command × distro — the no-privilege-crossing mode (apt/CI). No C-009/C-010 delta applies.
+- **separate-user · SUDO:** **green across the board.** C-009 moved the SUDO-mode dispatcher-op crossing from the `machinectl` PTY (which empty-crossed on apt — F-063) to `sudo systemd-run --pipe`, flipping the apt `start`/`doctor` cells; C-010 routed `attach`'s `/fwd` through the dispatcher so the per-op sudoers `Cmnd_Spec` authorizes it headlessly (F-060), flipping `attach` on all 4. `core-running` (non-PTY `sudo -u` read) and `preflight-crossing-count` (8→2 burst-collapse) are the verification probes that pin those fixes.
+- **separate-user · POLKIT:** red is the **durable** state, not a pending bug. `setup` correctly refuses to install a polkit rule (it runs as root and crosses via sudo); and even with a genuine `machine1.shell` rule + polkitd running, every crossing op needs interactive `manage-units` authorization, which is **headless-blocked** by design (F-060) — POLKIT-mode crossings require an interactive agent. (debian also lacks `polkit.service` on the minimal image, hence its `setup` ❌.)
