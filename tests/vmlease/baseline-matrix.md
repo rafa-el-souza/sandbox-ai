@@ -53,8 +53,8 @@ reference baseline.
 
 ## Sources + totals
 
-- **op-rootless** — `vmlease-e005-base-oprootless-v3-20260609T134818Z.summary.json` (2026-06-09) — {FAIL: 0, PASS: 64} — battery unchanged since (no C-009/C-010 delta touches the op-rootless path).
-- **separate-user · SUDO** — `vmlease-c010acc1-20260610T190646Z.summary.json` (2026-06-10) — {FAIL: 0, PASS: 72} — the refreshed reference baseline (C-009 + C-010 deltas) run green across all 4 distros.
+- **op-rootless** — `vmlease-c012-base-oprootless-20260611T204900Z.summary.json` (2026-06-11) — {FAIL: 0, PASS: 64} — re-run on the C-012 (`retire-polkit-mode`) tree; green across all 4 distros (the POLKIT removal does not touch the op-rootless path).
+- **separate-user · SUDO** — `vmlease-c012-base-su-sudo-20260611T211500Z.summary.json` (2026-06-11, debian/fedora/arch) + `vmlease-c012-su-sudo-ubuntu-recheck-20260611T212500Z.summary.json` (2026-06-11, ubuntu) — {FAIL: 0, PASS: 72} — re-run on the C-012 tree; green across all 4 distros. (ubuntu was re-confirmed in a single-distro re-run after a transient `apk add` package-download failure during the docker image build on the first attempt — an environmental build-time flake, unrelated to sandbox-ai.)
 
 ## Reading the matrix
 
