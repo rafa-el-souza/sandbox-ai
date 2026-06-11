@@ -38,11 +38,6 @@ def test_context_is_frozen() -> None:
         setattr(ctx, field_name, "other")
 
 
-def test_context_carries_sudo_auth() -> None:
-    ctx = _make_ctx(MachinectlAuth.SUDO)
-    assert ctx.auth == MachinectlAuth.SUDO
-
-
 def test_docker_execution_mode_defaults_to_separate_user() -> None:
     ctx = _make_ctx()
     assert ctx.docker_execution_mode == DockerExecutionMode.SEPARATE_USER

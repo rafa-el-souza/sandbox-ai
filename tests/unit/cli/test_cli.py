@@ -3921,14 +3921,6 @@ class TestInitAuthProbe:
             assert subset_args[1] == operator
             assert subset_kwargs["mode"] is DockerExecutionMode.OPERATOR_ROOTLESS
 
-    def test_invalid_machinectl_auth_value(self, runner: CliRunner) -> None:
-        """Invalid --machinectl-auth value exits with error."""
-        from cli.main import app
-
-        result = runner.invoke(app, ["init", "oprl", "--machinectl-auth", "invalid"])
-        assert result.exit_code == 1
-        assert "invalid" in result.output.lower()
-
     def test_probe_file_not_found_consolidated_into_failure_branch(self, runner: CliRunner) -> None:
         """The prior FileNotFoundError ("command not found on PATH") case still
         routes through the not-ok/not-timeout branch (Q8 narrowing —

@@ -102,7 +102,7 @@ echo PREP_TOML_SEEDED_OK
 
 [[probe]]
 id = "setup"
-title = "separate-user setup: `sudo … script -qec 'sandbox setup --docker-execution-mode separate-user --docker-unprivileged-user sandbox --machinectl-auth sudo --yes'`"
+title = "separate-user setup: `sudo … script -qec 'sandbox setup --docker-execution-mode separate-user --docker-unprivileged-user sandbox --yes'`"
 tag = "mutating:host-root"
 timeout = 1200
 classifies = "Provision a converged separate-user host: exit 0 + 'Setup complete' + the setup-state marker + the dedicated `sandbox` daemon user. Sentinel guard records reality (the apt/debian-13 separate-user empty-crossing is EXPECTED to trip)."
@@ -111,7 +111,7 @@ VENV="$HOME/sandbox-ai/.venv/bin"
 rc=0
 echo '== separate-user setup via sudo; capture the FULL tty stream with script(1) =='
 rm -f /tmp/setup.out
-sudo env PATH="$VENV:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" script -qec "sandbox setup --docker-execution-mode separate-user --docker-unprivileged-user sandbox --machinectl-auth sudo --yes" /tmp/setup.out
+sudo env PATH="$VENV:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" script -qec "sandbox setup --docker-execution-mode separate-user --docker-unprivileged-user sandbox --yes" /tmp/setup.out
 RC=$?
 echo "setup exit: $RC (0 expected)"
 tail -30 /tmp/setup.out
@@ -159,13 +159,13 @@ exit $rc
 
 [[probe]]
 id = "doctor"
-title = "`sandbox doctor --user sandbox --machinectl-auth sudo`: host readiness all green"
+title = "`sandbox doctor --user sandbox`: host readiness all green"
 tag = "mutating:host-root"
-classifies = "`sandbox doctor --user sandbox --machinectl-auth sudo` -> exit 0 (every readiness check green) on the separate-user host."
+classifies = "`sandbox doctor --user sandbox` -> exit 0 (every readiness check green) on the separate-user host."
 run = '''
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
 rc=0
-sandbox doctor --user sandbox --machinectl-auth sudo > /tmp/doctor.out 2>&1
+sandbox doctor --user sandbox > /tmp/doctor.out 2>&1
 DRC=$?
 echo "doctor exit: $DRC (0 expected)"
 cat /tmp/doctor.out

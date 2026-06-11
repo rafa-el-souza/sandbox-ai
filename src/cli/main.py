@@ -2242,11 +2242,9 @@ class _SetupFlagRefused(Exception):
     """Setup refuses an inapplicable flag or a dangerous value (D9, fail-closed).
 
     Raised before any mutation when a flag does not apply in the active mode
-    (e.g. ``--docker-unprivileged-user`` / ``--machinectl-auth`` in
-    operator-rootless), or when a flag carries a dangerous value (a resolved
-    daemon owner of root, or ``--operator`` naming someone other than the
-    invoker in operator-rootless), or when ``--machinectl-auth`` carries an
-    invalid value.
+    (e.g. ``--docker-unprivileged-user`` in operator-rootless), or when a flag
+    carries a dangerous value (a resolved daemon owner of root, or ``--operator``
+    naming someone other than the invoker in operator-rootless).
     """
 
 
@@ -2294,11 +2292,6 @@ def setup(
     enable_aide_integration: bool = typer.Option(
         False, "--enable-aide-integration", help="Opt in to the AIDE config drop-in phase"
     ),
-    machinectl_auth: str | None = typer.Option(
-        None,
-        "--machinectl-auth",
-        help="machinectl auth mode: 'sudo' (default; only supported mode)",
-    ),
     docker_execution_mode: str | None = typer.Option(
         None,
         "--docker-execution-mode",
@@ -2326,7 +2319,6 @@ def setup(
     try:
         ctx = _build_setup_context_with_operator(
             operator,
-            machinectl_auth,
             mode_flag=docker_execution_mode,
             docker_unprivileged_user=docker_unprivileged_user,
             workspace_bridge_group=workspace_bridge_group,
@@ -2353,7 +2345,6 @@ def setup(
             ctx.host_config,
             operator=ctx.operator,
             operator_flag=operator,
-            machinectl_auth_flag=machinectl_auth,
             docker_unprivileged_user=docker_unprivileged_user,
         )
     except _SetupFlagRefused as exc:
@@ -2462,22 +2453,13 @@ def _bootstrap_host(
         raise typer.Exit(code=1) from None
 
 
-def _resolve_setup_auth(machinectl_auth_flag: str | None) -> MachinectlAuth:
+def _resolve_setup_auth() -> MachinectlAuth:
     """Resolve setup's effective auth mode (D8 — toml-free).
 
-    Precedence: the ``--machinectl-auth`` flag (explicit operator intent) wins;
-    else the SUDO default. Setup is toml-free (D8) — it never reads the operator
-    toml — so there is no toml fallback channel for the auth mode. An invalid
-    value (anything other than ``sudo``) is refused as a generic invalid-enum
-    value BEFORE any phase runs.
+    The only supported auth mode is SUDO, so setup unconditionally provisions
+    :data:`MachinectlAuth.SUDO`. Setup is toml-free (D8) — it never reads the
+    operator toml — so there is no toml channel for the auth mode either.
     """
-    if machinectl_auth_flag is not None:
-        try:
-            return MachinectlAuth(machinectl_auth_flag)
-        except ValueError:
-            raise _SetupFlagRefused(
-                f"Invalid --machinectl-auth value: '{machinectl_auth_flag}'. Must be 'sudo'."
-            ) from None
     return MachinectlAuth.SUDO
 
 
@@ -2514,8 +2496,7 @@ def _parse_mode_flag(mode_flag: str | None) -> DockerExecutionMode | None:
     """Parse the ``--docker-execution-mode`` string into the enum, or ``None``.
 
     Returns ``None`` when the flag is absent. An unrecognized value is refused
-    (mirrors :func:`_resolve_setup_auth`'s invalid-value handling) before any
-    mutation via :class:`_SetupFlagRefused`.
+    before any mutation via :class:`_SetupFlagRefused`.
     """
     if mode_flag is None:
         return None
@@ -2558,7 +2539,6 @@ def _resolve_setup_operator(operator_flag: str | None) -> str:
 
 def _build_setup_context_with_operator(
     operator_flag: str | None,
-    machinectl_auth_flag: str | None = None,
     *,
     mode_flag: str | None = None,
     docker_unprivileged_user: str = "sandbox",
@@ -2580,8 +2560,8 @@ def _build_setup_context_with_operator(
     fallback for operator-run op-rootless), threading ``--operator`` (never a toml).
 
     This builder is pure resolution — it mutates nothing and raises only the
-    resolution refusals (:class:`_SetupFlagRefused` invalid auth value,
-    :class:`_SetupModeConflict` marker mismatch, :class:`OperatorResolutionError`).
+    resolution refusals (:class:`_SetupModeConflict` marker mismatch,
+    :class:`OperatorResolutionError`).
     The refuse-all FLAG guards (D9 — inapplicable flag / dangerous resolved owner /
     cross-operator owner) are NOT run here: :func:`setup` runs them via
     :func:`_guard_setup_flags` AFTER the entry-identity gate
@@ -2589,7 +2569,7 @@ def _build_setup_context_with_operator(
     operator-rootless surfaces the actionable "must NOT be run as root" message
     rather than the generic owner-root refusal (finding 8.7).
     """
-    auth = _resolve_setup_auth(machinectl_auth_flag)
+    auth = _resolve_setup_auth()
     operator = _resolve_setup_operator(operator_flag)
     mode = resolve_effective_mode(operator, _parse_mode_flag(mode_flag))
     host_config = HostConfig(
@@ -2610,7 +2590,6 @@ def _guard_setup_flags(
     *,
     operator: str,
     operator_flag: str | None,
-    machinectl_auth_flag: str | None,
     docker_unprivileged_user: str,
 ) -> None:
     """Refuse-all guards for setup flags (D9, fail-closed, pre-mutation).
@@ -2619,9 +2598,9 @@ def _guard_setup_flags(
     (:func:`_refuse_wrong_setup_identity`, §8-C) so the euid root-refusal surfaces
     its actionable message before the generic owner-root check here (finding 8.7).
 
-    Inapplicable-flag guard: in operator-rootless mode neither a non-default
-    ``--docker-unprivileged-user`` nor ``--machinectl-auth`` applies (there is no
-    dedicated daemon user and no crossing to authorize). Dangerous-value guard:
+    Inapplicable-flag guard: in operator-rootless mode a non-default
+    ``--docker-unprivileged-user`` does not apply (there is no dedicated daemon
+    user). Dangerous-value guard:
     a resolved daemon owner of ``root`` (or uid 0) — the residual root defense for
     a non-euid-0 owner that still resolves to root (e.g. ``--docker-unprivileged-user
     root`` in separate-user; the ``sudo`` op-rootless euid case is already refused
@@ -2634,11 +2613,6 @@ def _guard_setup_flags(
             raise _SetupFlagRefused(
                 "--docker-unprivileged-user does not apply in operator-rootless mode "
                 "(the rootless daemon runs as the operator's own user)."
-            )
-        if machinectl_auth_flag is not None:
-            raise _SetupFlagRefused(
-                "--machinectl-auth does not apply in operator-rootless mode "
-                "(there is no privilege-boundary crossing to authorize)."
             )
         if operator_flag is not None and operator_flag != getpass.getuser():
             raise _SetupFlagRefused(
@@ -2919,9 +2893,6 @@ def init(
     inst: str = typer.Argument(..., help="Instance name (1-30 chars, [a-z0-9_-])"),
     copy: list[str] = _COPY_FLAG,
     empty: list[str] = _EMPTY_FLAG,
-    machinectl_auth: str | None = typer.Option(
-        None, "--machinectl-auth", help="machinectl auth mode: 'sudo'"
-    ),
     git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
@@ -2976,21 +2947,12 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    # Resolution: machinectl_authentication (--machinectl-auth flag → host config → default sudo)
-    resolved_auth: MachinectlAuth
-    if machinectl_auth is not None:
-        try:
-            resolved_auth = MachinectlAuth(machinectl_auth)
-        except ValueError:
-            console.print(
-                f"Invalid --machinectl-auth value: '{machinectl_auth}'. Must be 'sudo'.",
-                style="red",
-            )
-            raise typer.Exit(code=1) from None
-    elif project_config is not None:
-        resolved_auth = project_config.host.machinectl_authentication
-    else:
-        resolved_auth = MachinectlAuth.SUDO
+    # Resolution: machinectl_authentication (host config → default sudo)
+    resolved_auth = (
+        project_config.host.machinectl_authentication
+        if project_config is not None
+        else MachinectlAuth.SUDO
+    )
 
     # Init-time auth mode probe (D5). This is a *probe* callsite: it must
     # branch (reachable → continue; unreachable/timeout → guidance + exit 1),

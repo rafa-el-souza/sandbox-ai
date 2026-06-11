@@ -22,7 +22,7 @@ bundles differ only in how `setup` provisions the host:
 | Bundle | Mode | Probes |
 |---|---|--:|
 | `baseline-op-rootless/` | operator-rootless (`setup --docker-execution-mode operator-rootless`, run as the operator) | 16 |
-| `baseline-separate-user-sudo/` | separate-user + sudo (`--docker-execution-mode separate-user --machinectl-auth sudo`) | 18 |
+| `baseline-separate-user-sudo/` | separate-user + sudo (`--docker-execution-mode separate-user`) | 18 |
 
 Lifecycle order (after `PREP`): `setup → init → doctor → status → workspace list/add/rename → start →
 status → attach → stop → workspace remove/restore → destroy`. Workspace mutations run while stopped.

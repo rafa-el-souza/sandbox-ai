@@ -1177,12 +1177,12 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
     assert ctx.operator == "dev"
 
 
-# ── --machinectl-auth input (sudo-only) ──────────────────────────────────────
+# ── auth-mode resolution (sudo-only) ─────────────────────────────────────────
 
 
 @pytest.mark.no_host_config_mock
-def test_machinectl_auth_sudo_flag_accepted(runner: CliRunner) -> None:
-    """`--machinectl-auth sudo` is the explicit SUDO selection; setup proceeds."""
+def test_setup_resolves_sudo_auth_unconditionally(runner: CliRunner) -> None:
+    """Setup always provisions SUDO auth (the only supported mode)."""
     from core.host_config import MachinectlAuth
 
     phases = [_phase("l0")]
@@ -1208,26 +1208,10 @@ def test_machinectl_auth_sudo_flag_accepted(runner: CliRunner) -> None:
                 "setup",
                 "--docker-execution-mode",
                 "separate-user",
-                "--machinectl-auth",
-                "sudo",
             ],
         )
     assert result.exit_code == 0
     assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
-
-
-@pytest.mark.no_host_config_mock
-def test_machinectl_auth_invalid_value_refused(runner: CliRunner) -> None:
-    """An out-of-domain `--machinectl-auth` value is refused with a clear message."""
-    with (
-        patch("cli.main.os.geteuid", return_value=0),
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.run_plan_pass") as plan_mock,
-    ):
-        result = runner.invoke(app, ["setup", "--machinectl-auth", "bogus"])
-    assert result.exit_code == 1
-    assert "Invalid --machinectl-auth value" in result.output
-    plan_mock.assert_not_called()
 
 
 # ── sticky-opt-in extras inclusion is wired into the phase list ──────────────
@@ -1344,7 +1328,6 @@ def test_invalid_mode_flag_refused(runner: CliRunner) -> None:
 
 def _build_and_guard(
     operator_flag: str | None = None,
-    machinectl_auth_flag: str | None = None,
     *,
     mode_flag: str | None = None,
     docker_unprivileged_user: str = "sandbox",
@@ -1358,7 +1341,6 @@ def _build_and_guard(
     """
     ctx = _build_setup_context_with_operator(
         operator_flag,
-        machinectl_auth_flag,
         mode_flag=mode_flag,
         docker_unprivileged_user=docker_unprivileged_user,
         workspace_bridge_group=workspace_bridge_group,
@@ -1367,7 +1349,6 @@ def _build_and_guard(
         ctx.host_config,
         operator=ctx.operator,
         operator_flag=operator_flag,
-        machinectl_auth_flag=machinectl_auth_flag,
         docker_unprivileged_user=docker_unprivileged_user,
     )
     return ctx
@@ -1380,7 +1361,6 @@ def test_flags_threaded_into_host_config() -> None:
         patch("cli.main.read_mode", return_value=None),
     ):
         ctx = _build_setup_context_with_operator(
-            None,
             None,
             mode_flag="separate-user",
             docker_unprivileged_user="customsvc",
@@ -1402,7 +1382,7 @@ def test_mode_flag_threaded_into_host_config() -> None:
         patch("core.host_config.getpass.getuser", return_value="dev"),
     ):
         ctx = _build_setup_context_with_operator(
-            None, None, mode_flag="operator-rootless"
+            None, mode_flag="operator-rootless"
         )
     assert (
         ctx.host_config.host.docker_execution_mode
@@ -1421,30 +1401,12 @@ def test_guard_refuses_docker_unprivileged_user_in_operator_rootless() -> None:
     ):
         _build_and_guard(
             None,
-            None,
             mode_flag="operator-rootless",
             docker_unprivileged_user="foo",
         )
     assert "--docker-unprivileged-user does not apply in operator-rootless" in str(
         exc.value
     )
-
-
-def test_guard_refuses_machinectl_auth_in_operator_rootless() -> None:
-    """--machinectl-auth in op-rootless is refused (inapplicable)."""
-    with (
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.read_mode", return_value=None),
-        patch("cli.main.getpass.getuser", return_value="dev"),
-        patch("core.host_config.getpass.getuser", return_value="dev"),
-        pytest.raises(_SetupFlagRefused) as exc,
-    ):
-        _build_and_guard(
-            None,
-            "sudo",
-            mode_flag="operator-rootless",
-        )
-    assert "--machinectl-auth does not apply in operator-rootless" in str(exc.value)
 
 
 def test_guard_refuses_operator_other_than_invoker_in_operator_rootless() -> None:
@@ -1457,7 +1419,6 @@ def test_guard_refuses_operator_other_than_invoker_in_operator_rootless() -> Non
     ):
         _build_and_guard(
             "someone-else",
-            None,
             mode_flag="operator-rootless",
         )
     assert "does not match the invoking user" in str(exc.value)
@@ -1471,7 +1432,6 @@ def test_guard_refuses_root_daemon_owner_separate_user() -> None:
         pytest.raises(_SetupFlagRefused) as exc,
     ):
         _build_and_guard(
-            None,
             None,
             mode_flag="separate-user",
             docker_unprivileged_user="root",
@@ -1492,7 +1452,6 @@ def test_guard_refuses_root_aliased_daemon_owner() -> None:
     ):
         _build_and_guard(
             None,
-            None,
             mode_flag="separate-user",
             docker_unprivileged_user="toor",
         )
@@ -1511,7 +1470,6 @@ def test_guard_unknown_daemon_owner_user_not_treated_as_root() -> None:
         patch("cli.main.pwd.getpwnam", side_effect=_missing),
     ):
         ctx = _build_and_guard(
-            None,
             None,
             mode_flag="separate-user",
             docker_unprivileged_user="brand-new-svc",
