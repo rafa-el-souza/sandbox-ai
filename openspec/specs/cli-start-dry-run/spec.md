@@ -70,7 +70,7 @@ The system SHALL verify that all files referenced by the hydration pipeline exis
 - **THEN** dry-run reports the missing file path and exits with code 1
 
 ### Requirement: Command Preview
-The system SHALL display the exact subprocess commands that would be executed during a real start. Command previews SHALL reflect the configured `machinectl_authentication` mode — omitting the `sudo` prefix when mode is `"polkit"`. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately, in the canonical phase order owned by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`:
+The system SHALL display the exact subprocess commands that would be executed during a real start. The preview SHALL enumerate each ownership-sensitive phase's planned operations separately, in the canonical phase order owned by `orchestrator-volumes`'s `Phase Order Contract for Ownership-Sensitive Phases`:
 
 - per-workspace shared-group operations from `_workspace_shared_group_plan` (fanned out per workspace in `[workspaces]`);
 - named-ACL grants from `_acl_grant_plan` (instance-dir set + helper-recipe parent grants + per-workspace named-ACL effective + default);
@@ -99,10 +99,6 @@ The handover command displayed by the preview SHALL likewise be obtained from th
 #### Scenario: Handover command displayed (sudo mode)
 - **WHEN** dry-run completes validation and `machinectl_authentication` is `"sudo"`
 - **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -F /dev/null -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no -o ProxyCommand="sudo systemd-run -q --pipe --uid=<sbuser> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
-
-#### Scenario: Handover command displayed (polkit mode)
-- **WHEN** dry-run completes validation and `machinectl_authentication` is `"polkit"`
-- **THEN** the preview shows the same command as the sudo-mode scenario except the `ProxyCommand` value carries no `sudo` prefix (the unprivileged `pipe_cmd` crossing; the `dispatch fwd <wire>` payload is identical, per `cli-attach`)
 
 #### Scenario: Named-ACL grant commands displayed (per-workspace)
 - **WHEN** dry-run completes validation for an instance with workspaces `main` and `scratch`

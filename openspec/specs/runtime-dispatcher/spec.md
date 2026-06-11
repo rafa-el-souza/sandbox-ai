@@ -38,7 +38,7 @@ Any other op MUST be rejected by the dispatcher with exit code non-zero and a cl
 
 Every op SHALL additionally accept a single `--check` flag as its lone argument: when present, the dispatcher SHALL validate the op name, log the invocation to journald (with `check=1`), and exit 0 WITHOUT performing the op's side effect. The `--check` flag enables the sister change `sandbox-setup`'s L3a per-op probe (validates each op in `SANDBOX_OPS` resolves to MATCH at the sudoers layer without actually running compose-up / docker / helper-chown / the preflight bundle). This applies uniformly to the streaming op: `dispatch fwd --check` (lone `--check`) rides the **framed** path like every other op — only `fwd`'s real stream invocation (op + wire args) is frameless, per the "Streaming Op Class" requirement — so the L3a/L8 probe protocol stays uniform across all twelve ops.
 
-**Sister-change carry-forward (C-002 `sandbox-setup` L3a — F-004 / F-018 silent-footgun class).** When the sister change's L3a per-op probe (and the L8 fresh-session re-probe, and `core.dispatch.invoke()`/`probe()` at runtime **in separate-user mode**) crosses the operator's privilege-boundary rule to run `dispatch <op> [--check]`, it MUST recover the inner exit via the **dispatcher-emitted begin/exit framing** (`core.executor.Executor(...).run(..., framed=True)`), per the "Dispatcher-Emitted Exit Framing" requirement — NOT via an orchestrator-injected `sentinel=True` wrap, and NOT via the `systemd-run --pipe` native exit (unreliable — F-064). In operator-rootless mode `invoke()`/`probe()` take the local path with native exit recovery (no crossing, no framing), per the "Operator-Rootless Local Invocation Mode" and "Native Exit Recovery for Operator-Rootless invoke/probe" requirements. The wrap injected `{ <cmd>; }; echo __SANDBOX_EXIT_<tok>_$?` INTO the crossed payload, which no per-op `Cmnd_Spec` could match, so it silently broke the probe (and the runtime grant) for every SUDO-mode password-operator while NOPASSWD-blanket / POLKIT operators masked it (F-018). `framed=True` keeps the crossed payload the bare `dispatch <op>` the rule matches and recovers the exit from the dispatcher's nonce-bound trailer. Both `machinectl shell` (PTY-masked) and `sudo systemd-run --pipe` (native exit unreliable, F-064) fail to faithfully propagate the inner `/bin/bash -c` exit, so without this framing a dispatcher *reject* (op-name validation failure → non-zero exit) would be masked as a sudoers *MATCH* — the probe would report a misconfigured rule as healthy. L3a MUST branch on the **recovered inner exit code**, never on journald presence: journald (the `check=1` structured entry) is the **audit channel**, not a control-flow signal — a journald entry is written for both the short-circuit-success path and is independent of the process exit, so presence/absence of a journal line says nothing about whether the rule resolved to MATCH. (The root setup-phase crossings L5/L6/L7 run as root with no rule to match and so keep the orchestrator-injected `sentinel=True` wrap, now token-validated per the `orchestrator-executor` capability.)
+**Sister-change carry-forward (C-002 `sandbox-setup` L3a — F-004 / F-018 silent-footgun class).** When the sister change's L3a per-op probe (and the L8 fresh-session re-probe, and `core.dispatch.invoke()`/`probe()` at runtime **in separate-user mode**) crosses the operator's privilege-boundary rule to run `dispatch <op> [--check]`, it MUST recover the inner exit via the **dispatcher-emitted begin/exit framing** (`core.executor.Executor(...).run(..., framed=True)`), per the "Dispatcher-Emitted Exit Framing" requirement — NOT via an orchestrator-injected `sentinel=True` wrap, and NOT via the `systemd-run --pipe` native exit (unreliable — F-064). In operator-rootless mode `invoke()`/`probe()` take the local path with native exit recovery (no crossing, no framing), per the "Operator-Rootless Local Invocation Mode" and "Native Exit Recovery for Operator-Rootless invoke/probe" requirements. The wrap injected `{ <cmd>; }; echo __SANDBOX_EXIT_<tok>_$?` INTO the crossed payload, which no per-op `Cmnd_Spec` could match, so it silently broke the probe (and the runtime grant) for every SUDO-mode password-operator while NOPASSWD-blanket operators masked it (F-018). `framed=True` keeps the crossed payload the bare `dispatch <op>` the rule matches and recovers the exit from the dispatcher's nonce-bound trailer. `sudo systemd-run --pipe` fails to faithfully propagate the inner `/bin/bash -c` exit (native exit unreliable, F-064), so without this framing a dispatcher *reject* (op-name validation failure → non-zero exit) would be masked as a sudoers *MATCH* — the probe would report a misconfigured rule as healthy. L3a MUST branch on the **recovered inner exit code**, never on journald presence: journald (the `check=1` structured entry) is the **audit channel**, not a control-flow signal — a journald entry is written for both the short-circuit-success path and is independent of the process exit, so presence/absence of a journal line says nothing about whether the rule resolved to MATCH. (The root setup-phase crossings L5/L6/L7 run as root with no rule to match and so keep the orchestrator-injected `sentinel=True` wrap, now token-validated per the `orchestrator-executor` capability.)
 
 #### Scenario: Known op accepted
 - **WHEN** the dispatcher is invoked as `/usr/local/libexec/sandbox-ai/dispatch auth-probe`
@@ -138,7 +138,7 @@ For the compose ops, `core.dispatch.invoke(...)` SHALL, AFTER per-op validation 
     --project <P> --env-file <E> --compose-file <f1> [--compose-file <f2> …] [--volumes]
 ```
 
-`--volumes` appears only for `compose-down` when the destroy path requested it. The typed `invoke()` API (and thus the "Typed Op Surface" and "Per-Op Argument Validation" requirements) is unchanged: callers pass `[<inst>]` (plus `["--volumes"]` for a `compose-down` destroy); the named-flag expansion is internal to `invoke()` and occurs only after the typed args validate. The SUDO-mode crossing carrying this wire (and every other op's bare payload) is now `sudo_pipe_cmd(user)` (the privileged byte-pipe, C-009 design D2), not `machinectl_cmd(user, SUDO)`; the POLKIT-mode crossing is still `machinectl_cmd(user, POLKIT)`. The wire form itself is identical across crossings — only the prefix differs.
+`--volumes` appears only for `compose-down` when the destroy path requested it. The typed `invoke()` API (and thus the "Typed Op Surface" and "Per-Op Argument Validation" requirements) is unchanged: callers pass `[<inst>]` (plus `["--volumes"]` for a `compose-down` destroy); the named-flag expansion is internal to `invoke()` and occurs only after the typed args validate. The separate-user crossing carrying this wire (and every other op's bare payload) is `sudo_pipe_cmd(user)` (the privileged byte-pipe, C-009 design D2), not `machinectl_cmd(user)`. The wire form itself is identical across crossings.
 
 The dispatcher binary SHALL, for a compose op, parse the named flags (`--project` once, `--env-file` once, `--compose-file` one-or-more, `--volumes` boolean for `compose-down` only), reject any unrecognized flag or a flag illegal for the op, and construct the target argv with an **op-hardcoded verb** that is NEVER taken from the wire. The dispatcher SHALL NOT re-derive `<P>`, the compose-file paths, or `<E>`.
 
@@ -182,7 +182,7 @@ Any failure SHALL cause a non-zero exit with stderr naming the offending operand
 
 #### Scenario: invoke() expands compose-up to the named-flag wire form
 - **WHEN** `core.dispatch.invoke("compose-up", ["myinst"], host_config)` is called for a registered instance under separate-user + SUDO auth
-- **THEN** the command crossed via `sudo_pipe_cmd(user)` is `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-up myinst --project <P> --env-file <E> --compose-file <f1> …"]` where `<P>`, `<E>`, and each `<f>` are the operator-side-resolved project name, `.sandbox.env` path, and compose-file paths for `myinst` (under POLKIT the same wire crosses via `machinectl_cmd(user, POLKIT)`)
+- **THEN** the command crossed via `sudo_pipe_cmd(user)` is `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-up myinst --project <P> --env-file <E> --compose-file <f1> …"]` where `<P>`, `<E>`, and each `<f>` are the operator-side-resolved project name, `.sandbox.env` path, and compose-file paths for `myinst`
 
 #### Scenario: compose-down destroy carries --volumes in the wire form
 - **WHEN** `core.dispatch.invoke("compose-down", ["myinst", "--volumes"], host_config)` is called
@@ -309,7 +309,7 @@ After installation, the dispatcher binary SHALL carry the immutable file attribu
 
 ### Requirement: Dispatcher-Emitted Exit Framing
 
-`machinectl shell` does NOT propagate the inner `/bin/bash -c` exit code (it exits 0 even when the payload fails), so the inner exit must be recovered out-of-band. The recovery framing SHALL be emitted **by the dispatcher itself**, AFTER sudo/polkit has authorized the bare `dispatch <op>` crossing — NOT injected into the crossed payload by the orchestrator. This keeps the crossed (authorized) command the bare `dispatch <op> [args]` that the per-op `Cmnd_Spec` matches; an orchestrator-injected wrap (`{ <cmd>; }; echo __SANDBOX_EXIT_…`) made the authorized command unmatchable and silently broke every op for a SUDO-mode password-operator (F-018).
+`machinectl shell` does NOT propagate the inner `/bin/bash -c` exit code (it exits 0 even when the payload fails), and the native `systemd-run --pipe` exit is likewise unreliable (F-064), so the inner exit must be recovered out-of-band. The recovery framing SHALL be emitted **by the dispatcher itself**, AFTER sudo has authorized the bare `dispatch <op>` crossing — NOT injected into the crossed payload by the orchestrator. This keeps the crossed (authorized) command the bare `dispatch <op> [args]` that the per-op `Cmnd_Spec` matches; an orchestrator-injected wrap (`{ <cmd>; }; echo __SANDBOX_EXIT_…`) made the authorized command unmatchable and silently broke every op for a SUDO-mode password-operator (F-018).
 
 The dispatcher SHALL:
 
@@ -337,7 +337,7 @@ The nonce binds the trailer: untrusted op output (a malicious image, `docker-man
 
 When `host_config.host.docker_execution_mode == operator-rootless`, `core.dispatch.build_invocation(op, args, host_config)` SHALL return the op's target-argv **directly** — the same `["/bin/bash", "-c", "<inner>"]` (or hardened `docker run`) produced by the existing per-op target-argv builder — with **no `machinectl_cmd(...)` prefix** and **no `<dispatch-binary> <op>` indirection**. The Go dispatcher binary SHALL NOT be invoked in this mode. The twelve-op surface, per-op argument validators, and per-op target-argv builders SHALL be reused unchanged across both modes. The operator-rootless path SHALL still perform the same upstream steps before the builder as the `separate-user` path — per-op argument validation AND, for the compose ops, the Q6 operator-side wire-expansion (`_expand_compose_wire`, which resolves dev-context project/compose-file/env-file state the pure builder cannot re-derive) — so that **only the crossing prefix is dropped**, not the validation/expansion pipeline. (The streaming op `fwd` is not reachable through `build_invocation`/`invoke()`/`probe()` in either mode; its operator-rootless form — the bare target argv with no dispatcher indirection — is owned by the "Streaming ProxyCommand Entrypoint" requirement and mirrors exactly this requirement's no-indirection local shape.)
 
-In `separate-user` mode `build_invocation` behavior SHALL keep the bare `dispatch <op>` payload, with the crossing prefix selected by auth mode: SUDO → `sudo_pipe_cmd(user)` (the privileged byte-pipe, C-009 design D2); POLKIT → `machinectl_cmd(user, POLKIT)` (unchanged).
+In `separate-user` mode `build_invocation` behavior SHALL keep the bare `dispatch <op>` payload, crossed via `sudo_pipe_cmd(user)` (the privileged byte-pipe, C-009 design D2).
 
 #### Scenario: build_invocation emits bare argv in operator-rootless mode
 
@@ -346,13 +346,8 @@ In `separate-user` mode `build_invocation` behavior SHALL keep the bare `dispatc
 
 #### Scenario: separate-user SUDO mode crosses via sudo_pipe_cmd
 
-- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user` and `machinectl_authentication == sudo`
+- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user`
 - **THEN** the returned argv is `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "<dispatch> compose-up …"]` (the bare `dispatch <op>` payload over the privileged byte-pipe — no `machinectl` prefix)
-
-#### Scenario: separate-user POLKIT mode unchanged
-
-- **WHEN** `build_invocation(Op.COMPOSE_UP, ["inst"], host_config)` is called with `docker_execution_mode == separate-user` and `machinectl_authentication == polkit`
-- **THEN** the returned argv is the existing `[*machinectl_cmd(user, POLKIT), "/bin/bash", "-c", "<dispatch> compose-up …"]` form
 
 ### Requirement: Native Exit Recovery for Operator-Rootless invoke/probe
 
@@ -414,21 +409,20 @@ Every orchestrator call site that invokes a dispatcher op for a lifecycle comman
 
 ### Requirement: `build_invocation` routes SUDO separate-user ops onto the privileged pipe
 
-For separate-user + SUDO auth, `core.dispatch.build_invocation` SHALL assemble the crossing as
+For separate-user, `core.dispatch.build_invocation` SHALL assemble the crossing as
 `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "<dispatch-binary> <op> <wire-args>"]` — the SAME bare
-`dispatch <op>` payload it crosses today (so the per-op `Cmnd_Spec` matches), with only the prefix changed
-from `machinectl_cmd(...)` to `sudo_pipe_cmd(...)`. The validation + compose-wire-expansion pipeline (Q6) and
-the operator-rootless and POLKIT branches SHALL be unchanged. No `--unit`/`--description` is added.
+`dispatch <op>` payload it crosses today (so the per-op `Cmnd_Spec` matches), crossed via
+`sudo_pipe_cmd(...)`. The validation + compose-wire-expansion pipeline (Q6) and
+the operator-rootless branch SHALL be unchanged. No `--unit`/`--description` is added.
 
 #### Scenario: SUDO separate-user prefix swap
-- **WHEN** `build_invocation(op, args, host_config)` runs with separate-user + SUDO
+- **WHEN** `build_invocation(op, args, host_config)` runs with separate-user
 - **THEN** the argv is `["sudo","systemd-run","-q","--pipe","--uid=<user>","/bin/bash","-c","<dispatch> <op> <wire>"]`
 - **AND** the inner `<dispatch> <op> <wire>` string is byte-identical to the machinectl-path payload it replaced
 
 #### Scenario: other modes unchanged
 - **WHEN** the host is operator-rootless
 - **THEN** `build_invocation` returns the local target-argv (no crossing prefix), as today
-- **AND WHEN** the host is separate-user + POLKIT, the prefix is still `machinectl_cmd(user, POLKIT)`
 
 ### Requirement: Frame-based exit recovery on the pipe path (`framed=True`)
 
@@ -461,8 +455,8 @@ query's output in an orchestrator-parseable, individually-attributable form. Eac
 sequencing (NOT `&&`/`set -e`) so one query's failure neither aborts the others nor forges their success. The
 op SHALL NOT take per-instance state (it is instance-agnostic; `compose-ps` stays a separate crossing). All
 check *interpretation* + per-check diagnostics remain orchestrator-side; the op only carries the raw query
-outputs. The op crosses via the same path as every other op (`build_invocation`: `sudo_pipe_cmd` under SUDO,
-local under operator-rootless, `machinectl_cmd` under POLKIT) and recovers exit via the frame (`framed=True`).
+outputs. The op crosses via the same path as every other op (`build_invocation`: `sudo_pipe_cmd` under
+separate-user, local under operator-rootless) and recovers exit via the frame (`framed=True`).
 
 Each query SHALL be attributed by a begin marker, its **stderr merged** (`2>&1`), and a trailing per-query
 **exit marker** (`__PREFLIGHT_RC_<…>_<rc>__`), so the orchestrator reconstructs a per-query outcome
@@ -555,8 +549,7 @@ These checks are defense-in-depth on top of the structural confinement already b
 
 `core.dispatch` SHALL expose a streaming entrypoint, distinct from `invoke()`/`probe()`, that **constructs and returns** the full crossing argv for a streaming op and **never executes it and never returns captured output**. The returned argv is embedded by the caller (the attach/handover builder) as the ssh `-o ProxyCommand=…` value; the *ssh client* executes it. Per mode:
 
-- separate-user + SUDO → `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "<dispatch> fwd <wire>"]` — the privileged byte-pipe; the crossed payload is the bare `dispatch fwd <wire>` the per-op sudoers `Cmnd_Spec` matches (headless-capable — the F-060 fix).
-- separate-user + POLKIT → `[*pipe_cmd(user), "/bin/bash", "-c", "<dispatch> fwd <wire>"]` — same payload over the unprivileged pipe; the polkit `manage-units` wall is unchanged (interactive-only).
+- separate-user → `[*sudo_pipe_cmd(user), "/bin/bash", "-c", "<dispatch> fwd <wire>"]` — the privileged byte-pipe; the crossed payload is the bare `dispatch fwd <wire>` the per-op sudoers `Cmnd_Spec` matches (headless-capable — the F-060 fix).
 - operator-rootless → the op's **target argv directly** (`["/usr/bin/docker", "exec", "-i", "<P>-admin-1", "/fwd", "<IP>:9999"]`) — no crossing, no dispatcher indirection, mirroring the "Operator-Rootless Local Invocation Mode" shape.
 
 `invoke()` and `probe()` SHALL reject a streaming op with a typed error before any boundary crossing — the orchestrator can never capture (and therefore never branch on) a stream invocation's output. The invariant this enforces: **the orchestrator branches only on framed, nonce-bound signals; streaming ops carry zero orchestrator-interpreted content.**
@@ -564,12 +557,8 @@ These checks are defense-in-depth on top of the structural confinement already b
 A convention meta-test (the `test_machinectl_cmd_callers_restricted` pattern) SHALL enforce structurally that: (a) no `src/` call site passes a streaming op to `invoke()`/`probe()`, and (b) no `src/` module outside `core.dispatch` constructs a `dispatch fwd` payload or its docker-exec target argv directly — the streaming entrypoint is the single sanctioned producer.
 
 #### Scenario: SUDO-mode streaming argv
-- **WHEN** the streaming entrypoint is called for `fwd`/`myinst` under separate-user + SUDO
+- **WHEN** the streaming entrypoint is called for `fwd`/`myinst` under separate-user
 - **THEN** it returns `["sudo", "systemd-run", "-q", "--pipe", "--uid=<user>", "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch fwd myinst --project <P> --ip <IP>"]` without executing anything
-
-#### Scenario: POLKIT-mode streaming argv
-- **WHEN** the streaming entrypoint is called for `fwd`/`myinst` under separate-user + POLKIT
-- **THEN** it returns the same argv with the `["systemd-run", "-q", "--pipe", "--uid=<user>"]` unprivileged prefix (no `sudo`) and the identical bare `dispatch fwd <wire>` payload
 
 #### Scenario: Operator-rootless streaming argv is the bare target
 - **WHEN** the streaming entrypoint is called for `fwd`/`myinst` under operator-rootless
