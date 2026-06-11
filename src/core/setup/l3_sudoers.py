@@ -229,7 +229,7 @@ def _sudoers_path(operator: str) -> Path:
     return _SUDOERS_DIR / f"sandbox-ai-machinectl-{operator}"
 
 
-def _drop_in_path(host_config: HostConfig, operator: str) -> Path:
+def _drop_in_path(operator: str) -> Path:
     """The owned sudoers drop-in path."""
     return _sudoers_path(operator)
 
@@ -248,7 +248,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     """Content-aware probe: render expected body, byte-compare to on-disk."""
     operator = ctx.operator
     host_config = ctx.host_config
-    path = _drop_in_path(host_config, operator)
+    path = _drop_in_path(operator)
     expected = _expected_body(host_config, operator)
     try:
         observed = path.read_text()
@@ -272,7 +272,7 @@ def _act(ctx: SetupContext) -> str:
     operator = ctx.operator
     host_config = ctx.host_config
     body = _expected_body(host_config, operator)
-    final_path = _drop_in_path(host_config, operator)
+    final_path = _drop_in_path(operator)
 
     staged = Path(f"/tmp/sandbox-ai-machinectl-{operator}.staged")
     staged.write_text(body)
@@ -310,7 +310,7 @@ def _reverify(ctx: SetupContext) -> bool:
     """Confirm the on-disk drop-in is byte-identical to the expected body."""
     operator = ctx.operator
     host_config = ctx.host_config
-    path = _drop_in_path(host_config, operator)
+    path = _drop_in_path(operator)
     try:
         return path.read_text() == _expected_body(host_config, operator)
     except FileNotFoundError:
@@ -324,7 +324,7 @@ def _rollback(ctx: SetupContext) -> None:
     run. ``missing_ok=True`` so a rollback of a never-installed file is a
     no-op (idempotent — design D1).
     """
-    _drop_in_path(ctx.host_config, ctx.operator).unlink(missing_ok=True)
+    _drop_in_path(ctx.operator).unlink(missing_ok=True)
 
 
 PHASE = Phase(

@@ -392,7 +392,7 @@ def check_setup_invariants(
             remediation="run 'sudo sandbox setup' to restore canonical setup state",
         )
 
-    drop_in_path = l3._drop_in_path(host_config, operator)
+    drop_in_path = l3._drop_in_path(operator)
     drop_in_text: str | None
     # ``drop_in_readable`` is False when the drop-in EXISTS but the current
     # (non-root) process cannot read it — the normal case under a plain

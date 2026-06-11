@@ -239,7 +239,7 @@ def _rollback(ctx: SetupContext) -> None:
     half-written-grant window (design D1). ``missing_ok=True`` keeps the
     removal idempotent.
     """
-    _drop_in_path(ctx.host_config, ctx.operator).unlink(missing_ok=True)
+    _drop_in_path(ctx.operator).unlink(missing_ok=True)
 
 
 PHASE = Phase(

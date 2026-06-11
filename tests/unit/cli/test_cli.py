@@ -3925,7 +3925,7 @@ class TestInitAuthProbe:
         """Invalid --machinectl-auth value exits with error."""
         from cli.main import app
 
-        result = runner.invoke(app, ["init", "polkit", "--machinectl-auth", "invalid"])
+        result = runner.invoke(app, ["init", "oprl", "--machinectl-auth", "invalid"])
         assert result.exit_code == 1
         assert "invalid" in result.output.lower()
 
@@ -3940,7 +3940,7 @@ class TestInitAuthProbe:
 
         enoent_msg = "[FATAL] ENOENT-machinectl-missing"
         with patch("cli.main.dispatch.probe", return_value=self._fail(message=enoent_msg)):
-            result = runner.invoke(app, ["init", "polkit"])
+            result = runner.invoke(app, ["init", "oprl"])
             assert result.exit_code == 1
             # The distinct ENOENT SandboxExecutionError text reaches the
             # operator via ProbeOutcome.message (restored fidelity).

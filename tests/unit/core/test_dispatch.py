@@ -1754,15 +1754,6 @@ class TestProbe:
 # and normalizes stdout via the same shared helper the separate-user path uses.
 
 
-def _separate_hc() -> HostConfig:
-    # Canonical separate-user fake: ``_FakeHostConfig`` defaults mode to
-    # SEPARATE_USER, so the bare ``MachinectlAuth.SUDO`` construction is the
-    # single source for the operator-rootless tests' separate-user arm.
-    from core.host_config import MachinectlAuth
-
-    return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
-
-
 def _rootless_hc() -> HostConfig:
     from core.host_config import DockerExecutionMode, MachinectlAuth
 
@@ -1809,11 +1800,11 @@ class TestOperatorRootlessBuildInvocation:
         self, isolated_sandbox_ai_home: Path
     ) -> None:
         # Same compose op in separate-user mode still routes through the Go
-        # dispatcher with a bare `dispatch <op>` payload. _separate_hc() is
+        # dispatcher with a bare `dispatch <op>` payload. _sudo_hc() is
         # SUDO, so the crossing rides the privileged byte-pipe (C-009 D2),
         # NOT machinectl shell.
         _seed_instance(isolated_sandbox_ai_home, "demo")
-        argv = build_invocation("compose-up", ["demo"], _separate_hc())
+        argv = build_invocation("compose-up", ["demo"], _sudo_hc())
         assert argv[:5] == ["sudo", "systemd-run", "-q", "--pipe", "--uid=sandbox"]
         assert argv[5:7] == ["/bin/bash", "-c"]
         assert argv[7].startswith("/usr/local/libexec/sandbox-ai/dispatch compose-up demo")
@@ -2012,7 +2003,7 @@ class TestOperatorRootlessAudit:
 
         monkeypatch.setattr("core.dispatch.emit_op_audit", emit_mock)
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        invoke("auth-probe", [], _separate_hc())
+        invoke("auth-probe", [], _sudo_hc())
         emit_mock.assert_not_called()
 
 
