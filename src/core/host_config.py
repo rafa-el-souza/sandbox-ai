@@ -89,7 +89,6 @@ class MachinectlAuth(StrEnum):
     """Machinectl privilege escalation mode."""
 
     SUDO = "sudo"
-    POLKIT = "polkit"
 
 
 class DockerExecutionMode(StrEnum):
@@ -239,12 +238,11 @@ def resolve_daemon_owner(host_config: HostConfig) -> str:
     return resolve_daemon_owner_settings(host_config.host)
 
 
-def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
-    """Build the machinectl shell prefix for the given user and auth mode.
+def machinectl_cmd(user: str) -> list[str]:
+    """Build the machinectl shell prefix for the given user.
 
     Returns:
-        ``["sudo", "machinectl", "shell", "<user>@.host"]`` when auth is SUDO,
-        ``["machinectl", "shell", "<user>@.host"]`` when auth is POLKIT.
+        ``["sudo", "machinectl", "shell", "<user>@.host"]``.
 
     Caveat — PTY allocation: ``machinectl shell`` opens a PTY between caller
     and the spawned command. The PTY's ``onlcr`` line discipline rewrites
@@ -258,8 +256,7 @@ def machinectl_cmd(user: str, auth: MachinectlAuth) -> list[str]:
     gRPC, raw TCP), use :func:`pipe_cmd` instead — it allocates no PTY and
     preserves bytes verbatim.
     """
-    prefix = ["sudo"] if auth == MachinectlAuth.SUDO else []
-    return [*prefix, "machinectl", "shell", f"{user}@.host"]
+    return ["sudo", "machinectl", "shell", f"{user}@.host"]
 
 
 def pipe_cmd(user: str) -> list[str]:

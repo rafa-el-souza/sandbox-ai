@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 
 _MOD = "core.doctor.checks.daemon_owner_sudo"
 
@@ -128,7 +128,7 @@ def test_distro_arg_ignored(monkeypatch: Any) -> None:
     monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
     _no_policy_grant(monkeypatch)
     result = check_daemon_owner_sudo(
-        "sandbox", "debian", auth_mode=MachinectlAuth.POLKIT, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+        "sandbox", "debian", mode=DockerExecutionMode.OPERATOR_ROOTLESS
     )
     assert result.status == "pass"
 

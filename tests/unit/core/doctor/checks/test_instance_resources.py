@@ -46,10 +46,10 @@ def test_public_re_exports_resolve_to_topic_module() -> None:
 
 def test_registered_in_both_modes() -> None:
     from core.doctor import build_check_registry
-    from core.host_config import MachinectlAuth
+    from core.host_config import DockerExecutionMode
 
-    for auth in (MachinectlAuth.SUDO, MachinectlAuth.POLKIT):
-        ids = [c.id for c in build_check_registry(auth)]
+    for mode in (DockerExecutionMode.SEPARATE_USER, DockerExecutionMode.OPERATOR_ROOTLESS):
+        ids = [c.id for c in build_check_registry(mode)]
         assert "host_cpu_capacity" in ids
         assert "instance_memory_overcommit" in ids
 

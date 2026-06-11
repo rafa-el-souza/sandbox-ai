@@ -18,7 +18,7 @@ from typing import Any
 
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.host_config import MachinectlAuth
-from core.setup.l3_sudoers_polkit import render_sudoers_rule
+from core.setup.l3_sudoers import render_sudoers_rule
 
 _MOD = "core.doctor.checks.setup_invariants"
 
@@ -45,10 +45,10 @@ def test_reuses_l0_l3_l2_single_source() -> None:
     """Orchestrator decision 2 / F-011: the check reuses the canonical
     resolver + renderer + L2 helpers (verified by referencing the same
     callables the setup modules expose)."""
-    from core.setup import l0_identity, l2_host_prereqs, l3_sudoers_polkit
+    from core.setup import l0_identity, l2_host_prereqs, l3_sudoers
 
     assert callable(l0_identity.resolve_machinectl_path)
-    assert callable(l3_sudoers_polkit.render_sudoers_rule)
+    assert callable(l3_sudoers.render_sudoers_rule)
     assert callable(l2_host_prereqs._subid_status)
 
 
@@ -64,7 +64,6 @@ def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
     monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: operator)
     monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
     monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
-    monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_daemon_user_no_admin", lambda hc, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
     monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
@@ -138,42 +137,6 @@ class TestTopLevelVerdicts:
         assert result.status == "warn"
         assert "sudoers drop-in" in result.detail
         assert "missing" in result.detail
-
-    def test_polkit_mode_skips_sudo_audits(self, monkeypatch: Any) -> None:
-        from core.doctor.checks.setup_invariants import check_setup_invariants
-
-        _patch_all_green(monkeypatch)
-        called: dict[str, bool] = {"stability": False, "body": False, "floor": False}
-        monkeypatch.setattr(
-            f"{_MOD}._audit_machinectl_stability",
-            lambda hc, v: called.__setitem__("stability", True),
-        )
-        monkeypatch.setattr(
-            f"{_MOD}._audit_rule_body",
-            lambda hc, op, t, v: called.__setitem__("body", True),
-        )
-        monkeypatch.setattr(
-            f"{_MOD}._audit_sudo_floor",
-            lambda v: called.__setitem__("floor", True),
-        )
-        monkeypatch.setattr("pathlib.Path.read_text", lambda self: "x")
-        result = check_setup_invariants("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
-        assert result.status == "pass"
-        assert called == {"stability": False, "body": False, "floor": False}
-
-    def test_polkit_drop_in_missing_says_polkit(self, monkeypatch: Any) -> None:
-        from core.doctor.checks.setup_invariants import check_setup_invariants
-
-        _patch_all_green(monkeypatch)
-
-        def missing(self: Any) -> str:
-            raise FileNotFoundError
-
-        monkeypatch.setattr("pathlib.Path.read_text", missing)
-        result = check_setup_invariants("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
-        assert result.status == "warn"
-        assert "polkit drop-in" in result.detail
-
 
 class TestOperatorRootlessBranch:
     """C-005 1.4 / design D2: in operator-rootless the check stays both-mode but
@@ -502,7 +465,6 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
         monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
-        monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
@@ -526,7 +488,6 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
         monkeypatch.setattr(f"{_MOD}._audit_subid_and_group", lambda u, op, g, v: None)
-        monkeypatch.setattr(f"{_MOD}._audit_rule_shape_agreement", lambda s, op, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_machinectl_stability", lambda hc, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
@@ -620,7 +581,7 @@ class TestAuditMachinectlStability:
         stale drop-in match makes the resolvable-machinectl case clean, proving
         the test catches the false-WARN regression."""
         from core.doctor.checks import setup_invariants as m
-        from core.setup.l3_sudoers_polkit import render_sudoers_rule
+        from core.setup.l3_sudoers import render_sudoers_rule
 
         monkeypatch.setattr(
             "core.setup.l0_identity.resolve_machinectl_path", lambda hc: "/usr/bin/machinectl"
@@ -782,12 +743,12 @@ class TestAuditRuleBody:
             "core.setup.l0_identity.resolve_systemd_run_path", lambda hc: "/usr/bin/systemd-run"
         )
 
-        from core.setup.l3_sudoers_polkit import RuleRenderError
+        from core.setup.l3_sudoers import RuleRenderError
 
         def boom(*a: Any, **k: Any) -> str:
             raise RuleRenderError("bad op name")
 
-        monkeypatch.setattr("core.setup.l3_sudoers_polkit.render_sudoers_rule", boom)
+        monkeypatch.setattr("core.setup.l3_sudoers.render_sudoers_rule", boom)
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", "x", v)
         assert any("op-enum drift" in x for x in v)
@@ -890,48 +851,6 @@ class TestExtractOps:
         # streaming ``fwd`` op — the audit's expected set must contain it.
         assert "fwd" in extracted
         assert len(extracted) == 12
-
-
-class TestAuditRuleShapeAgreement:
-    """F-022: WARN when the OTHER auth mode's drop-in is also installed."""
-
-    def test_sudo_with_stray_polkit_rule_warns(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-        from core.setup import l3_sudoers_polkit as l3
-
-        # Only the polkit rule "exists" on disk; toml selects SUDO.
-        monkeypatch.setattr(
-            "pathlib.Path.exists", lambda self: str(self) == str(l3._POLKIT_RULE_PATH)
-        )
-        v: list[str] = []
-        m._audit_rule_shape_agreement(True, "alice", v)
-        assert any("POLKIT rule is also installed" in x for x in v)
-
-    def test_sudo_without_stray_polkit_rule_clean(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-
-        monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
-        v: list[str] = []
-        m._audit_rule_shape_agreement(True, "alice", v)
-        assert v == []
-
-    def test_polkit_with_stray_sudoers_drop_in_warns(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-        from core.setup import l3_sudoers_polkit as l3
-
-        sudoers = l3._sudoers_path("alice")
-        monkeypatch.setattr("pathlib.Path.exists", lambda self: str(self) == str(sudoers))
-        v: list[str] = []
-        m._audit_rule_shape_agreement(False, "alice", v)
-        assert any("SUDO sudoers drop-in is also" in x for x in v)
-
-    def test_polkit_without_stray_sudoers_clean(self, monkeypatch: Any) -> None:
-        from core.doctor.checks import setup_invariants as m
-
-        monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
-        v: list[str] = []
-        m._audit_rule_shape_agreement(False, "alice", v)
-        assert v == []
 
 
 class TestWarnAggregation:

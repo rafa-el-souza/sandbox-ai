@@ -76,10 +76,10 @@ The apply pass executes phases in this named order (the order is named, not coun
 | **L6a** | runsc install (own phase): install the pinned binary if absent; on drift, mention it in the summary without auto-overwriting; `chattr +i`. |
 | **L6.5** | Compile the dispatcher (offline, in a pinned `golang` container — `go test ./...` for Python↔Go parity runs first, so a fixture drift fails the compile) and install it; `chattr +i`; write the root-owned `0644` `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` (host plane, alongside the binary, so every operator's `sandbox doctor` can read it — F-021). |
 | **L7** | Pre-pull the pinned helper image (`docker pull busybox:musl@<digest>`). |
-| **L3** | Install the sudoers (or polkit) privilege-boundary drop-in; `visudo -cf` validation; **L3a** per-op probe of every dispatcher op. |
+| **L3** | Install the sudoers privilege-boundary drop-in; `visudo -cf` validation; **L3a** per-op probe of every dispatcher op. |
 | **L8** | Fresh-session re-probe: verify the operator's group set now includes the `sb-ws` gid; verify machinectl is reachable through the new rule. |
 
-**L3 is the last base-ceremony mutation phase and the only one that touches the privilege-boundary rule.** No sudoers/polkit grant exists on disk at any point before L3, so a crash anywhere in L0..L7 leaves the host with zero sandbox-ai passwordless boundary crossing (the deliberate "no permissive bootstrap rule" property). An L3 crash is handled by L3a's rollback (the just-installed drop-in is removed). L8 is verification, not mutation.
+**L3 is the last base-ceremony mutation phase and the only one that touches the privilege-boundary rule.** No sudoers grant exists on disk at any point before L3, so a crash anywhere in L0..L7 leaves the host with zero sandbox-ai passwordless boundary crossing (the deliberate "no permissive bootstrap rule" property). An L3 crash is handled by L3a's rollback (the just-installed drop-in is removed). L8 is verification, not mutation.
 
 Apply continues past non-rollback failures: a failed phase is marked FAIL, its dependents BLOCKED-BY, and independent phases still run, so you see all reachable failures in one run. The finalization summary reports pass/fail/skipped counts plus remediation pointers.
 
@@ -148,24 +148,19 @@ The dispatcher/runsc tamper model layers from cheapest to strongest. The **F-003
 
 **Sticky opt-in.** Once you enable an integration, every subsequent `sudo sandbox setup` auto-includes that phase (its flag is no longer needed — the phase auto-includes when its owned drop-in exists on disk). So `--update-runsc` (or any dispatcher re-compile) on a host with sticky integration cascades a trust-file refresh with the new sha — no window of inconsistency. An integration-phase failure does not roll back the L0..L8 base ceremony; fix the underlying issue and re-run.
 
-**Auth mode is an explicit setup input — and POLKIT is fenced in this version.** `sudo sandbox setup` takes `--machinectl-auth {sudo|polkit}`; the effective mode is the flag if given, else the operator toml's `machinectl_authentication` if a toml exists, else the SUDO default. **Setup currently supports SUDO only.** If POLKIT is selected — via the flag, or an operator toml that already requests it — setup **refuses before touching the host** (no plan pass, no mutation) with a pointer to this section and the follow-on work. The reason is concrete: setup's per-op verification phases (L3a/L8) probe SUDO-only, so a polkit rule setup wrote could not be verified and would be rolled back — shipping a half-wired polkit path is worse than fencing it. An explicit `--machinectl-auth sudo` overrides a stale polkit toml (and `sandbox doctor`'s `setup_invariants` then WARNs on the lingering toml/rule disagreement). To run polkit today, configure the rule manually (step 2 of the uninstall recipe shows its path) and seed your toml with `machinectl_authentication = "polkit"`; full setup-driven polkit support (auth-aware L3a/L8 + live `V9d-polkit-e2e` validation) is a tracked follow-on change.
-
-**SUDO vs POLKIT asymmetry — a different security model, not just a different mechanism.** In SUDO auth mode the sudoers rule enumerates each dispatcher op individually (per-op `Cmnd_Spec` narrowing on top of the application-layer discipline) — **the dispatcher *is* a privilege boundary**: the operator's NOPASSWD grant is exactly those twelve ops with their arg shapes, nothing else. In POLKIT auth mode the `org.freedesktop.machine1.shell` action cannot inspect the invoked argv, so the polkit rule is an **action-level** grant ("operator may `machinectl shell` into the sandbox user *for any command*") and per-op narrowing lives **only** at the application layer (the orchestrator only calls `core.dispatch`, enforced by a convention meta-test). In POLKIT mode the dispatcher is therefore a **convenience + integrity layer over a fully-trusted operator→sandbox shell grant, not a privilege boundary** — a legitimate posture for a single trusted operator on their own box, but a *different security model*. Choose it deliberately; it is not a drop-in alternative to SUDO. This is a documented property of the polkit action surface, not a defect.
-
 ## Manual uninstall recipe
 
 There is no `sandbox setup --uninstall` yet (a future change will automate this). Setup writes ONLY to the namespaces it owns, so removing exactly the enumerable owned list **per the spec's "Reserved Namespace File Ownership" requirement** fully uninstalls sandbox-ai. Walk it manually:
 
-1. `rm /etc/sudoers.d/sandbox-ai-machinectl-<operator>` — sudoers drop-in (SUDO mode), one per operator.
-2. `rm /etc/polkit-1/rules.d/49-sandbox-ai-machinectl.rules` — polkit drop-in (POLKIT mode).
-3. `rm /etc/sysctl.d/49-sandbox-ai.conf` — kernel sysctl drop-in.
-4. `rm /etc/systemd/system/user-<sandbox-uid>.service.d/sandbox-ai-delegate.conf` — systemd `Delegate=yes` drop-in; then `systemctl daemon-reload`.
-5. `chattr -i /usr/local/libexec/sandbox-ai/dispatch /usr/local/libexec/sandbox-ai/runsc` then `rm -rf /usr/local/libexec/sandbox-ai/` — the immutable binary directory (dispatcher + runsc) plus the root-owned `dispatcher.manifest.json` that lives alongside them.
-6. Remove the `runtimes["sandbox-ai-runsc"]` key from `~<sandbox-user>/.config/docker/daemon.json` — reserved key only; leave the operator's other `runtimes["..."]` keys and the rest of the file intact.
-7. `rm -rf <sandbox_ai_home()>/` — per-operator state (`{config,state,instances,workspaces}`), one tree per operator. (This tree is created by `sandbox init` as the operator, not by setup; the dispatcher manifest moved to the libexec dir in step 5.)
-8. Remove the append-only `<sandbox-user>` lines from `/etc/subuid` + `/etc/subgid` if no longer needed (shared flat-file territory — remove only the sandbox-user entries by hand).
-9. `rm /etc/fapolicyd/trust.d/sandbox-ai.trust` then `fapolicyd-cli --update` — **only if** fapolicyd integration was enabled (optional owned path).
-10. `rm /etc/aide/aide.conf.d/sandbox-ai.conf` — **only if** AIDE integration was enabled (optional owned path); the operator's next `aide --check`/`aide --update` reflects the removal.
-11. Optionally `userdel <sandbox-user>`, `groupdel sb-ws`, and drop the operator's `sb-ws` membership if the sandbox user / bridge group are no longer wanted — these are shared host state, not removed automatically since other operators may still depend on them.
+1. `rm /etc/sudoers.d/sandbox-ai-machinectl-<operator>` — sudoers drop-in, one per operator.
+2. `rm /etc/sysctl.d/49-sandbox-ai.conf` — kernel sysctl drop-in.
+3. `rm /etc/systemd/system/user-<sandbox-uid>.service.d/sandbox-ai-delegate.conf` — systemd `Delegate=yes` drop-in; then `systemctl daemon-reload`.
+4. `chattr -i /usr/local/libexec/sandbox-ai/dispatch /usr/local/libexec/sandbox-ai/runsc` then `rm -rf /usr/local/libexec/sandbox-ai/` — the immutable binary directory (dispatcher + runsc) plus the root-owned `dispatcher.manifest.json` that lives alongside them.
+5. Remove the `runtimes["sandbox-ai-runsc"]` key from `~<sandbox-user>/.config/docker/daemon.json` — reserved key only; leave the operator's other `runtimes["..."]` keys and the rest of the file intact.
+6. `rm -rf <sandbox_ai_home()>/` — per-operator state (`{config,state,instances,workspaces}`), one tree per operator. (This tree is created by `sandbox init` as the operator, not by setup; the dispatcher manifest moved to the libexec dir in step 4.)
+7. Remove the append-only `<sandbox-user>` lines from `/etc/subuid` + `/etc/subgid` if no longer needed (shared flat-file territory — remove only the sandbox-user entries by hand).
+8. `rm /etc/fapolicyd/trust.d/sandbox-ai.trust` then `fapolicyd-cli --update` — **only if** fapolicyd integration was enabled (optional owned path).
+9. `rm /etc/aide/aide.conf.d/sandbox-ai.conf` — **only if** AIDE integration was enabled (optional owned path); the operator's next `aide --check`/`aide --update` reflects the removal.
+10. Optionally `userdel <sandbox-user>`, `groupdel sb-ws`, and drop the operator's `sb-ws` membership if the sandbox user / bridge group are no longer wanted — these are shared host state, not removed automatically since other operators may still depend on them.
 
 This list is faithful to and complete against the spec's "Reserved Namespace File Ownership" enumerable list (including the optional fapolicyd/AIDE drop-ins and the dispatcher manifest). Setup writes nothing outside it, so this recipe is exhaustive.

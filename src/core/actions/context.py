@@ -4,7 +4,7 @@ Bundles state that is uniform across a phase invocation:
 
 - ``host_user`` — the unprivileged systemd user that owns the docker
   daemon (``[host].docker_unprivileged_user`` from ``sandbox-ai.toml``).
-- ``auth`` — the machinectl auth mode (sudo / polkit) read from the
+- ``auth`` — the machinectl auth mode (sudo) read from the
   same per-host config file.
 - ``docker_execution_mode`` — the resolved
   :class:`~core.host_config.DockerExecutionMode` (separate-user / operator-rootless),

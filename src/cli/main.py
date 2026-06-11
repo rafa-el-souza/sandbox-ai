@@ -1657,12 +1657,9 @@ def _build_attach_argv(inst: str, ws: str, host_config: HostConfig) -> list[str]
     hand-assembles the crossing prefix, the streaming-op wire payload, or the
     docker-exec argv (C-010). ``proxy_argv`` selects the per-mode crossing:
 
-    - **separate-user + SUDO** → the ``fwd`` dispatcher wire payload over
+    - **separate-user** → the ``fwd`` dispatcher wire payload over
       ``sudo_pipe_cmd`` (the privileged byte-pipe, authorized non-interactively
       by the per-op sudoers ``Cmnd_Spec`` — headless-capable, the F-060 fix).
-    - **separate-user + POLKIT** → the same payload over ``pipe_cmd`` (the
-      unprivileged byte-pipe, polkit ``manage-units``-authorized — interactive
-      polkit agent required; headless POLKIT attach is unsupported).
     - **operator-rootless** → the bare local
       ``docker exec -i <project>-admin-1 /fwd <ip>:9999`` (no crossing, no
       dispatcher indirection — the operator owns dockerd, per design D5/D7).
@@ -2057,21 +2054,14 @@ def _resolve_full_host_config() -> HostConfig:
     )
 
 
-def _emit_auth_probe_failure(auth: MachinectlAuth, user: str, detail: str) -> None:
-    """Print mode-specific remediation guidance when the init-time auth probe fails."""
+def _emit_auth_probe_failure(user: str, detail: str) -> None:
+    """Print remediation guidance when the init-time auth probe fails."""
     console.print(f"machinectl auth probe failed for user '{user}': {detail}", style="red")
-    if auth == MachinectlAuth.SUDO:
-        console.print(
-            "Remediation: Verify 'sudo machinectl shell' works for this user. "
-            "Ensure the user exists and sudo is configured.",
-            style="yellow",
-        )
-    else:
-        console.print(
-            "Remediation: Verify polkit rules allow 'machinectl shell' without sudo. "
-            "Ensure org.freedesktop.machine1.shell policy is configured for this user.",
-            style="yellow",
-        )
+    console.print(
+        "Remediation: Verify 'sudo machinectl shell' works for this user. "
+        "Ensure the user exists and sudo is configured.",
+        style="yellow",
+    )
 
 
 # ─── CLI Commands ────────────────────────────────────────────────────────────
@@ -2197,7 +2187,7 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
     auth_input = (
         typer.prompt(
-            "machinectl_authentication [sudo/polkit, default sudo]",
+            "machinectl_authentication [sudo, default sudo]",
             default="sudo",
             show_default=False,
         ).strip()
@@ -2207,7 +2197,7 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
         resolved_auth_for_seed = MachinectlAuth(auth_input)
     except ValueError as exc:
         console.print(
-            f"Invalid machinectl_authentication value: '{auth_input}'. Must be 'sudo' or 'polkit'.",
+            f"Invalid machinectl_authentication value: '{auth_input}'. Must be 'sudo'.",
             style="red",
         )
         raise typer.Exit(code=1) from exc
@@ -2235,18 +2225,6 @@ class _SetupAborted(Exception):
     """Operator pressed Ctrl-C during the setup ceremony (exit 130)."""
 
 
-class _SetupAuthRefused(Exception):
-    """Setup refuses the requested auth mode before any mutation (F-022 / D2).
-
-    Raised by :func:`_resolve_setup_auth` when POLKIT is selected (via the
-    ``--machinectl-auth`` flag OR an operator toml already requesting it).
-    Carries the operator-facing refusal text; the entry point prints it and
-    exits non-zero WITHOUT entering the plan or apply pass — no host state is
-    touched (the "no permissive window" property extends to "no half-wired
-    polkit rule either").
-    """
-
-
 class _SetupModeConflict(Exception):
     """Setup refuses a mode-switch that conflicts with the recorded marker (D6).
 
@@ -2255,7 +2233,7 @@ class _SetupModeConflict(Exception):
     one. Switching modes for a provisioned operator would create a catastrophic
     mixed-mode host (separate-user artifacts + op-rootless artifacts for one
     operator), so setup refuses BEFORE any mutation and directs the operator to
-    tear down first. Mirrors :class:`_SetupAuthRefused` (printed at the entry
+    tear down first. Mirrors :class:`_SetupFlagRefused` (printed at the entry
     point, exit non-zero, no host state touched).
     """
 
@@ -2264,22 +2242,10 @@ class _SetupFlagRefused(Exception):
     """Setup refuses an inapplicable flag or a dangerous value (D9, fail-closed).
 
     Raised before any mutation when a flag does not apply in the active mode
-    (e.g. ``--docker-unprivileged-user`` / ``--machinectl-auth`` in
-    operator-rootless), or when a flag carries a dangerous value (a resolved
-    daemon owner of root, or ``--operator`` naming someone other than the
-    invoker in operator-rootless). Mirrors :class:`_SetupAuthRefused`.
+    (e.g. ``--docker-unprivileged-user`` in operator-rootless), or when a flag
+    carries a dangerous value (a resolved daemon owner of root, or ``--operator``
+    naming someone other than the invoker in operator-rootless).
     """
-
-
-_POLKIT_FENCE_MESSAGE = (
-    "POLKIT auth mode is not yet supported by `sandbox setup` (tracked: the "
-    "POLKIT auth-mode follow-on change + validation track V9d-polkit-e2e). "
-    "Setup's per-op verification phases (L3a/L8) probe SUDO-only, so a "
-    "polkit rule it installed could not be verified and would be rolled back. "
-    "Re-run with `--machinectl-auth sudo`, or configure the polkit rule "
-    "manually per docs/setup-guide.md (the SUDO-vs-POLKIT security models "
-    "differ — see that guide before choosing polkit)."
-)
 
 
 def _run_setup_update_runsc(ctx: SetupContext) -> int:
@@ -2326,11 +2292,6 @@ def setup(
     enable_aide_integration: bool = typer.Option(
         False, "--enable-aide-integration", help="Opt in to the AIDE config drop-in phase"
     ),
-    machinectl_auth: str | None = typer.Option(
-        None,
-        "--machinectl-auth",
-        help="machinectl auth mode: 'sudo' (default; only supported mode) or 'polkit' (refused — see docs)",
-    ),
     docker_execution_mode: str | None = typer.Option(
         None,
         "--docker-execution-mode",
@@ -2358,7 +2319,6 @@ def setup(
     try:
         ctx = _build_setup_context_with_operator(
             operator,
-            machinectl_auth,
             mode_flag=docker_execution_mode,
             docker_unprivileged_user=docker_unprivileged_user,
             workspace_bridge_group=workspace_bridge_group,
@@ -2366,7 +2326,7 @@ def setup(
     except OperatorResolutionError as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
-    except (_SetupAuthRefused, _SetupModeConflict, _SetupFlagRefused) as exc:
+    except (_SetupModeConflict, _SetupFlagRefused) as exc:
         # _SetupFlagRefused here is the invalid-mode-value refusal from
         # `_parse_mode_flag` (a build-time resolution error); the FLAG guards
         # (`_guard_setup_flags`) run separately below, after the identity gate.
@@ -2385,7 +2345,6 @@ def setup(
             ctx.host_config,
             operator=ctx.operator,
             operator_flag=operator,
-            machinectl_auth_flag=machinectl_auth,
             docker_unprivileged_user=docker_unprivileged_user,
         )
     except _SetupFlagRefused as exc:
@@ -2494,28 +2453,14 @@ def _bootstrap_host(
         raise typer.Exit(code=1) from None
 
 
-def _resolve_setup_auth(machinectl_auth_flag: str | None) -> MachinectlAuth:
-    """Resolve setup's effective auth mode, fencing POLKIT (F-022 / D2 / D8).
+def _resolve_setup_auth() -> MachinectlAuth:
+    """Resolve setup's effective auth mode (D8 — toml-free).
 
-    Precedence: the ``--machinectl-auth`` flag (explicit operator intent) wins;
-    else the SUDO default. Setup is toml-free (D8) — it never reads the operator
-    toml — so there is no toml fallback channel for the auth mode. POLKIT through
-    the flag is refused — raising :class:`_SetupAuthRefused` BEFORE any phase
-    runs — because setup's L3a/L8 verification probes are SUDO-only, so a polkit
-    rule it wrote could not be verified (and would be rolled back).
+    The only supported auth mode is SUDO, so setup unconditionally provisions
+    :data:`MachinectlAuth.SUDO`. Setup is toml-free (D8) — it never reads the
+    operator toml — so there is no toml channel for the auth mode either.
     """
-    if machinectl_auth_flag is not None:
-        try:
-            effective = MachinectlAuth(machinectl_auth_flag)
-        except ValueError:
-            raise _SetupAuthRefused(
-                f"Invalid --machinectl-auth value: '{machinectl_auth_flag}'. Must be 'sudo' or 'polkit'."
-            ) from None
-    else:
-        effective = MachinectlAuth.SUDO
-    if effective == MachinectlAuth.POLKIT:
-        raise _SetupAuthRefused(_POLKIT_FENCE_MESSAGE)
-    return effective
+    return MachinectlAuth.SUDO
 
 
 def resolve_effective_mode(
@@ -2551,8 +2496,7 @@ def _parse_mode_flag(mode_flag: str | None) -> DockerExecutionMode | None:
     """Parse the ``--docker-execution-mode`` string into the enum, or ``None``.
 
     Returns ``None`` when the flag is absent. An unrecognized value is refused
-    (mirrors :func:`_resolve_setup_auth`'s invalid-value handling) before any
-    mutation via :class:`_SetupFlagRefused`.
+    before any mutation via :class:`_SetupFlagRefused`.
     """
     if mode_flag is None:
         return None
@@ -2595,7 +2539,6 @@ def _resolve_setup_operator(operator_flag: str | None) -> str:
 
 def _build_setup_context_with_operator(
     operator_flag: str | None,
-    machinectl_auth_flag: str | None = None,
     *,
     mode_flag: str | None = None,
     docker_unprivileged_user: str = "sandbox",
@@ -2610,15 +2553,15 @@ def _build_setup_context_with_operator(
     in separate-user mode), so an operator's real toml override never reached
     setup. The daemon user, auth mode, execution mode, and bridge group are all
     **explicit inputs** via flags (with documented defaults). The auth mode is
-    POLKIT-fenced by :func:`_resolve_setup_auth`; the execution mode is decided
+    resolved (sudo-only) by :func:`_resolve_setup_auth`; the execution mode is decided
     against the per-operator marker by :func:`resolve_effective_mode` (the marker
     WRITE is §8). Operator is resolved once via :func:`_resolve_setup_operator`
     (euid-aware: the canonical root-scoped precedence, with a non-root current-user
     fallback for operator-run op-rootless), threading ``--operator`` (never a toml).
 
     This builder is pure resolution — it mutates nothing and raises only the
-    resolution refusals (:class:`_SetupAuthRefused` POLKIT fence,
-    :class:`_SetupModeConflict` marker mismatch, :class:`OperatorResolutionError`).
+    resolution refusals (:class:`_SetupModeConflict` marker mismatch,
+    :class:`OperatorResolutionError`).
     The refuse-all FLAG guards (D9 — inapplicable flag / dangerous resolved owner /
     cross-operator owner) are NOT run here: :func:`setup` runs them via
     :func:`_guard_setup_flags` AFTER the entry-identity gate
@@ -2626,7 +2569,7 @@ def _build_setup_context_with_operator(
     operator-rootless surfaces the actionable "must NOT be run as root" message
     rather than the generic owner-root refusal (finding 8.7).
     """
-    auth = _resolve_setup_auth(machinectl_auth_flag)
+    auth = _resolve_setup_auth()
     operator = _resolve_setup_operator(operator_flag)
     mode = resolve_effective_mode(operator, _parse_mode_flag(mode_flag))
     host_config = HostConfig(
@@ -2647,7 +2590,6 @@ def _guard_setup_flags(
     *,
     operator: str,
     operator_flag: str | None,
-    machinectl_auth_flag: str | None,
     docker_unprivileged_user: str,
 ) -> None:
     """Refuse-all guards for setup flags (D9, fail-closed, pre-mutation).
@@ -2656,9 +2598,9 @@ def _guard_setup_flags(
     (:func:`_refuse_wrong_setup_identity`, §8-C) so the euid root-refusal surfaces
     its actionable message before the generic owner-root check here (finding 8.7).
 
-    Inapplicable-flag guard: in operator-rootless mode neither a non-default
-    ``--docker-unprivileged-user`` nor ``--machinectl-auth`` applies (there is no
-    dedicated daemon user and no crossing to authorize). Dangerous-value guard:
+    Inapplicable-flag guard: in operator-rootless mode a non-default
+    ``--docker-unprivileged-user`` does not apply (there is no dedicated daemon
+    user). Dangerous-value guard:
     a resolved daemon owner of ``root`` (or uid 0) — the residual root defense for
     a non-euid-0 owner that still resolves to root (e.g. ``--docker-unprivileged-user
     root`` in separate-user; the ``sudo`` op-rootless euid case is already refused
@@ -2671,11 +2613,6 @@ def _guard_setup_flags(
             raise _SetupFlagRefused(
                 "--docker-unprivileged-user does not apply in operator-rootless mode "
                 "(the rootless daemon runs as the operator's own user)."
-            )
-        if machinectl_auth_flag is not None:
-            raise _SetupFlagRefused(
-                "--machinectl-auth does not apply in operator-rootless mode "
-                "(there is no privilege-boundary crossing to authorize)."
             )
         if operator_flag is not None and operator_flag != getpass.getuser():
             raise _SetupFlagRefused(
@@ -2956,9 +2893,6 @@ def init(
     inst: str = typer.Argument(..., help="Instance name (1-30 chars, [a-z0-9_-])"),
     copy: list[str] = _COPY_FLAG,
     empty: list[str] = _EMPTY_FLAG,
-    machinectl_auth: str | None = typer.Option(
-        None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
-    ),
     git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
@@ -3013,21 +2947,12 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    # Resolution: machinectl_authentication (--machinectl-auth flag → host config → default sudo)
-    resolved_auth: MachinectlAuth
-    if machinectl_auth is not None:
-        try:
-            resolved_auth = MachinectlAuth(machinectl_auth)
-        except ValueError:
-            console.print(
-                f"Invalid --machinectl-auth value: '{machinectl_auth}'. Must be 'sudo' or 'polkit'.",
-                style="red",
-            )
-            raise typer.Exit(code=1) from None
-    elif project_config is not None:
-        resolved_auth = project_config.host.machinectl_authentication
-    else:
-        resolved_auth = MachinectlAuth.SUDO
+    # Resolution: machinectl_authentication (host config → default sudo)
+    resolved_auth = (
+        project_config.host.machinectl_authentication
+        if project_config is not None
+        else MachinectlAuth.SUDO
+    )
 
     # Init-time auth mode probe (D5). This is a *probe* callsite: it must
     # branch (reachable → continue; unreachable/timeout → guidance + exit 1),
@@ -3072,13 +2997,13 @@ def init(
         gate = evaluate_preflight_gate(probe_outcome)
         if not gate.reachable:
             if probe_outcome.timed_out:
-                _emit_auth_probe_failure(resolved_auth, resolved_user, "probe timed out after 15 seconds")
+                _emit_auth_probe_failure(resolved_user, "probe timed out after 15 seconds")
             else:
                 auth_probe_segment = gate.per_op.get("auth-probe")
                 detail = probe_outcome.message or (
                     auth_probe_segment.message if auth_probe_segment is not None else "preflight crossing failed"
                 )
-                _emit_auth_probe_failure(resolved_auth, resolved_user, detail)
+                _emit_auth_probe_failure(resolved_user, detail)
             raise typer.Exit(code=1)
 
         # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)
@@ -3091,7 +3016,6 @@ def init(
             probe_owner,
             distro,
             exclude_ids={"ancestor_traverse"},
-            auth_mode=resolved_auth,
             mode=probe_mode,
         )
         has_failures = any(r.status == "fail" for r in preflight_results)
@@ -3278,14 +3202,14 @@ def start(
         # the whole-crossing outcome (carries the timeout / op-failure message)
         # when the crossing itself failed, else the parsed (not-ok or absent)
         # ``auth-probe`` segment.
-        reachability = interpret_preflight_reachability(gate.reach_outcome, host_user, auth)
+        reachability = interpret_preflight_reachability(gate.reach_outcome, host_user)
         render_results([reachability], console=console)
         raise typer.Exit(code=1)
 
     # The crossing succeeded → split the bundle and produce all seven verdicts
     # (the single ``docker-info-runtimes`` segment feeds the three
     # runsc/host-uds checks — the intrinsic dedup).
-    preflight_results = interpret_preflight_bundle(gate.per_op, host_user, auth)
+    preflight_results = interpret_preflight_bundle(gate.per_op, host_user)
     has_preflight_failures = any(r.status == "fail" for r in preflight_results)
     if has_preflight_failures:
         render_results(preflight_results, console=console)
@@ -3799,9 +3723,6 @@ def destroy(
 @app.command()
 def doctor(
     user: str | None = typer.Option(None, "--user", help="Unprivileged user to validate"),
-    machinectl_auth: str | None = typer.Option(
-        None, "--machinectl-auth", help="machinectl auth mode: 'sudo' or 'polkit'"
-    ),
 ) -> None:
     """Run host readiness diagnostics."""
     project_config: HostConfig | None = None
@@ -3848,24 +3769,10 @@ def doctor(
         )
         raise typer.Exit(code=1)
 
-    if machinectl_auth is not None:
-        try:
-            resolved_auth = MachinectlAuth(machinectl_auth)
-        except ValueError:
-            console.print(
-                f"Invalid --machinectl-auth value '{machinectl_auth}'. Expected 'sudo' or 'polkit'.",
-                style="red",
-            )
-            raise typer.Exit(code=1) from None
-    elif project_config is not None:
-        resolved_auth = project_config.host.machinectl_authentication
-    else:
-        resolved_auth = MachinectlAuth.SUDO
-
     console.print(f"Per-user home: {sandbox_ai_home()}")
 
     distro = detect_distro()
-    checks = build_check_registry(resolved_auth, mode)
+    checks = build_check_registry(mode)
     results = run_checks(checks, resolved_user, distro, mode)
     render_results(results, console=console)
 

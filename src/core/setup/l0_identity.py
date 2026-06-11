@@ -25,7 +25,7 @@ state from the live host and compares it to the observed host:
   ``CONFLICT`` (an unconvergeable refusal — the runner never calls ``act``).
 
 ``resolve_machinectl_path`` is exported as a module-level *pure* function:
-Group 7's ``l3_sudoers_polkit`` re-imports and re-calls it at rule-render time
+Group 7's ``l3_sudoers`` re-imports and re-calls it at rule-render time
 so the rendered ``Cmnd_Spec`` path equals what sudo resolves the orchestrator's
 relative ``machinectl`` to (B-3); re-resolution also detects an L0↔live
 ``secure_path`` drift (the F-005 footgun ``setup_invariants`` re-checks).

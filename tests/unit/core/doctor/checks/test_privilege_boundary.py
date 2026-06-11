@@ -583,11 +583,11 @@ class TestRunscRuntimeArgsEdgeCases:
 
 class TestAuthModeThreadedToDispatch:
     """The checks delegate boundary-prefix construction to ``core.dispatch.invoke``;
-    the doctor-level contract is that the auth mode + user are threaded into the
-    ``HostConfig`` ``invoke`` receives (the sudo/polkit prefix shape itself is
-    asserted in ``tests/unit/core/test_dispatch.py``, not here)."""
+    the doctor-level contract is that the user is threaded into the ``HostConfig``
+    ``invoke`` receives (the sudo prefix shape itself is asserted in
+    ``tests/unit/core/test_dispatch.py``, not here)."""
 
-    def test_machinectl_reachable_threads_auth_mode_into_host_config(self, monkeypatch: Any) -> None:
+    def test_machinectl_reachable_threads_user_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_machinectl_reachable
         from core.host_config import MachinectlAuth
 
@@ -602,59 +602,27 @@ class TestAuthModeThreadedToDispatch:
             return _okn("ok\n")
 
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
-        result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+        result = check_machinectl_reachable("sandbox", None)
 
         assert result.status == "pass"
         assert captured["op"] == "auth-probe"
         assert captured["timeout"] == 10
         assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
-
-    def test_machinectl_reachable_sudo_mode_host_config(self, monkeypatch: Any) -> None:
-        from core.doctor import check_machinectl_reachable
-        from core.host_config import MachinectlAuth
-
-        captured: dict[str, Any] = {}
-
-        def capture(
-            op: str, args: Any, host_config: Any, **kwargs: Any
-        ) -> tuple[subprocess.CompletedProcess[str], None]:
-            captured["host_config"] = host_config
-            return _okn("ok\n")
-
-        monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
-        check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
-
         assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
-
-    def test_polkit_timeout_remediation_mentions_polkit(self, monkeypatch: Any) -> None:
-        from core.doctor import check_machinectl_reachable
-        from core.host_config import MachinectlAuth
-
-        def boom(*a: Any, **k: Any) -> Any:
-            raise _exec_error(timeout=True)
-
-        monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
-        result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
-
-        assert result.status == "fail"
-        assert "polkit" in (result.remediation or "").lower()
-        assert "sudoers" not in (result.remediation or "").lower()
 
     def test_sudo_timeout_remediation_mentions_sudoers(self, monkeypatch: Any) -> None:
         from core.doctor import check_machinectl_reachable
-        from core.host_config import MachinectlAuth
 
         def boom(*a: Any, **k: Any) -> Any:
             raise _exec_error(timeout=True)
 
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", boom)
-        result = check_machinectl_reachable("sandbox", None, auth_mode=MachinectlAuth.SUDO)
+        result = check_machinectl_reachable("sandbox", None)
 
         assert result.status == "fail"
         assert "sudoers" in (result.remediation or "").lower()
 
-    def test_docker_available_threads_auth_mode_into_host_config(self, monkeypatch: Any) -> None:
+    def test_docker_available_threads_user_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_docker_available
         from core.host_config import MachinectlAuth
 
@@ -667,9 +635,9 @@ class TestAuthModeThreadedToDispatch:
             return _okn("24.0.7\n")
 
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
-        check_docker_available("sandbox", None, auth_mode=MachinectlAuth.POLKIT)
+        check_docker_available("sandbox", None)
 
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.POLKIT
+        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
 
 
 class TestCheckComposeProjectNameCollision:
@@ -768,7 +736,7 @@ class TestOperatorRootlessLocalRouting:
 
     def test_docker_available_host_config_is_operator_rootless(self, monkeypatch: Any) -> None:
         from core.doctor import check_docker_available
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         captured: dict[str, Any] = {}
 
@@ -780,7 +748,7 @@ class TestOperatorRootlessLocalRouting:
 
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         result = check_docker_available(
-            "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+            "sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS
         )
         assert result.status == "pass"
         assert captured["host_config"].host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
@@ -790,7 +758,7 @@ class TestOperatorRootlessLocalRouting:
         branch: assert the argv that reaches the Executor carries NO machinectl
         crossing and runs ``framed=False`` (the local path)."""
         from core.doctor import check_docker_available
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         captured: dict[str, Any] = {}
 
@@ -803,7 +771,7 @@ class TestOperatorRootlessLocalRouting:
         # Silence the journald audit side-effect the local path emits.
         monkeypatch.setattr("core.dispatch.emit_op_audit", lambda *a, **k: None)
         result = check_docker_available(
-            "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+            "sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS
         )
         assert result.status == "pass"
         assert captured["framed"] is False
@@ -816,7 +784,7 @@ class TestOperatorRootlessLocalRouting:
         byte-pipe (``sudo systemd-run --pipe``), NOT machinectl shell — but the
         exit is still recovered from the dispatcher frame (framed=True, D3)."""
         from core.doctor import check_docker_available
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         captured: dict[str, Any] = {}
 
@@ -827,7 +795,7 @@ class TestOperatorRootlessLocalRouting:
 
         monkeypatch.setattr("core.executor.Executor.run", fake_run)
         result = check_docker_available(
-            "sandbox", None, auth_mode=MachinectlAuth.SUDO, mode=DockerExecutionMode.SEPARATE_USER
+            "sandbox", None, mode=DockerExecutionMode.SEPARATE_USER
         )
         assert result.status == "pass"
         assert captured["framed"] is True
@@ -854,34 +822,23 @@ def _outcome(*, ok: bool = False, timed_out: bool = False, stdout: str = "", mes
 class TestInterpretMachinectlReachable:
     def test_pass(self) -> None:
         from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
-        from core.host_config import MachinectlAuth
 
-        result = _interpret_machinectl_reachable(_outcome(ok=True), "sandbox", MachinectlAuth.SUDO)
+        result = _interpret_machinectl_reachable(_outcome(ok=True), "sandbox")
         assert result.status == "pass"
         assert "sandbox@.host" in result.detail
 
     def test_timeout_sudo_remediation(self) -> None:
         from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
-        from core.host_config import MachinectlAuth
 
-        result = _interpret_machinectl_reachable(_outcome(timed_out=True), "sandbox", MachinectlAuth.SUDO)
+        result = _interpret_machinectl_reachable(_outcome(timed_out=True), "sandbox")
         assert result.status == "fail"
         assert "sudo" in (result.detail + (result.remediation or "")).lower()
         assert "sudoers" in (result.remediation or "")
 
-    def test_timeout_polkit_remediation(self) -> None:
-        from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
-        from core.host_config import MachinectlAuth
-
-        result = _interpret_machinectl_reachable(_outcome(timed_out=True), "sandbox", MachinectlAuth.POLKIT)
-        assert result.status == "fail"
-        assert "polkit" in (result.remediation or "")
-
     def test_not_ok_interpolates_message(self) -> None:
         from core.doctor.checks.privilege_boundary import _interpret_machinectl_reachable
-        from core.host_config import MachinectlAuth
 
-        result = _interpret_machinectl_reachable(_outcome(message="boom"), "sandbox", MachinectlAuth.SUDO)
+        result = _interpret_machinectl_reachable(_outcome(message="boom"), "sandbox")
         assert result.status == "fail"
         assert "boom" in result.detail
 
@@ -1266,31 +1223,28 @@ _ALL_OK_SEGMENTS = {
 class TestInterpretPreflightReachability:
     def test_pass_outcome_passes(self) -> None:
         from core.doctor import interpret_preflight_reachability
-        from core.host_config import MachinectlAuth
 
-        result = interpret_preflight_reachability(_outcome(ok=True), "sandbox", MachinectlAuth.SUDO)
+        result = interpret_preflight_reachability(_outcome(ok=True), "sandbox")
         assert result.status == "pass"
         assert result.name == "machinectl reachable"
 
     def test_failed_outcome_fails_with_reachability_message(self) -> None:
         from core.doctor import interpret_preflight_reachability
-        from core.host_config import MachinectlAuth
 
         result = interpret_preflight_reachability(
-            _outcome(ok=False, message="boom"), "sandbox", MachinectlAuth.SUDO
+            _outcome(ok=False, message="boom"), "sandbox"
         )
         assert result.status == "fail"
         assert "boom" in result.detail
 
     def test_timeout_outcome_fails(self) -> None:
         from core.doctor import interpret_preflight_reachability
-        from core.host_config import MachinectlAuth
 
         result = interpret_preflight_reachability(
-            _outcome(timed_out=True), "sandbox", MachinectlAuth.POLKIT
+            _outcome(timed_out=True), "sandbox"
         )
         assert result.status == "fail"
-        assert "polkit" in (result.remediation or "").lower() or "timed out" in result.detail.lower()
+        assert "sudoers" in (result.remediation or "").lower() or "timed out" in result.detail.lower()
 
 
 class TestInterpretComposeCollisionSegment:
@@ -1381,13 +1335,12 @@ class TestInterpretPreflightBundle:
     def test_all_ok_produces_seven_verdicts_in_chain_order(self, isolated_sandbox_ai_home: Any) -> None:
         from core.dispatch import parse_preflight_outcome
         from core.doctor import interpret_preflight_bundle
-        from core.host_config import MachinectlAuth
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True)
         (state / "instances.json").write_text("{}")
         per_op = parse_preflight_outcome(_bundle_outcome(_ALL_OK_SEGMENTS))
-        results = interpret_preflight_bundle(per_op, "sandbox", MachinectlAuth.SUDO)
+        results = interpret_preflight_bundle(per_op, "sandbox")
         names = [r.name for r in results]
         assert names == [
             "machinectl reachable",
@@ -1406,7 +1359,6 @@ class TestInterpretPreflightBundle:
         # deduped segment.
         from core.dispatch import parse_preflight_outcome
         from core.doctor import interpret_preflight_bundle
-        from core.host_config import MachinectlAuth
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True)
@@ -1414,7 +1366,7 @@ class TestInterpretPreflightBundle:
         segments = dict(_ALL_OK_SEGMENTS)
         segments["docker-info-runtimes"] = (json.dumps({"runc": {}}), 0)
         per_op = parse_preflight_outcome(_bundle_outcome(segments))
-        results = interpret_preflight_bundle(per_op, "sandbox", MachinectlAuth.SUDO)
+        results = interpret_preflight_bundle(per_op, "sandbox")
         by_name = {r.name: r for r in results}
         assert by_name["gVisor runsc"].status == "fail"
         # runtimeArgs + host-uds derive from the same segment (no reserved key →
@@ -1427,7 +1379,6 @@ class TestInterpretPreflightBundle:
         # ITS specific diagnostic, not a generic bundle failure.
         from core.dispatch import parse_preflight_outcome
         from core.doctor import interpret_preflight_bundle
-        from core.host_config import MachinectlAuth
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True)
@@ -1435,7 +1386,7 @@ class TestInterpretPreflightBundle:
         segments = dict(_ALL_OK_SEGMENTS)
         segments["docker-version"] = ("Cannot connect to the Docker daemon", 1)
         per_op = parse_preflight_outcome(_bundle_outcome(segments))
-        results = interpret_preflight_bundle(per_op, "sandbox", MachinectlAuth.SUDO)
+        results = interpret_preflight_bundle(per_op, "sandbox")
         by_name = {r.name: r for r in results}
         assert by_name["Docker available"].status == "fail"
         assert "Docker not accessible" in by_name["Docker available"].detail

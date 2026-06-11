@@ -140,8 +140,8 @@ class Executor:
 
         # Framed path (F-018): the callee (the dispatcher) emits its own
         # begin/exit framing — we inject nothing and recover the exit from the
-        # dispatcher's nonce-bound trailer, so the crossed (sudo/polkit-
-        # authorized) payload stays the bare command the per-op rule matches.
+        # dispatcher's nonce-bound trailer, so the crossed (sudo-authorized)
+        # payload stays the bare command the per-op rule matches.
         if framed and not interactive:
             kwargs["check"] = False
 

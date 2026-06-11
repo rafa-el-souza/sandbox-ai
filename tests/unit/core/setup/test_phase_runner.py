@@ -344,19 +344,7 @@ def test_route_sandbox_is_machinectl_cmd_sudo() -> None:
         host_config=minimal_host_config("sbuser", MachinectlAuth.SUDO),
         operator="alice",
     )
-    assert route(Identity.SANDBOX, ctx) == machinectl_cmd(
-        "sbuser", MachinectlAuth.SUDO
-    )
-
-
-def test_route_sandbox_is_machinectl_cmd_polkit() -> None:
-    ctx = SetupContext(
-        host_config=minimal_host_config("sbuser", MachinectlAuth.POLKIT),
-        operator="alice",
-    )
-    assert route(Identity.SANDBOX, ctx) == machinectl_cmd(
-        "sbuser", MachinectlAuth.POLKIT
-    )
+    assert route(Identity.SANDBOX, ctx) == machinectl_cmd("sbuser")
 
 
 # ── run_plan_pass ────────────────────────────────────────────────────────────
@@ -966,7 +954,7 @@ def test_apply_pass_mode_skip_does_not_block_dependents() -> None:
 
 
 # The four crossing-only phases mode-gated to separate-user (M2): no dispatcher
-# binary, no sudoers/polkit AUTH GATE, no per-op probe, no fresh-session
+# binary, no sudoers AUTH GATE, no per-op probe, no fresh-session
 # re-probe in operator-rootless. Driving the REAL discovered phase set proves
 # the declarative ``applies_in`` skip reaches the runner end-to-end.
 _CROSSING_ONLY_IDS = frozenset({"l65", "l3", "l3a", "l8"})
@@ -1044,7 +1032,7 @@ def test_real_crossing_only_phases_run_in_separate_user_plan(
     ``resolve_systemd_run_path`` is pinned so l3's probe is host-independent.
     """
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit.resolve_systemd_run_path",
+        "core.setup.l3_sudoers.resolve_systemd_run_path",
         lambda _hc: "/usr/bin/systemd-run",
     )
     phases = _real_crossing_only_phases()
@@ -1081,16 +1069,7 @@ def test_daemon_owner_user_operator_rootless_is_operator() -> None:
 def test_daemon_owner_crossing_separate_user_is_machinectl_cmd() -> None:
     """separate-user crossing equals machinectl_cmd(...) byte-for-byte."""
     ctx = _ctx(user="sbuser", auth=MachinectlAuth.SUDO)
-    assert daemon_owner_crossing(ctx) == machinectl_cmd(
-        "sbuser", MachinectlAuth.SUDO
-    )
-
-
-def test_daemon_owner_crossing_separate_user_polkit() -> None:
-    ctx = _ctx(user="sbuser", auth=MachinectlAuth.POLKIT)
-    assert daemon_owner_crossing(ctx) == machinectl_cmd(
-        "sbuser", MachinectlAuth.POLKIT
-    )
+    assert daemon_owner_crossing(ctx) == machinectl_cmd("sbuser")
 
 
 def test_daemon_owner_crossing_operator_rootless_injects_session_env(

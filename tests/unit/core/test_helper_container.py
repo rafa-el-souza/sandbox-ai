@@ -113,21 +113,6 @@ class TestHelperChownFiles:
         assert hc.host.docker_unprivileged_user == _HOST_USER
         assert hc.host.machinectl_authentication == MachinectlAuth.SUDO
 
-    def test_polkit_auth_propagates_to_host_config(
-        self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
-    ) -> None:
-        helper_chown_files(
-            _HOST_USER,
-            "/p",
-            ["a"],
-            owner_uid=_HOST_UID,
-            owner_gid=_HOST_GID,
-            mode=0o640,
-            machinectl_auth=MachinectlAuth.POLKIT,
-        )
-        hc = captured_invoke[0]["host_config"]
-        assert hc.host.machinectl_authentication == MachinectlAuth.POLKIT
-
     def test_default_execution_mode_is_separate_user(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
     ) -> None:
@@ -363,21 +348,6 @@ class TestHelperMkdirChownDirs:
         )
         assert len(captured_invoke) == 1
         assert captured_invoke[0]["args"][3:] == [".claude", "tmux_resurrect"]
-
-    def test_polkit_auth_propagates_to_host_config(
-        self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
-    ) -> None:
-        helper_mkdir_chown_dirs(
-            _HOST_USER,
-            "/p",
-            ["x"],
-            owner_uid=_HOST_UID,
-            owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.POLKIT,
-        )
-        hc = captured_invoke[0]["host_config"]
-        assert hc.host.docker_unprivileged_user == _HOST_USER
-        assert hc.host.machinectl_authentication == MachinectlAuth.POLKIT
 
     def test_default_execution_mode_is_separate_user(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]

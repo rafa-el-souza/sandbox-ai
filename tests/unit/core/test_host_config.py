@@ -104,12 +104,6 @@ docker_unprivileged_user = "sandbox"
 machinectl_authentication = "sudo"
 """
 
-VALID_PROJECT_TOML_POLKIT = """\
-[host]
-docker_unprivileged_user = "sandbox"
-machinectl_authentication = "polkit"
-"""
-
 VALID_PROJECT_TOML_NO_AUTH = """\
 [host]
 docker_unprivileged_user = "sandbox"
@@ -134,12 +128,6 @@ class TestHostConfigFromToml:
         config = HostConfig.from_toml()
         assert config.host.docker_unprivileged_user == "sandbox"
         assert config.host.machinectl_authentication == MachinectlAuth.SUDO
-
-    def test_polkit_mode_parsed(self, isolated_sandbox_ai_home: Path) -> None:
-        """machinectl_authentication = 'polkit' parses to MachinectlAuth.POLKIT."""
-        _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML_POLKIT)
-        config = HostConfig.from_toml()
-        assert config.host.machinectl_authentication == MachinectlAuth.POLKIT
 
     def test_missing_file_raises_file_not_found(self, isolated_sandbox_ai_home: Path) -> None:
         """Missing sandbox-ai.toml raises FileNotFoundError with canonical path."""
@@ -223,25 +211,23 @@ class TestHostSettingsModel:
 
     def test_host_config_attributes(self) -> None:
         """HostSettings exposes docker_unprivileged_user and machinectl_authentication."""
-        hc = HostSettings(docker_unprivileged_user="sandbox", machinectl_authentication=MachinectlAuth.POLKIT)
+        hc = HostSettings(docker_unprivileged_user="sandbox", machinectl_authentication=MachinectlAuth.SUDO)
         assert hc.docker_unprivileged_user == "sandbox"
-        assert hc.machinectl_authentication == MachinectlAuth.POLKIT
+        assert hc.machinectl_authentication == MachinectlAuth.SUDO
 
 
 class TestMachinectlAuthEnum:
     """MachinectlAuth StrEnum members."""
 
-    def test_exactly_two_members(self) -> None:
-        """MachinectlAuth contains exactly SUDO and POLKIT."""
+    def test_exactly_one_member(self) -> None:
+        """MachinectlAuth contains exactly SUDO (POLKIT retired — C-012)."""
         members = list(MachinectlAuth)
-        assert len(members) == 2
+        assert len(members) == 1
         assert MachinectlAuth.SUDO in members
-        assert MachinectlAuth.POLKIT in members
 
     def test_string_values(self) -> None:
         """Enum values are the expected strings."""
         assert MachinectlAuth.SUDO.value == "sudo"
-        assert MachinectlAuth.POLKIT.value == "polkit"
 
 
 class TestDockerExecutionMode:
@@ -381,25 +367,20 @@ class TestResolveDaemonOwnerSettings:
 class TestMachinectlCmd:
     """machinectl_cmd() command prefix builder."""
 
-    def test_sudo_mode_returns_sudo_prefix(self) -> None:
-        """Sudo mode: ['sudo', 'machinectl', 'shell', '<user>@.host']."""
-        result = machinectl_cmd("sandbox", MachinectlAuth.SUDO)
+    def test_returns_sudo_prefix(self) -> None:
+        """['sudo', 'machinectl', 'shell', '<user>@.host']."""
+        result = machinectl_cmd("sandbox")
         assert result == ["sudo", "machinectl", "shell", "sandbox@.host"]
-
-    def test_polkit_mode_returns_no_sudo_prefix(self) -> None:
-        """Polkit mode: ['machinectl', 'shell', '<user>@.host']."""
-        result = machinectl_cmd("sandbox", MachinectlAuth.POLKIT)
-        assert result == ["machinectl", "shell", "sandbox@.host"]
 
     def test_custom_user(self) -> None:
         """User parameter is interpolated correctly."""
-        result = machinectl_cmd("devuser", MachinectlAuth.SUDO)
+        result = machinectl_cmd("devuser")
         assert result == ["sudo", "machinectl", "shell", "devuser@.host"]
 
     def test_returns_new_list_each_call(self) -> None:
         """Each call returns a fresh list (no shared mutable state)."""
-        a = machinectl_cmd("sandbox", MachinectlAuth.SUDO)
-        b = machinectl_cmd("sandbox", MachinectlAuth.SUDO)
+        a = machinectl_cmd("sandbox")
+        b = machinectl_cmd("sandbox")
         assert a == b
         assert a is not b
 
@@ -414,14 +395,14 @@ class TestPipeCmd:
         """Canonical shape: ['systemd-run', '-q', '--pipe', '--uid=<user>']."""
         assert pipe_cmd("claude-sandbox") == ["systemd-run", "-q", "--pipe", "--uid=claude-sandbox"]
 
-    def test_signature_is_auth_mode_independent(self) -> None:
+    def test_signature_takes_only_user(self) -> None:
         """pipe_cmd takes only ``user`` — no ``auth`` parameter.
 
-        Contrasts with ``machinectl_cmd`` which takes ``(user, auth)``: the
-        byte-pipe primitive has no second authorization layer to select.
+        ``machinectl_cmd`` likewise takes only ``user`` since POLKIT retirement
+        (C-012): both primitives have no auth-mode argument to select.
         """
         assert set(inspect.signature(pipe_cmd).parameters) == {"user"}
-        assert set(inspect.signature(machinectl_cmd).parameters) == {"user", "auth"}
+        assert set(inspect.signature(machinectl_cmd).parameters) == {"user"}
 
 
 # ─── sudo_pipe_cmd() privileged byte-pipe primitive ──────────────────────────

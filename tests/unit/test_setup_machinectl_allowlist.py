@@ -133,7 +133,7 @@ def test_synthetic_out_of_category_caller_still_fails(tmp_path: Path) -> None:
     rogue = tmp_path / "rogue_setup_lookalike.py"
     rogue.write_text(
         "from core.host_config import machinectl_cmd\n\n"
-        "machinectl_cmd('sandbox', 'sudo')\n"
+        "machinectl_cmd('sandbox')\n"
     )
 
     # Use the full (setup-populated) allowlist, NOT the two-literal subset —

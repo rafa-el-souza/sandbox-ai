@@ -153,39 +153,30 @@ def check_systemd_machined(user: str, distro: str | None) -> CheckResult:
 def check_machinectl_reachable(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that machinectl shell can reach the unprivileged user.
 
-    Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang)
-    in sudo mode, or polkit dialog/timeout in polkit mode.
+    Uses a 10-second timeout to detect sudoers misconfiguration (password prompt hang).
     """
-    outcome = dispatch.probe("auth-probe", [], minimal_host_config(user, auth_mode, mode), timeout=10)
-    return _interpret_machinectl_reachable(outcome, user, auth_mode)
+    outcome = dispatch.probe("auth-probe", [], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=10)
+    return _interpret_machinectl_reachable(outcome, user)
 
 
 def _interpret_machinectl_reachable(
     outcome: dispatch.ProbeOutcome,
     user: str,
-    auth_mode: MachinectlAuth,
 ) -> CheckResult:
     """Interpret the ``auth-probe`` outcome (the seam reused by ``start`` preflight)."""
     if outcome.timed_out:
-        if auth_mode == MachinectlAuth.SUDO:
-            timeout_remediation = (
-                "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
-                f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
-            )
-        else:
-            timeout_remediation = (
-                "Configure a passwordless polkit rule for org.freedesktop.machine1.shell "
-                f"granting your user access to '{user}@.host', or switch to sudo mode."
-            )
+        timeout_remediation = (
+            "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
+            f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
+        )
         return CheckResult(
             status="fail",
             name="machinectl reachable",
-            detail=f"Probe timed out after 10 seconds (likely {auth_mode.value} prompt)",
+            detail="Probe timed out after 10 seconds (likely sudo prompt)",
             remediation=timeout_remediation,
         )
     if not outcome.ok:
@@ -206,11 +197,10 @@ def _interpret_machinectl_reachable(
 def check_docker_available(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
-    outcome = dispatch.probe("docker-version", [], minimal_host_config(user, auth_mode, mode), timeout=15)
+    outcome = dispatch.probe("docker-version", [], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15)
     return _interpret_docker_available(outcome, user)
 
 
@@ -234,12 +224,11 @@ def _interpret_docker_available(outcome: dispatch.ProbeOutcome, user: str) -> Ch
 def check_docker_rootless(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that Docker is running in rootless mode."""
     outcome = dispatch.probe(
-        "docker-info", ["security-options"], minimal_host_config(user, auth_mode, mode), timeout=15
+        "docker-info", ["security-options"], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15
     )
     return _interpret_docker_rootless(outcome, user)
 
@@ -282,11 +271,12 @@ def _interpret_docker_rootless(outcome: dispatch.ProbeOutcome, user: str) -> Che
 def check_runsc_registered(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
-    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)
+    outcome = dispatch.probe(
+        "docker-info", ["runtimes"], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15
+    )
     return _interpret_runsc_registered(outcome)
 
 
@@ -313,7 +303,6 @@ def _interpret_runsc_registered(outcome: dispatch.ProbeOutcome) -> CheckResult:
 def check_runsc_runtimeargs(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that runsc runtimeArgs match what L6 configures (single-sourced).
@@ -325,7 +314,9 @@ def check_runsc_runtimeargs(
     L6 target, this check follows automatically. WARN (not fail) when an expected arg is absent — this
     is a defense-in-depth advisory.
     """
-    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)
+    outcome = dispatch.probe(
+        "docker-info", ["runtimes"], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15
+    )
     return _interpret_runsc_runtimeargs(outcome, user)
 
 
@@ -385,7 +376,6 @@ def _runtime_arg_present(expected: str, runtime_args: list[str]) -> bool:
 def check_host_uds(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that runsc runtimeArgs do NOT include --host-uds=all.
@@ -393,7 +383,9 @@ def check_host_uds(
     The default (--host-uds=none) is the correct security posture.
     Returns PASS if --host-uds=all is absent, WARN if present.
     """
-    outcome = dispatch.probe("docker-info", ["runtimes"], minimal_host_config(user, auth_mode, mode), timeout=15)
+    outcome = dispatch.probe(
+        "docker-info", ["runtimes"], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15
+    )
     return _interpret_host_uds(outcome, user)
 
 
@@ -444,7 +436,6 @@ def _interpret_host_uds(outcome: dispatch.ProbeOutcome, user: str) -> CheckResul
 def check_compose_project_name_collision(
     host_user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Fail if a daemon-side compose project already exists for any registered instance.
@@ -458,7 +449,7 @@ def check_compose_project_name_collision(
     # ``_interpret_compose_project_name_collision`` (it reproduces it "for
     # totality"); the public check does not re-guard it, so the registry is read
     # exactly once per invocation.
-    outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, auth_mode, mode), timeout=15)
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(host_user, MachinectlAuth.SUDO, mode), timeout=15)
     return _interpret_compose_project_name_collision(outcome)
 
 
@@ -547,7 +538,6 @@ def interpret_compose_collision_segment(segment: dispatch.ProbeOutcome | None) -
 def interpret_preflight_reachability(
     outcome: dispatch.ProbeOutcome,
     user: str,
-    auth_mode: MachinectlAuth,
 ) -> CheckResult:
     """Render the boundary-reachability verdict for ``sandbox start``'s preflight gate.
 
@@ -561,7 +551,7 @@ def interpret_preflight_reachability(
     existing :func:`_interpret_machinectl_reachable` so the diagnostic is
     byte-identical to the per-crossing chain's reachability FAIL.
     """
-    return _interpret_machinectl_reachable(outcome, user, auth_mode)
+    return _interpret_machinectl_reachable(outcome, user)
 
 
 class PreflightGate(NamedTuple):
@@ -615,7 +605,6 @@ def evaluate_preflight_gate(outcome: dispatch.ProbeOutcome) -> PreflightGate:
 def interpret_preflight_bundle(
     per_op: dict[str, dispatch.ProbeOutcome],
     user: str,
-    auth_mode: MachinectlAuth,
 ) -> list[CheckResult]:
     """Map a single ``preflight``-op bundle to the seven privilege-boundary verdicts.
 
@@ -635,7 +624,7 @@ def interpret_preflight_bundle(
     """
     runtimes = per_op["docker-info-runtimes"]
     return [
-        _interpret_machinectl_reachable(per_op["auth-probe"], user, auth_mode),
+        _interpret_machinectl_reachable(per_op["auth-probe"], user),
         _interpret_docker_available(per_op["docker-version"], user),
         _interpret_docker_rootless(per_op["docker-info-security-options"], user),
         _interpret_runsc_registered(runtimes),

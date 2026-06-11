@@ -1,10 +1,10 @@
-"""Unit tests for ``core.setup.l3_sudoers_polkit`` (L3 — privilege rule).
+"""Unit tests for ``core.setup.l3_sudoers`` (L3 — privilege rule).
 
 Covers: the V9 golden-file render + zero-``"`` assertion across every
 ``Cmnd_Spec``; the F-004 render-time refusal (a ``"`` in a body / a bad
 op-name); the content-aware probe (ALREADY_CORRECT -> DRIFT on a stale Op enum,
-driven by the shared ``assert_phase_content_aware`` fixture); SUDO vs POLKIT
-auth-mode branching; visudo-failure refusal; the rollback removing the
+driven by the shared ``assert_phase_content_aware`` fixture); visudo-failure
+refusal; the rollback removing the
 just-installed drop-in. (Operator resolution itself now lives in
 ``core.setup.l0_identity.resolve_operator`` and is tested there; L3 reads the
 already-resolved operator off the :class:`SetupContext`.)
@@ -25,11 +25,10 @@ from core.host_config import (
     MachinectlAuth,
     minimal_host_config,
 )
-from core.setup import l3_sudoers_polkit as l3
-from core.setup.l3_sudoers_polkit import (
+from core.setup import l3_sudoers as l3
+from core.setup.l3_sudoers import (
     PHASE,
     RuleRenderError,
-    render_polkit_rule,
     render_sudoers_rule,
 )
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -51,7 +50,7 @@ def _stable_systemd_run(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _stable_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit.socket.gethostname",
+        "core.setup.l3_sudoers.socket.gethostname",
         lambda: "testhost",
     )
 
@@ -384,30 +383,6 @@ def test_render_refuses_bad_sandbox_user(bad_user: str) -> None:
         render_sudoers_rule("/usr/bin/systemd-run", "alice", "testhost", bad_user)
 
 
-# ── POLKIT branch ────────────────────────────────────────────────────────────
-
-
-def test_polkit_rule_is_action_level() -> None:
-    rendered = render_polkit_rule("alice", "sandbox")
-    assert 'action.id == "org.freedesktop.machine1.shell"' in rendered
-    assert 'subject.user == "alice"' in rendered
-    assert 'action.lookup("user") == "sandbox"' in rendered
-    assert "polkit.Result.YES" in rendered
-
-
-def test_probe_polkit_missing_then_after_write(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    target = tmp_path / "49-sandbox-ai-machinectl.rules"
-    monkeypatch.setattr(l3, "_POLKIT_RULE_PATH", target)
-    ctx = _ctx(MachinectlAuth.POLKIT)
-    result, _ = l3._probe(ctx)
-    assert result == PhaseResult.MISSING
-    target.write_text(render_polkit_rule("alice", "sandbox"))
-    result2, _ = l3._probe(ctx)
-    assert result2 == PhaseResult.ALREADY_CORRECT
-
-
 # ── content-aware probe (SUDO) ───────────────────────────────────────────────
 
 
@@ -462,36 +437,13 @@ def test_act_sudo_stages_validates_installs(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit.subprocess.run", _fake_run
+        "core.setup.l3_sudoers.subprocess.run", _fake_run
     )
     detail = l3._act(_ctx())
     assert "installed" in detail
     assert calls[0][0] == "visudo"
     assert calls[1][0] == "install"
     assert "0440" in calls[1]
-
-
-def test_act_polkit_skips_visudo(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    target = tmp_path / "49-sandbox-ai-machinectl.rules"
-    monkeypatch.setattr(l3, "_POLKIT_RULE_PATH", target)
-    calls: list[list[str]] = []
-
-    def _fake_run(
-        argv: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append(argv)
-        if argv[0] == "install":
-            Path(argv[-1]).write_text(Path(argv[-2]).read_text())
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit.subprocess.run", _fake_run
-    )
-    l3._act(_ctx(MachinectlAuth.POLKIT))
-    assert all(c[0] != "visudo" for c in calls)
-    assert "0644" in calls[0]
 
 
 def test_act_visudo_failure_refuses_install(
@@ -509,7 +461,7 @@ def test_act_visudo_failure_refuses_install(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(
-        "core.setup.l3_sudoers_polkit.subprocess.run", _fake_run
+        "core.setup.l3_sudoers.subprocess.run", _fake_run
     )
     with pytest.raises(RuleRenderError, match="visudo -cf rejected"):
         l3._act(_ctx())
@@ -570,5 +522,5 @@ def test_phase_identity_and_graph() -> None:
     assert PHASE.depends_on == ("l7",)
     assert PHASE.identity == Identity.ROOT
     assert PHASE.rollback is l3._rollback
-    # no crossing → no sudoers/polkit AUTH GATE → separate-user only.
+    # no crossing → no sudoers AUTH GATE → separate-user only.
     assert PHASE.applies_in == frozenset({DockerExecutionMode.SEPARATE_USER})

@@ -76,7 +76,7 @@ For each `--copy NAME=PATH` flag, the system SHALL validate the source path befo
 - **THEN** the CLI exits with a walker-boundary error
 
 ### Requirement: Init Command Interface
-The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). A `--machinectl-auth` flag SHALL accept `"sudo"` or `"polkit"` to override the `machinectl_authentication` value from host config; absent the flag and absent a host config value, the default is `"sudo"`. The previously-supported `--user` flag is removed.
+The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). The command does not accept a `--machinectl-auth` flag; the `machinectl_authentication` value is read from host config and defaults to `"sudo"` (the only supported value, established by seeding). The previously-supported `--user` flag is removed.
 
 CWD-based instance discovery is removed: the `<inst>` argument is positional and required.
 
@@ -84,12 +84,8 @@ CWD-based instance discovery is removed: the `<inst>` argument is positional and
 - **WHEN** the operator runs `sandbox init foo` and `<home>/config/sandbox-ai.toml` contains `docker_unprivileged_user = "sandbox"`
 - **THEN** the system uses `"sandbox"` as the docker unprivileged user
 
-#### Scenario: machinectl-auth flag overrides config
-- **WHEN** the operator runs `sandbox init foo --machinectl-auth polkit` and `<home>/config/sandbox-ai.toml` contains `machinectl_authentication = "sudo"`
-- **THEN** the system uses `"polkit"` as the authentication mode for this invocation
-
-#### Scenario: machinectl-auth defaults to sudo
-- **WHEN** the operator runs `sandbox init foo` without `--machinectl-auth` and `<home>/config/sandbox-ai.toml` does not specify `machinectl_authentication`
+#### Scenario: machinectl auth defaults to sudo
+- **WHEN** the operator runs `sandbox init foo` and `<home>/config/sandbox-ai.toml` does not specify `machinectl_authentication`
 - **THEN** the system uses `"sudo"` as the authentication mode
 
 #### Scenario: --user flag is rejected
@@ -101,33 +97,25 @@ CWD-based instance discovery is removed: the `<inst>` argument is positional and
 - **THEN** the CLI exits with a typer "missing argument" error
 
 ### Requirement: Init-Time Auth Mode Probe
-The system SHALL validate that the resolved machinectl authentication mode works at init time by executing the dispatcher `auth-probe` op against the resolved docker unprivileged user (via `core.dispatch.probe("auth-probe", [], host_config)` — which crosses the bare `dispatch auth-probe` payload, NOT an inline `"echo ok"` string; the dispatcher's `auth-probe` target argv is `["/bin/bash", "-c", "echo ok"]`). The crossing primitive is selected by the resolved `machinectl_authentication` mode: SUDO crosses via `sudo_pipe_cmd` (the privileged byte-pipe), POLKIT via `machinectl_cmd(user, POLKIT)`. The probe SHALL use a 5-second timeout.
+The system SHALL validate that the resolved machinectl authentication mode works at init time by executing the dispatcher `auth-probe` op against the resolved docker unprivileged user (via `core.dispatch.probe("auth-probe", [], host_config)` — which crosses the bare `dispatch auth-probe` payload, NOT an inline `"echo ok"` string; the dispatcher's `auth-probe` target argv is `["/bin/bash", "-c", "echo ok"]`). The resolved `machinectl_authentication` mode is always SUDO, which crosses via `sudo_pipe_cmd` (the privileged byte-pipe). The probe SHALL use a 5-second timeout.
 
 #### Scenario: Sudo mode probe succeeds
 - **WHEN** init resolves `machinectl_authentication = "sudo"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `sudo_pipe_cmd(<user>)` as `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
-- **THEN** init proceeds normally
-
-#### Scenario: Polkit mode probe succeeds
-- **WHEN** init resolves `machinectl_authentication = "polkit"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `machinectl_cmd(<user>, POLKIT)` as `[*machinectl_cmd(<user>, POLKIT), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
 - **THEN** init proceeds normally
 
 #### Scenario: Sudo mode probe fails with timeout
 - **WHEN** the sudo probe times out after 5 seconds (`probe(...)` returns `timed_out=True`)
 - **THEN** init exits with an error including remediation: "Configure passwordless machinectl access in /etc/sudoers.d/"
 
-#### Scenario: Polkit mode probe fails
-- **WHEN** the polkit probe returns `ok=False` or times out
-- **THEN** init exits with an error including remediation: "Configure polkit rules for org.freedesktop.machine1.shell"
-
 ### Requirement: Init Doctor Pre-Flight Auth Mode Awareness
-The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Repo Integrity` chains (excluding `ancestor_traverse`, since ACLs are granted during `start`, not `init`). Privilege Boundary verification at init time is delegated to the dedicated init-time auth probe (see "Init-Time Auth Mode Probe" requirement). The pre-flight SHALL forward the resolved `machinectl_authentication` mode to `run_check_subset()` / `build_check_registry()` so that, if and when machinectl-dependent checks enter the pre-flight scope, the `sudo` binary check is conditionally omitted under polkit mode.
+The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Repo Integrity` chains (excluding `ancestor_traverse`, since ACLs are granted during `start`, not `init`). Privilege Boundary verification at init time is delegated to the dedicated init-time auth probe (see "Init-Time Auth Mode Probe" requirement). The pre-flight SHALL run the `Filesystem` and `Repo Integrity` checks via `run_check_subset()` / `build_check_registry()`; the privilege-boundary checks are not in the pre-flight scope.
 
-#### Scenario: Pre-flight forwards auth mode to the check registry
-- **WHEN** init resolves `machinectl_authentication = "polkit"` and runs the Filesystem + Repo Integrity pre-flight
-- **THEN** `run_check_subset(..., auth_mode=POLKIT)` is invoked so the registry it builds reflects polkit semantics (sudo check omitted, `machinectl_reachable` depends_on without `sudo`)
+#### Scenario: Pre-flight runs the filesystem and repo-integrity chains
+- **WHEN** init runs the Filesystem + Repo Integrity pre-flight
+- **THEN** only those chains' checks execute; `run_check_subset(...)` builds the registry with dependency graph and cascading-skip logic preserved
 
 #### Scenario: Privilege Boundary verification is performed by the init-time probe, not the pre-flight
-- **WHEN** init runs in either auth mode
+- **WHEN** init runs
 - **THEN** Chain 1 (Privilege Boundary) checks are NOT executed by the pre-flight; the init-time auth probe (5-second timeout) is the single source of truth for machinectl reachability at init time
 
 ### Requirement: Init Git Config Auto-Detection
@@ -213,13 +201,13 @@ The system SHALL create the per-user tree (`<home>/`, `<home>/config/`, `<home>/
 - **THEN** the per-user tree is created under `/tmp/test-home/` rather than `~/.sandbox-ai/`
 
 ### Requirement: Host Config Seeding (TTY Prompt or Non-TTY Fail)
-When `<home>/config/sandbox-ai.toml` does not exist, `sandbox init` SHALL seed it. In TTY mode, the system SHALL prompt the operator interactively for `docker_unprivileged_user` (required) and `machinectl_authentication` (optional, default `"sudo"`). In non-TTY mode, the system SHALL exit with a clear error directing the operator to create the file manually before retrying.
+When `<home>/config/sandbox-ai.toml` does not exist, `sandbox init` SHALL seed it. In TTY mode, the system SHALL prompt the operator interactively for `docker_unprivileged_user` (required) and `machinectl_authentication` (optional, default `"sudo"`, only accepting `"sudo"`). In non-TTY mode, the system SHALL exit with a clear error directing the operator to create the file manually before retrying.
 
 The seeded file SHALL begin with a leading managed-comment header — `# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)` — guarding the setup-determined `[host]` fields (D10 stopgap). The seed SHALL NOT write a `docker_execution_mode` field: the execution mode is no longer a toml field (it is resolved at runtime from the setup-state marker — see the `host-config` capability's "Docker Execution Mode Selector").
 
 #### Scenario: TTY clean install — interactive seed
 - **WHEN** `sandbox init` runs in a TTY and `<home>/config/sandbox-ai.toml` does not exist
-- **THEN** the CLI prompts: "docker_unprivileged_user (e.g., sandbox):" — accepts a non-empty value — then prompts: "machinectl_authentication [sudo/polkit, default sudo]:" — accepts `sudo`, `polkit`, or empty (defaulting to `sudo`) — then writes the seeded values to `<home>/config/sandbox-ai.toml`, preceded by the managed-comment header and with no `docker_execution_mode` field
+- **THEN** the CLI prompts: "docker_unprivileged_user (e.g., sandbox):" — accepts a non-empty value — then prompts: "machinectl_authentication [sudo, default sudo]:" — accepts `sudo` or empty (defaulting to `sudo`) — then writes the seeded values to `<home>/config/sandbox-ai.toml`, preceded by the managed-comment header and with no `docker_execution_mode` field
 
 #### Scenario: TTY clean install — empty user rejected
 - **WHEN** the operator presses Enter without typing a value at the `docker_unprivileged_user` prompt

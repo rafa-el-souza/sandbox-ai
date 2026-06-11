@@ -54,9 +54,7 @@ from core.exceptions import SandboxExecutionError
 from core.executor import Executor, normalize_captured_output
 from core.helper_container import _hardened_docker_run
 from core.host_config import (
-    MachinectlAuth,
     is_operator_rootless,
-    machinectl_cmd,
     pipe_cmd,
     sudo_pipe_cmd,
 )
@@ -1165,11 +1163,6 @@ def build_invocation(
       path's, so the per-op sudoers ``Cmnd_Spec`` (derived from this same
       ``sudo_pipe_cmd`` prefix) still matches; no ``--unit``/``--description``
       is added.
-    - ``separate-user`` + POLKIT (UNCHANGED): returns
-      ``[*machinectl_cmd(user, POLKIT), "/bin/bash", "-c",
-      "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` — the POLKIT
-      action-level grant cannot inspect argv, so the ``machinectl`` crossing
-      is retained as-is.
     - ``operator-rootless``: returns the op's target-argv **directly** (the same
       ``["/bin/bash", "-c", "<inner>"]`` / hardened ``docker run`` the per-op
       builder produces) with NO ``machinectl_cmd`` prefix and NO
@@ -1200,15 +1193,8 @@ def build_invocation(
         return build_target_argv(resolved, wire_args, host_config)
     inner = dispatch_payload(op_value, wire_args)
     user = host_config.host.docker_unprivileged_user
-    auth = host_config.host.machinectl_authentication
-    # SUDO crossings ride the privileged byte-pipe (design D2); POLKIT keeps
-    # the machinectl shell crossing. The inner payload is byte-identical in
-    # both — only the prefix differs.
-    crossing = (
-        sudo_pipe_cmd(user)
-        if auth == MachinectlAuth.SUDO
-        else machinectl_cmd(user, auth)
-    )
+    # SUDO crossings ride the privileged byte-pipe (design D2).
+    crossing = sudo_pipe_cmd(user)
     return [
         *crossing,
         "/bin/bash",
@@ -1239,9 +1225,6 @@ def proxy_argv(
     - ``separate-user`` + SUDO → ``[*sudo_pipe_cmd(user), "/bin/bash", "-c",
       "<dispatch> fwd <wire>"]`` — the privileged byte-pipe; headless-capable
       (the F-060 fix).
-    - ``separate-user`` + POLKIT → ``[*pipe_cmd(user), "/bin/bash", "-c",
-      "<dispatch> fwd <wire>"]`` — the unprivileged pipe; the polkit
-      ``manage-units`` wall is unchanged (interactive-only).
     - ``operator-rootless`` → the op's **target argv directly**
       (``["/usr/bin/docker", "exec", "-i", "<P>-admin-1", "/fwd", "<IP>:9999"]``)
       — no crossing, no dispatcher indirection.
@@ -1266,12 +1249,7 @@ def proxy_argv(
         return build_target_argv(resolved, wire_args, host_config)
     inner = dispatch_payload(resolved.value, wire_args)
     user = host_config.host.docker_unprivileged_user
-    auth = host_config.host.machinectl_authentication
-    crossing = (
-        sudo_pipe_cmd(user)
-        if auth == MachinectlAuth.SUDO
-        else pipe_cmd(user)
-    )
+    crossing = sudo_pipe_cmd(user)
     return [
         *crossing,
         "/bin/bash",
@@ -1316,7 +1294,7 @@ def invoke(
     mechanism (F-018): ``machinectl shell`` does NOT propagate the inner
     ``/bin/bash -c`` payload's exit code (it exits 0 even when that payload
     fails). The exit recovery therefore lives in the **dispatcher**, which —
-    AFTER sudo/polkit authorizes the bare ``dispatch <op>`` crossing —
+    AFTER sudo authorizes the bare ``dispatch <op>`` crossing —
     announces a ``__SANDBOX_BEGIN_<nonce>`` line and echoes
     ``__SANDBOX_EXIT_<nonce>_$?``; the Executor binds the recovered exit to
     that nonce and raises :class:`~core.exceptions.SandboxExecutionError` on a
@@ -1351,7 +1329,7 @@ def invoke(
        resolver ``_resolve_compose_state``). The deterministic ops pass their
        typed args through verbatim.
     3. Cross the privilege boundary in the backward-compatible shape
-       ``[*machinectl_cmd(user, auth), "/bin/bash", "-c",
+       ``[*sudo_pipe_cmd(user), "/bin/bash", "-c",
        "<dispatch-binary> <op> <shlex.join(wire_args)>"]`` (design D2 — the
        outer argv shape is preserved so operators' existing sudoers rule still
        matches).
@@ -1683,8 +1661,8 @@ def compile_dispatcher(
     The host embeds the dispatcher source (gzip+base64 tar) in a single
     ``bash -c`` payload crossed via :func:`~core.host_config.pipe_cmd` — NOT
     :func:`~core.host_config.machinectl_cmd`. The 11 runtime ops
-    (:func:`invoke`/:func:`probe`) cross via ``sudo_pipe_cmd`` (SUDO) or
-    ``machinectl_cmd`` (POLKIT) and carry small text results; this compile
+    (:func:`invoke`/:func:`probe`) cross via ``sudo_pipe_cmd`` and carry small
+    text results; this compile
     recipe carries a multi-MB **binary frame** (the built dispatcher binary,
     base64'd on stdout), so it MUST use the byte-pipe primitive: ``machinectl_cmd`` allocates a PTY where
     ``stdout ≡ stderr`` and whose ``onlcr`` line discipline would corrupt the

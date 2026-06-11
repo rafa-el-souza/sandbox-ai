@@ -91,7 +91,7 @@ from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.host_config import DockerExecutionMode, pipe_cmd, sudo_as_operator
 from core.setup.l0_identity import resolve_systemd_run_path
-from core.setup.l3_sudoers_polkit import _drop_in_path
+from core.setup.l3_sudoers import _drop_in_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -239,7 +239,7 @@ def _rollback(ctx: SetupContext) -> None:
     half-written-grant window (design D1). ``missing_ok=True`` keeps the
     removal idempotent.
     """
-    _drop_in_path(ctx.host_config, ctx.operator).unlink(missing_ok=True)
+    _drop_in_path(ctx.operator).unlink(missing_ok=True)
 
 
 PHASE = Phase(

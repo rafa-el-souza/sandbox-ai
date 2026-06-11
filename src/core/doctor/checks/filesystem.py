@@ -121,7 +121,6 @@ def _has_acl_exec(directory: str, user: str) -> bool:
 def check_ancestor_traverse(
     user: str,
     distro: str | None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> CheckResult:
     """Check that all ancestor directories of sandboxes/ are traversable by the sandbox user.
@@ -198,7 +197,7 @@ def check_ancestor_traverse(
             has_exec = _has_acl_exec(directory, user)
 
         if not has_exec:
-            if _no_sandbox_running(user, auth_mode, mode):
+            if _no_sandbox_running(user, mode):
                 return CheckResult(
                     status="skip",
                     name="ancestor traverse",
@@ -230,7 +229,7 @@ def check_ancestor_traverse(
     )
 
 
-def _no_sandbox_running(user: str, auth_mode: MachinectlAuth, mode: DockerExecutionMode) -> bool:
+def _no_sandbox_running(user: str, mode: DockerExecutionMode) -> bool:
     """``True`` iff the sandbox daemon reports zero compose projects.
 
     Distinguishes "no sandbox started yet" (traverse-absent is expected — the
@@ -239,7 +238,7 @@ def _no_sandbox_running(user: str, auth_mode: MachinectlAuth, mode: DockerExecut
     (docker down / probe failure / unparseable output), return ``False`` so the
     caller reports the real traverse gap rather than hiding it behind a SKIP.
     """
-    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, auth_mode, mode), timeout=15)
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15)
     if not outcome.ok:
         return False
     try:

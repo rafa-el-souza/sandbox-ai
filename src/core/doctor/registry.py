@@ -64,7 +64,7 @@ from core.doctor.checks.workspace_bridge import (
     check_workspace_path_in_walker_boundary,
 )
 from core.doctor.types import Check, CheckResult
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 
 # The crossing-only checks that have no meaning in ``operator-rootless`` mode
 # (there is no machinectl crossing / dedicated daemon user / sudoers rule to
@@ -81,17 +81,9 @@ _OPERATOR_ROOTLESS_ONLY = frozenset({DockerExecutionMode.OPERATOR_ROOTLESS})
 
 
 def build_check_registry(
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[Check]:
-    """Build the doctor check registry with auth-mode- and execution-mode-aware checks.
-
-    When ``auth_mode == MachinectlAuth.POLKIT``, the `sudo` binary check is
-    omitted from the registry and the `machinectl_reachable` check no longer
-    depends on `sudo`. The 7 machinectl-invoking checks are partial-bound with
-    ``auth_mode`` so they cross the privilege boundary via
-    ``core.dispatch.probe``, which builds the command prefix from the threaded
-    auth mode.
+    """Build the doctor check registry with execution-mode-aware checks.
 
     ``mode`` (the marker-resolved :class:`DockerExecutionMode`) is partial-bound
     into the closure of every check that builds ``minimal_host_config(...)`` so
@@ -102,120 +94,109 @@ def build_check_registry(
     mode-skips them in ``operator-rootless``; ``setup_invariants`` stays
     both-mode and branches internally.
     """
-    is_sudo = auth_mode == MachinectlAuth.SUDO
-    machinectl_reachable_deps = (
-        ["sudo", "machinectl", "user_exists", "systemd_machined"]
-        if is_sudo
-        else ["machinectl", "user_exists", "systemd_machined"]
-    )
+    machinectl_reachable_deps = ["sudo", "machinectl", "user_exists", "systemd_machined"]
 
-    chain1: list[Check] = []
-    if is_sudo:
-        chain1.append(
-            Check(
-                id="sudo",
-                name="sudo binary",
-                category="Privilege Boundary",
-                depends_on=[],
-                run=check_sudo,
-                remediation="",
-            )
-        )
-    chain1.extend(
-        [
-            Check(
-                id="machinectl",
-                name="machinectl binary",
-                category="Privilege Boundary",
-                depends_on=[],
-                run=check_machinectl,
-                remediation="",
-            ),
-            Check(
-                id="tlog",
-                name="tlog binary",
-                category="Privilege Boundary",
-                depends_on=[],
-                run=check_tlog,
-                remediation="",
-            ),
-            Check(
-                id="user_exists",
-                name="unprivileged user",
-                category="Privilege Boundary",
-                depends_on=[],
-                run=check_user_exists,
-                remediation="",
-                applies_in=_SEPARATE_USER_ONLY,
-            ),
-            Check(
-                id="systemd_machined",
-                name="systemd-machined",
-                category="Privilege Boundary",
-                depends_on=["machinectl"],
-                run=check_systemd_machined,
-                remediation="",
-                applies_in=_SEPARATE_USER_ONLY,
-            ),
-            Check(
-                id="machinectl_reachable",
-                name="machinectl reachable",
-                category="Privilege Boundary",
-                depends_on=machinectl_reachable_deps,
-                run=functools.partial(check_machinectl_reachable, auth_mode=auth_mode, mode=mode),
-                remediation="",
-                applies_in=_SEPARATE_USER_ONLY,
-            ),
-            Check(
-                id="docker_available",
-                name="Docker available",
-                category="Privilege Boundary",
-                depends_on=["machinectl_reachable"],
-                run=functools.partial(check_docker_available, auth_mode=auth_mode, mode=mode),
-                remediation="",
-            ),
-            Check(
-                id="docker_rootless",
-                name="Docker rootless",
-                category="Privilege Boundary",
-                depends_on=["docker_available"],
-                run=functools.partial(check_docker_rootless, auth_mode=auth_mode, mode=mode),
-                remediation="",
-            ),
-            Check(
-                id="runsc",
-                name="gVisor runsc",
-                category="Privilege Boundary",
-                depends_on=["docker_available"],
-                run=functools.partial(check_runsc_registered, auth_mode=auth_mode, mode=mode),
-                remediation="",
-            ),
-            Check(
-                id="runsc_runtimeargs",
-                name="runsc runtimeArgs",
-                category="Privilege Boundary",
-                depends_on=["runsc"],
-                run=functools.partial(check_runsc_runtimeargs, auth_mode=auth_mode, mode=mode),
-                remediation="",
-            ),
-            Check(
-                id="host_uds",
-                name="--host-uds=none",
-                category="Privilege Boundary",
-                depends_on=["runsc"],
-                run=functools.partial(check_host_uds, auth_mode=auth_mode, mode=mode),
-                remediation="",
-            ),
-            Check(
-                id="compose_project_name_collision",
-                name="compose project name collision",
-                category="Privilege Boundary",
-                depends_on=["machinectl_reachable"],
-                run=functools.partial(check_compose_project_name_collision, auth_mode=auth_mode, mode=mode),
-                remediation="",
-            ),
-        ]
-    )
+    chain1: list[Check] = [
+        Check(
+            id="sudo",
+            name="sudo binary",
+            category="Privilege Boundary",
+            depends_on=[],
+            run=check_sudo,
+            remediation="",
+        ),
+        Check(
+            id="machinectl",
+            name="machinectl binary",
+            category="Privilege Boundary",
+            depends_on=[],
+            run=check_machinectl,
+            remediation="",
+        ),
+        Check(
+            id="tlog",
+            name="tlog binary",
+            category="Privilege Boundary",
+            depends_on=[],
+            run=check_tlog,
+            remediation="",
+        ),
+        Check(
+            id="user_exists",
+            name="unprivileged user",
+            category="Privilege Boundary",
+            depends_on=[],
+            run=check_user_exists,
+            remediation="",
+            applies_in=_SEPARATE_USER_ONLY,
+        ),
+        Check(
+            id="systemd_machined",
+            name="systemd-machined",
+            category="Privilege Boundary",
+            depends_on=["machinectl"],
+            run=check_systemd_machined,
+            remediation="",
+            applies_in=_SEPARATE_USER_ONLY,
+        ),
+        Check(
+            id="machinectl_reachable",
+            name="machinectl reachable",
+            category="Privilege Boundary",
+            depends_on=machinectl_reachable_deps,
+            run=functools.partial(check_machinectl_reachable, mode=mode),
+            remediation="",
+            applies_in=_SEPARATE_USER_ONLY,
+        ),
+        Check(
+            id="docker_available",
+            name="Docker available",
+            category="Privilege Boundary",
+            depends_on=["machinectl_reachable"],
+            run=functools.partial(check_docker_available, mode=mode),
+            remediation="",
+        ),
+        Check(
+            id="docker_rootless",
+            name="Docker rootless",
+            category="Privilege Boundary",
+            depends_on=["docker_available"],
+            run=functools.partial(check_docker_rootless, mode=mode),
+            remediation="",
+        ),
+        Check(
+            id="runsc",
+            name="gVisor runsc",
+            category="Privilege Boundary",
+            depends_on=["docker_available"],
+            run=functools.partial(check_runsc_registered, mode=mode),
+            remediation="",
+        ),
+        Check(
+            id="runsc_runtimeargs",
+            name="runsc runtimeArgs",
+            category="Privilege Boundary",
+            depends_on=["runsc"],
+            run=functools.partial(check_runsc_runtimeargs, mode=mode),
+            remediation="",
+        ),
+        Check(
+            id="host_uds",
+            name="--host-uds=none",
+            category="Privilege Boundary",
+            depends_on=["runsc"],
+            run=functools.partial(check_host_uds, mode=mode),
+            remediation="",
+        ),
+        Check(
+            id="compose_project_name_collision",
+            name="compose project name collision",
+            category="Privilege Boundary",
+            depends_on=["machinectl_reachable"],
+            run=functools.partial(check_compose_project_name_collision, mode=mode),
+            remediation="",
+        ),
+    ]
 
     return [
         *chain1,
@@ -253,7 +234,7 @@ def build_check_registry(
             name="ancestor traverse",
             category="Filesystem",
             depends_on=["acl_support"],
-            run=functools.partial(check_ancestor_traverse, auth_mode=auth_mode, mode=mode),
+            run=functools.partial(check_ancestor_traverse, mode=mode),
             remediation="",
         ),
         # Chain 3: repo integrity
@@ -279,7 +260,7 @@ def build_check_registry(
             name="image digests",
             category="Supply Chain",
             depends_on=["docker_available"],
-            run=functools.partial(check_image_digests, auth_mode=auth_mode, mode=mode),
+            run=functools.partial(check_image_digests, mode=mode),
             remediation="",
         ),
         # Chain 5: per-user tree
@@ -435,15 +416,15 @@ def build_check_registry(
         # Independent filesystem/local probes — no doctor-internal deps
         # (spec "runsc Pinned Match Check" / "Dispatcher Sha Drift Check" /
         # "Binary Integrity Posture Check" / "Setup Invariants Check":
-        # dependencies are filesystem readability only). The two auth-mode
-        # checks are partial-bound with ``auth_mode`` so the host_config they
-        # build carries the configured mode.
+        # dependencies are filesystem readability only). These checks are
+        # partial-bound with ``mode`` so the host_config they build carries the
+        # configured execution mode.
         Check(
             id="runsc_pinned_match",
             name="runsc pinned match",
             category="Setup Integrity",
             depends_on=[],
-            run=functools.partial(check_runsc_pinned_match, auth_mode=auth_mode, mode=mode),
+            run=functools.partial(check_runsc_pinned_match, mode=mode),
             remediation="",
         ),
         Check(
@@ -468,7 +449,7 @@ def build_check_registry(
             name="setup invariants",
             category="Setup Integrity",
             depends_on=[],
-            run=functools.partial(check_setup_invariants, auth_mode=auth_mode, mode=mode),
+            run=functools.partial(check_setup_invariants, mode=mode),
             remediation="",
         ),
         Check(
@@ -476,7 +457,7 @@ def build_check_registry(
             name="daemon owner sudo",
             category="Setup Integrity",
             depends_on=[],
-            run=functools.partial(check_daemon_owner_sudo, auth_mode=auth_mode, mode=mode),
+            run=functools.partial(check_daemon_owner_sudo, mode=mode),
             remediation="",
             applies_in=_OPERATOR_ROOTLESS_ONLY,
         ),
@@ -572,7 +553,6 @@ def run_check_subset(
     distro: str | None,
     *,
     exclude_ids: set[str] | None = None,
-    auth_mode: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> list[CheckResult]:
     """Execute a filtered subset of doctor checks by category.
@@ -589,7 +569,6 @@ def run_check_subset(
             Excluded checks are removed *before* the cross-chain invariant
             validation. Checks that ``depends_on`` an excluded ID will be
             auto-skipped by the dependency engine.
-        auth_mode: Active machinectl auth mode (threaded into each check).
         mode: Active :class:`DockerExecutionMode` (threaded into each check's
             ``minimal_host_config(...)`` and used by the runner for mode-skip
             gating).
@@ -601,7 +580,7 @@ def run_check_subset(
     if not categories:
         return []
 
-    registry = build_check_registry(auth_mode, mode)
+    registry = build_check_registry(mode)
     category_set = set(categories)
     excluded = exclude_ids or set()
     subset = [c for c in registry if c.category in category_set and c.id not in excluded]

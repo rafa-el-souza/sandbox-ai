@@ -117,7 +117,7 @@ func main() {
 }
 
 // genNonce returns a per-invocation 64-bit hex nonce. It is generated HERE —
-// inside the trusted, root-owned dispatcher, AFTER sudo/polkit has authorized
+// inside the trusted, root-owned dispatcher, AFTER sudo has authorized
 // the bare `dispatch <op>` crossing — and NEVER passed in the authorized argv,
 // so the rendered per-op Cmnd_Spec matches the bare command and never needs a
 // wildcard to carry an exit sentinel (F-018). crypto/rand keeps the nonce
@@ -144,7 +144,7 @@ func genNonce() (string, error) {
 // trailer entirely (the F-023 root cause that bit the orchestrator's Executor;
 // the two wraps are kept in parity). This is the same recovery the Executor
 // used to inject into the CROSSED payload — relocated here, post-authorization,
-// so the sentinel never appears in the sudo/polkit-authorized command (F-018).
+// so the sentinel never appears in the sudo-authorized command (F-018).
 //
 // It also assigns __PFNONCE=<nonce> (the SAME nonce as the BEGIN/EXIT frame)
 // OUTSIDE the subshell, uniformly for every op (H-1). The preflight bundle's
@@ -306,7 +306,7 @@ func run(argv []string, errOut io.Writer, nonce string) int {
 	journalLog(op, rest, targetArgv, instance, false)
 
 	// Relocate the exit sentinel into the dispatcher (post-authorization): the
-	// command sudo/polkit authorized was the bare `dispatch <op>` (matching the
+	// command sudo authorized was the bare `dispatch <op>` (matching the
 	// per-op Cmnd_Spec), so we wrap the bash -c inner HERE rather than letting
 	// the orchestrator wrap the CROSSED payload (which no enumerated Cmnd_Spec
 	// could match — F-018). Every buildTargetArgv arm returns bashC(...), so

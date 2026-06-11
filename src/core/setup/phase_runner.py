@@ -35,7 +35,7 @@ phase's probe against synthetic stale-content inputs and asserting it returns
 Identity routing (design D3): setup straddles three identities, each with a
 fixed cross-boundary primitive. :func:`route` maps an :class:`Identity` to the
 argv prefix — ``[]`` for ROOT, ``pipe_cmd(<operator>)`` for OPERATOR,
-``machinectl_cmd(<sandbox-user>, <auth-mode>)`` for SANDBOX. Setup modules may
+``machinectl_cmd(<sandbox-user>)`` for SANDBOX. Setup modules may
 import ``machinectl_cmd`` directly: they match the pre-existing
 ``src/core/setup/*.py`` allowlist category the ``host-config`` capability
 defines (no allowlist amendment by this change).
@@ -104,7 +104,7 @@ class Identity(StrEnum):
 
     - ``ROOT`` — no prefix; the ``sudo sandbox setup`` process itself.
     - ``OPERATOR`` — crossed via ``pipe_cmd(<operator>)``.
-    - ``SANDBOX`` — crossed via ``machinectl_cmd(<sandbox-user>, <auth-mode>)``.
+    - ``SANDBOX`` — crossed via ``machinectl_cmd(<sandbox-user>)``.
     """
 
     ROOT = "root"
@@ -374,19 +374,15 @@ def route(identity: Identity, ctx: SetupContext) -> list[str]:
       crossing into the operator; its ``--uid`` transient unit re-runs
       ``initgroups`` so a fresh unit reflects the post-``usermod`` group set).
     - :attr:`Identity.SANDBOX` →
-      ``machinectl_cmd(ctx.host_config.host.docker_unprivileged_user,
-      ctx.host_config.host.machinectl_authentication)`` — the sandbox user and
-      auth mode are read from the context's host config; identical to the
+      ``machinectl_cmd(ctx.host_config.host.docker_unprivileged_user)`` — the
+      sandbox user is read from the context's host config; identical to the
       runtime orchestrator's primitive.
     """
     if identity == Identity.ROOT:
         return []
     if identity == Identity.OPERATOR:
         return pipe_cmd(ctx.operator)
-    return machinectl_cmd(
-        ctx.host_config.host.docker_unprivileged_user,
-        ctx.host_config.host.machinectl_authentication,
-    )
+    return machinectl_cmd(ctx.host_config.host.docker_unprivileged_user)
 
 
 def daemon_owner_user(ctx: SetupContext) -> str:
@@ -403,7 +399,7 @@ def daemon_owner_user(ctx: SetupContext) -> str:
 def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
     """argv prefix to run a ``/bin/bash -c`` as the rootless-daemon owner in their user session.
 
-    separate-user: ``machinectl_cmd(<sandbox-user>, <auth>)`` — BYTE-IDENTICAL to
+    separate-user: ``machinectl_cmd(<sandbox-user>)`` — BYTE-IDENTICAL to
     what L5/L6/L7 build inline (so the L5/L6/L7 separate-user path is unchanged).
     Root must still drop into the dedicated ``sandbox`` user.
 
@@ -431,10 +427,7 @@ def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
             f"DBUS_SESSION_BUS_ADDRESS=unix:path={run_dir}/bus",
             f"DOCKER_HOST=unix://{run_dir}/docker.sock",
         ]
-    return machinectl_cmd(
-        ctx.host_config.host.docker_unprivileged_user,
-        ctx.host_config.host.machinectl_authentication,
-    )
+    return machinectl_cmd(ctx.host_config.host.docker_unprivileged_user)
 
 
 class SandboxUserNotYetCreated(KeyError):

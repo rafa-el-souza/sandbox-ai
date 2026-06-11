@@ -162,12 +162,6 @@ def test_execute_requires_host_config_on_context() -> None:
         ComposeUpAction(instance_name="demo").execute(_ctx(None))
 
 
-def test_polkit_auth_drops_sudo_prefix_in_render(isolated_sandbox_ai_home: Path) -> None:
-    _seed_instance(isolated_sandbox_ai_home, "demo")
-    rendered = ComposeUpAction(instance_name="demo").render_command(_hc(MachinectlAuth.POLKIT))
-    assert rendered.startswith("machinectl shell claude-sandbox@.host /bin/bash -c")
-
-
 def test_render_and_execute_share_one_seam(
     isolated_sandbox_ai_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

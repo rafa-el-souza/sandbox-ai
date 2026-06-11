@@ -291,53 +291,33 @@ class TestWarnStatus:
         assert results[1].status == "skip"
 
 
-class TestPolkitRegistry:
-    def test_sudo_check_omitted_in_polkit_mode(self) -> None:
+class TestSudoRegistry:
+    def test_sudo_check_present(self) -> None:
         from core.doctor import build_check_registry
-        from core.host_config import MachinectlAuth
 
-        checks = build_check_registry(MachinectlAuth.POLKIT)
-        ids = [c.id for c in checks]
-        assert "sudo" not in ids
-        assert len(checks) == 41
-
-    def test_sudo_check_present_in_sudo_mode(self) -> None:
-        from core.doctor import build_check_registry
-        from core.host_config import MachinectlAuth
-
-        checks = build_check_registry(MachinectlAuth.SUDO)
+        checks = build_check_registry()
         ids = [c.id for c in checks]
         assert "sudo" in ids
         assert len(checks) == 42
 
-    def test_machinectl_reachable_dependency_omits_sudo_in_polkit(self) -> None:
+    def test_machinectl_reachable_dependency_includes_sudo(self) -> None:
         from core.doctor import build_check_registry
-        from core.host_config import MachinectlAuth
 
-        checks = build_check_registry(MachinectlAuth.POLKIT)
-        reach = next(c for c in checks if c.id == "machinectl_reachable")
-        assert "sudo" not in reach.depends_on
-        assert set(reach.depends_on) == {"machinectl", "user_exists", "systemd_machined"}
-
-    def test_machinectl_reachable_dependency_includes_sudo_in_sudo(self) -> None:
-        from core.doctor import build_check_registry
-        from core.host_config import MachinectlAuth
-
-        checks = build_check_registry(MachinectlAuth.SUDO)
+        checks = build_check_registry()
         reach = next(c for c in checks if c.id == "machinectl_reachable")
         assert "sudo" in reach.depends_on
+        assert set(reach.depends_on) == {"sudo", "machinectl", "user_exists", "systemd_machined"}
 
-    def test_default_auth_mode_is_sudo(self) -> None:
+    def test_default_mode_is_separate_user(self) -> None:
         from core.doctor import build_check_registry
-        from core.host_config import MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         default_ids = [c.id for c in build_check_registry()]
-        sudo_ids = [c.id for c in build_check_registry(MachinectlAuth.SUDO)]
-        assert default_ids == sudo_ids
+        explicit_ids = [c.id for c in build_check_registry(DockerExecutionMode.SEPARATE_USER)]
+        assert default_ids == explicit_ids
 
-    def test_run_check_subset_forwards_auth_mode(self) -> None:
+    def test_run_check_subset_includes_sudo(self) -> None:
         from core.doctor import run_check_subset
-        from core.host_config import MachinectlAuth
 
         with patch(
             "subprocess.run",
@@ -347,11 +327,10 @@ class TestPolkitRegistry:
                 ["Privilege Boundary"],
                 "sandbox",
                 None,
-                auth_mode=MachinectlAuth.POLKIT,
             )
 
         names = {r.name for r in results}
-        assert "sudo" not in names
+        assert "sudo" in names
 
     def test_registry_includes_host_uds(self) -> None:
         from core.doctor import build_check_registry
