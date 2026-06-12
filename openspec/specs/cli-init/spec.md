@@ -76,7 +76,9 @@ For each `--copy NAME=PATH` flag, the system SHALL validate the source path befo
 - **THEN** the CLI exits with a walker-boundary error
 
 ### Requirement: Init Command Interface
-The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). The command does not accept a `--machinectl-auth` flag; the `machinectl_authentication` value is read from host config and defaults to `"sudo"` (the only supported value, established by seeding). The previously-supported `--user` flag is removed.
+The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...] [--secrets-from-env | --secrets-from-file PATH]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). The command does not accept a `--machinectl-auth` flag; the `machinectl_authentication` value is read from host config and defaults to `"sudo"` (the only supported value, established by seeding). The previously-supported `--user` flag is removed.
+
+The `--secrets-from-env` and `--secrets-from-file` flags are mutually exclusive — supplying both SHALL be rejected before any state mutation. Their secret-seeding behavior is defined in the "Non-Interactive Secret Seeding" requirement.
 
 CWD-based instance discovery is removed: the `<inst>` argument is positional and required.
 
@@ -96,19 +98,31 @@ CWD-based instance discovery is removed: the `<inst>` argument is positional and
 - **WHEN** the operator runs `sandbox init` without an `<inst>` argument
 - **THEN** the CLI exits with a typer "missing argument" error
 
-### Requirement: Init-Time Auth Mode Probe
-The system SHALL validate that the resolved machinectl authentication mode works at init time by executing the dispatcher `auth-probe` op against the resolved docker unprivileged user (via `core.dispatch.probe("auth-probe", [], host_config)` — which crosses the bare `dispatch auth-probe` payload, NOT an inline `"echo ok"` string; the dispatcher's `auth-probe` target argv is `["/bin/bash", "-c", "echo ok"]`). The resolved `machinectl_authentication` mode is always SUDO, which crosses via `sudo_pipe_cmd` (the privileged byte-pipe). The probe SHALL use a 5-second timeout.
+#### Scenario: Conflicting secret-source flags rejected
+- **WHEN** the operator runs `sandbox init foo --secrets-from-env --secrets-from-file /tmp/s.env`
+- **THEN** the CLI exits with a "mutually exclusive" error before any state mutation
 
-#### Scenario: Sudo mode probe succeeds
-- **WHEN** init resolves `machinectl_authentication = "sudo"` and `core.dispatch.probe("auth-probe", [], host_config)` — crossing via `sudo_pipe_cmd(<user>)` as `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch auth-probe"]` — returns `ok=True` within 5 seconds
+### Requirement: Init-Time Auth Mode Probe
+The system SHALL validate that the privilege boundary is reachable at init time by executing the dispatcher `preflight` op against the resolved daemon owner (via `core.dispatch.probe("preflight", [], host_config, timeout=15)`). The probe is **mode-aware**: in operator-rootless mode it runs as a local subprocess (no boundary crossing); in separate-user mode it crosses via `sudo_pipe_cmd` (the privileged byte-pipe). The resolved `machinectl_authentication` mode is always SUDO (POLKIT is retired). The probe SHALL use a 15-second timeout. The crossing succeeding (its bundled segments parse and the `auth-probe` segment is present) IS the reachability signal — there is no separate standalone `auth-probe` crossing at init; the single `preflight` bundle is the source of truth for boundary reachability at init time, and its bundled `compose-ls` segment additionally feeds the compose-project-name collision pre-flight (so init fires no second `compose-ls` crossing). The probe is NOT deferred by the non-interactive secret-seeding path. The active execution mode the probe uses is resolved from the setup marker (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector"); on a host with **no marker entry** (`ModeMarkerMissing` — a not-yet-`setup` host) the probe mode SHALL fall back to `DEFAULT_PROVISIONING_MODE` (operator-rootless, the single system-wide default per the `host-config` capability's "Single-Sourced Execution-Mode Default"), so a fresh host runs the probe as a local subprocess rather than crossing `machinectl`/`sudo_pipe_cmd` into a dedicated user that does not exist yet. A marker that resolves to a concrete mode takes precedence over the fallback.
+
+#### Scenario: Preflight probe succeeds
+- **WHEN** init resolves the execution mode and `core.dispatch.probe("preflight", [], host_config, timeout=15)` returns a bundle whose reachability gate is satisfied within 15 seconds
 - **THEN** init proceeds normally
 
-#### Scenario: Sudo mode probe fails with timeout
-- **WHEN** the sudo probe times out after 5 seconds (`probe(...)` returns `timed_out=True`)
-- **THEN** init exits with an error including remediation: "Configure passwordless machinectl access in /etc/sudoers.d/"
+#### Scenario: Preflight probe fails with timeout
+- **WHEN** the preflight probe times out after 15 seconds (`probe(...)` returns `timed_out=True`)
+- **THEN** init exits non-zero with an error reporting "probe timed out after 15 seconds" and machinectl-reachability remediation guidance
+
+#### Scenario: Preflight crossing unreachable
+- **WHEN** the preflight crossing returns but the reachability gate is not satisfied (the `auth-probe` segment is absent or failed)
+- **THEN** init exits non-zero with the boundary-unreachable diagnostic derived from the bundle's `auth-probe` segment (or the probe's own failure message), before scaffold begins
+
+#### Scenario: Marker-absent fresh host resolves the probe to operator-rootless
+- **WHEN** init runs on a host with no setup marker entry for the invoking operator (`resolve_execution_mode` raises `ModeMarkerMissing`)
+- **THEN** the probe mode falls back to `DEFAULT_PROVISIONING_MODE` (operator-rootless) and the preflight probe runs as a local subprocess with no boundary crossing into a dedicated user
 
 ### Requirement: Init Doctor Pre-Flight Auth Mode Awareness
-The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Repo Integrity` chains (excluding `ancestor_traverse`, since ACLs are granted during `start`, not `init`). Privilege Boundary verification at init time is delegated to the dedicated init-time auth probe (see "Init-Time Auth Mode Probe" requirement). The pre-flight SHALL run the `Filesystem` and `Repo Integrity` checks via `run_check_subset()` / `build_check_registry()`; the privilege-boundary checks are not in the pre-flight scope.
+The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Repo Integrity` chains (excluding `ancestor_traverse`, since ACLs are granted during `start`, not `init`). Privilege Boundary verification at init time is delegated to the dedicated init-time preflight probe (see "Init-Time Auth Mode Probe" requirement). The pre-flight SHALL run the `Filesystem` and `Repo Integrity` checks via `run_check_subset()` / `build_check_registry()`; the privilege-boundary checks are not in the pre-flight scope.
 
 #### Scenario: Pre-flight runs the filesystem and repo-integrity chains
 - **WHEN** init runs the Filesystem + Repo Integrity pre-flight
@@ -116,7 +130,7 @@ The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Re
 
 #### Scenario: Privilege Boundary verification is performed by the init-time probe, not the pre-flight
 - **WHEN** init runs
-- **THEN** Chain 1 (Privilege Boundary) checks are NOT executed by the pre-flight; the init-time auth probe (5-second timeout) is the single source of truth for machinectl reachability at init time
+- **THEN** Chain 1 (Privilege Boundary) checks are NOT executed by the pre-flight; the init-time preflight probe (15-second timeout) is the single source of truth for boundary reachability at init time
 
 ### Requirement: Init Git Config Auto-Detection
 The system SHALL auto-detect `git_user` and `git_email` from the host's `git config --global` during scaffold and write them into `sandbox.toml`. The `--git-user` and `--git-email` flags SHALL override auto-detected values.
@@ -156,22 +170,30 @@ The system SHALL reject init for an instance name that already has an entry in t
 - **THEN** the CLI exits with: "Instance '<inst>' already initialized. Use `sandbox workspace add` to add workspaces, or `sandbox destroy <inst>` first." and exit code 1
 
 ### Requirement: Init Non-TTY Mode
-The system SHALL skip interactive secret prompting when stdin is not a TTY, completing scaffold without secrets populated.
+The system SHALL skip interactive secret prompting when stdin is not a TTY **and no secret-source flag (`--secrets-from-env` / `--secrets-from-file`) is given**. In that case it SHALL stub each required secret slot in `.sandbox.env` with a clearly-fake placeholder of the form `YOUR_<NAME>_HERE` — **not** leave it empty — so the subsequent `sandbox start` "missing required secrets" pre-flight does not block automation flows for sandboxes that do not use those services at runtime. Pre-existing non-empty (operator-edited) values SHALL be preserved. If any required secret slot is absent or not in the canonical `<NAME>=""` form (so the stub cannot be applied), init SHALL fail loud, naming the unresolved slot(s), rather than print a misleading "stub values written" message. When a secret-source flag IS given, the "Non-Interactive Secret Seeding" requirement governs instead (populate-or-refuse), in both TTY and non-TTY contexts.
 
-#### Scenario: Non-TTY init completes
-- **WHEN** `init` is invoked in a non-TTY environment (e.g., CI pipeline)
-- **THEN** scaffold completes through S7 (sentinel written), `.sandbox.env` contains empty secret values, and no RuntimeError is raised
+#### Scenario: Non-TTY init completes with stub placeholders
+- **WHEN** `init` is invoked in a non-TTY environment (e.g., CI pipeline) with no secret-source flag and each required secret is present in `.sandbox.env` in the canonical `<NAME>=""` form
+- **THEN** scaffold completes through S7 (sentinel written), each required secret slot holds a `YOUR_<NAME>_HERE` placeholder value (not empty), and no RuntimeError is raised
+
+#### Scenario: Non-TTY stub fails loud on a non-canonical slot
+- **WHEN** `init` runs non-TTY with no secret-source flag and a required secret slot is absent or not in the canonical `<NAME>=""` form
+- **THEN** init raises (rather than printing a "stub values written" message), naming the unresolved slot(s)
 
 #### Scenario: Non-TTY guidance printed
-- **WHEN** `init` completes in non-TTY mode
-- **THEN** the CLI prints the path to `.sandbox.env` with instructions to populate secrets before running `sandbox start`
+- **WHEN** `init` completes in non-TTY mode with no secret-source flag
+- **THEN** the CLI prints the path to `.sandbox.env` with instructions to edit it and set real values before running `sandbox start`
 
 ### Requirement: Init Dry-Run Preview
-The system SHALL support `sandbox init --dry-run` that previews the scaffold output without writing any state.
+The system SHALL support `sandbox init --dry-run` that previews the scaffold output without writing any state. The preview SHALL report the secret-seeding SOURCE the real run would use, derived from the flags and context: with `--secrets-from-env`, that secrets would be seeded from the named environment variables (flagging any currently unset); with `--secrets-from-file PATH`, that secrets would be seeded from `PATH` (flagging any missing required keys); with no flag in a TTY, that the named secrets would be prompted interactively; with no flag in non-TTY, that the required secret slots would be stubbed with `YOUR_<NAME>_HERE` placeholders. The dry-run SHALL NOT print any secret value, and (consistent with its no-mutation contract) SHALL report missing secrets rather than refusing.
 
 #### Scenario: Dry-run previews config
 - **WHEN** `sandbox init --dry-run` is invoked
-- **THEN** the system prints the instance ID, directory path, generated sandbox.toml content, list of secrets that would be prompted, and ACL commands that would execute, without creating any files or registry entries
+- **THEN** the system prints the instance ID, directory path, generated sandbox.toml content, the secret-seeding source the real run would use, and ACL commands that would execute, without creating any files or registry entries
+
+#### Scenario: Dry-run reports the secret source for --secrets-from-env
+- **WHEN** `sandbox init foo --dry-run --secrets-from-env` is invoked
+- **THEN** the preview states that secrets would be seeded from the required-secret environment variables (naming them), flags any that are currently unset, and prints no secret values
 
 #### Scenario: Dry-run exits cleanly
 - **WHEN** `sandbox init --dry-run` completes
@@ -235,4 +257,42 @@ During `sandbox init`, the system SHALL inspect the current working directory fo
 #### Scenario: Legacy state directory detected
 - **WHEN** `sandbox init` runs and `<cwd>/.state/` exists
 - **THEN** init prints a warning: "Found legacy `<cwd>/.state/`. Orchestrator state now lives at `<resolved-home>/state/`. Migrate manually or delete the legacy directory."
+
+### Requirement: Non-Interactive Secret Seeding
+The system SHALL provide two mutually-exclusive opt-in flags on `sandbox init` for populating the required instance secrets without an interactive prompt:
+
+- `--secrets-from-env` — read each required secret from the process environment.
+- `--secrets-from-file PATH` — read each required secret from a `KEY=VALUE` file at `PATH`.
+
+The required secrets are `CORE_ANTHROPIC_API_KEY` and `CORE_GITHUB_TOKEN` (the same names used as env keys and as file keys). When either flag is present, init is in explicit non-interactive secret mode and SHALL either populate ALL required secrets into `.sandbox.env` or REFUSE before any state mutation, exiting non-zero with an error naming exactly which required secrets are missing. This populate-or-refuse contract is distinct from the "Init Non-TTY Mode" stub-placeholder default (which writes `YOUR_<NAME>_HERE` placeholders), and applies only when a secret-source flag is given.
+
+The `--secrets-from-file` format SHALL be: one `KEY=VALUE` per line; a line whose first non-whitespace character is `#` is a comment and is ignored; blank lines are ignored; no `export ` prefix is accepted; each KEY MUST be a member of the required-secret set (an unrecognized key SHALL be rejected). A required key absent from the file, or present with an empty value, SHALL trigger the refusal above.
+
+The seeding SHALL be honored regardless of whether stdin is a TTY (an interactive operator MAY also use the flags to skip the prompts).
+
+The system SHALL NOT implicitly consume secrets from the environment. When NO secret-source flag is given and one or more required-secret environment variables are nonetheless set, the CLI SHALL emit a single informational hint that names the detected variable(s) and recommends `--secrets-from-env`, WITHOUT seeding from them — the no-flag prompt (TTY) / skip (non-TTY) behavior is unchanged. The hint SHALL reveal only variable names, never values.
+
+#### Scenario: --secrets-from-env populates secrets
+- **WHEN** `sandbox init foo --secrets-from-env` is invoked with `CORE_ANTHROPIC_API_KEY` and `CORE_GITHUB_TOKEN` both set in the environment
+- **THEN** scaffold completes with `.sandbox.env` containing those secret values, with no interactive prompt
+
+#### Scenario: --secrets-from-env refuses on a missing required var
+- **WHEN** `sandbox init foo --secrets-from-env` is invoked with `CORE_GITHUB_TOKEN` set but `CORE_ANTHROPIC_API_KEY` unset
+- **THEN** the CLI exits non-zero with an error naming `CORE_ANTHROPIC_API_KEY` as the missing required secret, before any state mutation
+
+#### Scenario: --secrets-from-file populates secrets
+- **WHEN** `sandbox init foo --secrets-from-file /tmp/secrets.env` is invoked and the file contains `CORE_ANTHROPIC_API_KEY=...` and `CORE_GITHUB_TOKEN=...` (one KEY=VALUE per line, optionally with `#` comment lines)
+- **THEN** scaffold completes with `.sandbox.env` populated from the file, with no interactive prompt
+
+#### Scenario: --secrets-from-file refuses on a missing required key
+- **WHEN** `sandbox init foo --secrets-from-file /tmp/secrets.env` is invoked and the file omits `CORE_GITHUB_TOKEN`
+- **THEN** the CLI exits non-zero naming `CORE_GITHUB_TOKEN` as missing, before any state mutation
+
+#### Scenario: --secrets-from-file rejects an unrecognized key
+- **WHEN** the file contains a `KEY=VALUE` line whose KEY is not a member of the required-secret set
+- **THEN** the CLI exits non-zero identifying the unrecognized key, before any state mutation
+
+#### Scenario: Detected env vars emit a hint without consumption
+- **WHEN** `sandbox init foo` is invoked with NO secret-source flag and `CORE_ANTHROPIC_API_KEY` is set in the environment
+- **THEN** the CLI prints a single informational hint naming `CORE_ANTHROPIC_API_KEY` and recommending `--secrets-from-env`, does NOT seed any secret from the environment, and the no-flag prompt (TTY) / skip (non-TTY) behavior is unchanged
 

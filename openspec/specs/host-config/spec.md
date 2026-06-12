@@ -370,3 +370,21 @@ headless-capable — C-010/F-060).
 - **THEN** the crossing prefix is `sudo_pipe_cmd(user)`; the crossed payload (`dispatch fwd <wire>`) is the
   same, and `machinectl_cmd` is used in neither (the PTY's `onlcr` would corrupt the SSH stream)
 
+### Requirement: Single-Sourced Execution-Mode Default
+
+There SHALL be exactly ONE named execution-mode default in the system: `core.host_config.DEFAULT_PROVISIONING_MODE` (= `DockerExecutionMode.OPERATOR_ROOTLESS`). It is the mode `sandbox setup` provisions when the operator passes no `--docker-execution-mode` flag and the marker has no entry, AND the in-memory carrier default on `HostSettings.docker_execution_mode`, `minimal_host_config`'s `mode` parameter, and every other execution-mode parameter/field default across `src/` (finding F-051). A bare `DockerExecutionMode` enum member (`SEPARATE_USER` / `OPERATOR_ROOTLESS`) SHALL NOT appear as a function-parameter default or a field (`AnnAssign`) default RHS anywhere in `src/` except `src/core/host_config.py` (the module that DEFINES the constant); every such default SHALL reference `DEFAULT_PROVISIONING_MODE` instead. The carrier value is moot at runtime — `_resolve_full_host_config` always overlays the marker-resolved mode — so single-sourcing it is behavior-preserving; the point is that the codebase never carries two opposite-valued defaults that could diverge and crystallize into the public docs.
+
+This is enforced STRUCTURALLY (mirroring the "Dispatcher-Only `machinectl_cmd` Call Sites" gate). A meta-test in `tests/unit/test_conventions.py` SHALL `ast`-walk `src/` and fail the gate on any bare `DockerExecutionMode` member that appears in a DEFAULT position — a `FunctionDef`/`AsyncFunctionDef` `args.defaults` or `args.kw_defaults` entry, or an `AnnAssign` value — outside the single-element allowlist `{src/core/host_config.py}`. The detector SHALL deliberately NOT flag the non-default positions: `Set` elements (`applies_in=frozenset({DockerExecutionMode.SEPARATE_USER})` membership sets), `Compare` operands (`mode is DockerExecutionMode.…`), or `Call` arguments (an explicit `write_mode_root_owned(…, SEPARATE_USER)` or `minimal_host_config(u, a, SEPARATE_USER)`). The allowlist SHALL be defined in exactly one place (the meta-test); broadening it is a spec change, made visible by the deliberate-violation regression and code review, never a silent expansion. The detector file-iterable + allowlist SHALL be parameters (not module state) so a deliberate-violation regression drives the SAME predicate.
+
+#### Scenario: Named-constant references pass the gate
+- **WHEN** the meta-test runs against the codebase where every execution-mode default outside `src/core/host_config.py` references `DEFAULT_PROVISIONING_MODE`
+- **THEN** the gate passes; `src/core/host_config.py` (defining the constant) may spell the bare enum member and is not flagged, and the membership-set / comparison / call-argument uses of the bare member elsewhere are not flagged
+
+#### Scenario: A new bare-literal default fails the gate naming file and line
+- **WHEN** a developer writes a bare `DockerExecutionMode.SEPARATE_USER` (or `OPERATOR_ROOTLESS`) as a function-parameter default or a field-default RHS in any `src/` module other than `src/core/host_config.py` and runs `make test` or `make coverage`
+- **THEN** the meta-test fails with output naming the offending file and line, instructing the developer to reference `core.host_config.DEFAULT_PROVISIONING_MODE` instead
+
+#### Scenario: Deliberate-violation regression proves the detector bites
+- **WHEN** the deliberate-violation regression test drives the shared detector against a written rogue file that contains a bare `DockerExecutionMode` member as BOTH a function-parameter default and an `AnnAssign` field default, plus the bare member in a `frozenset({…})` membership set, an `is` comparison, and a call argument
+- **THEN** the detector reports exactly the two default-slot lines (the param default and the field default) and does NOT report the membership-set, comparison, or call-argument lines — proving the gate catches the regression class while preserving the structural carve-outs
+
