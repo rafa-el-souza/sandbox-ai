@@ -71,11 +71,11 @@ The apply pass executes phases in this named order (the order is named, not coun
 | **L0** | Root assertion; operator resolution (`--operator` → `$SUDO_USER`+`$SUDO_UID` → `$PKEXEC_UID` → refuse); distro-tier classification; required-binary check; `MACHINECTL_PATH` uniqueness assertion on the sudoers `secure_path` basis. |
 | **L1** | `/etc/sysctl.d/49-sandbox-ai.conf` (+ `sysctl -w`); verify-only ACL-FS support + cgroup-v2 hierarchy. (Resolves no OS user.) |
 | **L2** | systemd-machined enable+start; `useradd` for the sandbox user; `/etc/subuid`/`/etc/subgid` append-only-when-safe; `groupadd sb-ws` at an autodetected gid in the subuid range; `usermod -aG sb-ws <operator>`. (Does **not** install runsc.) |
-| **L2a** | `Delegate=yes` drop-in at `user-<sandbox-uid>.service.d/` — split out of L1 because its path is uid-scoped to the sandbox user L2 creates (`depends_on=("l2",)`, ordered before L5; F-014). |
+| **L2a** | `Delegate=yes` drop-in at `user-<sandbox-uid>.service.d/` — split out of L1 because its path is uid-scoped to the sandbox user L2 creates (`depends_on=("l2",)`, ordered before L5). |
 | **L5** | `loginctl enable-linger <sandbox-user>`; rootless dockerd install via machinectl. |
 | **L6** | Merge `runtimes["sandbox-ai-runsc"]` into `~<sandbox-user>/.config/docker/daemon.json` (preserving the operator's other runtimes); conditional `systemctl --user restart docker` + readiness poll. |
 | **L6a** | runsc install (own phase): install the pinned binary if absent; on drift, mention it in the summary without auto-overwriting; `chattr +i`. |
-| **L6.5** | Compile the dispatcher (offline, in a pinned `golang` container — `go test ./...` for Python↔Go parity runs first, so a fixture drift fails the compile) and install it; `chattr +i`; write the root-owned `0644` `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` (host plane, alongside the binary, so every operator's `sandbox doctor` can read it — F-021). |
+| **L6.5** | Compile the dispatcher (offline, in a pinned `golang` container — `go test ./...` for Python↔Go parity runs first, so a fixture drift fails the compile) and install it; `chattr +i`; write the root-owned `0644` `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` (host plane, alongside the binary, so every operator's `sandbox doctor` can read it). |
 | **L7** | Pre-pull the pinned helper image (`docker pull busybox:musl@<digest>`). |
 | **L3** | Install the sudoers privilege-boundary drop-in; `visudo -cf` validation; **L3a** per-op probe of every dispatcher op. |
 | **L8** | Fresh-session re-probe: verify the operator's group set now includes the `sb-ws` gid; verify machinectl is reachable through the new rule. |
@@ -137,7 +137,7 @@ A future config setting (`[setup] auto_update_runsc = true`) for silent auto-upd
 
 ## Production integrity posture
 
-The dispatcher/runsc tamper model layers from cheapest to strongest. The **F-003** constraint is load-bearing: the sudoers `Digest_Spec` crypto pin is silently a no-op on Debian-family hosts, so the rendered sudoers rule deliberately contains no `Digest_Spec`. The compensating controls:
+The dispatcher/runsc tamper model layers from cheapest to strongest. One constraint is load-bearing: the sudoers `Digest_Spec` crypto pin is silently a no-op on Debian-family hosts, so the rendered sudoers rule deliberately contains no `Digest_Spec`. The compensating controls:
 
 - **`chattr +i`** (automatic, L6a/L6.5) — defense-in-depth against casual/automated tampering plus an audit signal. Root can clear the bit; this is not crypto tamper resistance.
 - **Doctor checks** — `dispatcher_sha_drift` (on-disk binary sha vs. the manifest's `compiled_sha512` + source-bundle sha; WARN on tamper or wheel-upgrade drift), `runsc_pinned_match` (on-disk runsc sha vs. the pin; WARN on drift), `setup_invariants` (owned-path/mode/ownership audit + machinectl-path stability + sudoers-rule content audit + sudo-version floor). All WARN, never FAIL.
