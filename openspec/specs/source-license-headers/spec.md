@@ -1,7 +1,8 @@
 # source-license-headers Specification
 
 ## Purpose
-TBD - created by archiving change publish-prep. Update Purpose after archive.
+Defines the meta-test-enforced SPDX license-header-presence contract for tracked first-party source files: every covered source file carries the `SPDX-License-Identifier: AGPL-3.0-or-later` token, enforced at the gate with a self-validating allowlist for genuinely header-exempt files.
+
 ## Requirements
 ### Requirement: SPDX License Header Presence
 
