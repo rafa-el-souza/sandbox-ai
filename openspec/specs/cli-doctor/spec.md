@@ -790,6 +790,8 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 
 `sandbox doctor` SHALL honor the active execution mode, which is the **marker-resolved** value (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector" requirement) overlaid onto `host_config.host.docker_execution_mode` — it is NOT a toml field, and the doctor runner's callers (including `sandbox init`'s and `sandbox start`'s pre-flight `run_check_subset`) SHALL thread the resolved mode and the `resolve_daemon_owner` owner so the checks evaluate against the real mode rather than a defaulted/mode-less config. In `operator-rootless` mode `sandbox doctor` itself SHALL resolve the daemon owner as the invoking operator (`resolve_daemon_owner`) **toml-free** — reading neither the toml nor `docker_unprivileged_user` (the D7 owner-read discipline) — so a missing toml is not an error in operator-rootless. In `operator-rootless` mode it SHALL skip the checks that only make sense for the `machinectl` crossing — machinectl Shell Reachability, systemd-machined Service Check, Unprivileged User Existence (the dedicated daemon user), and the dispatcher-integrity checks (dispatcher-sha drift / the setup-invariants machinectl-stability + sudoers-rule-body audit) — and SHALL run the docker/runsc/supply-chain/compose-collision checks **locally** (these route through `core.dispatch.probe`, which takes the local path in `operator-rootless`). In `separate-user` mode every check SHALL behave exactly as before. A check that does not apply in the active mode SHALL report an explicit mode-skip status; it SHALL NOT report PASS (no false green).
 
+On a host with **no marker entry** for the invoking operator (`resolve_execution_mode` raises `ModeMarkerMissing` — a not-yet-`setup` host), `sandbox doctor` SHALL fall back to the provisioning default `DEFAULT_PROVISIONING_MODE` (`operator-rootless`, the single system-wide execution-mode default per the `host-config` capability's "Single-Sourced Execution-Mode Default" requirement) rather than to `separate-user`. Under this operator-rootless fallback doctor resolves the daemon owner as the invoking operator **toml-free** and runs the operator-rootless check set, so a truly fresh host (no marker, no `sandbox-ai.toml`, no `--user`) can still run doctor instead of hard-failing on a missing toml / "No user specified". The marker is the authority once `setup` writes it; the fallback governs only the not-yet-provisioned window. (An explicit `--user`, or a marker that resolves to a concrete mode, takes precedence over the fallback exactly as before.)
+
 #### Scenario: crossing checks skipped in operator-rootless
 
 - **WHEN** `sandbox doctor` runs with `docker_execution_mode == operator-rootless`
@@ -799,6 +801,11 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 
 - **WHEN** `sandbox doctor` runs with `docker_execution_mode == separate-user`
 - **THEN** every check behaves exactly as before this change (including the crossing and dispatcher-integrity checks)
+
+#### Scenario: marker-absent fresh host falls back to operator-rootless and runs
+
+- **WHEN** `sandbox doctor` runs on a host with no setup marker entry (`resolve_execution_mode` raises `ModeMarkerMissing`), no `sandbox-ai.toml`, and no `--user` flag
+- **THEN** doctor falls back to `operator-rootless` (the provisioning default), resolves the daemon owner as the invoking operator toml-free, runs the operator-rootless check set (threading `operator-rootless` into `build_check_registry` and `run_checks`), and does NOT hard-fail with "No user specified" — rather than falling back to `separate-user` and erroring on the missing toml
 
 ### Requirement: Daemon User Privilege Invariant (separate-user)
 

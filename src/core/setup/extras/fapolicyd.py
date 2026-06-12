@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Optional fapolicyd integration phase (sticky opt-in, design D11).
 
 fapolicyd is a userspace allow-listing daemon: a binary not in its trust DB

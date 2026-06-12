@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Operator-rootless host-root batch model (design D5a / D2 / D6).
 
 Operator-rootless ``sandbox setup`` runs as the *operator*, unprivileged. The

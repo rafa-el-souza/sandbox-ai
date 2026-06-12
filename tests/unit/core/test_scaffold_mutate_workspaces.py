@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for `core.scaffold.mutate_workspaces` — round-trip and parse-error guards.
 
 Pins the design's "tomlkit cosmetic changes" risk in two layers:

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the ``sandbox setup`` Typer command (Group 8).
 
 Covers the full apply-gating edge-case matrix from tasks.md 8.3 with the
@@ -459,7 +460,9 @@ def test_update_runsc_in_operator_rootless_routes_to_body() -> None:
 def test_update_runsc_in_separate_user_runs_l6a_subset() -> None:
     """separate-user ``--update-runsc`` still routes to the L6a-only subset path."""
     sep_ctx = SetupContext(
-        host_config=minimal_host_config("sandbox", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="dev",
     )
     with (

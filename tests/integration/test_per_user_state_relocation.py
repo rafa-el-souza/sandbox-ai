@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Subprocess-level coverage for the per-user state relocation change.
 
 Each test invokes the CLI via ``uv run sandbox …`` with ``SANDBOX_AI_HOME``

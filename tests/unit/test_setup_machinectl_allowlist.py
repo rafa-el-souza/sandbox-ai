@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Verify the setup-phase package is correctly permitted by the pre-existing
 ``machinectl_cmd`` allowlist — WITHOUT touching the allowlist definition.
 

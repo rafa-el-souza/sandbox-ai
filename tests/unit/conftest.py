@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared test fixtures for unit tests.
 
 Centralizes Rich Console construction for deterministic, ANSI-free output capture.

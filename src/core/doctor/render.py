@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Rich output renderer for doctor check results.
 
 Groups results by category and prints with progressive disclosure: pass

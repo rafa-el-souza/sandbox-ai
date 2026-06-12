@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for `core.ipam` lock topology — regression guards for the lock layout.
 
 Guards two invariants:

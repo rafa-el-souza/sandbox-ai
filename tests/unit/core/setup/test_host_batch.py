@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the operator-rootless host-root batch model (§8-A / D5a)."""
 
 from __future__ import annotations

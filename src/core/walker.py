@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """ACL ancestor walker: planning-only pure function emitting ancestor paths.
 
 Implements the seven safety rules from the ``instance-workspace-model`` spec:

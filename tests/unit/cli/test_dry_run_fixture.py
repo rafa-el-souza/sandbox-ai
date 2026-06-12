@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Byte-equivalence fixture gate for `sandbox start --dry-run` output.
 
 Section 5.1-5.3 of the ``refactor-plan-tuples-to-actions`` change.

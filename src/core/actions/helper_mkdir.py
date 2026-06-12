@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Helper-mkdir+chown Action — wraps a (parent, leaves, uid, gid) tuple.
 
 Replaces the ``(parent_abs, leaves, owner_uid, owner_gid)`` tuple

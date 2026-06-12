@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Instance registry: maps instance names to their on-disk state.
 
 Keyed by ``instance_name`` (globally unique per-user). Values record the

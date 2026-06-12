@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l3_sudoers`` (L3 — privilege rule).
 
 Covers: the V9 golden-file render + zero-``"`` assertion across every
@@ -56,7 +57,7 @@ def _stable_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _hc(auth: MachinectlAuth = MachinectlAuth.SUDO) -> HostConfig:
-    return minimal_host_config("sandbox", auth)
+    return minimal_host_config("sandbox", auth, DockerExecutionMode.SEPARATE_USER)
 
 
 def _ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> SetupContext:

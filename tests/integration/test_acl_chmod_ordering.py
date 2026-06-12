@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Empirical validation of G13 — chmod-after-setfacl mask collapse.
 
 Locks the rule: ``setfacl`` must be applied AFTER ``chmod``. Otherwise the

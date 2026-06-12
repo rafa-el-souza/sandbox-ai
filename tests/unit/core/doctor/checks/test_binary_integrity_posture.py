@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.binary_integrity_posture.
 
 Always-PASS informational check; the four mechanism probes degrade gracefully

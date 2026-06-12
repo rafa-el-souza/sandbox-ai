@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared fixtures for the cross-boundary integration tests.
 
 Two pieces of setup were byte-duplicated across

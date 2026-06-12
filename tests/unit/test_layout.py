@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for test-suite layout — assert tests/unit/<pkg>/ mirrors src/<pkg>/.
 
 Walks every Python module under ``src/<pkg>/`` and asserts a corresponding

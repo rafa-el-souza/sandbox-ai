@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Sandbox CLI orchestrator — full lifecycle implementation.
 
 Commands: init, start, stop, attach, destroy, doctor, status.
@@ -76,6 +77,8 @@ from core.ipam import IPAMExhaustedError, IPAMLedger, derive_static_ips, derive_
 from core.locks import acquire_backup_lock, is_backup_lock_held
 from core.registry import InstanceRegistry
 from core.scaffold import (
+    REQUIRED_INSTANCE_SECRETS,
+    SecretSeedingError,
     WorkspaceSpec,
     _detect_git_config,
     apply_default_acls,
@@ -83,7 +86,10 @@ from core.scaffold import (
     create_instance_dirs,
     ensure_registry_seed,
     mutate_workspaces,
+    parse_secrets_file,
     prompt_secrets,
+    resolve_secrets_from_env,
+    seed_secrets,
     write_initialized_sentinel,
     write_sandbox_toml,
 )
@@ -311,7 +317,7 @@ def _container_status(
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
 
@@ -372,7 +378,7 @@ def _warm_check(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> bool:
     """Check if containers are already running. Returns True if warm.
 
@@ -1470,7 +1476,7 @@ def _phase_helper_cp_chown_ro_files(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Phase 5d: helper-cp + chown for ro single-file mounts.
 
@@ -1524,7 +1530,7 @@ def _phase_helper_mkdir_chown_cache_log(
     host_user: str,
     auth: MachinectlAuth,
     dev_user: str | None = None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Phase 5c: helper-mkdir + chown for cache/log leaves.
 
@@ -1769,7 +1775,7 @@ def _compose_down(
     *,
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Run docker compose down via the typed ``compose-down`` dispatcher op.
 
@@ -1826,7 +1832,7 @@ def _phase_stop_teardown(
     *,
     volumes: bool,
     auth: MachinectlAuth,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[str]:
     """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
     Sequence requirement).
@@ -2213,6 +2219,16 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
 
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
+_SECRETS_FROM_ENV_FLAG = typer.Option(
+    False,
+    "--secrets-from-env",
+    help="Seed required instance secrets from the process environment (non-interactive).",
+)
+_SECRETS_FROM_FILE_FLAG = typer.Option(
+    None,
+    "--secrets-from-file",
+    help="Seed required instance secrets from a KEY=VALUE file at PATH (non-interactive).",
+)
 _BOOTSTRAP_ITEM_FLAG = typer.Option(
     [], "--item", help="A host-root BatchItem to apply (repeatable, canonical order)"
 )
@@ -2888,6 +2904,32 @@ def _setup_body_operator_rootless(
     return 0
 
 
+def _dry_run_secret_source_lines(secrets_from_env: bool, secrets_from_file: str | None) -> list[str]:
+    """Build the dry-run secret-seeding SOURCE report line(s).
+
+    Reports the source the real run would use; prints NO secret values. Per the
+    no-mutation contract this REPORTS missing secrets (flags them) rather than
+    refusing. TTY detection goes through ``_stdin_is_tty`` (the test seam).
+    """
+    names = list(REQUIRED_INSTANCE_SECRETS)
+    if secrets_from_env:
+        unset = [name for name in REQUIRED_INSTANCE_SECRETS if os.environ.get(name, "") == ""]
+        line = f"  Secrets: from environment variables {names}"
+        if unset:
+            line += f" (currently unset: {unset})"
+        return [line]
+    if secrets_from_file is not None:
+        line = f"  Secrets: from file {secrets_from_file!r} (required keys: {names})"
+        try:
+            parse_secrets_file(secrets_from_file)
+        except SecretSeedingError as exc:
+            line += f" [would fail: {exc}]"
+        return [line]
+    if _stdin_is_tty():
+        return [f"  Secrets: interactive prompt for {names}"]
+    return [f"  Secrets: stub `YOUR_<NAME>_HERE` placeholders for {names}"]
+
+
 @app.command()
 def init(
     inst: str = typer.Argument(..., help="Instance name (1-30 chars, [a-z0-9_-])"),
@@ -2896,10 +2938,52 @@ def init(
     git_user: str = typer.Option("", "--git-user", help="Git user.name (auto-detected if omitted)"),
     git_email: str = typer.Option("", "--git-email", help="Git user.email (auto-detected if omitted)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview scaffold without writing"),
+    secrets_from_env: bool = _SECRETS_FROM_ENV_FLAG,
+    secrets_from_file: str | None = _SECRETS_FROM_FILE_FLAG,
 ) -> None:
     """Initialize a new sandbox instance with one or more workspaces."""
     _refuse_root_euid()
     _validate_name(inst, kind="instance", max_len=_INSTANCE_NAME_MAX)
+
+    # Mutual exclusion of the two secret-source flags — reject BEFORE any state
+    # mutation (the populate-or-refuse / dry-run-report contract).
+    if secrets_from_env and secrets_from_file is not None:
+        console.print(
+            "--secrets-from-env and --secrets-from-file are mutually exclusive.",
+            style="red",
+        )
+        raise typer.Exit(code=1)
+
+    # Resolve + validate the non-interactive secret set EARLY (before any state
+    # mutation). On the real run a refusal exits here; on --dry-run we report the
+    # source instead (no refusal — the no-mutation contract). The resolved dict is
+    # written at S6 via ``seed_secrets`` in place of the interactive prompt.
+    seeded_secrets: dict[str, str] | None = None
+    if not dry_run and secrets_from_env:
+        try:
+            seeded_secrets = resolve_secrets_from_env(os.environ)
+        except SecretSeedingError as exc:
+            console.print(str(exc), style="red", markup=False)
+            raise typer.Exit(code=1) from None
+    elif not dry_run and secrets_from_file is not None:
+        try:
+            seeded_secrets = parse_secrets_file(secrets_from_file)
+        except SecretSeedingError as exc:
+            console.print(str(exc), style="red", markup=False)
+            raise typer.Exit(code=1) from None
+    elif not dry_run and not secrets_from_env and secrets_from_file is None:
+        # No-implicit-consume hint (Z): a required-secret env var is set but no
+        # secret-source flag was given. Emit ONE informational hint naming the
+        # detected variable(s) — names only, never values — and DO NOT seed from
+        # them. The no-flag prompt (TTY) / stub (non-TTY) behavior is unchanged.
+        detected = [name for name in REQUIRED_INSTANCE_SECRETS if os.environ.get(name, "") != ""]
+        if detected:
+            console.print(
+                f"Note: detected required-secret environment variable(s) {detected} — "
+                "these are NOT consumed automatically. Pass --secrets-from-env to seed from them.",
+                style="yellow",
+                markup=False,
+            )
 
     # Per-user tree creation (idempotent, mode 0700)
     user_home = sandbox_ai_home()
@@ -2968,12 +3052,15 @@ def init(
     if not dry_run:
         # Resolve the active execution mode from the root-owned setup marker
         # (the single runtime authority, C-004), mirroring ``doctor``. An
-        # un-setup host has no marker entry → diagnose it as separate-user (the
-        # pre-flip default). In operator-rootless the daemon runs as the
-        # *operator's* own user, so the boundary-crossing owner is
-        # ``resolve_daemon_owner`` of the resolved config — NOT the stale
-        # ``docker_unprivileged_user``, which would cross machinectl into a
-        # nonexistent dedicated user. Threading ``mode`` into
+        # un-setup host has no marker entry → fall back to
+        # ``DEFAULT_PROVISIONING_MODE`` (operator-rootless — the single
+        # system-wide default, F-051). The marker is the authority once setup
+        # writes it; on a fresh host the provisioning default lets the
+        # auth-probe resolve the invoking operator as the daemon owner. In
+        # operator-rootless the daemon runs as the *operator's* own user, so the
+        # boundary-crossing owner is ``resolve_daemon_owner`` of the resolved
+        # config — NOT the stale ``docker_unprivileged_user``, which would cross
+        # machinectl into a nonexistent dedicated user. Threading ``mode`` into
         # ``minimal_host_config`` makes ``dispatch.probe`` take the local
         # (no-machinectl) path in op-rootless. Resolved once and reused across
         # the init pre-flight crossing (the single ``preflight`` op) and the
@@ -2981,7 +3068,7 @@ def init(
         try:
             probe_mode = resolve_execution_mode(getpass.getuser())
         except ModeMarkerMissing:
-            probe_mode = DockerExecutionMode.SEPARATE_USER
+            probe_mode = DEFAULT_PROVISIONING_MODE
         probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
         probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
 
@@ -3055,6 +3142,10 @@ def init(
         for ws in workspace_specs:
             origin = f"copy from {ws.source}" if ws.bootstrap_mode == "copy" else "empty"
             console.print(f"  Workspace [{rich_escape(ws.name)}]: {origin} → {ws.path}")
+        # Secret-seeding SOURCE the real run would use (no secret VALUES printed;
+        # per the no-mutation contract dry-run REPORTS missing secrets, never refuses).
+        for line in _dry_run_secret_source_lines(secrets_from_env, secrets_from_file):
+            console.print(line, markup=False)
         console.print("\n  [green bold]Dry-run complete — no files written[/green bold]\n")
         return
 
@@ -3093,19 +3184,25 @@ def init(
     ensure_registry_seed(user_home)
     InstanceRegistry().register(inst, instance_dir)
 
-    # S6: Secret prompting (non-TTY safe)
-    required_secrets: list[tuple[str, str]] = [
-        ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
-        ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
-    ]
-    # PG_PASSWORD is auto-generated at scaffold time — not prompted
-    if config.components.mcp_firecrawl:
-        required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
-    prompt_secrets(
-        env_path,
-        required_secrets,
-        prompt_func=lambda msg: typer.prompt(msg, hide_input=True),
-    )
+    # S6: Secret seeding. When a secret-source flag was given, the required
+    # secrets were resolved + validated BEFORE any mutation; write them now
+    # (populate-or-refuse already enforced). Otherwise fall back to the
+    # interactive prompt (TTY) / stub-placeholder (non-TTY) default.
+    if seeded_secrets is not None:
+        seed_secrets(env_path, seeded_secrets)
+    else:
+        required_secrets: list[tuple[str, str]] = [
+            ("CORE_ANTHROPIC_API_KEY", "Anthropic API key"),
+            ("CORE_GITHUB_TOKEN", "GitHub personal access token"),
+        ]
+        # PG_PASSWORD is auto-generated at scaffold time — not prompted
+        if config.components.mcp_firecrawl:
+            required_secrets.append(("FIRECRAWL_API_KEY", "Firecrawl API key"))
+        prompt_secrets(
+            env_path,
+            required_secrets,
+            prompt_func=lambda msg: typer.prompt(msg, hide_input=True),
+        )
 
     # S7: Sentinel
     write_initialized_sentinel(instance_dir)
@@ -3740,13 +3837,19 @@ def doctor(
     # Resolve the active execution mode from the root-owned setup marker (the
     # single runtime authority, C-004) BEFORE the user, so user resolution can be
     # mode-aware. The marker read is toml-independent — an un-setup host has no
-    # marker entry → diagnose it as separate-user (the pre-flip default; a future
-    # group flips the broader default). The operator is the current real user,
-    # exactly how the rest of doctor resolves the invoker.
+    # marker entry → fall back to ``DEFAULT_PROVISIONING_MODE`` (operator-rootless,
+    # the single system-wide default — F-051). This is load-bearing for a FRESH
+    # host: under the old separate-user fallback, a host with no marker AND no toml
+    # AND no ``--user`` hard-failed at the "No user specified" guard below, unable
+    # to run even the mode-invariant checks. Operator-rootless resolves the owner
+    # as the invoking operator (toml-free), so doctor RUNS. The marker is the
+    # authority once setup writes it; the fallback only governs the not-yet-setup
+    # window. The operator is the current real user, exactly how the rest of doctor
+    # resolves the invoker.
     try:
         mode = resolve_execution_mode(getpass.getuser())
     except ModeMarkerMissing:
-        mode = DockerExecutionMode.SEPARATE_USER
+        mode = DEFAULT_PROVISIONING_MODE
 
     if user is not None:
         # Explicit --user wins in both modes.

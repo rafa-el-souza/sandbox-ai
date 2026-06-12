@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for `_compose_up_cmd_plan` / `_phase_compose_up` — the compose-up seam.
 
 Post-runtime-dispatcher (C-001 / Q6): the plan yields a typed

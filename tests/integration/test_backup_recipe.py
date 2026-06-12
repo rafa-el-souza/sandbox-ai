@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Empirical validation of the workspace-backup rsync recipe (D8).
 
 Verifies that ``core.workspace_backups.create_backup`` strips runtime ACL/

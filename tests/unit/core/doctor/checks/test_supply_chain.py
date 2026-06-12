@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.supply_chain.
 
 Covers `check_image_digests` IMAGE_REGISTRY pin verification.

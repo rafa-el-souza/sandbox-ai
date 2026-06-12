@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.runsc_pinned_match.
 
 Covers the PASS / SKIP / WARN verdicts of ``check_runsc_pinned_match``, which

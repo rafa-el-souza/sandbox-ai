@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.workspace_bridge.
 
 Covers the 11 workspace-bridge checks plus the per-instance scan helpers

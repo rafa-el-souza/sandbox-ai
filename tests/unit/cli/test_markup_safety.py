@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for Rich markup safety — AST regression scan over `console.print` literals.
 
 Per the `orchestrator-cli` capability's "Rich Markup Safety in Console Output"

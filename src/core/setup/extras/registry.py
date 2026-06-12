@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Opt-in setup *extras* registry + sticky-opt-in inclusion predicate.
 
 The base ceremony is the L0..L8 phases auto-discovered by

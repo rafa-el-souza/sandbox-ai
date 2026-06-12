@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.filesystem.
 
 Covers `check_setfacl`, `check_acl_support`, `check_cgroup_v2`,

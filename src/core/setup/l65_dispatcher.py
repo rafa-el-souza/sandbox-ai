@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """L6.5 — dispatcher install (offline reproducible compile + manifest).
 
 Compiles the Go dispatcher via ``core.dispatch.compile_dispatcher`` (sister

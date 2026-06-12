@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for core.binary_install (operator-side pinned-binary install).
 
 No production callers exist yet (L6a / --update-runsc / doctor wire this in

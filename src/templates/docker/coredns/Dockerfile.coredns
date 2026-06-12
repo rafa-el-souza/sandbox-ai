@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 # ─── CoreDNS Multi-Stage Build ────────────────────────────────────────────────
 # Stage 1 (probe): Extract wget from busybox for healthcheck binary.
 # Stage 2 (runtime): CoreDNS with injected wget for CMD-based healthcheck.

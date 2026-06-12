@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """L0 — identity, distro classification, binary check, machinectl-path resolution.
 
 The first phase of ``sandbox setup`` (design D5; spec "Phase Execution Order"

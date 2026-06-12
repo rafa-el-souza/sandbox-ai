@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Doctor module: host readiness diagnostics for sandbox operation.
 
 Provides 16 diagnostic checks across 4 independent chains:

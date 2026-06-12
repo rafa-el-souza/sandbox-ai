@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Project-wide configuration: sandbox-ai.toml schema, loader, and machinectl command builder.
 
 Defines the project-root configuration that holds host-level settings
@@ -105,13 +106,17 @@ class DockerExecutionMode(StrEnum):
     OPERATOR_ROOTLESS = "operator-rootless"
 
 
-# The PROVISIONING default: the mode `sandbox setup` provisions when the operator
-# passes no `--docker-execution-mode` flag and the marker has no entry — the single,
-# user-facing default (referenced, never re-literalised; see finding F-051). It is
-# DISTINCT from the in-memory fallback on `HostSettings.docker_execution_mode` and
-# `minimal_host_config` below (intentionally kept `SEPARATE_USER`): the runtime never
-# acts on that fallback because `_resolve_full_host_config` always overlays the
-# marker-resolved mode, so it is moot, and keeping it avoids a no-benefit re-pin sweep.
+# The single execution-mode default for the WHOLE system (finding F-051): the mode
+# `sandbox setup` provisions when the operator passes no `--docker-execution-mode`
+# flag and the marker has no entry, AND the moot in-memory carrier default on
+# `HostSettings.docker_execution_mode` / `minimal_host_config` / every mode-param
+# default below. One value, one name — referenced, never re-literalised. The
+# in-memory carrier value is moot at runtime (`_resolve_full_host_config` always
+# overlays the marker-resolved mode), so pointing it here is behavior-preserving; the
+# value is single-sourced here so the codebase never carries two opposite-valued
+# defaults. The `tests/unit/test_conventions.py::test_no_bare_mode_literal_defaults`
+# gate forbids a bare `DockerExecutionMode` member in any param/field default
+# position outside this module.
 DEFAULT_PROVISIONING_MODE = DockerExecutionMode.OPERATOR_ROOTLESS
 
 
@@ -150,7 +155,7 @@ class HostSettings(BaseModel):
     # marker (``core.setup_state.resolve_execution_mode``). ``from_toml`` rejects a
     # toml that sets it; the field is populated programmatically (by setup, by
     # ``minimal_host_config``, and by the runtime overlay in ``cli.main``).
-    docker_execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
+    docker_execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
     workspace_bridge_group: str = "sb-ws"
 
 
@@ -190,12 +195,12 @@ class HostConfig(BaseModel):
 
 
 def minimal_host_config(
-    user: str, auth: MachinectlAuth, mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
+    user: str, auth: MachinectlAuth, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
 ) -> HostConfig:
     """Build a HostConfig carrying only the fields the dispatch boundary reads.
 
     The fields are ``docker_unprivileged_user``, ``machinectl_authentication``,
-    and ``docker_execution_mode`` (defaulting to ``SEPARATE_USER``).
+    and ``docker_execution_mode`` (defaulting to ``DEFAULT_PROVISIONING_MODE``).
     """
     return HostConfig(
         host=HostSettings(

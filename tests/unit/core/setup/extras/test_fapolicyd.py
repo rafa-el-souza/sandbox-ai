@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the optional fapolicyd integration phase.
 
 Covers: probe refusals (binary absent → CONFLICT, trust.d dir absent →
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from core.exceptions import SandboxExecutionError
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup.extras import fapolicyd as fap
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
@@ -30,7 +31,9 @@ if TYPE_CHECKING:
 @pytest.fixture
 def ctx() -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="op",
     )
 

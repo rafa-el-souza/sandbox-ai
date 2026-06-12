@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """ActionContext — per-invocation plumbing passed to ``Action.execute``.
 
 Bundles state that is uniform across a phase invocation:
@@ -34,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from core.host_config import DockerExecutionMode
+from core.host_config import DEFAULT_PROVISIONING_MODE, DockerExecutionMode
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,4 +53,4 @@ class ActionContext:
     executor: Executor
     instance_dir: Path
     host_config: HostConfig | None = None
-    docker_execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER
+    docker_execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE

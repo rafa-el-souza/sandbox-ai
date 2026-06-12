@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Action ABC — typed Command-pattern carrier for plan items.
 
 The ``Action`` hierarchy formalizes the Command pattern that the project's

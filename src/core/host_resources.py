@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Single source of truth for host CPU/RAM/size detection.
 
 Imported by both the hydration CPU/RAM clamp and the doctor host-capacity checks

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for ``ActionContext`` — frozen dataclass bundling per-phase plumbing."""
 
 from __future__ import annotations
@@ -38,9 +39,9 @@ def test_context_is_frozen() -> None:
         setattr(ctx, field_name, "other")
 
 
-def test_docker_execution_mode_defaults_to_separate_user() -> None:
+def test_docker_execution_mode_defaults_to_operator_rootless() -> None:
     ctx = _make_ctx()
-    assert ctx.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+    assert ctx.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 def test_docker_execution_mode_round_trips() -> None:

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.repo_integrity.
 
 Covers `check_tooling_plane` (template inventory) and `check_state_dir_writable`.

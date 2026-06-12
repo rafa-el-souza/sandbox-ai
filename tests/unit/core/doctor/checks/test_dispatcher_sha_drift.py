@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.dispatcher_sha_drift.
 
 Covers the PASS / SKIP / WARN verdicts. The check reuses setup L6.5's

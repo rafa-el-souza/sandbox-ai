@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """CLI lifecycle unit tests — start, stop, attach, destroy.
 
 All subprocess interactions are mocked at the core.executor.Executor.run boundary.
@@ -2856,9 +2857,11 @@ class TestDoctorHostConfig:
             mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
             mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
-    def test_doctor_falls_back_to_separate_user_when_marker_missing(self, runner: CliRunner) -> None:
-        """C-005 1.4: ``ModeMarkerMissing`` (un-setup host) → diagnose as
-        separate-user (the pre-flip default), no crash."""
+    def test_doctor_falls_back_to_operator_rootless_when_marker_missing(self, runner: CliRunner) -> None:
+        """F-051 (C-006 Group 9): ``ModeMarkerMissing`` (un-setup host) → diagnose
+        as operator-rootless (DEFAULT_PROVISIONING_MODE — the single system-wide
+        default), no crash. The marker is the authority once setup writes it; a
+        fresh host falls back to the provisioning default so doctor can run."""
         from cli.main import app
         from core.doctor import CheckResult
         from core.host_config import DockerExecutionMode
@@ -2875,8 +2878,37 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
-            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.SEPARATE_USER)
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+
+    def test_doctor_fresh_host_no_marker_no_toml_no_flag_runs(self, runner: CliRunner) -> None:
+        """F-051 (C-006 Group 9) bug fix: a TRULY fresh host — no setup marker,
+        no sandbox-ai.toml, no ``--user`` — must NOT hard-fail "No user specified".
+        Pre-flip, the marker-less fallback was separate-user, so with no toml and
+        no flag doctor early-exited at the "No user specified (separate-user mode)"
+        guard, unable to run even the mode-invariant checks. Now the fallback is
+        operator-rootless, so doctor resolves the invoking operator as the daemon
+        owner and RUNS the operator-rootless check set."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode
+        from core.setup_state import ModeMarkerMissing
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", side_effect=ModeMarkerMissing("no marker")),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor"])
+            assert r.exit_code == 0
+            assert "no user specified" not in r.output.lower()
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
     def test_doctor_op_rootless_no_toml_no_flag_resolves_operator(self, runner: CliRunner) -> None:
         """C-005 gap: operator-rootless host that's been ``setup`` but not ``init``'d
@@ -3268,6 +3300,252 @@ class TestInitNonTTY:
         ):
             result = runner.invoke(app, ["init", "newproject"])
             assert result.exit_code == 0
+
+
+def _secret_seed_mock_config() -> InstanceConfig:
+    from core.hydration import InstanceConfig
+
+    return InstanceConfig.model_validate(
+        {
+            "instance": {"name": "newproject", "host_uid": "1000"},
+            "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/home/user/newproject"}},
+        }
+    )
+
+
+@contextlib.contextmanager
+def _secret_seed_scaffold_patches(
+    *, tty: bool = False
+) -> typing.Iterator[dict[str, MagicMock]]:
+    """Patch the full init scaffold surface for the secret-seeding tests.
+
+    Yields a dict of the named mocks so tests can assert on them. ``_stdin_is_tty``
+    defaults to non-TTY (CI shape); pass ``tty=True`` for the prompt-path assertions.
+    """
+    with (
+        patch("cli.main._detect_git_config", return_value=("", "")),
+        patch("cli.main.run_check_subset", return_value=[]),
+        patch("cli.main.subprocess.run", return_value=_crossed_ok()),
+        patch("cli.main._stdin_is_tty", return_value=tty),
+        patch("cli.main.create_instance_dirs") as mock_dirs,
+        patch("cli.main.write_sandbox_toml"),
+        patch("cli.main._load_config", return_value=_secret_seed_mock_config()),
+        patch("cli.main.create_env_file"),
+        patch("cli.main.apply_default_acls"),
+        patch("cli.main.seed_secrets") as mock_seed,
+        patch("cli.main.prompt_secrets") as mock_prompt,
+        patch("cli.main.write_initialized_sentinel"),
+    ):
+        yield {"dirs": mock_dirs, "seed": mock_seed, "prompt": mock_prompt}
+
+
+class TestInitSecretSeeding:
+    """D1: non-interactive secret seeding (`--secrets-from-env` / `--secrets-from-file`)."""
+
+    def test_secrets_from_env_missing_required_refuses_no_mutation(
+        self, runner: CliRunner
+    ) -> None:
+        """1.1 regression: --secrets-from-env with CORE_GITHUB_TOKEN unset refuses, no mutation."""
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "ak-123"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            _secret_seed_scaffold_patches() as mocks,
+        ):
+            os.environ.pop("CORE_GITHUB_TOKEN", None)
+            result = runner.invoke(app, ["init", "newproject", "--secrets-from-env"])
+        assert result.exit_code != 0, result.output
+        assert "CORE_GITHUB_TOKEN" in result.output
+        mocks["dirs"].assert_not_called()
+        mocks["seed"].assert_not_called()
+        mocks["prompt"].assert_not_called()
+
+    def test_secrets_from_env_populates_both(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "ak-123", "CORE_GITHUB_TOKEN": "gh-456"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            _secret_seed_scaffold_patches() as mocks,
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--secrets-from-env"])
+        assert result.exit_code == 0, result.output
+        mocks["seed"].assert_called_once()
+        assert mocks["seed"].call_args.args[1] == {
+            "CORE_ANTHROPIC_API_KEY": "ak-123",
+            "CORE_GITHUB_TOKEN": "gh-456",
+        }
+        mocks["prompt"].assert_not_called()
+
+    def test_secrets_from_file_populates_both(self, runner: CliRunner, tmp_path: Path) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text(
+            "# leading comment\n"
+            "\n"
+            'CORE_ANTHROPIC_API_KEY=ak-file\n'
+            "CORE_GITHUB_TOKEN=gh-file\n"
+        )
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code == 0, result.output
+        mocks["seed"].assert_called_once()
+        assert mocks["seed"].call_args.args[1] == {
+            "CORE_ANTHROPIC_API_KEY": "ak-file",
+            "CORE_GITHUB_TOKEN": "gh-file",
+        }
+        mocks["prompt"].assert_not_called()
+
+    def test_secrets_from_file_missing_key_refuses(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text('CORE_ANTHROPIC_API_KEY=ak-file\n')
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code != 0, result.output
+        assert "CORE_GITHUB_TOKEN" in result.output
+        mocks["dirs"].assert_not_called()
+
+    def test_secrets_from_file_unrecognized_key_refuses(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text(
+            'CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\nFIRECRAWL_API_KEY=fc\n'
+        )
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code != 0, result.output
+        assert "FIRECRAWL_API_KEY" in result.output
+        mocks["dirs"].assert_not_called()
+
+    def test_secrets_from_file_unreadable_refuses(self, runner: CliRunner, tmp_path: Path) -> None:
+        from cli.main import app
+
+        missing = tmp_path / "does-not-exist.env"
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(missing)]
+            )
+        assert result.exit_code != 0, result.output
+        mocks["dirs"].assert_not_called()
+
+    def test_both_flags_mutually_exclusive_no_mutation(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\n")
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app,
+                ["init", "newproject", "--secrets-from-env", "--secrets-from-file", str(sfile)],
+            )
+        assert result.exit_code != 0, result.output
+        assert "mutually exclusive" in result.output
+        mocks["dirs"].assert_not_called()
+        mocks["seed"].assert_not_called()
+        mocks["prompt"].assert_not_called()
+
+    def test_no_flag_env_var_set_emits_hint_no_consume(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "leak-me"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            _secret_seed_scaffold_patches() as mocks,
+        ):
+            os.environ.pop("CORE_GITHUB_TOKEN", None)
+            result = runner.invoke(app, ["init", "newproject"])
+        assert result.exit_code == 0, result.output
+        assert "CORE_ANTHROPIC_API_KEY" in result.output
+        assert "--secrets-from-env" in result.output
+        assert "leak-me" not in result.output  # names only, never values
+        # No-flag path leaves the existing prompt/stub seeding intact.
+        mocks["prompt"].assert_called_once()
+        mocks["seed"].assert_not_called()
+
+    def test_dry_run_reports_env_source_no_values(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "secret-value"}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("CORE_GITHUB_TOKEN", None)
+            with patch("cli.main._detect_git_config", return_value=("", "")):
+                result = runner.invoke(
+                    app, ["init", "newproject", "--dry-run", "--secrets-from-env"]
+                )
+        assert result.exit_code == 0, result.output
+        assert "environment variables" in result.output
+        assert "CORE_ANTHROPIC_API_KEY" in result.output
+        assert "CORE_GITHUB_TOKEN" in result.output  # flagged as currently unset
+        assert "secret-value" not in result.output  # never print values
+
+    def test_dry_run_reports_file_source(self, runner: CliRunner, tmp_path: Path) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\n")
+        with patch("cli.main._detect_git_config", return_value=("", "")):
+            result = runner.invoke(
+                app, ["init", "newproject", "--dry-run", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code == 0, result.output
+        assert "from file" in result.output
+        assert str(sfile) in result.output
+        assert "would fail" not in result.output
+
+    def test_dry_run_file_source_flags_would_fail(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\n")  # missing CORE_GITHUB_TOKEN
+        with patch("cli.main._detect_git_config", return_value=("", "")):
+            result = runner.invoke(
+                app, ["init", "newproject", "--dry-run", "--secrets-from-file", str(sfile)]
+            )
+        # Dry-run REPORTS (does not refuse) per the no-mutation contract.
+        assert result.exit_code == 0, result.output
+        assert "would fail" in result.output
+        assert "CORE_GITHUB_TOKEN" in result.output
+
+    def test_dry_run_no_flag_tty_reports_prompt(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "interactive prompt" in result.output
+
+    def test_dry_run_no_flag_non_tty_reports_stub(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main._stdin_is_tty", return_value=False),
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "YOUR_<NAME>_HERE" in result.output
 
 
 class TestRequirePerUserStateInitialized:
@@ -3823,13 +4101,17 @@ class TestInitAuthProbe:
             assert result.exit_code == 1
             assert "probe timed out after 15 seconds" in result.output.lower()
 
-    def test_probe_mode_marker_missing_falls_back_to_separate_user(
+    def test_probe_mode_marker_missing_falls_back_to_operator_rootless(
         self, runner: CliRunner
     ) -> None:
-        """C-005 1.6: an un-setup host has no marker entry — ``resolve_execution_mode``
-        raises ``ModeMarkerMissing``, so init's auth-probe diagnoses separate-user
-        (the pre-flip default) and the probe owner stays the configured dedicated
-        user (mirrors the doctor() fallback)."""
+        """F-051 (C-006 Group 9): an un-setup host has no marker entry —
+        ``resolve_execution_mode`` raises ``ModeMarkerMissing``, so init's auth-probe
+        falls back to operator-rootless (DEFAULT_PROVISIONING_MODE — the single
+        system-wide default), and the probe owner is the invoking OPERATOR
+        (``getpass.getuser()``), not the configured dedicated user. Mirrors the
+        doctor() marker-less fallback."""
+        import getpass
+
         from cli.main import app
         from core.host_config import DockerExecutionMode
         from core.hydration import InstanceConfig
@@ -3842,6 +4124,7 @@ class TestInitAuthProbe:
                 "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
+        operator = getpass.getuser()
 
         with (
             patch(
@@ -3863,9 +4146,9 @@ class TestInitAuthProbe:
             result = runner.invoke(app, ["init", "nomarker"])
             assert result.exit_code == 0
             (_op, _args, host_config), _kwargs = mock_probe.call_args
-            # Separate-user fallback: owner is the configured dedicated user.
-            assert host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
-            assert host_config.host.docker_unprivileged_user == HOST_USER
+            # Operator-rootless fallback: owner is the invoking operator (local path).
+            assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+            assert host_config.host.docker_unprivileged_user == operator
 
     def test_probe_operator_rootless_uses_operator_owner_and_local_mode(
         self, runner: CliRunner
@@ -4270,9 +4553,9 @@ class TestContainerStatus:
 
         assert containers == []
 
-    def test_default_mode_probes_separate_user(self, tmp_path: Path) -> None:
-        """Omitting ``mode`` threads ``SEPARATE_USER`` into the probe host_config
-        (C-003 §6: the default execution mode is separate-user)."""
+    def test_default_mode_probes_operator_rootless(self, tmp_path: Path) -> None:
+        """Omitting ``mode`` threads ``DEFAULT_PROVISIONING_MODE`` (OPERATOR_ROOTLESS,
+        the single system-wide default — F-051) into the probe host_config."""
         from cli.main import _container_status
 
         compose = tmp_path / "docker" / "compose.yml"
@@ -4285,7 +4568,7 @@ class TestContainerStatus:
             _container_status(str(tmp_path), "s", self._config())
 
         (_op, _args, host_config), _kwargs = mock_probe.call_args
-        assert host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+        assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_operator_rootless_mode_threaded_to_probe(self, tmp_path: Path) -> None:
         """C-003 §6: when ``mode=OPERATOR_ROOTLESS`` is threaded, the probe's

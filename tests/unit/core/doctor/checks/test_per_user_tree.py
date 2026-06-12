@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.per_user_tree.
 
 Covers the per-user-tree existence/mode checks plus three legacy-state

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the L6a runsc-install phase (shape #3).
 
 Covers: probe branches (MISSING absent, ALREADY_CORRECT match, DRIFT
@@ -29,7 +30,9 @@ if TYPE_CHECKING:
 @pytest.fixture
 def ctx() -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="op",
     )
 

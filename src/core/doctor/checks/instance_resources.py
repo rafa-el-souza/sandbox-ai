@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-instance host-resource capacity doctor checks.
 
 Two advisory (WARN-only) checks that guard the rendered `compose.yml` against

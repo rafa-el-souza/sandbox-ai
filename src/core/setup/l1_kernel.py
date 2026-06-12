@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """L1 — kernel sysctl drop-in + verify-only checks (user-independent).
 
 Second phase of ``sandbox setup`` (spec "Phase Execution Order" step 2). L1

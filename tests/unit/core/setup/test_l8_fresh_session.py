@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l8_fresh_session`` (L8 — fresh-session re-probe).
 
 Covers: the always-MISSING verification probe; the ``id -G`` bridge-gid
@@ -37,7 +38,7 @@ def _bridge_group(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _hc() -> HostConfig:
-    return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+    return minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
 
 
 def _ctx() -> SetupContext:

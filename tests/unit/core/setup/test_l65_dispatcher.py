@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the L6.5 dispatcher-install phase.
 
 Covers: the 2-arg ``compile_dispatcher`` contract, the
@@ -42,7 +43,9 @@ class _Env:
 @pytest.fixture
 def ctx() -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="op",
     )
 

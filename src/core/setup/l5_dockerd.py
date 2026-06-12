@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """L5 — linger + rootless dockerd install (content-aware).
 
 **Mode split (D2/D4 — the daemon owner + crossing differ by execution mode).**

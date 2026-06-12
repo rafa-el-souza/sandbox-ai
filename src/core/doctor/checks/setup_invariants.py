@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Setup-invariants doctor check (spec "Setup Invariants Check").
 
 Read-only steady-state audit of setup's owned-namespace artifacts. This is the
@@ -41,6 +42,7 @@ from typing import TYPE_CHECKING
 from core.dispatch import _DISPATCH_BINARY, Op
 from core.doctor.types import CheckResult
 from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
     MachinectlAuth,
     minimal_host_config,
@@ -334,7 +336,7 @@ def _audit_sudo_floor(violations: list[str]) -> None:
 def check_setup_invariants(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Read-only steady-state audit of setup's owned-namespace artifacts.
 

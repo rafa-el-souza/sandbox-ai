@@ -1,0 +1,84 @@
+# Dispatcher
+
+The operator-friendly "what does the dispatcher do for op X" reference for `core.dispatch`, the single crossing between orchestrator and sandbox. The authoritative source is the runtime-dispatcher spec's "Typed Op Surface" + "Target Argv Construction Per Op".
+
+- [Dispatcher op reference](#dispatcher-op-reference)
+- [Contract notes](#contract-notes)
+  - [Compose wire expansion](#compose-wire-expansion)
+  - [`docker-manifest-inspect` membership validation](#docker-manifest-inspect-membership-validation)
+  - [`invoke()` raises, `probe()` branches](#invoke-raises-probe-branches)
+  - [Streaming op class (`fwd` only — the frameless carve-out)](#streaming-op-class-fwd-only--the-frameless-carve-out)
+  - [Exit recovery is dispatcher-emitted](#exit-recovery-is-dispatcher-emitted)
+- [Adding a new orchestrator-to-sandbox operation](#adding-a-new-orchestrator-to-sandbox-operation)
+
+## Dispatcher op reference
+
+`core.dispatch` accepts **exactly twelve** ops as the dispatcher's `argv[1]`. The surface is byte-faithful to the `machinectl_cmd(...)` callsites it replaced — it is an enumeration of existing behavior, not a new API — with two exceptions: `preflight` (op 11), a read-only *bundle* of `sandbox start`'s privilege-boundary preflight queries, and `fwd` (op 12), the streaming attach ProxyCommand payload.
+
+**Framed vs streaming.** Eleven ops are **framed** (begin/exit recovery framing); `fwd` alone is **streaming** — its stream invocation is frameless (its lone `--check` probe rides the framed path). See the [streaming-class contract note](#streaming-op-class-fwd-only--the-frameless-carve-out) below.
+
+How to read the table: each row gives the typed args callers pass to `invoke()`/`probe()` and the resulting target argv the dispatcher constructs (all are `["/bin/bash", "-c", "<inner>"]` unless noted).
+
+| # | Op | Typed args | Target-argv inner string |
+|---|---|---|---|
+| 1 | `auth-probe` | (none) | `echo ok` |
+| 2 | `compose-up` | `[<inst>]` | `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<proj> docker compose <compose-files> --ansi never --env-file <env> up -d --build --wait` |
+| 3 | `compose-down` | `[<inst>]` (+ `["--volumes"]` for destroy) | `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<proj> docker compose <compose-files> --ansi never --env-file <env> down<vol>` where `<vol>` is ` -v` iff `--volumes` was supplied (`sandbox stop` → `down`; `sandbox destroy` → `down -v`) |
+| 4 | `compose-ps` | `[<inst>]` | `TERM=dumb NO_COLOR=1 BUILDKIT_PROGRESS=plain COMPOSE_PROJECT_NAME=<proj> docker compose <compose-files> --env-file <env> --ansi never ps --format json` |
+| 5 | `compose-ls` | (none) | `docker compose ls --format json --all` |
+| 6 | `docker-version` | (none) | `docker version --format '{{.Server.Version}}'` (the `docker version` subcommand — NOT a `docker-info` preset) |
+| 7 | `docker-info` | `[<preset>]`, preset ∈ {`security-options`, `runtimes`} | `docker info --format '{{.SecurityOptions}}'` for `security-options`; `docker info --format '{{json .Runtimes}}'` for `runtimes`. There is no `default` preset. |
+| 8 | `docker-manifest-inspect` | `[<ref>]` | `docker manifest inspect <ref>` |
+| 9 | `helper-chown-files` | `[<parent-path>, <mode-octal>, <uid>, <gid>, <file-name>...]` | the hardened `docker run` invocation from `core.helper_container._hardened_docker_run` (busybox-musl pin, `--cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE`, `--security-opt no-new-privileges:true`, `--tmpfs /tmp`, `--user 0:0`, `-v <parent>:/p`) with the existing `cp→unlink→cp→chmod→chown` inode-stability inner loop |
+| 10 | `helper-mkdir-chown-dirs` | `[<parent-path>, <uid>, <gid>, <leaf-name>...]` | same hardened prefix with the existing `mkdir -p && chown` inner loop (no chmod, per the primitive's contract) |
+| 11 | `preflight` | (none) | the `;`-sequenced read-only health bundle backing `sandbox start`'s privilege-boundary preflight — one segment per DISTINCT query, each emitting a question marker, the query (stderr merged), and a per-query exit marker. See [the `preflight` marker protocol](#preflight-marker-protocol) below. |
+| 12 | `fwd` | `[<inst>]` (operator-side-expanded to the wire `<inst> --project <P> --ip <IP>`) | **streaming** (frameless) — the ONE op whose target argv is NOT `/bin/bash -c`-wrapped: a DIRECT `["/usr/bin/docker", "exec", "-i", "<P>-admin-1", "/fwd", "<IP>:9999"]` for the attach ProxyCommand payload. See [the `fwd` target construction](#fwd-target-construction) below. |
+
+### `preflight` marker protocol
+
+The op 11 inner string is the `;`-sequenced read-only health bundle backing `sandbox start`'s privilege-boundary preflight: `echo __PREFLIGHT_Q_<name>__; <query> 2>&1; echo __PREFLIGHT_RC_<name>_$?__` for each DISTINCT query — `echo ok` (auth-probe), `docker version` (docker-version), `docker info` security-options, `docker info` runtimes (one query, deduped — feeds runsc/runsc-runtimeArgs/host-uds), `docker compose ls`. NOT `&&`/`set -e` (one query's failure must not abort or forge the others). Each query merges stderr (`2>&1`) into its attributed segment and is followed by a per-query exit marker (`__PREFLIGHT_RC_<name>_$?__`, where `$?` is the query's own exit, unaffected by the redirection; the RC echo still runs because segments are `;`-joined), so the bundle carries per-query stdout + merged stderr + exit code for orchestrator-side per-check reconstruction on the `__PREFLIGHT_Q_<name>__` / `__PREFLIGHT_RC_<name>_$?__` markers. The query inners are SSOT-shared with the individual read-only op builders.
+
+### `fwd` target construction
+
+The op 12 target is the DIRECT `["/usr/bin/docker", "exec", "-i", "<P>-admin-1", "/fwd", "<IP>:9999"]` (admin container name derived dispatcher-side from `--project`; the `exec -i` verb, the `/fwd` path, and port `9999` are op-hardcoded, never wire-read). The attach ProxyCommand payload — `proxy_argv` constructs the crossing argv for the ssh client; the dispatcher execs docker directly so no interpreter sits between it and the SSH byte stream. The dispatcher-side wire validation: `--project` matches `^[a-z0-9][a-z0-9_-]*$` and must end `-<inst>`; `--ip` is a dotted-quad inside the IPAM superblock (`10.100.0.0`–`10.255.255.0`).
+
+## Contract notes
+
+Four contract notes load-bearing for anyone touching the dispatcher.
+
+### Compose wire expansion
+
+Callers pass only `[<inst>]` (plus `["--volumes"]` for a `compose-down` destroy). `invoke()` internally resolves dev-context state via `core.dispatch._resolve_compose_state(inst)` (project name, compose-file list, `.sandbox.env` path — the dispatcher runs in the sandbox-user session and *cannot* re-derive these) and expands the crossed command to the wire form `dispatch <compose-op> <inst> --project <P> --env-file <E> --compose-file <f1> [--compose-file <f2>…] [--volumes]`. The Go binary parses those named flags, applies a **structural + symlink confinement** check (every compose-file/env-file operand must be absolute, `..`-free, live provably under some `…/instances/<inst>/` tree, and have no symlinked component from the `instances/<inst>` boundary downward; `--project` must match `^[a-z0-9][a-z0-9_-]*$` and end with `-<inst>`), and assembles the env prefix around an **op-hardcoded verb** (`up -d --build --wait` / `down` / `down -v` / `ps --format json`) that is NEVER read from the wire.
+
+### `docker-manifest-inspect` membership validation
+
+The single arg must be a member of the precomputed set `{pin.pinned for pin in IMAGE_REGISTRY.values()} ∪ {pin.tagged for pin in IMAGE_REGISTRY.values()}` — i.e. *either* a registry `.pinned` digest ref *or* a registry `.tagged` tag ref. Validation is by set membership (computed once at module load from `IMAGE_REGISTRY`), NOT by a docker-reference regex. A bare `sha256:…`, an arbitrary non-registry `name@sha256:…`, or any non-registry ref is rejected. (`doctor/checks/supply_chain.py` queries both `.pinned` (stale-digest) and `.tagged` (tag-drift) per registry entry; both route through this one op.)
+
+### `invoke()` raises, `probe()` branches
+
+`core.dispatch.invoke()` keeps a raise-on-failure contract: it raises `SandboxExecutionError` on non-zero exit or timeout (used by mutating / abort-on-failure callers — helper, compose-up/down). Probe-style callers that must branch on success/failure/timeout (every doctor check, the cli `auth-probe` preflight) call `core.dispatch.probe()` instead, which returns a typed frozen `ProbeOutcome` (`ok: bool`, `timed_out: bool`, `stdout: str`). `probe()` is the single place the `SandboxExecutionError` → `isinstance(__cause__, subprocess.TimeoutExpired)` timeout discrimination lives; `invoke()` and `Executor` are unchanged.
+
+### Streaming op class (`fwd` only — the frameless carve-out)
+
+`fwd` is the lone **streaming** op; the other eleven are **framed**. A `fwd` *stream invocation* (op + wire args, NOT the lone `--check`) emits **no** nonce, BEGIN, or `__SANDBOX_EXIT_` trailer — a single dispatcher-emitted stdout byte would corrupt the raw SSH byte stream the op exists to carry — writes all diagnostics to **stderr** only (zero stdout bytes on a reject), and replaces its process image via a **direct `syscall.Exec`** of the docker-exec target (no `/bin/bash -c`, no sentinel wrap). The lone `dispatch fwd --check` probe form is NOT a stream invocation — it rides the **framed** path (nonce + BEGIN + `_0`) like every op, so the L3a/L8 per-op probe protocol stays uniform across all twelve. The orchestrator NEVER executes or parses a stream invocation: `core.dispatch.proxy_argv` *constructs* the per-mode crossing argv (separate-user → `sudo_pipe_cmd`; operator-rootless → the bare target argv) for the ssh client's `-o ProxyCommand=…`, and `invoke()`/`probe()` **reject** a streaming op with a typed error before any crossing. The forgery-resistance property is preserved, not weakened — control decisions ride framed, nonce-bound ops exclusively; streaming ops carry zero orchestrator-interpreted content (the bytes go to the operator's ssh client, which authenticates core's sshd end-to-end). A convention meta-test structurally pins `core.dispatch` as the single sanctioned producer of a `dispatch fwd` payload / `/fwd` docker-exec argv.
+
+### Exit recovery is dispatcher-emitted
+
+Exit recovery is dispatcher-emitted, not orchestrator-injected (load-bearing, do NOT revert to a wrap). `machinectl shell` masks the inner `/bin/bash -c` exit, so the real exit must be recovered out-of-band. The recovery framing is emitted **by the dispatcher** (`__SANDBOX_BEGIN_<nonce>` before the op, `__SANDBOX_EXIT_<nonce>_$?` after), *after* sudo has authorized the crossing — so `invoke()` crosses the **bare** `dispatch <op>` payload (`Executor.run(framed=True)`), which is exactly what the per-op `Cmnd_Spec` matches. The earlier `Executor.run(sentinel=True)` *injected* `( <cmd> ); echo __SANDBOX_EXIT_…` into the crossed payload, making the authorized command unmatchable by any `Cmnd_Spec` — silently breaking every op for a password-operator (only a NOPASSWD-blanket grant masked it). `sentinel=True` (orchestrator-injected wrap, token-validated) survives **only** on the root setup-phase crossings (L5/L6/L7) that run as root with no rule to match; the operator-rule crossings (`core.dispatch.invoke`, L3a, L8) MUST use `framed=True`. (The wrap is a **subshell** `( <cmd> )`, not a brace group `{ <cmd>; }`, so an inner `exit` cannot swallow the trailing sentinel echo; the dispatcher's Go-side `wrapSentinel` is kept in parity.) The recovered exit is bound to the begin nonce so untrusted op output (a malicious image, `docker-manifest-inspect` registry JSON) cannot forge it.
+
+## Adding a new orchestrator-to-sandbox operation
+
+There is no separate developer doc — this is the canonical pipeline. Every new Docker/compose/helper crossing is a new dispatcher op (do NOT hand-roll `machinectl_cmd`; the convention meta-test will fail the gate):
+
+1. **Add the op to the `Op` enum** in `src/core/dispatch.py` and its `OpSpec` (name, min/max args).
+2. **Add the typed-arg validator** — reject malformed args with a typed error before the boundary is ever crossed (the dispatcher binary trusts upstream validation and does not re-run validators).
+3. **Add the target-argv builder** — pure function from validated args to the `["/bin/bash", "-c", "<inner>"]` (or hardened-`docker run`) argv. Reuse existing primitives (e.g. `core.helper_container._hardened_docker_run`) rather than re-deriving flag lists.
+4. **Add the Go-side translation** in `src/templates/dispatch/main.go` and a row to the shared fixture `src/templates/dispatch/fixtures/target_argv_cases.json` (`{op, args, expected_target_argv}`). Both the Python unit tests and the Go `main_test.go` consume this one fixture, so a Python↔Go drift is a fixture mismatch.
+5. **Add Python unit tests** in `tests/unit/core/test_dispatch.py`: ≥1 validator-positive, ≥3 validator-negative, and target-argv-builder assertions against the fixture rows. 100% coverage on the new validator/builder paths (no suppressions).
+6. **Go fixture-parity is compile-time-enforced, not gate-enforced.** The `make test`/`make coverage` gate covers only the Python side — it does NOT run the Go tests, and a host Go toolchain is not *required*. The authoritative parity run is `go test ./...` inside the pinned `golang:1.23-alpine` image as the first step of `core.dispatch.compile_dispatcher` — a fixture mismatch fails `go test`, which fails the compile, which fails `sandbox-setup`'s install phase, so a drifted dispatcher binary is never produced.
+   - A dev host that *does* have Go installed can run the suite directly for fast iteration: `go -C src/templates/dispatch test ./...`; mind that the host toolchain version may differ from the pinned `1.23-alpine`, so the in-container compile remains the source of truth.
+7. **Integration smoke** — exercise the op end-to-end via `make test-integration` on a real-docker host (the default gate does not collect `tests/integration/`).
+
+If the op carries instance state that the dispatcher cannot re-derive (like the compose ops' project name / compose-file / env-file), resolve it operator-side in `core.dispatch` and cross it as named wire flags with an op-hardcoded verb — see the [compose-wire-expansion note](#compose-wire-expansion) above; do not let the wire dictate the verb.
+
+A **streaming** op (the `fwd` precedent) additionally specifies its **frameless contract**: it carries a raw byte stream, so its real invocation emits no begin/exit framing (a frame byte would corrupt the stream), execs its target directly via `syscall.Exec` (no `/bin/bash -c`, no sentinel wrap), writes diagnostics to stderr only, and is constructed (never executed) by a dedicated `core.dispatch` entrypoint (`proxy_argv`) — `invoke()`/`probe()` reject it. Its lone `--check` form still rides the framed path. See the [streaming-op-class contract note](#streaming-op-class-fwd-only--the-frameless-carve-out) above.

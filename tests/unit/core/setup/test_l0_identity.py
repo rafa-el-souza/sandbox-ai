@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l0_identity`` (Group 5, task 5.4).
 
 Covers operator resolution precedence, the three-tier distro classification +
@@ -31,7 +32,9 @@ from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
 def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator=operator,
     )
 

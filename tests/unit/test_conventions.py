@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for project-wide test conventions — enforces fixture/marker/suppression rules.
 
 Three structural guarantees, all AST-based:
@@ -23,6 +24,7 @@ import re
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TypeGuard
 
 import pytest
 
@@ -434,6 +436,148 @@ def test_machinectl_cmd_deliberate_violation_is_detected(
     assert str(rogue) in detail
 
 
+# ── 4b. Single-sourced execution-mode default (F-051) ───────────────────────
+#
+# host-config "Single-Sourced Execution-Mode Default" (finding F-051): there is
+# exactly ONE named execution-mode default in the system —
+# ``core.host_config.DEFAULT_PROVISIONING_MODE``. A bare ``DockerExecutionMode``
+# enum member (``SEPARATE_USER`` / ``OPERATOR_ROOTLESS``) MUST NOT appear as a
+# function-parameter default or a field (``AnnAssign``) default RHS anywhere in
+# ``src/`` except the module that DEFINES the constant. Two opposite-valued
+# scattered defaults (the pre-F-051 state) crystallize into the public docs and
+# silently diverge; the single named constant keeps the default coherent.
+#
+# This is enforced STRUCTURALLY (the ``_machinectl_cmd_violations`` pattern): an
+# ``ast`` walk that flags the bare member ONLY in a default-slot position —
+# ``FunctionDef``/``AsyncFunctionDef`` ``args.defaults`` + ``args.kw_defaults``,
+# or an ``AnnAssign`` value (a field default). It deliberately does NOT flag
+# ``Set`` elements (``applies_in=frozenset({DockerExecutionMode.SEPARATE_USER})``
+# membership sets), ``Compare`` operands (``mode is DockerExecutionMode.…``), or
+# ``Call`` arguments (an explicit ``write_mode_root_owned(…, SEPARATE_USER)`` or
+# ``minimal_host_config(u, a, SEPARATE_USER)``) — those are not defaults.
+_MODE_DEFAULT_ALLOWLIST: frozenset[str] = frozenset({"src/core/host_config.py"})
+_DOCKER_EXECUTION_MODE_MEMBERS: frozenset[str] = frozenset(
+    {"SEPARATE_USER", "OPERATOR_ROOTLESS"}
+)
+
+
+def _is_bare_mode_member(node: ast.expr | None) -> TypeGuard[ast.Attribute]:
+    """True iff ``node`` is a bare ``DockerExecutionMode.<MEMBER>`` attribute
+    reference (the enum-default literal the gate forbids in a default slot).
+
+    A ``TypeGuard`` so callers can read ``.lineno`` off the narrowed
+    ``ast.Attribute`` without mypy flagging the ``expr | None`` input (an
+    ``ast.Attribute`` is never ``None``)."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr in _DOCKER_EXECUTION_MODE_MEMBERS
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "DockerExecutionMode"
+    )
+
+
+def _bare_mode_default_lines(tree: ast.AST) -> list[int]:
+    """Return line numbers where a bare ``DockerExecutionMode`` member appears in
+    a DEFAULT position: a function param default (positional or keyword-only) or
+    an ``AnnAssign`` (field-annotation) value. Membership-set elements,
+    comparisons, and call arguments are NOT default positions and are ignored."""
+    linenos: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            args = node.args
+            for default in (*args.defaults, *args.kw_defaults):
+                if _is_bare_mode_member(default):
+                    linenos.add(default.lineno)
+        elif isinstance(node, ast.AnnAssign) and _is_bare_mode_member(node.value):
+            linenos.add(node.value.lineno)
+    return sorted(linenos)
+
+
+def _mode_default_violations(
+    files: Iterator[Path], allowlist: frozenset[str]
+) -> list[tuple[Path, list[int]]]:
+    """Scan ``files``; return ``(path, linenos)`` for every file with a bare
+    ``DockerExecutionMode`` member in a default slot while NOT in ``allowlist``.
+
+    Reusable detector seam (anti-hack rule 5): the file iterable + allowlist are
+    parameters, not module state, so the deliberate-violation regression drives
+    the SAME predicate against an arbitrary out-of-allowlist file."""
+    offenders: list[tuple[Path, list[int]]] = []
+    for src in files:
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        if rel in allowlist:
+            continue
+        tree = ast.parse(src.read_text(), filename=str(src))
+        linenos = _bare_mode_default_lines(tree)
+        if linenos:
+            offenders.append((src, linenos))
+    return offenders
+
+
+def test_no_bare_mode_literal_defaults() -> None:
+    """A bare ``DockerExecutionMode`` member is forbidden as a param/field default
+    outside ``core.host_config`` (host-config "Single-Sourced Execution-Mode
+    Default", F-051).
+
+    Every default must reference ``DEFAULT_PROVISIONING_MODE`` — the single named
+    constant — so the system never carries two opposite-valued defaults. The
+    allowlist is exactly the module that DEFINES the constant; broadening it
+    re-introduces the scatter the gate exists to prevent.
+    """
+    offenders = _mode_default_violations(_python_files(_SRC_ROOT), _MODE_DEFAULT_ALLOWLIST)
+
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)}: line(s) {linenos}"
+            for p, linenos in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} file(s) use a bare DockerExecutionMode member as a "
+            f"param/field default outside core.host_config.\n{details}\n\n"
+            f"Allowlist: {sorted(_MODE_DEFAULT_ALLOWLIST)}\n"
+            "Fix: reference core.host_config.DEFAULT_PROVISIONING_MODE — the single "
+            "system-wide execution-mode default (F-051). Do NOT spell the bare enum "
+            "member in a default slot; that re-creates the two-default scatter."
+        )
+
+
+def test_mode_default_deliberate_violation_is_detected(tmp_path: Path) -> None:
+    """A file with a bare ``DockerExecutionMode`` member in BOTH default-slot kinds
+    (a function param default and an ``AnnAssign`` field default) is reported by
+    the shared detector — proving the guard catches the bug class, not just the
+    absence of the symptom. A membership-set element, a comparison, and a call
+    argument in the SAME file must NOT be flagged (the structural carve-outs)."""
+    rogue = tmp_path / "rogue_default.py"
+    rogue.write_text(
+        "def f(mode=DockerExecutionMode.SEPARATE_USER):\n"  # param default → FLAG
+        "    return mode\n"
+        "\n"
+        "class C:\n"
+        "    m: DockerExecutionMode = DockerExecutionMode.OPERATOR_ROOTLESS\n"  # field → FLAG
+        "\n"
+        "S = frozenset({DockerExecutionMode.SEPARATE_USER})\n"  # set elem → NOT flagged
+        "ok = x is DockerExecutionMode.SEPARATE_USER\n"  # compare → NOT flagged
+        "build(DockerExecutionMode.SEPARATE_USER)\n"  # call arg → NOT flagged
+    )
+
+    offenders = _mode_default_violations(iter([rogue]), _MODE_DEFAULT_ALLOWLIST)
+
+    assert offenders, "deliberate bare-mode-default violation was not detected"
+    offending_paths = {p for p, _ in offenders}
+    assert rogue in offending_paths
+    # Exactly the two default-slot lines (param default line 1, field default
+    # line 5) — the set/compare/call lines (7, 8, 9) are NOT flagged.
+    (_path, linenos) = offenders[0]
+    assert linenos == [1, 5], (
+        f"detector flagged {linenos}; expected only the param + field default "
+        "lines (the set/compare/call carve-outs must not fire)"
+    )
+
+
 # ── 5. Streaming-op discipline: fwd is reachable ONLY via proxy_argv ─────────
 #
 # The runtime-dispatcher "Streaming ProxyCommand Entrypoint" requirement pins,
@@ -792,3 +936,157 @@ def test_every_custom_marker_is_registered() -> None:
             "Fix: add the marker (with a one-line description) to "
             "pyproject.toml's [tool.pytest.ini_options].markers list."
         )
+
+
+# ── 6. SPDX license-header presence (publish-prep, source-license-headers) ───
+#
+# Every covered first-party source file SHALL carry the SPDX license-identifier
+# token within its first few lines. The one-time sweep (publish-prep task 2.2)
+# is the migration; THIS gate is the durable drift-prevention contract: a newly
+# added source file without the header fails `make coverage`.
+#
+# The covered set is built from the CURRENT tree, not a frozen list:
+#   - Python: every `*.py` under `src/` and `tests/` (the `#` token).
+#   - Templates: EVERY file under `src/templates/` that is not Python/pyc — so a
+#     new non-source template file is FORCED into the allowlist (drift-proof),
+#     never silently exempt. The comment token differs by type (`//` Go,
+#     `{# … #}` Jinja-rendered, `#` shell/Dockerfile/config), but the normative
+#     invariant the gate enforces is only the SPDX TOKEN substring; the comment
+#     framing is the sweep's concern, not the gate's.
+# Generated / comment-less / served-verbatim files are exempt via
+# `_SPDX_ALLOWLIST` (one-line reason each, mirroring `_LAYOUT_ALLOWLIST`); a
+# dead allowlist entry fails the gate so exemptions cannot rot.
+
+# The normative invariant: this exact substring must appear in a covered file's
+# first few lines, whatever the comment token framing it.
+_SPDX_TOKEN = "SPDX-License-Identifier: AGPL-3.0-or-later"
+# How many leading lines may carry the header (shebang + header → line 2).
+_SPDX_HEADER_LINES = 5
+
+_TEMPLATES_ROOT = _SRC_ROOT / "templates"
+
+# Covered-set template files with no header, each with a one-line reason. Keyed
+# by repo-relative POSIX path (mirrors `_LAYOUT_ALLOWLIST`).
+_SPDX_ALLOWLIST: dict[str, str] = {
+    "src/templates/config/core/.claude.json": (
+        "JSON config seed — JSON has no comment syntax, a header would be invalid."
+    ),
+    "src/templates/dispatch/fixtures/target_argv_cases.json": (
+        "JSON test fixture — JSON has no comment syntax."
+    ),
+    "src/templates/config/proxy/ERR_SANDBOX_403": (
+        "Static HTTP 403 error body served verbatim to clients; a header would "
+        "leak into the response page."
+    ),
+    "src/templates/dispatch/go.mod": "Managed by the Go toolchain.",
+    "src/templates/dispatch/go.sum": "Generated checksum file.",
+    "src/templates/dispatch/vendor/modules.txt": "Vendored module manifest (generated).",
+}
+
+
+def _spdx_covered_template_files() -> Iterator[Path]:
+    """Every file under `src/templates/` that is NOT Python/pyc and not in a
+    `__pycache__` dir — the covered template set, derived from the live tree.
+
+    Built from the tree (not a frozen list) so a newly added non-source template
+    file is forced through the gate: it must either carry the header or earn an
+    explicit `_SPDX_ALLOWLIST` entry — it cannot be silently skipped."""
+    for p in _TEMPLATES_ROOT.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix in (".py", ".pyc") or "__pycache__" in p.parts:
+            continue
+        yield p
+
+
+def _spdx_violations(files: Iterator[Path], allowlist: dict[str, str]) -> list[str]:
+    """Scan ``files``; return the repo-relative (or absolute, if outside the
+    repo) path of every file that lacks the SPDX token within its first
+    ``_SPDX_HEADER_LINES`` lines and is NOT in ``allowlist``.
+
+    Reusable detector seam (anti-hack rule 5): the file iterable and allowlist
+    are PARAMETERS, not module state, so the deliberate-violation regression
+    (:func:`test_spdx_deliberate_violation_is_detected`) drives the SAME
+    predicate against arbitrary tmp_path files without duplicating the logic."""
+    offenders: list[str] = []
+    for src in files:
+        key = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        if key in allowlist:
+            continue
+        head = "\n".join(src.read_text().splitlines()[:_SPDX_HEADER_LINES])
+        if _SPDX_TOKEN not in head:
+            offenders.append(key)
+    return offenders
+
+
+def _spdx_covered_files() -> list[Path]:
+    """The full covered set from the live tree: Python under src/ + tests/, plus
+    every non-Python file under src/templates/."""
+    files = list(_python_files(_SRC_ROOT)) + list(_python_files(_TESTS_ROOT))
+    files.extend(_spdx_covered_template_files())
+    return files
+
+
+def test_spdx_headers_present() -> None:
+    """Every covered first-party source file carries the SPDX header
+    (publish-prep "SPDX License Header Presence").
+
+    The covered set is built from the CURRENT tree, so a newly added source file
+    without the header (and not allowlisted) fails this gate — the durable
+    drift-prevention contract behind the one-time sweep.
+    """
+    offenders = _spdx_violations(iter(_spdx_covered_files()), _SPDX_ALLOWLIST)
+    if offenders:
+        details = "\n".join(f"  {o}" for o in sorted(offenders))
+        pytest.fail(
+            f"{len(offenders)} covered file(s) lack the SPDX header.\n{details}\n\n"
+            f"Fix: add `{_SPDX_TOKEN}` within the first {_SPDX_HEADER_LINES} "
+            "lines, using the comment token for the file type (`#` Python/shell/"
+            "Dockerfile/config, `//` Go, `{# … #}` Jinja-rendered template — the "
+            "Jinja comment is stripped at render so it never reaches output). If "
+            "the file genuinely cannot carry a header (no comment syntax / served "
+            "verbatim / generated), add it to _SPDX_ALLOWLIST with a one-line reason."
+        )
+
+
+def test_spdx_allowlist_has_no_stale_entries() -> None:
+    """Every `_SPDX_ALLOWLIST` key must correspond to a file on disk.
+
+    Mirrors `_LAYOUT_ALLOWLIST`'s self-validation: a dead exemption (the file was
+    renamed or deleted) fails the gate, so the allowlist cannot silently rot."""
+    stale = [rel for rel in _SPDX_ALLOWLIST if not (_REPO_ROOT / rel).exists()]
+    if stale:
+        details = "\n".join(f"  {s}" for s in sorted(stale))
+        pytest.fail(
+            f"{len(stale)} stale _SPDX_ALLOWLIST entr(y/ies) — path no longer exists.\n"
+            f"{details}\n\nFix: remove the dead entry (the file was renamed or deleted)."
+        )
+
+
+def test_spdx_deliberate_violation_is_detected(tmp_path: Path) -> None:
+    """A header-LESS file is flagged by the shared detector; a header-FULL file is
+    not — proving the gate catches the bug class (a new file missing the header),
+    not merely the current absence of the symptom.
+
+    Drives the SAME :func:`_spdx_violations` predicate the gate uses (no
+    duplicated logic), satisfying the 2.4 "header-less new file fails the gate /
+    then revert" requirement durably as a tmp_path regression."""
+    headerless = tmp_path / "rogue_no_header.py"
+    headerless.write_text("import os\n\n\ndef f() -> None:\n    return None\n")
+    headerful = tmp_path / "rogue_with_header.py"
+    headerful.write_text(
+        f"# Copyright (c) 2026 zerotrust-ai. {_SPDX_TOKEN}\nimport os\n"
+    )
+
+    offenders = _spdx_violations(iter([headerless, headerful]), {})
+
+    assert headerless.as_posix() in offenders, (
+        "deliberate header-less file was not flagged by _spdx_violations"
+    )
+    assert headerful.as_posix() not in offenders, (
+        "a file carrying the SPDX token was wrongly flagged"
+    )

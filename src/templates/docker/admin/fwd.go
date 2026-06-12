@@ -1,3 +1,4 @@
+// Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 // fwd is the admin container's only binary.
 //
 // Two argv modes:

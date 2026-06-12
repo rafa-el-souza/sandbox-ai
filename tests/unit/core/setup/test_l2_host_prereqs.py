@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l2_host_prereqs`` (Group 5, task 5.4).
 
 Covers the content-aware probe (ALREADY_CORRECT / MISSING for absent
@@ -30,7 +31,9 @@ if TYPE_CHECKING:
 def _ctx() -> SetupContext:
     # The operator is "alice" (the user the _World membership fixtures grant).
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="alice",
     )
 

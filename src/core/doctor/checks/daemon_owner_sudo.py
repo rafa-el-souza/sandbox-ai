@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Sudoer daemon-owner doctor check (spec "Sudoer Daemon-Owner Warning").
 
 Operator-rootless only (registry ``applies_in={OPERATOR_ROOTLESS}``). In
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from core.doctor.types import CheckResult
 from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
     MachinectlAuth,
     minimal_host_config,
@@ -29,7 +31,7 @@ from core.host_config import (
 def check_daemon_owner_sudo(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.OPERATOR_ROOTLESS,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """WARN when the operator account owning rootless Docker is a sudoer.
 

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Plan/apply two-pass rendering + gating logic for ``sandbox setup``.
 
 This module owns the *pure* parts of the ``sandbox setup`` UX so the Typer
