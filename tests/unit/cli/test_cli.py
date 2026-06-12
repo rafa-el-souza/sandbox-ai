@@ -2856,9 +2856,11 @@ class TestDoctorHostConfig:
             mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
             mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
-    def test_doctor_falls_back_to_separate_user_when_marker_missing(self, runner: CliRunner) -> None:
-        """C-005 1.4: ``ModeMarkerMissing`` (un-setup host) → diagnose as
-        separate-user (the pre-flip default), no crash."""
+    def test_doctor_falls_back_to_operator_rootless_when_marker_missing(self, runner: CliRunner) -> None:
+        """F-051 (C-006 Group 9): ``ModeMarkerMissing`` (un-setup host) → diagnose
+        as operator-rootless (DEFAULT_PROVISIONING_MODE — the single system-wide
+        default), no crash. The marker is the authority once setup writes it; a
+        fresh host falls back to the provisioning default so doctor can run."""
         from cli.main import app
         from core.doctor import CheckResult
         from core.host_config import DockerExecutionMode
@@ -2875,8 +2877,37 @@ class TestDoctorHostConfig:
         ):
             r = runner.invoke(app, ["doctor", "--user", "sandbox"])
             assert r.exit_code == 0
-            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
-            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.SEPARATE_USER)
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+
+    def test_doctor_fresh_host_no_marker_no_toml_no_flag_runs(self, runner: CliRunner) -> None:
+        """F-051 (C-006 Group 9) bug fix: a TRULY fresh host — no setup marker,
+        no sandbox-ai.toml, no ``--user`` — must NOT hard-fail "No user specified".
+        Pre-flip, the marker-less fallback was separate-user, so with no toml and
+        no flag doctor early-exited at the "No user specified (separate-user mode)"
+        guard, unable to run even the mode-invariant checks. Now the fallback is
+        operator-rootless, so doctor resolves the invoking operator as the daemon
+        owner and RUNS the operator-rootless check set."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode
+        from core.setup_state import ModeMarkerMissing
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.resolve_execution_mode", side_effect=ModeMarkerMissing("no marker")),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor"])
+            assert r.exit_code == 0
+            assert "no user specified" not in r.output.lower()
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
 
     def test_doctor_op_rootless_no_toml_no_flag_resolves_operator(self, runner: CliRunner) -> None:
         """C-005 gap: operator-rootless host that's been ``setup`` but not ``init``'d
@@ -3823,13 +3854,17 @@ class TestInitAuthProbe:
             assert result.exit_code == 1
             assert "probe timed out after 15 seconds" in result.output.lower()
 
-    def test_probe_mode_marker_missing_falls_back_to_separate_user(
+    def test_probe_mode_marker_missing_falls_back_to_operator_rootless(
         self, runner: CliRunner
     ) -> None:
-        """C-005 1.6: an un-setup host has no marker entry — ``resolve_execution_mode``
-        raises ``ModeMarkerMissing``, so init's auth-probe diagnoses separate-user
-        (the pre-flip default) and the probe owner stays the configured dedicated
-        user (mirrors the doctor() fallback)."""
+        """F-051 (C-006 Group 9): an un-setup host has no marker entry —
+        ``resolve_execution_mode`` raises ``ModeMarkerMissing``, so init's auth-probe
+        falls back to operator-rootless (DEFAULT_PROVISIONING_MODE — the single
+        system-wide default), and the probe owner is the invoking OPERATOR
+        (``getpass.getuser()``), not the configured dedicated user. Mirrors the
+        doctor() marker-less fallback."""
+        import getpass
+
         from cli.main import app
         from core.host_config import DockerExecutionMode
         from core.hydration import InstanceConfig
@@ -3842,6 +3877,7 @@ class TestInitAuthProbe:
                 "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
+        operator = getpass.getuser()
 
         with (
             patch(
@@ -3863,9 +3899,9 @@ class TestInitAuthProbe:
             result = runner.invoke(app, ["init", "nomarker"])
             assert result.exit_code == 0
             (_op, _args, host_config), _kwargs = mock_probe.call_args
-            # Separate-user fallback: owner is the configured dedicated user.
-            assert host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
-            assert host_config.host.docker_unprivileged_user == HOST_USER
+            # Operator-rootless fallback: owner is the invoking operator (local path).
+            assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
+            assert host_config.host.docker_unprivileged_user == operator
 
     def test_probe_operator_rootless_uses_operator_owner_and_local_mode(
         self, runner: CliRunner
@@ -4270,9 +4306,9 @@ class TestContainerStatus:
 
         assert containers == []
 
-    def test_default_mode_probes_separate_user(self, tmp_path: Path) -> None:
-        """Omitting ``mode`` threads ``SEPARATE_USER`` into the probe host_config
-        (C-003 §6: the default execution mode is separate-user)."""
+    def test_default_mode_probes_operator_rootless(self, tmp_path: Path) -> None:
+        """Omitting ``mode`` threads ``DEFAULT_PROVISIONING_MODE`` (OPERATOR_ROOTLESS,
+        the single system-wide default — F-051) into the probe host_config."""
         from cli.main import _container_status
 
         compose = tmp_path / "docker" / "compose.yml"
@@ -4285,7 +4321,7 @@ class TestContainerStatus:
             _container_status(str(tmp_path), "s", self._config())
 
         (_op, _args, host_config), _kwargs = mock_probe.call_args
-        assert host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+        assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_operator_rootless_mode_threaded_to_probe(self, tmp_path: Path) -> None:
         """C-003 §6: when ``mode=OPERATOR_ROOTLESS`` is threaded, the probe's

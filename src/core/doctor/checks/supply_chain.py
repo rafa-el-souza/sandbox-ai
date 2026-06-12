@@ -6,13 +6,18 @@ import json
 
 from core import dispatch
 from core.doctor.types import CheckResult
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 
 
 def check_image_digests(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
 

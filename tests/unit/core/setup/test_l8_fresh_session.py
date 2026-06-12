@@ -37,7 +37,7 @@ def _bridge_group(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _hc() -> HostConfig:
-    return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+    return minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
 
 
 def _ctx() -> SetupContext:

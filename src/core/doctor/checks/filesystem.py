@@ -11,7 +11,13 @@ from pathlib import Path
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config, sandbox_ai_home
+from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+    sandbox_ai_home,
+)
 
 _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
 
@@ -121,7 +127,7 @@ def _has_acl_exec(directory: str, user: str) -> bool:
 def check_ancestor_traverse(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that all ancestor directories of sandboxes/ are traversable by the sandbox user.
 

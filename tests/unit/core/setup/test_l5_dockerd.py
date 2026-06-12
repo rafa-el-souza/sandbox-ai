@@ -40,7 +40,9 @@ def _present_pw() -> pwd.struct_passwd:
 @pytest.fixture
 def ctx() -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="op",
     )
 

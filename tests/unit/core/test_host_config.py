@@ -245,10 +245,11 @@ class TestDockerExecutionMode:
         assert DockerExecutionMode.SEPARATE_USER.value == "separate-user"
         assert DockerExecutionMode.OPERATOR_ROOTLESS.value == "operator-rootless"
 
-    def test_defaults_to_separate_user_when_omitted(self) -> None:
-        """A [host] section without docker_execution_mode defaults to SEPARATE_USER."""
+    def test_defaults_to_operator_rootless_when_omitted(self) -> None:
+        """A [host] section without docker_execution_mode defaults to the single
+        system-wide default DEFAULT_PROVISIONING_MODE (OPERATOR_ROOTLESS, F-051)."""
         hc = HostSettings.model_validate({"docker_unprivileged_user": "sandbox"})
-        assert hc.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+        assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_operator_rootless_parses(self) -> None:
         """'operator-rootless' parses to the OPERATOR_ROOTLESS member."""
@@ -280,10 +281,11 @@ class TestDockerExecutionMode:
 class TestMinimalHostConfigMode:
     """minimal_host_config() docker_execution_mode parameter (additive, defaulted)."""
 
-    def test_default_mode_is_separate_user(self) -> None:
-        """Omitting the mode parameter yields SEPARATE_USER."""
+    def test_default_mode_is_operator_rootless(self) -> None:
+        """Omitting the mode parameter yields DEFAULT_PROVISIONING_MODE
+        (OPERATOR_ROOTLESS — the single system-wide default, F-051)."""
         hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
-        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_explicit_operator_rootless_mode(self) -> None:
         """Passing mode=OPERATOR_ROOTLESS sets the field."""
@@ -300,8 +302,8 @@ class TestIsOperatorRootless:
         assert is_operator_rootless(hc) is True
 
     def test_false_for_separate_user(self) -> None:
-        """Returns False for the default SEPARATE_USER mode."""
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        """Returns False for an explicit SEPARATE_USER mode."""
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
         assert is_operator_rootless(hc) is False
 
 
@@ -331,7 +333,7 @@ class TestResolveDaemonOwner:
     ) -> None:
         """In separate-user mode the owner is the configured dedicated user."""
         monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
         assert resolve_daemon_owner(hc) == "sandbox"
 
 
@@ -357,7 +359,10 @@ class TestResolveDaemonOwnerSettings:
         from core.host_config import resolve_daemon_owner_settings
 
         monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-        host = HostSettings(docker_unprivileged_user="sandbox")
+        host = HostSettings(
+            docker_unprivileged_user="sandbox",
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
         assert resolve_daemon_owner_settings(host) == "sandbox"
 
 
@@ -646,7 +651,10 @@ class TestWorkspaceBridgeGid:
             gr_gid = 200500
 
         monkeypatch.setattr("core.host_config.grp.getgrnam", lambda n: _Gr())
-        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        host = HostSettings(
+            docker_unprivileged_user="claude-sandbox",
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
         assert workspace_bridge_gid(host) == 200500
 
     def test_missing_group_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -665,7 +673,10 @@ class TestWorkspaceBridgeGid:
             gr_gid = 99
 
         monkeypatch.setattr("core.host_config.grp.getgrnam", lambda n: _Gr())
-        host = HostSettings(docker_unprivileged_user="claude-sandbox")
+        host = HostSettings(
+            docker_unprivileged_user="claude-sandbox",
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
         with pytest.raises(SubgidOutOfRangeError):
             workspace_bridge_gid(host)
 

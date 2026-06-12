@@ -23,6 +23,7 @@ import re
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TypeGuard
 
 import pytest
 
@@ -432,6 +433,148 @@ def test_machinectl_cmd_deliberate_violation_is_detected(
         f"  {p}: line(s) {linenos}" for p, linenos in offenders
     )
     assert str(rogue) in detail
+
+
+# ── 4b. Single-sourced execution-mode default (F-051) ───────────────────────
+#
+# host-config "Single-Sourced Execution-Mode Default" (finding F-051): there is
+# exactly ONE named execution-mode default in the system —
+# ``core.host_config.DEFAULT_PROVISIONING_MODE``. A bare ``DockerExecutionMode``
+# enum member (``SEPARATE_USER`` / ``OPERATOR_ROOTLESS``) MUST NOT appear as a
+# function-parameter default or a field (``AnnAssign``) default RHS anywhere in
+# ``src/`` except the module that DEFINES the constant. Two opposite-valued
+# scattered defaults (the pre-F-051 state) crystallize into the public docs and
+# silently diverge; the single named constant keeps the default coherent.
+#
+# This is enforced STRUCTURALLY (the ``_machinectl_cmd_violations`` pattern): an
+# ``ast`` walk that flags the bare member ONLY in a default-slot position —
+# ``FunctionDef``/``AsyncFunctionDef`` ``args.defaults`` + ``args.kw_defaults``,
+# or an ``AnnAssign`` value (a field default). It deliberately does NOT flag
+# ``Set`` elements (``applies_in=frozenset({DockerExecutionMode.SEPARATE_USER})``
+# membership sets), ``Compare`` operands (``mode is DockerExecutionMode.…``), or
+# ``Call`` arguments (an explicit ``write_mode_root_owned(…, SEPARATE_USER)`` or
+# ``minimal_host_config(u, a, SEPARATE_USER)``) — those are not defaults.
+_MODE_DEFAULT_ALLOWLIST: frozenset[str] = frozenset({"src/core/host_config.py"})
+_DOCKER_EXECUTION_MODE_MEMBERS: frozenset[str] = frozenset(
+    {"SEPARATE_USER", "OPERATOR_ROOTLESS"}
+)
+
+
+def _is_bare_mode_member(node: ast.expr | None) -> TypeGuard[ast.Attribute]:
+    """True iff ``node`` is a bare ``DockerExecutionMode.<MEMBER>`` attribute
+    reference (the enum-default literal the gate forbids in a default slot).
+
+    A ``TypeGuard`` so callers can read ``.lineno`` off the narrowed
+    ``ast.Attribute`` without mypy flagging the ``expr | None`` input (an
+    ``ast.Attribute`` is never ``None``)."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr in _DOCKER_EXECUTION_MODE_MEMBERS
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "DockerExecutionMode"
+    )
+
+
+def _bare_mode_default_lines(tree: ast.AST) -> list[int]:
+    """Return line numbers where a bare ``DockerExecutionMode`` member appears in
+    a DEFAULT position: a function param default (positional or keyword-only) or
+    an ``AnnAssign`` (field-annotation) value. Membership-set elements,
+    comparisons, and call arguments are NOT default positions and are ignored."""
+    linenos: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            args = node.args
+            for default in (*args.defaults, *args.kw_defaults):
+                if _is_bare_mode_member(default):
+                    linenos.add(default.lineno)
+        elif isinstance(node, ast.AnnAssign) and _is_bare_mode_member(node.value):
+            linenos.add(node.value.lineno)
+    return sorted(linenos)
+
+
+def _mode_default_violations(
+    files: Iterator[Path], allowlist: frozenset[str]
+) -> list[tuple[Path, list[int]]]:
+    """Scan ``files``; return ``(path, linenos)`` for every file with a bare
+    ``DockerExecutionMode`` member in a default slot while NOT in ``allowlist``.
+
+    Reusable detector seam (anti-hack rule 5): the file iterable + allowlist are
+    parameters, not module state, so the deliberate-violation regression drives
+    the SAME predicate against an arbitrary out-of-allowlist file."""
+    offenders: list[tuple[Path, list[int]]] = []
+    for src in files:
+        rel = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        if rel in allowlist:
+            continue
+        tree = ast.parse(src.read_text(), filename=str(src))
+        linenos = _bare_mode_default_lines(tree)
+        if linenos:
+            offenders.append((src, linenos))
+    return offenders
+
+
+def test_no_bare_mode_literal_defaults() -> None:
+    """A bare ``DockerExecutionMode`` member is forbidden as a param/field default
+    outside ``core.host_config`` (host-config "Single-Sourced Execution-Mode
+    Default", F-051).
+
+    Every default must reference ``DEFAULT_PROVISIONING_MODE`` — the single named
+    constant — so the system never carries two opposite-valued defaults. The
+    allowlist is exactly the module that DEFINES the constant; broadening it
+    re-introduces the scatter the gate exists to prevent.
+    """
+    offenders = _mode_default_violations(_python_files(_SRC_ROOT), _MODE_DEFAULT_ALLOWLIST)
+
+    if offenders:
+        details = "\n".join(
+            f"  {p.relative_to(_REPO_ROOT)}: line(s) {linenos}"
+            for p, linenos in offenders
+        )
+        pytest.fail(
+            f"{len(offenders)} file(s) use a bare DockerExecutionMode member as a "
+            f"param/field default outside core.host_config.\n{details}\n\n"
+            f"Allowlist: {sorted(_MODE_DEFAULT_ALLOWLIST)}\n"
+            "Fix: reference core.host_config.DEFAULT_PROVISIONING_MODE — the single "
+            "system-wide execution-mode default (F-051). Do NOT spell the bare enum "
+            "member in a default slot; that re-creates the two-default scatter."
+        )
+
+
+def test_mode_default_deliberate_violation_is_detected(tmp_path: Path) -> None:
+    """A file with a bare ``DockerExecutionMode`` member in BOTH default-slot kinds
+    (a function param default and an ``AnnAssign`` field default) is reported by
+    the shared detector — proving the guard catches the bug class, not just the
+    absence of the symptom. A membership-set element, a comparison, and a call
+    argument in the SAME file must NOT be flagged (the structural carve-outs)."""
+    rogue = tmp_path / "rogue_default.py"
+    rogue.write_text(
+        "def f(mode=DockerExecutionMode.SEPARATE_USER):\n"  # param default → FLAG
+        "    return mode\n"
+        "\n"
+        "class C:\n"
+        "    m: DockerExecutionMode = DockerExecutionMode.OPERATOR_ROOTLESS\n"  # field → FLAG
+        "\n"
+        "S = frozenset({DockerExecutionMode.SEPARATE_USER})\n"  # set elem → NOT flagged
+        "ok = x is DockerExecutionMode.SEPARATE_USER\n"  # compare → NOT flagged
+        "build(DockerExecutionMode.SEPARATE_USER)\n"  # call arg → NOT flagged
+    )
+
+    offenders = _mode_default_violations(iter([rogue]), _MODE_DEFAULT_ALLOWLIST)
+
+    assert offenders, "deliberate bare-mode-default violation was not detected"
+    offending_paths = {p for p, _ in offenders}
+    assert rogue in offending_paths
+    # Exactly the two default-slot lines (param default line 1, field default
+    # line 5) — the set/compare/call lines (7, 8, 9) are NOT flagged.
+    (_path, linenos) = offenders[0]
+    assert linenos == [1, 5], (
+        f"detector flagged {linenos}; expected only the param + field default "
+        "lines (the set/compare/call carve-outs must not fire)"
+    )
 
 
 # ── 5. Streaming-op discipline: fwd is reachable ONLY via proxy_argv ─────────

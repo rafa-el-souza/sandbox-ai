@@ -38,9 +38,9 @@ def test_context_is_frozen() -> None:
         setattr(ctx, field_name, "other")
 
 
-def test_docker_execution_mode_defaults_to_separate_user() -> None:
+def test_docker_execution_mode_defaults_to_operator_rootless() -> None:
     ctx = _make_ctx()
-    assert ctx.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+    assert ctx.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 def test_docker_execution_mode_round_trips() -> None:

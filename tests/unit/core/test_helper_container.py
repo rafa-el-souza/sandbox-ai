@@ -113,7 +113,7 @@ class TestHelperChownFiles:
         assert hc.host.docker_unprivileged_user == _HOST_USER
         assert hc.host.machinectl_authentication == MachinectlAuth.SUDO
 
-    def test_default_execution_mode_is_separate_user(
+    def test_default_execution_mode_is_operator_rootless(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
     ) -> None:
         helper_chown_files(
@@ -126,7 +126,7 @@ class TestHelperChownFiles:
             machinectl_auth=MachinectlAuth.SUDO,
         )
         hc = captured_invoke[0]["host_config"]
-        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_operator_rootless_execution_mode_propagates(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
@@ -349,7 +349,7 @@ class TestHelperMkdirChownDirs:
         assert len(captured_invoke) == 1
         assert captured_invoke[0]["args"][3:] == [".claude", "tmux_resurrect"]
 
-    def test_default_execution_mode_is_separate_user(
+    def test_default_execution_mode_is_operator_rootless(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
     ) -> None:
         helper_mkdir_chown_dirs(
@@ -361,7 +361,7 @@ class TestHelperMkdirChownDirs:
             machinectl_auth=MachinectlAuth.SUDO,
         )
         hc = captured_invoke[0]["host_config"]
-        assert hc.host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+        assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_operator_rootless_execution_mode_propagates(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]

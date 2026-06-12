@@ -17,13 +17,18 @@ from __future__ import annotations
 from core import binary_install
 from core.binary_install import SHA_DISPLAY_PREFIX
 from core.doctor.types import CheckResult
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 
 
 def check_runsc_pinned_match(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Verify the installed runsc sha512 matches the pinned registry value.
 

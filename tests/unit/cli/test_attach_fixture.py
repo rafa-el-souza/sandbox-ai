@@ -102,8 +102,18 @@ def _capture_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_mode: st
     # Freeze the timestamp embedded in the session-log filename.
     monkeypatch.setattr("cli.main.datetime", _FrozenDatetime)
 
+    # This fixture pins the SEPARATE-USER attach argv (the sudo-pipe ProxyCommand).
+    # The system-wide default mode is now operator-rootless (DEFAULT_PROVISIONING_MODE,
+    # F-051), so the separate-user crossing must be requested explicitly rather than
+    # relying on the moot field default.
     fixed_host = HostConfig.model_validate(
-        {"host": {"docker_unprivileged_user": _STABLE_SBUSER, "machinectl_authentication": auth_mode}}
+        {
+            "host": {
+                "docker_unprivileged_user": _STABLE_SBUSER,
+                "machinectl_authentication": auth_mode,
+                "docker_execution_mode": "separate-user",
+            }
+        }
     )
 
     return _build_attach_argv(_STABLE_INST, _STABLE_WS, fixed_host)

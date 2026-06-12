@@ -14,7 +14,12 @@ from typing import Any, NamedTuple, cast, overload
 
 from core import dispatch
 from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
+    DockerExecutionMode,
+    MachinectlAuth,
+    minimal_host_config,
+)
 
 # Single-source the reserved runtime key AND the expected runtimeArgs from the
 # phase that registers them (L6) rather than hardcoding (F-024 — the doctor
@@ -153,7 +158,7 @@ def check_systemd_machined(user: str, distro: str | None) -> CheckResult:
 def check_machinectl_reachable(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that machinectl shell can reach the unprivileged user.
 
@@ -197,7 +202,7 @@ def _interpret_machinectl_reachable(
 def check_docker_available(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that Docker is installed and accessible via machinectl."""
     outcome = dispatch.probe("docker-version", [], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15)
@@ -224,7 +229,7 @@ def _interpret_docker_available(outcome: dispatch.ProbeOutcome, user: str) -> Ch
 def check_docker_rootless(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that Docker is running in rootless mode."""
     outcome = dispatch.probe(
@@ -271,7 +276,7 @@ def _interpret_docker_rootless(outcome: dispatch.ProbeOutcome, user: str) -> Che
 def check_runsc_registered(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that gVisor runsc runtime is registered in Docker."""
     outcome = dispatch.probe(
@@ -303,7 +308,7 @@ def _interpret_runsc_registered(outcome: dispatch.ProbeOutcome) -> CheckResult:
 def check_runsc_runtimeargs(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that runsc runtimeArgs match what L6 configures (single-sourced).
 
@@ -376,7 +381,7 @@ def _runtime_arg_present(expected: str, runtime_args: list[str]) -> bool:
 def check_host_uds(
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Check that runsc runtimeArgs do NOT include --host-uds=all.
 
@@ -436,7 +441,7 @@ def _interpret_host_uds(outcome: dispatch.ProbeOutcome, user: str) -> CheckResul
 def check_compose_project_name_collision(
     host_user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
     """Fail if a daemon-side compose project already exists for any registered instance.
 

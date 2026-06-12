@@ -74,10 +74,11 @@ def _patch_all_green(monkeypatch: Any, operator: str = "alice") -> None:
 class TestTopLevelVerdicts:
     def test_all_invariants_hold_reports_pass(self, monkeypatch: Any) -> None:
         from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
 
         _patch_all_green(monkeypatch)
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
-        result = check_setup_invariants("sandbox", None)
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
         assert result.status == "pass"
         assert "all setup invariants hold" in result.detail
         assert "operator=alice" in result.detail
@@ -87,6 +88,7 @@ class TestTopLevelVerdicts:
         # 0440 sudoers drop-in → PermissionError. The audit MUST NOT crash: skip
         # the rule-body audit and PASS-with-note (other invariants hold).
         from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
 
         _patch_all_green(monkeypatch)
 
@@ -94,7 +96,7 @@ class TestTopLevelVerdicts:
             raise PermissionError(13, "Permission denied")
 
         monkeypatch.setattr("pathlib.Path.read_text", _denied)
-        result = check_setup_invariants("sandbox", None)
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
         assert result.status == "pass"
         assert "root-only" in result.detail
         assert "L3a per-op probe" in result.detail
@@ -126,6 +128,7 @@ class TestTopLevelVerdicts:
 
     def test_drop_in_missing_warns(self, monkeypatch: Any) -> None:
         from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
 
         _patch_all_green(monkeypatch)
 
@@ -133,7 +136,7 @@ class TestTopLevelVerdicts:
             raise FileNotFoundError
 
         monkeypatch.setattr("pathlib.Path.read_text", missing)
-        result = check_setup_invariants("sandbox", None)
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
         assert result.status == "warn"
         assert "sudoers drop-in" in result.detail
         assert "missing" in result.detail
@@ -461,6 +464,7 @@ class TestDaemonUserNoAdminInCheck:
 
     def test_separate_user_sudoer_daemon_user_warns(self, monkeypatch: Any) -> None:
         from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
 
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
@@ -476,7 +480,7 @@ class TestDaemonUserNoAdminInCheck:
         )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
 
-        result = check_setup_invariants("sandbox", None)
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
         assert result.status == "warn"
         assert "privilege-granting group(s) sudo" in result.detail
 
@@ -484,6 +488,7 @@ class TestDaemonUserNoAdminInCheck:
         """C-005 product gap: a daemon user with a NOPASSWD drop-in but NO admin
         group still surfaces as a WARN through the top-level verdict."""
         from core.doctor.checks.setup_invariants import check_setup_invariants
+        from core.host_config import DockerExecutionMode
 
         monkeypatch.setattr("core.setup.l0_identity.resolve_operator", lambda: "alice")
         monkeypatch.setattr(f"{_MOD}._audit_reserved_dir", lambda v: None)
@@ -499,7 +504,7 @@ class TestDaemonUserNoAdminInCheck:
         )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
 
-        result = check_setup_invariants("sandbox", None)
+        result = check_setup_invariants("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
         assert result.status == "warn"
         assert "passwordless sudo by the sudoers policy" in result.detail
 

@@ -311,7 +311,7 @@ def _container_status(
     host_user: str,
     config: InstanceConfig,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
 
@@ -372,7 +372,7 @@ def _warm_check(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> bool:
     """Check if containers are already running. Returns True if warm.
 
@@ -1470,7 +1470,7 @@ def _phase_helper_cp_chown_ro_files(
     instance_dir: str,
     host_user: str,
     auth: MachinectlAuth,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Phase 5d: helper-cp + chown for ro single-file mounts.
 
@@ -1524,7 +1524,7 @@ def _phase_helper_mkdir_chown_cache_log(
     host_user: str,
     auth: MachinectlAuth,
     dev_user: str | None = None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Phase 5c: helper-mkdir + chown for cache/log leaves.
 
@@ -1769,7 +1769,7 @@ def _compose_down(
     *,
     volumes: bool = False,
     auth: MachinectlAuth = MachinectlAuth.SUDO,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Run docker compose down via the typed ``compose-down`` dispatcher op.
 
@@ -1826,7 +1826,7 @@ def _phase_stop_teardown(
     *,
     volumes: bool,
     auth: MachinectlAuth,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[str]:
     """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
     Sequence requirement).
@@ -2968,12 +2968,15 @@ def init(
     if not dry_run:
         # Resolve the active execution mode from the root-owned setup marker
         # (the single runtime authority, C-004), mirroring ``doctor``. An
-        # un-setup host has no marker entry → diagnose it as separate-user (the
-        # pre-flip default). In operator-rootless the daemon runs as the
-        # *operator's* own user, so the boundary-crossing owner is
-        # ``resolve_daemon_owner`` of the resolved config — NOT the stale
-        # ``docker_unprivileged_user``, which would cross machinectl into a
-        # nonexistent dedicated user. Threading ``mode`` into
+        # un-setup host has no marker entry → fall back to
+        # ``DEFAULT_PROVISIONING_MODE`` (operator-rootless — the single
+        # system-wide default, F-051). The marker is the authority once setup
+        # writes it; on a fresh host the provisioning default lets the
+        # auth-probe resolve the invoking operator as the daemon owner. In
+        # operator-rootless the daemon runs as the *operator's* own user, so the
+        # boundary-crossing owner is ``resolve_daemon_owner`` of the resolved
+        # config — NOT the stale ``docker_unprivileged_user``, which would cross
+        # machinectl into a nonexistent dedicated user. Threading ``mode`` into
         # ``minimal_host_config`` makes ``dispatch.probe`` take the local
         # (no-machinectl) path in op-rootless. Resolved once and reused across
         # the init pre-flight crossing (the single ``preflight`` op) and the
@@ -2981,7 +2984,7 @@ def init(
         try:
             probe_mode = resolve_execution_mode(getpass.getuser())
         except ModeMarkerMissing:
-            probe_mode = DockerExecutionMode.SEPARATE_USER
+            probe_mode = DEFAULT_PROVISIONING_MODE
         probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
         probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
 
@@ -3740,13 +3743,19 @@ def doctor(
     # Resolve the active execution mode from the root-owned setup marker (the
     # single runtime authority, C-004) BEFORE the user, so user resolution can be
     # mode-aware. The marker read is toml-independent — an un-setup host has no
-    # marker entry → diagnose it as separate-user (the pre-flip default; a future
-    # group flips the broader default). The operator is the current real user,
-    # exactly how the rest of doctor resolves the invoker.
+    # marker entry → fall back to ``DEFAULT_PROVISIONING_MODE`` (operator-rootless,
+    # the single system-wide default — F-051). This is load-bearing for a FRESH
+    # host: under the old separate-user fallback, a host with no marker AND no toml
+    # AND no ``--user`` hard-failed at the "No user specified" guard below, unable
+    # to run even the mode-invariant checks. Operator-rootless resolves the owner
+    # as the invoking operator (toml-free), so doctor RUNS. The marker is the
+    # authority once setup writes it; the fallback only governs the not-yet-setup
+    # window. The operator is the current real user, exactly how the rest of doctor
+    # resolves the invoker.
     try:
         mode = resolve_execution_mode(getpass.getuser())
     except ModeMarkerMissing:
-        mode = DockerExecutionMode.SEPARATE_USER
+        mode = DEFAULT_PROVISIONING_MODE
 
     if user is not None:
         # Explicit --user wins in both modes.

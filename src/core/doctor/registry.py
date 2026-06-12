@@ -64,7 +64,7 @@ from core.doctor.checks.workspace_bridge import (
     check_workspace_path_in_walker_boundary,
 )
 from core.doctor.types import Check, CheckResult
-from core.host_config import DockerExecutionMode
+from core.host_config import DEFAULT_PROVISIONING_MODE, DockerExecutionMode
 
 # The crossing-only checks that have no meaning in ``operator-rootless`` mode
 # (there is no machinectl crossing / dedicated daemon user / sudoers rule to
@@ -81,7 +81,7 @@ _OPERATOR_ROOTLESS_ONLY = frozenset({DockerExecutionMode.OPERATOR_ROOTLESS})
 
 
 def build_check_registry(
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[Check]:
     """Build the doctor check registry with execution-mode-aware checks.
 
@@ -494,7 +494,7 @@ def run_checks(
     checks: list[Check],
     user: str,
     distro: str | None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[CheckResult]:
     """Execute checks in topological order with mode gating + cascading skip.
 
@@ -553,7 +553,7 @@ def run_check_subset(
     distro: str | None,
     *,
     exclude_ids: set[str] | None = None,
-    mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[CheckResult]:
     """Execute a filtered subset of doctor checks by category.
 

@@ -459,7 +459,9 @@ def test_update_runsc_in_operator_rootless_routes_to_body() -> None:
 def test_update_runsc_in_separate_user_runs_l6a_subset() -> None:
     """separate-user ``--update-runsc`` still routes to the L6a-only subset path."""
     sep_ctx = SetupContext(
-        host_config=minimal_host_config("sandbox", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="dev",
     )
     with (

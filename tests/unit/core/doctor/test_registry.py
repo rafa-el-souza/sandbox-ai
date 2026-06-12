@@ -308,12 +308,12 @@ class TestSudoRegistry:
         assert "sudo" in reach.depends_on
         assert set(reach.depends_on) == {"sudo", "machinectl", "user_exists", "systemd_machined"}
 
-    def test_default_mode_is_separate_user(self) -> None:
+    def test_default_mode_is_operator_rootless(self) -> None:
         from core.doctor import build_check_registry
         from core.host_config import DockerExecutionMode
 
         default_ids = [c.id for c in build_check_registry()]
-        explicit_ids = [c.id for c in build_check_registry(DockerExecutionMode.SEPARATE_USER)]
+        explicit_ids = [c.id for c in build_check_registry(DockerExecutionMode.OPERATOR_ROOTLESS)]
         assert default_ids == explicit_ids
 
     def test_run_check_subset_includes_sudo(self) -> None:
@@ -516,7 +516,7 @@ class TestExecutionModeGating:
         assert results[0].status == "pass"
         assert ran == ["crossing"]
 
-    def test_run_checks_defaults_to_separate_user(self) -> None:
+    def test_run_checks_defaults_to_operator_rootless(self) -> None:
         from core.doctor import Check, CheckResult, run_checks
         from core.host_config import DockerExecutionMode
 
@@ -534,9 +534,11 @@ class TestExecutionModeGating:
                 applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
             ),
         ]
-        # No mode arg → SEPARATE_USER default → the separate-user check runs.
+        # No mode arg → OPERATOR_ROOTLESS default (DEFAULT_PROVISIONING_MODE, F-051)
+        # → the separate-user-only check is SKIPPED, not run.
         results = run_checks(checks, "sandbox", None)
-        assert results[0].status == "pass"
+        assert results[0].status == "skip"
+        assert results[0].detail == "skipped (operator-rootless)"
 
 
 class TestRegistryThreadsMode:
@@ -564,7 +566,7 @@ class TestRegistryThreadsMode:
         assert result.status == "pass"
         assert captured["host_config"].host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
 
-    def test_default_mode_is_separate_user(self, monkeypatch: Any) -> None:
+    def test_default_mode_is_operator_rootless(self, monkeypatch: Any) -> None:
         import subprocess
 
         from core.doctor import build_check_registry
@@ -581,7 +583,7 @@ class TestRegistryThreadsMode:
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         checks = {c.id: c for c in build_check_registry()}
         checks["docker_available"].run("sandbox", None)
-        assert captured["host_config"].host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+        assert captured["host_config"].host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 class TestRunCheckSubsetThreadsMode:
@@ -602,24 +604,21 @@ class TestRunCheckSubsetThreadsMode:
         assert by_name["unprivileged user"].status == "skip"
         assert by_name["systemd-machined"].status == "skip"
 
-    def test_subset_defaults_to_separate_user(self) -> None:
+    def test_subset_defaults_to_operator_rootless(self) -> None:
         from core.doctor import run_check_subset
 
-        # In separate-user the crossing-only user_exists check RUNS (id probe),
-        # so it is never mode-skipped. Patch the id subprocess so the result
-        # does not depend on a real host user.
+        # No mode arg → OPERATOR_ROOTLESS default (DEFAULT_PROVISIONING_MODE, F-051).
+        # In operator-rootless the crossing-only user_exists check is mode-SKIPPED.
         with patch(
             "subprocess.run",
             return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="uid=0\n", stderr=""),
         ):
             results = run_check_subset(["Privilege Boundary"], "sandbox", None)
-        # No result carries a mode-skip detail when the default (separate-user)
-        # is active — every crossing-only check runs.
-        details = [r.detail for r in results]
-        assert "skipped (operator-rootless)" not in details
-        assert "skipped (separate-user)" not in details
-        # The user_exists check actually ran (its result name is "user exists").
-        assert any(r.name == "user exists" for r in results)
+        by_name = {r.name: r for r in results}
+        # The crossing-only checks carry the operator-rootless mode-skip detail.
+        assert by_name["unprivileged user"].status == "skip"
+        assert by_name["unprivileged user"].detail == "skipped (operator-rootless)"
+        assert by_name["machinectl reachable"].status == "skip"
 
 
 class TestL1PrerequisitesSurfaceInOperatorRootless:

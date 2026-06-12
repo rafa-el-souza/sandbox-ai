@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable
 from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
     MachinectlAuth,
     in_container_gid_for_host_gid,
@@ -73,7 +74,7 @@ def helper_chown_files(
     mode: int,
     machinectl_auth: MachinectlAuth,
     timeout: float = DEFAULT_HELPER_TIMEOUT_S,
-    execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Copy → chmod → chown → atomic rename each file under ``parent``.
 
@@ -120,7 +121,7 @@ def helper_mkdir_chown_dirs(
     owner_gid: int,
     machinectl_auth: MachinectlAuth,
     timeout: float = DEFAULT_HELPER_TIMEOUT_S,
-    execution_mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
+    execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """``mkdir -p`` + ``chown`` each leaf under ``parent``.
 

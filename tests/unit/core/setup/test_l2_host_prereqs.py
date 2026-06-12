@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 def _ctx() -> SetupContext:
     # The operator is "alice" (the user the _World membership fixtures grant).
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator="alice",
     )
 

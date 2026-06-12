@@ -51,7 +51,7 @@ def _stable_systemd_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _hc(auth: MachinectlAuth = MachinectlAuth.SUDO) -> HostConfig:
-    return minimal_host_config("sandbox", auth)
+    return minimal_host_config("sandbox", auth, DockerExecutionMode.SEPARATE_USER)
 
 
 def _ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> SetupContext:

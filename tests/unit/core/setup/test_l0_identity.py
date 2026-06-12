@@ -31,7 +31,9 @@ from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 
 def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandboxuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config(
+            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+        ),
         operator=operator,
     )
 
