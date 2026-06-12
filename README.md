@@ -13,29 +13,40 @@ The usual answer is "review every command" — which defeats the point of an
 agent — or "run it in Docker," which just means the agent now drives a Docker
 daemon that *is* root on your host. Most setups have **no boundary at all**.
 
-`sandbox-ai` gives each project a disposable, isolated agent sandbox built on a
-**rootless Docker daemon** — so a container escape that reaches the daemon lands
-on an *unprivileged* uid, never host root. On top of that foundation, every
-agent container runs under the **gVisor (`runsc`) runtime**, behind
-**deny-by-default network egress** (an allowlisting proxy + a filtering DNS
-resolver) and per-instance isolated subnets, with a hardened container baseline
-and ACL-gated host filesystem access. That isolation is the load-bearing
-foundation, and it holds the same way in both of the project's execution modes.
+*Jump to: [Why not just…?](#why-not-just) · [Threat model](#threat-model) · [Requirements](#requirements) · [Quick start](#quick-start) · [Two execution modes](#two-execution-modes) · [Architecture](#architecture)*
 
-For adversarial-agent and multi-tenant threat models, an **opt-in hardened mode**
-(`separate-user`) adds a real privilege boundary on top: Docker runs as a
-*dedicated, dead-end unprivileged user*, and the `sandbox` CLI **never executes a
-Docker call itself** — every Docker operation is dispatched across the boundary
-into that user via a root-owned dispatcher. The default mode (`operator-rootless`)
-runs the rootless daemon as your own user with no crossing, which is the right fit
-for a single-operator developer box.
+## Why not just…?
 
-```bash
-sandbox init myproject          # scaffold an isolated, per-project sandbox
-sandbox start myproject         # launch it — agent runs inside, behind the boundary
-sandbox attach myproject        # drop into the running agent's environment
-sandbox stop myproject          # tear it down
-```
+|                                   | Dev Containers | DevPod          | e2b.dev                    | Unsandboxed (your shell) | **sandbox-ai**                        |
+|-----------------------------------|----------------|-----------------|----------------------------|--------------------------|---------------------------------------|
+| **Built for**                     | humans in an editor | humans, any provider | running AI-generated code | —                        | **autonomous AI coding agents**       |
+| **Runs on your own host**         | yes            | yes / remote    | cloud-first (self-host available) | yes               | **yes**                               |
+| **Isolation primitive**           | container      | container / VM  | Firecracker microVM        | none                     | **rootless-daemon container + gVisor + userns** |
+| **Docker daemon runs as root**    | yes (typical)  | yes (typical)   | n/a (remote service)       | yes (typical)            | **no — rootless in both modes**       |
+| **Orchestrator runs Docker as you** | yes (you drive Docker) | yes | n/a (remote service) | yes (it's just your shell) | **default: yes (as your *rootless* user) · hardened: no (crosses into a dead-end user)** |
+| **Network egress controlled by default** | no       | no              | yes (remote)               | no                       | **yes (deny-by-default: allowlisting proxy + filtering DNS)** |
+| **License**                       | MIT            | MPL-2.0         | Apache-2.0                 | —                        | **AGPL-3.0**                          |
+
+The honest framing: Dev Containers and DevPod are **developer** environment
+managers — they were built to make *your* editor reproducible, not to contain an
+untrusted actor that has your credentials. e2b is a **cloud** runtime for
+executing AI-generated code in an ephemeral microVM, but it lives off your
+machine and off your existing local workflow. And the most common setup of all —
+an agent in your plain shell — has no boundary whatsoever. `sandbox-ai` is for
+the case in between: an autonomous agent doing real, persistent work **on your
+own host**, where you want isolation *and* a privilege boundary without shipping
+your code to someone else's cloud.
+
+It gives each project a disposable, isolated agent sandbox built on a **rootless
+Docker daemon** — so a container escape that reaches the daemon lands on an
+*unprivileged* uid, never host root. On that foundation every agent container
+runs under the **gVisor (`runsc`) runtime**, behind **deny-by-default network
+egress** (an allowlisting proxy + a filtering DNS resolver) and per-instance
+isolated subnets, with a hardened container baseline and ACL-gated host
+filesystem access. That isolation is load-bearing, and it holds the same way in
+both execution modes: the **default `operator-rootless`** (rootless daemon as
+your own user, no boundary crossing) and an **opt-in hardened `separate-user`**
+for adversarial-agent and multi-tenant threat models ([details ↓](#two-execution-modes)).
 
 > **Status: pre-release.** The core orchestrator works end-to-end and is
 > well-tested (100% coverage on `core/` and `cli/`). Non-interactive setup, the
@@ -51,48 +62,6 @@ Coming soon — asciinema casts (CLI-native, copy-pasteable, no video):
 - **The boundary in action (≈60s)** — denied operations failing at the edge: the sandbox reaching for a host path, a secret, or network egress it isn't allowed.
 - **Workspace sharing (≈60s)** — bind a host checkout into the sandbox without handing over ownership.
 </details>
-
-## Why not just…?
-
-|                                   | Dev Containers | DevPod          | e2b.dev                    | Unsandboxed (your shell) | **sandbox-ai**                        |
-|-----------------------------------|----------------|-----------------|----------------------------|--------------------------|---------------------------------------|
-| **Built for**                     | humans in an editor | humans, any provider | running AI-generated code | —                        | **autonomous AI coding agents**       |
-| **Runs on your own host**         | yes            | yes / remote    | cloud-first (self-host available) | yes               | **yes**                               |
-| **Isolation primitive**           | container      | container / VM  | Firecracker microVM        | none                     | **rootless-daemon container + gVisor runtime + userns** |
-| **Docker daemon runs as root**    | yes (typical)  | yes (typical)   | n/a (remote service)       | yes (typical)            | **no — rootless daemon in both modes (escape lands on an unprivileged uid)** |
-| **Orchestrator runs Docker as you** | yes (you drive Docker) | yes | n/a (remote service) | yes (it's just your shell) | **default `operator-rootless`: yes, as your *rootless* user · opt-in `separate-user`: no — calls cross into a dead-end user** |
-| **Network egress controlled by default** | no       | no              | yes (remote)               | no                       | **yes (deny-by-default: allowlisting proxy + filtering DNS)** |
-| **License**                       | MIT            | MPL-2.0         | Apache-2.0                 | —                        | **AGPL-3.0**                          |
-
-The honest framing: Dev Containers and DevPod are **developer** environment
-managers — they were built to make *your* editor reproducible, not to contain an
-untrusted actor that has your credentials. e2b is a **cloud** runtime for
-executing AI-generated code in an ephemeral microVM, but it lives off your
-machine and off your existing local workflow. And the most
-common setup of all — an agent in your plain shell — has no boundary
-whatsoever. `sandbox-ai` is for the case in between: an autonomous agent doing
-real, persistent work **on your own host**, where you want isolation *and* a
-privilege boundary without shipping your code to someone else's cloud.
-
-### Two modes: rootless by default, dead-end-user when you need it
-
-The isolation foundation above — rootless daemon, gVisor, userns, deny-by-default
-egress, container hardening, ACL-gated filesystem — is **the same in both modes**.
-What differs is *who owns the Docker daemon* and whether ops cross a boundary:
-
-- **`operator-rootless` (default).** Rootless Docker runs as **your own user**; ops
-  are local subprocesses with no crossing. Best for single-operator dev boxes.
-  Caveat: if your operator account is a **sudoer**, a (rare, gVisor-fronted) escape
-  reaching the daemon owner could reach root — `sandbox doctor` flags this as an
-  informed-tradeoff **WARN (never a failure)**, with two remedies: run as a
-  dedicated non-sudo operator, or switch to `separate-user`.
-- **`separate-user` (opt-in hardened).** Rootless Docker runs as a **dedicated,
-  dead-end unprivileged user**; the orchestrator holds no Docker access and crosses
-  a privilege boundary (a root-owned dispatcher, per-op sudoers authorization) for
-  every op. For adversarial-agent and multi-tenant threat models.
-
-The mode is chosen at `sudo sandbox setup` time. Full detail:
-[`docs/privilege-boundary.md`](docs/privilege-boundary.md).
 
 ## Threat model
 
@@ -182,7 +151,30 @@ sandbox stop myproject       # graceful stop
 sandbox destroy myproject    # remove the instance entirely
 ```
 
-Run `sandbox doctor` at any time for host-readiness diagnostics.
+**Trying it on a throwaway dev box?** Take the default — you don't choose or
+configure a mode: `sudo sandbox setup` provisions `operator-rootless` and you're
+ready to `init`. Run `sandbox doctor` at any time for host-readiness diagnostics.
+
+## Two execution modes
+
+Rootless by default; dead-end user when you need it. The isolation foundation
+above — rootless daemon, gVisor, userns, deny-by-default egress, container
+hardening, ACL-gated filesystem — is **the same in both modes**. What differs is
+*who owns the Docker daemon* and whether ops cross a boundary:
+
+- **`operator-rootless` (default).** Rootless Docker runs as **your own user**; ops
+  are local subprocesses with no crossing. Best for single-operator dev boxes.
+  Caveat: if your operator account is a **sudoer**, a (rare, gVisor-fronted) escape
+  reaching the daemon owner could reach root — `sandbox doctor` flags this as an
+  informed-tradeoff **WARN (never a failure)**, with two remedies: run as a
+  dedicated non-sudo operator, or switch to `separate-user`.
+- **`separate-user` (opt-in hardened).** Rootless Docker runs as a **dedicated,
+  dead-end unprivileged user**; the orchestrator holds no Docker access and crosses
+  a privilege boundary (a root-owned dispatcher, per-op sudoers authorization) for
+  every op. For adversarial-agent and multi-tenant threat models.
+
+The mode is chosen at `sudo sandbox setup` time. Full detail:
+[`docs/privilege-boundary.md`](docs/privilege-boundary.md).
 
 ## Architecture
 
