@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Hydration pipeline: Pydantic config parsing + Jinja2 template rendering.
 
 Implements the PHASE 4 (HYDRATION) from the orchestrator design:

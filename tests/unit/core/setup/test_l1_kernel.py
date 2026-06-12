@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l1_kernel`` (sysctl-only after the L1→l2a split).
 
 L1 now owns ONLY the user-independent sysctl drop-in + the verify-only ACL FS

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Filesystem-related doctor checks: setfacl binary, ACL probe, cgroup-v2, ancestor traverse."""
 
 from __future__ import annotations

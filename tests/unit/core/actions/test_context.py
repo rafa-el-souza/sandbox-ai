@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for ``ActionContext`` — frozen dataclass bundling per-phase plumbing."""
 
 from __future__ import annotations

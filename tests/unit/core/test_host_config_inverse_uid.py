@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for in_container_uid_for_host_uid (inverse of host_id_for_in_container)."""
 
 from pathlib import Path

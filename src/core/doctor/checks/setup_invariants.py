@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Setup-invariants doctor check (spec "Setup Invariants Check").
 
 Read-only steady-state audit of setup's owned-namespace artifacts. This is the

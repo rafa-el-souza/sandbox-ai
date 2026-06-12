@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the operator-side journald audit shim (``core.journal_audit``)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Project-wide configuration: sandbox-ai.toml schema, loader, and machinectl command builder.
 
 Defines the project-root configuration that holds host-level settings

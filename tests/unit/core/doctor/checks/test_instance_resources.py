@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.instance_resources.
 
 Covers the two advisory (WARN-only) per-instance host-capacity checks plus the

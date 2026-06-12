@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for :mod:`core.setup.phase_runner`.
 
 Covers: the phase-module name predicate; ``discover_phases`` via a synthetic

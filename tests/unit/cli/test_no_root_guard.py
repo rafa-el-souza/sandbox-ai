@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """No-root guard on the runtime commands (host-config delta, C-004 §3.2 / D8).
 
 The 11 runtime commands (`init`, `start`, `stop`, `status`, `attach`, `destroy`,

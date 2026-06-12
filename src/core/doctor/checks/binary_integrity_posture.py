@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Binary-integrity posture doctor check (spec "Binary Integrity Posture Check").
 
 Probes the host for the presence and enforcement state of four

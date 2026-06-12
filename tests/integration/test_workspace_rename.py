@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Empirical validation of D11 / D18 — same-fs ``os.rename`` preserves named
 ACLs, setgid bit, and persistent default ACL without re-application.
 

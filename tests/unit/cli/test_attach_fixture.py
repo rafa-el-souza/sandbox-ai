@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Byte-equivalence fixture gate for ``_build_attach_argv()``.
 
 Per ``admin-reframe`` design D9 and the methodology rule "fixture-diff for

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.registry.
 
 Covers ``build_check_registry``, ``topological_sort``, ``run_checks``, and

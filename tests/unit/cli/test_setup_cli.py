@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the ``sandbox setup`` Typer command (Group 8).
 
 Covers the full apply-gating edge-case matrix from tasks.md 8.3 with the

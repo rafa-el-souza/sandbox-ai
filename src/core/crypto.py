@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Proxy credential generation: password, bcrypt hash, htpasswd file.
 
 Generates a cryptographically secure proxy password, hashes it via bcrypt,

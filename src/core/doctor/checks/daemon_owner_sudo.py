@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Sudoer daemon-owner doctor check (spec "Sudoer Daemon-Owner Warning").
 
 Operator-rootless only (registry ``applies_in={OPERATOR_ROOTLESS}``). In

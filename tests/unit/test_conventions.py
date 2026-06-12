@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for project-wide test conventions — enforces fixture/marker/suppression rules.
 
 Three structural guarantees, all AST-based:
@@ -935,3 +936,157 @@ def test_every_custom_marker_is_registered() -> None:
             "Fix: add the marker (with a one-line description) to "
             "pyproject.toml's [tool.pytest.ini_options].markers list."
         )
+
+
+# ── 6. SPDX license-header presence (publish-prep, source-license-headers) ───
+#
+# Every covered first-party source file SHALL carry the SPDX license-identifier
+# token within its first few lines. The one-time sweep (publish-prep task 2.2)
+# is the migration; THIS gate is the durable drift-prevention contract: a newly
+# added source file without the header fails `make coverage`.
+#
+# The covered set is built from the CURRENT tree, not a frozen list:
+#   - Python: every `*.py` under `src/` and `tests/` (the `#` token).
+#   - Templates: EVERY file under `src/templates/` that is not Python/pyc — so a
+#     new non-source template file is FORCED into the allowlist (drift-proof),
+#     never silently exempt. The comment token differs by type (`//` Go,
+#     `{# … #}` Jinja-rendered, `#` shell/Dockerfile/config), but the normative
+#     invariant the gate enforces is only the SPDX TOKEN substring; the comment
+#     framing is the sweep's concern, not the gate's.
+# Generated / comment-less / served-verbatim files are exempt via
+# `_SPDX_ALLOWLIST` (one-line reason each, mirroring `_LAYOUT_ALLOWLIST`); a
+# dead allowlist entry fails the gate so exemptions cannot rot.
+
+# The normative invariant: this exact substring must appear in a covered file's
+# first few lines, whatever the comment token framing it.
+_SPDX_TOKEN = "SPDX-License-Identifier: AGPL-3.0-or-later"
+# How many leading lines may carry the header (shebang + header → line 2).
+_SPDX_HEADER_LINES = 5
+
+_TEMPLATES_ROOT = _SRC_ROOT / "templates"
+
+# Covered-set template files with no header, each with a one-line reason. Keyed
+# by repo-relative POSIX path (mirrors `_LAYOUT_ALLOWLIST`).
+_SPDX_ALLOWLIST: dict[str, str] = {
+    "src/templates/config/core/.claude.json": (
+        "JSON config seed — JSON has no comment syntax, a header would be invalid."
+    ),
+    "src/templates/dispatch/fixtures/target_argv_cases.json": (
+        "JSON test fixture — JSON has no comment syntax."
+    ),
+    "src/templates/config/proxy/ERR_SANDBOX_403": (
+        "Static HTTP 403 error body served verbatim to clients; a header would "
+        "leak into the response page."
+    ),
+    "src/templates/dispatch/go.mod": "Managed by the Go toolchain.",
+    "src/templates/dispatch/go.sum": "Generated checksum file.",
+    "src/templates/dispatch/vendor/modules.txt": "Vendored module manifest (generated).",
+}
+
+
+def _spdx_covered_template_files() -> Iterator[Path]:
+    """Every file under `src/templates/` that is NOT Python/pyc and not in a
+    `__pycache__` dir — the covered template set, derived from the live tree.
+
+    Built from the tree (not a frozen list) so a newly added non-source template
+    file is forced through the gate: it must either carry the header or earn an
+    explicit `_SPDX_ALLOWLIST` entry — it cannot be silently skipped."""
+    for p in _TEMPLATES_ROOT.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix in (".py", ".pyc") or "__pycache__" in p.parts:
+            continue
+        yield p
+
+
+def _spdx_violations(files: Iterator[Path], allowlist: dict[str, str]) -> list[str]:
+    """Scan ``files``; return the repo-relative (or absolute, if outside the
+    repo) path of every file that lacks the SPDX token within its first
+    ``_SPDX_HEADER_LINES`` lines and is NOT in ``allowlist``.
+
+    Reusable detector seam (anti-hack rule 5): the file iterable and allowlist
+    are PARAMETERS, not module state, so the deliberate-violation regression
+    (:func:`test_spdx_deliberate_violation_is_detected`) drives the SAME
+    predicate against arbitrary tmp_path files without duplicating the logic."""
+    offenders: list[str] = []
+    for src in files:
+        key = (
+            src.relative_to(_REPO_ROOT).as_posix()
+            if src.is_relative_to(_REPO_ROOT)
+            else src.as_posix()
+        )
+        if key in allowlist:
+            continue
+        head = "\n".join(src.read_text().splitlines()[:_SPDX_HEADER_LINES])
+        if _SPDX_TOKEN not in head:
+            offenders.append(key)
+    return offenders
+
+
+def _spdx_covered_files() -> list[Path]:
+    """The full covered set from the live tree: Python under src/ + tests/, plus
+    every non-Python file under src/templates/."""
+    files = list(_python_files(_SRC_ROOT)) + list(_python_files(_TESTS_ROOT))
+    files.extend(_spdx_covered_template_files())
+    return files
+
+
+def test_spdx_headers_present() -> None:
+    """Every covered first-party source file carries the SPDX header
+    (publish-prep "SPDX License Header Presence").
+
+    The covered set is built from the CURRENT tree, so a newly added source file
+    without the header (and not allowlisted) fails this gate — the durable
+    drift-prevention contract behind the one-time sweep.
+    """
+    offenders = _spdx_violations(iter(_spdx_covered_files()), _SPDX_ALLOWLIST)
+    if offenders:
+        details = "\n".join(f"  {o}" for o in sorted(offenders))
+        pytest.fail(
+            f"{len(offenders)} covered file(s) lack the SPDX header.\n{details}\n\n"
+            f"Fix: add `{_SPDX_TOKEN}` within the first {_SPDX_HEADER_LINES} "
+            "lines, using the comment token for the file type (`#` Python/shell/"
+            "Dockerfile/config, `//` Go, `{# … #}` Jinja-rendered template — the "
+            "Jinja comment is stripped at render so it never reaches output). If "
+            "the file genuinely cannot carry a header (no comment syntax / served "
+            "verbatim / generated), add it to _SPDX_ALLOWLIST with a one-line reason."
+        )
+
+
+def test_spdx_allowlist_has_no_stale_entries() -> None:
+    """Every `_SPDX_ALLOWLIST` key must correspond to a file on disk.
+
+    Mirrors `_LAYOUT_ALLOWLIST`'s self-validation: a dead exemption (the file was
+    renamed or deleted) fails the gate, so the allowlist cannot silently rot."""
+    stale = [rel for rel in _SPDX_ALLOWLIST if not (_REPO_ROOT / rel).exists()]
+    if stale:
+        details = "\n".join(f"  {s}" for s in sorted(stale))
+        pytest.fail(
+            f"{len(stale)} stale _SPDX_ALLOWLIST entr(y/ies) — path no longer exists.\n"
+            f"{details}\n\nFix: remove the dead entry (the file was renamed or deleted)."
+        )
+
+
+def test_spdx_deliberate_violation_is_detected(tmp_path: Path) -> None:
+    """A header-LESS file is flagged by the shared detector; a header-FULL file is
+    not — proving the gate catches the bug class (a new file missing the header),
+    not merely the current absence of the symptom.
+
+    Drives the SAME :func:`_spdx_violations` predicate the gate uses (no
+    duplicated logic), satisfying the 2.4 "header-less new file fails the gate /
+    then revert" requirement durably as a tmp_path regression."""
+    headerless = tmp_path / "rogue_no_header.py"
+    headerless.write_text("import os\n\n\ndef f() -> None:\n    return None\n")
+    headerful = tmp_path / "rogue_with_header.py"
+    headerful.write_text(
+        f"# Copyright (c) 2026 zerotrust-ai. {_SPDX_TOKEN}\nimport os\n"
+    )
+
+    offenders = _spdx_violations(iter([headerless, headerful]), {})
+
+    assert headerless.as_posix() in offenders, (
+        "deliberate header-less file was not flagged by _spdx_violations"
+    )
+    assert headerful.as_posix() not in offenders, (
+        "a file carrying the SPDX token was wrongly flagged"
+    )

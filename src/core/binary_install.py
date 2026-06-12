@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Operator-side pinned-binary install + drift detection.
 
 Consumed by setup's L6a phase, the ``sandbox setup --update-runsc`` flag, and

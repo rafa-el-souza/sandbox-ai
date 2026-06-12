@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-user-tree doctor checks: layout existence, mode, and legacy-CWD detection."""
 
 from __future__ import annotations

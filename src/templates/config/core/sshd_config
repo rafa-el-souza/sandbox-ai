@@ -1,3 +1,4 @@
+{# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later #}
 # Hardened sshd_config — Wave 4 SSH IPC Transport
 # Binds only to the instance's ipc_net IP. Password auth disabled.
 # See: openspec/changes/containment-ipc-hardening/specs/ssh-ipc-transport/spec.md

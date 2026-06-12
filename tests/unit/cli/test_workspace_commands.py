@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for ``sandbox workspace add | remove | rename``.
 
 Mirrors task 9.5's validation matrix from instance-workspace-model.

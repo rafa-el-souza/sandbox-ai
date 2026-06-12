@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Doctor check registry, topological sort, and runner.
 
 Wires the per-topic check functions into a single ordered registry with

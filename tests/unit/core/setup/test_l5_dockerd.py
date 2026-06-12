@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the L5 linger + rootless-dockerd phase.
 
 Covers: probe branches (linger-absent MISSING, dockerd-unreachable MISSING,

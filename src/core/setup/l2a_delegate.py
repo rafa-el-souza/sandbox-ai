@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """L2a — systemd ``Delegate=yes`` drop-in for the sandbox user's manager.
 
 Sub-phase between L2 and L5 (spec "Phase Execution Order"). It owns one

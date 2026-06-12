@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """IPAM allocator: /24-quintuple subnet allocation with lowest-slot scan and overflow detection.
 
 Each sandbox instance is assigned five consecutive /24 subnets (isolated, core_proxy, dns, egress,

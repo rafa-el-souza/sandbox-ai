@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """runsc pinned-match doctor check (spec "runsc Pinned Match Check").
 
 Read-only verification that ``/usr/local/libexec/sandbox-ai/runsc`` matches

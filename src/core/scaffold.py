@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Instance scaffolding: directory tree, sandbox.toml, env file, ACLs, secret prompting.
 
 Implements the SCAFFOLD SUB-SEQUENCE (S1-S7) from the orchestrator design.

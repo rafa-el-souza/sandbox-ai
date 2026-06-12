@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for `sandbox workspace remove`'s refuse-last-workspace contract.
 
 The refusal MUST precede the `--backup`/`--purge` branching: no rsync,

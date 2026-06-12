@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.walker — ACL ancestor walker with safety rules."""
 
 from __future__ import annotations

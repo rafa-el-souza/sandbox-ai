@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Typed Action hierarchy — Command-pattern carriers for plan items.
 
 Each ``_*_plan`` function in :mod:`cli.main` returns a list of typed

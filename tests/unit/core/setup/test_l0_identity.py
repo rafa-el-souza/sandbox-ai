@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l0_identity`` (Group 5, task 5.4).
 
 Covers operator resolution precedence, the three-tier distro classification +

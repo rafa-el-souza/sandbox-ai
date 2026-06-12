@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Dispatcher sha-drift doctor check (spec "Dispatcher Sha Drift Check").
 
 Compares the on-disk dispatcher binary against the manifest written by setup's

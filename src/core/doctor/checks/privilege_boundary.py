@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Privilege-boundary doctor checks.
 
 Covers the 11 checks that validate the dev → unprivileged-user → docker daemon

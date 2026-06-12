@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """L7 — helper image pre-pull (content-aware on the pinned digest).
 
 Pre-pulls the disposable-helper image so the first ``sandbox start`` does not

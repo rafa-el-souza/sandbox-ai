@@ -1,3 +1,4 @@
+# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for ``core.setup.l3a_per_op_probe`` (L3a — per-op probe).
 
 Covers the F-004 / Finding-J inner-exit-recovery decision matrix: MATCH
