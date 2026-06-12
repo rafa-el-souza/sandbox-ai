@@ -13,13 +13,22 @@ The usual answer is "review every command" — which defeats the point of an
 agent — or "run it in Docker," which just means the agent now drives a Docker
 daemon that *is* root on your host. Most setups have **no boundary at all**.
 
-`sandbox-ai` gives each project a disposable, isolated agent sandbox and puts a
-real privilege boundary between you and it. The `sandbox` CLI wraps Docker
-Compose lifecycles, but it **never executes a Docker call as you** — every
-Docker operation is dispatched across a boundary into an *unprivileged systemd
-user* via `machinectl shell`. The orchestrator you run holds no Docker access
-of its own; the thing that can talk to the daemon is a user that can't touch
-your home directory, your keys, or your repos.
+`sandbox-ai` gives each project a disposable, isolated agent sandbox built on a
+**rootless Docker daemon** — so a container escape that reaches the daemon lands
+on an *unprivileged* uid, never host root. On top of that foundation, every
+agent container runs under the **gVisor (`runsc`) runtime**, behind
+**deny-by-default network egress** (an allowlisting proxy + a filtering DNS
+resolver) and per-instance isolated subnets, with a hardened container baseline
+and ACL-gated host filesystem access. That isolation is the load-bearing
+foundation, and it holds the same way in both of the project's execution modes.
+
+For adversarial-agent and multi-tenant threat models, an **opt-in hardened mode**
+(`separate-user`) adds a real privilege boundary on top: Docker runs as a
+*dedicated, dead-end unprivileged user*, and the `sandbox` CLI **never executes a
+Docker call itself** — every Docker operation is dispatched across the boundary
+into that user via a root-owned dispatcher. The default mode (`operator-rootless`)
+runs the rootless daemon as your own user with no crossing, which is the right fit
+for a single-operator developer box.
 
 ```bash
 sandbox init myproject          # scaffold an isolated, per-project sandbox
@@ -49,8 +58,9 @@ Coming soon — asciinema casts (CLI-native, copy-pasteable, no video):
 |-----------------------------------|----------------|-----------------|----------------------------|--------------------------|---------------------------------------|
 | **Built for**                     | humans in an editor | humans, any provider | running AI-generated code | —                        | **autonomous AI coding agents**       |
 | **Runs on your own host**         | yes            | yes / remote    | cloud-first (self-host available) | yes               | **yes**                               |
-| **Isolation primitive**           | container      | container / VM  | Firecracker microVM        | none                     | **container behind an unprivileged-user boundary** |
-| **Orchestrator holds host-root / Docker access** | yes (you drive Docker) | yes | n/a (remote service) | yes (it's just your shell) | **no — Docker calls cross into an unprivileged user** |
+| **Isolation primitive**           | container      | container / VM  | Firecracker microVM        | none                     | **rootless-daemon container + gVisor runtime + userns** |
+| **Docker daemon runs as root**    | yes (typical)  | yes (typical)   | n/a (remote service)       | yes (typical)            | **no — rootless daemon in both modes (escape lands on an unprivileged uid)** |
+| **Orchestrator runs Docker as you** | yes (you drive Docker) | yes | n/a (remote service) | yes (it's just your shell) | **default `operator-rootless`: yes, as your *rootless* user · opt-in `separate-user`: no — calls cross into a dead-end user** |
 | **Network egress controlled by default** | no       | no              | yes (remote)               | no                       | **yes (deny-by-default: allowlisting proxy + filtering DNS)** |
 | **License**                       | MIT            | MPL-2.0         | Apache-2.0                 | —                        | **AGPL-3.0**                          |
 
@@ -63,6 +73,26 @@ common setup of all — an agent in your plain shell — has no boundary
 whatsoever. `sandbox-ai` is for the case in between: an autonomous agent doing
 real, persistent work **on your own host**, where you want isolation *and* a
 privilege boundary without shipping your code to someone else's cloud.
+
+### Two modes: rootless by default, dead-end-user when you need it
+
+The isolation foundation above — rootless daemon, gVisor, userns, deny-by-default
+egress, container hardening, ACL-gated filesystem — is **the same in both modes**.
+What differs is *who owns the Docker daemon* and whether ops cross a boundary:
+
+- **`operator-rootless` (default).** Rootless Docker runs as **your own user**; ops
+  are local subprocesses with no crossing. Best for single-operator dev boxes.
+  Caveat: if your operator account is a **sudoer**, a (rare, gVisor-fronted) escape
+  reaching the daemon owner could reach root — `sandbox doctor` flags this as an
+  informed-tradeoff **WARN (never a failure)**, with two remedies: run as a
+  dedicated non-sudo operator, or switch to `separate-user`.
+- **`separate-user` (opt-in hardened).** Rootless Docker runs as a **dedicated,
+  dead-end unprivileged user**; the orchestrator holds no Docker access and crosses
+  a privilege boundary (a root-owned dispatcher, per-op sudoers authorization) for
+  every op. For adversarial-agent and multi-tenant threat models.
+
+The mode is chosen at `sudo sandbox setup` time. Full detail:
+[`docs/privilege-boundary.md`](docs/privilege-boundary.md).
 
 ## Threat model
 
@@ -78,11 +108,13 @@ A security tool is only as good as the boundary it draws. Here is ours.
 **Defends against:**
 
 - An agent reading or exfiltrating the operator's host credentials, SSH keys,
-  cloud config, or unrelated project files — the sandbox runs as an
-  unprivileged user with no access to the operator's home or keys.
-- An agent escalating to host root through the orchestrator: the orchestrator
-  never executes Docker as the operator; the only path to the daemon is the
-  unprivileged boundary user.
+  cloud config, or unrelated project files — the daemon owner has no access to
+  the operator's home or keys, and the instance tree is ACL-gated.
+- An agent escalating to host root through the daemon: the Docker daemon is
+  **rootless in both modes**, so an escape that reaches it lands on an
+  unprivileged uid, not root. In `separate-user` mode the orchestrator
+  additionally never executes Docker as the operator — the only path to the
+  daemon is the dedicated, dead-end boundary user.
 - Uncontrolled network egress: egress is deny-by-default — each instance routes
   through an allowlisting proxy and a filtering DNS resolver, not the open
   internet.
@@ -92,7 +124,14 @@ A security tool is only as good as the boundary it draws. Here is ours.
 **Does NOT defend against** (known limitations — see [`SECURITY.md`](SECURITY.md)):
 
 - A container-escape via a host **kernel or container-runtime 0-day** — shared-kernel
-  containers are the isolation primitive here, not a hypervisor.
+  containers (even under gVisor) are the isolation primitive here, not a hypervisor.
+- In `operator-rootless` mode, a **sudoer daemon owner** reaching root after a
+  (rare, gVisor-fronted) escape — an informed-tradeoff **WARN**, not a failure;
+  remedied by a non-sudo operator or `separate-user` mode.
+- A trustworthy **view** of the sandbox while attached — `sandbox attach`
+  guarantees only that the session can't escalate back to your host, not that the
+  view is un-tampered (terminal-escape, tlog-replay, and typed-secret visibility
+  are documented residuals).
 - A **malicious or compromised operator**, or a host that is already compromised
   before setup.
 - **Dependency / supply-chain** compromise of what the agent installs *inside*
@@ -109,11 +148,14 @@ diagrams: [`docs/security-model.md`](docs/security-model.md).
 
 ## Requirements
 
-- A Linux host with **systemd** (`machinectl` must be available) and **Docker**.
+- A Linux host with **systemd** and **rootless Docker** (the opt-in
+  `separate-user` mode additionally requires `machinectl`/`systemd-run` for its
+  privilege crossing).
 - [`uv`](https://docs.astral.sh/uv/) for the Python toolchain. The project pins
   Python 3.14 via `.python-version`; always use `uv run` or the `make` targets.
-- One-time host preparation via `sudo sandbox setup`, which provisions the
-  unprivileged boundary user and the privilege-crossing configuration. See
+- One-time host preparation via `sudo sandbox setup`, which provisions rootless
+  Docker, the gVisor runtime, and — for `separate-user` mode — the dedicated
+  boundary user and privilege-crossing configuration. See
   [`docs/setup-guide.md`](docs/setup-guide.md) for the operator runbook and
   [`docs/setup.md`](docs/setup.md) for what it does under the hood.
 
@@ -123,7 +165,8 @@ currently exercised configuration rather than assuming your distro is covered.
 ## Quick start
 
 ```bash
-# 1. One-time host prep (provisions the unprivileged boundary user).
+# 1. One-time host prep (rootless Docker + gVisor; the dedicated boundary user
+#    is added only in the opt-in separate-user mode).
 sudo sandbox setup
 
 # 2. Scaffold an isolated sandbox for a project.
@@ -148,9 +191,10 @@ idea — the privilege boundary. The documentation is split by concern:
 
 - [docs/architecture.md](docs/architecture.md) — project overview and the
   `src/core/` module map.
-- [docs/privilege-boundary.md](docs/privilege-boundary.md) — the privilege
-  boundary itself: how `machinectl shell` crossings work and their PTY/PAM
-  consequences.
+- [docs/privilege-boundary.md](docs/privilege-boundary.md) — the two execution
+  modes and the privilege boundary itself: rootless-by-default, the opt-in
+  `separate-user` crossing (`sudo systemd-run --pipe` → root-owned dispatcher),
+  the 12-op dispatcher surface, and the PTY/PAM consequences.
 - [docs/dispatcher.md](docs/dispatcher.md) — the dispatcher op reference and how
   to add a new orchestrator-to-sandbox operation.
 - [docs/configuration.md](docs/configuration.md) — the per-host and per-instance

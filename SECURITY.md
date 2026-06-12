@@ -32,8 +32,10 @@ and an **untrusted agent**, and it defends against the agent:
 
 - reading or exfiltrating the operator's credentials, keys, cloud config, or
   unrelated project files;
-- escalating to host root through the orchestrator (the orchestrator never runs
-  Docker as the operator — the only path to the daemon is the unprivileged
+- escalating to host root through the daemon (the Docker daemon is **rootless in
+  both execution modes**, so an escape that reaches it lands on an unprivileged
+  uid; in the opt-in `separate-user` mode the orchestrator additionally never runs
+  Docker as the operator — the only path to the daemon is a dedicated, dead-end
   boundary user);
 - making uncontrolled network egress (egress is deny-by-default — an
   allowlisting proxy plus a filtering DNS resolver);
@@ -51,6 +53,23 @@ the current design; where there is a realistic path to closing it, a
   vulnerability is out of scope. If you need hardware-level isolation, use a
   microVM (Firecracker/Kata) or a dedicated host. *Revisit when:* a microVM
   backend is added.
+- **Sudoer daemon owner in `operator-rootless` mode.** The default mode runs the
+  rootless daemon as the operator's own user; if that account is a **sudoer**, a
+  (rare, gVisor-fronted) escape that reaches the daemon owner could `sudo` → root.
+  This is an **informed-tradeoff WARN, never a failure** — `sandbox doctor` flags
+  it with two named remedies: run as a dedicated **non-sudo** operator account, or
+  switch to the **`separate-user`** mode (whose daemon user is a dead-end account
+  with no sudo path). It is specific to `operator-rootless`; `separate-user` has no
+  equivalent exposure.
+- **A trustworthy *view* of the sandbox while attached.** `sandbox attach`
+  guarantees **non-escalation** (a session cannot be used to reach back into the
+  operator's host) — but **not** a trustworthy view of the sandbox, which is
+  unattainable at this layer because the ssh endpoint lives inside the plane the
+  agent controls. **Terminal escape sequences**, the **tlog-replay hazard**, and
+  **typed-secret visibility** (a secret typed during an attach session is visible
+  to the plane) are accepted, documented residuals — see
+  [`docs/security-model.md`](docs/security-model.md) § "Attach & the streaming
+  `fwd` op".
 - **Dependency / supply-chain compromise.** A poisoned package (PyPI / npm / Go
   modules), a backdoored base image, or a malicious OS package that the agent or
   the build installs *inside* the sandbox is not something the boundary inspects.
