@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project
 
-`sandbox-ai` is a deterministic, zero-trust orchestrator that provisions isolated AI agent sandboxes. The CLI (`sandbox`) wraps Docker Compose lifecycles but executes every Docker call across a privilege boundary into an unprivileged systemd user via `machinectl shell`.
+`sandbox-ai` is a deterministic, zero-trust orchestrator that provisions isolated AI agent sandboxes. The CLI (`sandbox`) wraps Docker Compose lifecycles on a rootless Docker daemon. It runs in two execution modes: the default **operator-rootless** (the daemon runs as the operator, ops are local subprocesses, no privilege crossing) and the opt-in hardened **separate-user** (the daemon is owned by a dedicated unprivileged user, and every Docker op crosses a privilege boundary into that user via a root-owned dispatcher — `sudo systemd-run --pipe`).
 
 ## Commands
 
@@ -40,10 +40,4 @@ The architecture documentation is fanned out across `docs/`. Read the relevant d
 
 ## OpenSpec workflow
 
-This repo uses an OpenSpec-driven change workflow under `openspec/`:
-
-- `openspec/specs/<capability>/` — current source-of-truth specs (one dir per capability, e.g. `cli-init`, `hydration-pipeline`, `instance-registry`).
-- `openspec/changes/<change-id>/` — in-flight change proposals with delta specs and tasks.
-- `openspec/changes/archive/` — completed changes.
-
-Use the `openspec-*` skills (`openspec-new-change`, `openspec-apply-change`, `openspec-verify-change`, `openspec-archive-change`, etc.) rather than editing artifacts by hand — or the `internal-tooling` skill, which wraps them with the full change-development lifecycle (explore → scope → draft → implement → archive → integrate) and owns `openspec/explorations/` (the exploration backlog, ongoing explorations, validation records, findings). When the user defers work during an OpenSpec / `internal-tooling` flow, log it via `flow-backlog add deferred …` (the `internal-tooling` skill — it lands in `openspec/explorations/backlog/deferred.md`) per the global rule.
+This repo tracks specs and changes under `openspec/`: `openspec/specs/<capability>/` holds the current source-of-truth specs (one dir per capability), `openspec/changes/<change-id>/` the in-flight change proposals (delta specs + tasks), and `openspec/changes/archive/` the completed ones. Prefer the `openspec-*` skills over editing those artifacts by hand.

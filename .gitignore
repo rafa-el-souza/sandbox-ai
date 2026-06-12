@@ -21,6 +21,7 @@ openspec/explorations/
 .agent/
 .venv/
 .claude/
+.claudeignore
 
 # Python
 __pycache__/
