@@ -80,15 +80,16 @@ runs as the operator, and ops are local subprocesses.
 ```mermaid
 flowchart TB
     subgraph Z0["Zone 0 — Operator / host · TRUSTED (account, keys, files)"]
-        subgraph Z1["Zone 1 — Orchestrator + rootless daemon · runs as the operator"]
-            ORCH["sandbox CLI (Python) + rootless dockerd (operator-owned)"]
-            subgraph Z3["Zone 3 — Containers / the agent · UNTRUSTED"]
-                AGENT["AI agent + workload — assumed hostile"]
+        subgraph Z1["Zone 1 — Orchestrator + rootless daemon (as operator)"]
+            ORCH["sandbox CLI (Python)<br/>+ rootless dockerd (operator-owned)"]
+            subgraph Z3["Zone 3 — Containers / agent · UNTRUSTED"]
+                AGENT["AI agent + workload<br/>(assumed hostile)"]
             end
         end
     end
-    Z3 -. gVisor + userns + deny-by-default egress .-> Z1
 ```
+
+*Containment is the message: the agent (Zone 3) sits inside Zone 1, held there by the mode-invariant foundation — gVisor + userns + deny-by-default egress (see §4–§5).*
 
 **`separate-user` (opt-in hardened):** a dedicated, dead-end boundary user owns the
 daemon; the orchestrator holds no Docker access and can only *ask* across the
@@ -107,7 +108,7 @@ flowchart TB
             end
         end
     end
-    Z1 -->|"privilege boundary: sudo systemd-run --pipe → root-owned dispatcher (per-op sudoers Cmnd_Spec)"| Z2
+    Z1 -->|"privilege boundary<br/>sudo systemd-run --pipe → root-owned dispatcher<br/>(per-op sudoers Cmnd_Spec)"| Z2
 ```
 
 - **Zone 0 (operator/host) — trusted by assumption.** A compromised host or a
