@@ -1,13 +1,30 @@
 # Privilege boundary (two modes)
 
-`sandbox-ai` runs the Docker daemon **rootless** in both of its execution modes —
-a container escape that reaches the daemon lands on an *unprivileged* uid, never
-host root. That rootless-daemon isolation is the load-bearing foundation and
-holds regardless of mode. The privilege *boundary* described in this document — a
-crossing into a dedicated, dead-end systemd user via a root-owned dispatcher — is
-an **increment on top of that foundation**, present only in the opt-in hardened
-mode. This document describes both modes and is explicit about which mechanism is
-the default.
+This document describes both execution modes and is explicit about which mechanism
+is the default. The isolation rests on two layers:
+
+- **Foundation (both modes).** `sandbox-ai` runs the Docker daemon **rootless** in
+  both of its execution modes — a container escape that reaches the daemon lands on
+  an *unprivileged* uid, never host root. That rootless-daemon isolation is the
+  load-bearing foundation and holds regardless of mode.
+- **Increment (hardened mode only).** The privilege *boundary* described in this
+  document — a crossing into a dedicated, dead-end systemd user via a root-owned
+  dispatcher — is an **increment on top of that foundation**, present only in the
+  opt-in hardened mode.
+
+## Contents
+
+- [The two execution modes](#the-two-execution-modes)
+  - [The operator-rootless tradeoff](#the-operator-rootless-tradeoff)
+- [The separate-user privilege boundary](#the-separate-user-privilege-boundary)
+  - [The dispatcher op surface — 12 ops](#the-dispatcher-op-surface--12-ops)
+- [Binary-location split (load-bearing trust boundary)](#binary-location-split-load-bearing-trust-boundary)
+- [Boundary primitives](#boundary-primitives)
+  - [Why `sudo systemd-run --pipe` for separate-user ops (not `machinectl shell`)](#why-sudo-systemd-run---pipe-for-separate-user-ops-not-machinectl-shell)
+  - [The `attach` ProxyCommand and the streaming `fwd` op](#the-attach-proxycommand-and-the-streaming-fwd-op)
+  - [Setuid exception — `sudo_as_operator(operator)`](#setuid-exception--sudo_as_operatoroperator)
+  - [PTY consequence (`machinectl_cmd` only)](#pty-consequence-machinectl_cmd-only)
+- [The privilege-boundary crossing sequence (separate-user only)](#the-privilege-boundary-crossing-sequence-separate-user-only)
 
 ## The two execution modes
 
@@ -33,17 +50,21 @@ the configured `docker_unprivileged_user`.
 
 ### The operator-rootless tradeoff
 
-Because the rootless daemon in `operator-rootless` is owned by the operator's own
-user, if that operator is a **sudoer**, a (rare, gVisor-fronted) container escape
-that reaches the daemon owner could `sudo` → root — re-enlarging the blast radius
-that the separate-user dead-end account would otherwise shrink. This is an
-**informed-tradeoff WARN, never a FAIL**: `sandbox doctor`'s `daemon_owner_sudo`
-check surfaces it with two named remedies — (a) run sandboxes as a dedicated
-**non-sudo** operator account, or (b) switch to **`separate-user`** mode.
+**The operator-as-sudoer blast-radius tradeoff.** Because the rootless daemon in
+`operator-rootless` is owned by the operator's own user, if that operator is a
+**sudoer**, a (rare, gVisor-fronted) container escape that reaches the daemon owner
+could `sudo` → root — re-enlarging the blast radius that the separate-user dead-end
+account would otherwise shrink. This is an **informed-tradeoff WARN, never a FAIL**:
+`sandbox doctor`'s `daemon_owner_sudo` check surfaces it with two named remedies:
+
+a. run sandboxes as a dedicated **non-sudo** operator account, or
+b. switch to **`separate-user`** mode.
+
 `separate-user` has no equivalent warning, because its daemon user is a dead-end
-account with no sudo path. (The escape is gated behind gVisor — it must be
-defeated first — so this is a tradeoff for hardened deployments to weigh, not a
-misconfiguration.)
+account with no sudo path.
+
+(The escape is gated behind gVisor — it must be defeated first — so this is a
+tradeoff for hardened deployments to weigh, not a misconfiguration.)
 
 ## The separate-user privilege boundary
 
@@ -83,12 +104,26 @@ orchestrator→sandbox crossing means adding an op to `core.dispatch` (see
 
 ### The dispatcher op surface — 12 ops
 
-`core.dispatch` accepts **exactly twelve** ops as the dispatcher's `argv[1]`:
-`auth-probe`, `compose-up`, `compose-down`, `compose-ps`, `compose-ls`,
-`docker-version`, `docker-info`, `docker-manifest-inspect`, `helper-chown-files`,
-`helper-mkdir-chown-dirs`, `preflight`, and `fwd`. **Eleven are *framed*** (they
-carry begin/exit recovery framing); **`fwd` alone is *streaming*** (it carries a
-raw byte stream and emits no framing). The surface is byte-faithful to the
+`core.dispatch` accepts **exactly twelve** ops as the dispatcher's `argv[1]`.
+**Eleven are *framed*** (they carry begin/exit recovery framing); **`fwd` alone is
+*streaming*** (it carries a raw byte stream and emits no framing).
+
+| Op | Framing |
+|---|---|
+| `auth-probe` | framed |
+| `compose-up` | framed |
+| `compose-down` | framed |
+| `compose-ps` | framed |
+| `compose-ls` | framed |
+| `docker-version` | framed |
+| `docker-info` | framed |
+| `docker-manifest-inspect` | framed |
+| `helper-chown-files` | framed |
+| `helper-mkdir-chown-dirs` | framed |
+| `preflight` | framed |
+| `fwd` | streaming |
+
+The surface is byte-faithful to the
 crossings it replaced — an enumeration of existing behavior, not a free-form
 passthrough. Arguments are validated *before* the crossing, and op verbs (e.g. the
 compose `up -d --build --wait` / `down` verb) are **hard-coded per op, never read
@@ -110,14 +145,20 @@ contributors MUST NOT move binaries between them without revisiting this design:
   invoked by other binaries, never typed by users), `chattr +i` after install (the
   cheap compensating control for the unavailable sudoers `Digest_Spec`).
 
-The split is not cosmetic: `pip` has no root, so a wheel-shipped dispatcher would
-land operator-writable and defeat the immutable-bit tamper model; a
-Python-interpreted entry point would expand the trust root to `/usr/bin/python3` +
-every imported stdlib module instead of one static-binary sha. "Root-owned" refers
-to *file ownership on disk*, not runtime privilege — the dispatcher still
-*executes* as the unprivileged `docker_unprivileged_user` (the crossing drops
-privilege before bash execs it). Moving the dispatcher next to the `sandbox` CLI
-breaks all three of those guarantees; revisit this design before any such change.
+The split is not cosmetic:
+
+- **`pip` has no root** — so a wheel-shipped dispatcher would land operator-writable
+  and defeat the immutable-bit tamper model.
+- **A Python entry point expands the trust root** — a Python-interpreted entry point
+  would expand the trust root to `/usr/bin/python3` + every imported stdlib module
+  instead of one static-binary sha.
+- **"Root-owned" = on-disk ownership, not runtime privilege** — "root-owned" refers
+  to *file ownership on disk*, not runtime privilege; the dispatcher still
+  *executes* as the unprivileged `docker_unprivileged_user` (the crossing drops
+  privilege before bash execs it).
+
+Moving the dispatcher next to the `sandbox` CLI breaks all three of those
+guarantees; revisit this design before any such change.
 
 ## Boundary primitives
 
@@ -149,15 +190,18 @@ and on interactive handoffs.
 
 **PAM-skip trade-off (`pipe_cmd`/`sudo_pipe_cmd`).** `systemd-run` does NOT invoke
 PAM, so policies on `pam_limits.conf` and similar do not apply to processes started
-via either pipe primitive. This is acceptable for our use case — programmatic
-byte-pipe transport over a session-bounded lifetime where the call site is a fixed,
-audited orchestrator path, not a user-typed command. `machinectl_cmd` retains the
-full PAM stack and remains the right choice for any path that should respect those
-policies. Moving SUDO-mode dispatcher-op crossings off `machinectl shell` (full
-PAM) onto `sudo systemd-run` (PAM-skip) is a stated, operator-blessed decision: an
-audited orchestrator path crossing as the unprivileged sandbox uid for a
-session-bounded op (no privilege gain), with per-op sudoers `Cmnd_Spec` authz of
-unchanged strength.
+via either pipe primitive.
+
+| Mechanism | PAM? | When used |
+|---|---|---|
+| `pipe_cmd` / `sudo_pipe_cmd` (`systemd-run`) | no — PAM-skip | programmatic byte-pipe transport over a session-bounded lifetime where the call site is a fixed, audited orchestrator path, not a user-typed command |
+| `machinectl_cmd` (`machinectl shell`) | yes — full PAM stack | the right choice for any path that should respect those policies |
+
+This is acceptable for our use case. Moving SUDO-mode dispatcher-op crossings off
+`machinectl shell` (full PAM) onto `sudo systemd-run` (PAM-skip) is a stated,
+operator-blessed decision: an audited orchestrator path crossing as the unprivileged
+sandbox uid for a session-bounded op (no privilege gain), with per-op sudoers
+`Cmnd_Spec` authz of unchanged strength.
 
 ### The `attach` ProxyCommand and the streaming `fwd` op
 
@@ -190,9 +234,10 @@ the SSH binary-frame path; `sudo_as_operator` is the setuid-only sibling.
 
 ### PTY consequence (`machinectl_cmd` only)
 
-The allocated PTY's `onlcr` line discipline rewrites every `\n` byte in either
-direction to `\r\n`. Captured stdout from `machinectl shell` therefore has CRLF
-line endings, even when the underlying command emits LF. Code that captures output
+**Strip the `\r` from `machinectl shell` output before using it.** The allocated
+PTY's `onlcr` line discipline rewrites every `\n` byte in either direction to
+`\r\n`. Captured stdout from `machinectl shell` therefore has CRLF line endings,
+even when the underlying command emits LF. Code that captures output
 (e.g. `docker inspect ... | head -1`) MUST strip the `\r` (`tr -d '\r'` or read in
 text mode) before using the value as a filename, IP, hostname, or argv element —
 passing a `<value>\r` to a downstream command silently fails. This is also why
@@ -219,7 +264,11 @@ sequenceDiagram
 
 The exit recovery is **dispatcher-emitted**, not orchestrator-injected: the
 crossing masks the inner `/bin/bash -c` exit, so the dispatcher frames its run with
-a random nonce (`__SANDBOX_BEGIN_<nonce>` … `__SANDBOX_EXIT_<nonce>_<code>`)
-emitted *after* sudo authorizes the crossing. Untrusted op output cannot forge the
-trailer because it cannot learn the nonce, which is emitted *before* the op runs.
+a random nonce (`__SANDBOX_BEGIN_<nonce>` … `__SANDBOX_EXIT_<nonce>_<code>`).
+
+- **The nonce is emitted before the op runs** — it is emitted *after* sudo
+  authorizes the crossing, but *before* the op runs.
+- **Op output cannot learn the nonce → cannot forge the trailer** — untrusted op
+  output cannot forge the trailer because it cannot learn the nonce.
+
 The streaming `fwd` op is the lone exception — it carries no framing (see above).

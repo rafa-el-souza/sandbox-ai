@@ -1,25 +1,24 @@
 # Security Model
 
-This document describes how `sandbox-ai` isolates an untrusted AI agent from the
-operator's host, in enough detail to *review* the claims — not just trust them.
-It is the deep-dive companion to the [README threat model](../README.md#threat-model)
-and the lean reporting policy in [SECURITY.md](../SECURITY.md). Where a subsystem
-has its own reference doc, this page links to it rather than duplicating.
+This document describes how `sandbox-ai` isolates an untrusted AI agent from the operator's host, in enough detail to *review* the claims — not just trust them. It is the deep-dive companion to the [README threat model](../README.md#threat-model) and the lean reporting policy in [SECURITY.md](../SECURITY.md), linking to each subsystem's own reference doc rather than duplicating it, and describing the implementation as it actually is — including its **deliberate limits**. A security tool that hides its limits is marketing; the limitations sections below are load-bearing.
 
-Everything here describes the implementation as it actually is, including its
-**deliberate limits**. A security tool that hides its limits is marketing; the
-limitations sections below are load-bearing.
+## Contents
+
+- [1. The foundation — mode-invariant isolation](#1-the-foundation--mode-invariant-isolation)
+- [2. The two execution modes & the trust model](#2-the-two-execution-modes--the-trust-model)
+- [3. The privilege boundary (`separate-user` mode)](#3-the-privilege-boundary-separate-user-mode)
+- [4. Network isolation (deny-by-default egress)](#4-network-isolation-deny-by-default-egress)
+- [5. Container hardening](#5-container-hardening)
+- [6. Filesystem & ACL isolation (host files)](#6-filesystem--acl-isolation-host-files)
+- [7. Secrets & state](#7-secrets--state)
+- [8. Threat model summary](#8-threat-model-summary)
+- [9. Where to read more](#9-where-to-read-more)
 
 ---
 
 ## 1. The foundation — mode-invariant isolation
 
-`sandbox-ai` has two execution modes (§2). Almost all of its isolation, however,
-is **mode-invariant**: it holds identically whether you run the default
-`operator-rootless` mode or the opt-in hardened `separate-user` mode. This common
-foundation is the load-bearing part of the design; the separate-owner privilege
-crossing of `separate-user` mode is an *increment* on top of it, not its
-substitute. Read this section as "what you get in **both** modes."
+Almost all of `sandbox-ai`'s isolation is **mode-invariant** — it holds identically in the default `operator-rootless` mode and the opt-in hardened `separate-user` mode (§2), so read this section as "what you get in **both** modes." **The separate-owner privilege crossing of `separate-user` mode is an *increment* on this load-bearing common foundation, not its substitute.**
 
 - **The Docker daemon is rootless in both modes.** A container escape that reaches
   the daemon lands on an **unprivileged uid**, never host root. (The one documented
@@ -125,17 +124,10 @@ flowchart TB
 
 ### The operator-rootless sudoer-owner tradeoff (honest does-NOT-defend)
 
-Because the rootless daemon in `operator-rootless` is owned by the operator's own
-user, if that operator is a **sudoer**, a (rare, gVisor-fronted) escape that
-reaches the daemon owner could `sudo` → root — re-enlarging the blast radius the
-`separate-user` dead-end account would otherwise shrink. This is an
-**informed-tradeoff WARN, never a FAIL**: `sandbox doctor`'s `daemon_owner_sudo`
-check surfaces it (gated to operator-rootless) with two named remedies — (a) run
-sandboxes as a dedicated **non-sudo** operator account, or (b) switch to
-**`separate-user`** mode. `separate-user` has **no** equivalent warning, because
-its daemon user is a dead-end account. The escape is gated behind gVisor (it must
-be defeated first), so this is a tradeoff for hardened deployments to weigh, not a
-misconfiguration.
+- **What it is.** Because the rootless daemon in `operator-rootless` is owned by the operator's own user, if that operator is a **sudoer**, a (rare, gVisor-fronted) escape that reaches the daemon owner could `sudo` → root — re-enlarging the blast radius the `separate-user` dead-end account would otherwise shrink.
+- **Why it is a WARN, not a FAIL.** `sandbox doctor`'s `daemon_owner_sudo` check surfaces it (gated to operator-rootless) as an **informed-tradeoff WARN, never a FAIL**. The escape is gated behind gVisor (it must be defeated first), so this is a tradeoff for hardened deployments to weigh, not a misconfiguration.
+- **The two named remedies.** (a) Run sandboxes as a dedicated **non-sudo** operator account, or (b) switch to **`separate-user`** mode.
+- **Why `separate-user` is exempt.** `separate-user` has **no** equivalent warning, because its daemon user is a dead-end account.
 
 ---
 
@@ -192,14 +184,10 @@ Key properties:
 
 ### 3.1 Attach & the streaming `fwd` op — residual exposure
 
-`sandbox attach` connects the operator to the running agent over SSH. In
-`separate-user` mode the ProxyCommand crosses via `sudo_pipe_cmd` carrying the
-streaming **`fwd`** op (`… dispatch fwd <inst> --project <P> --ip <IP>`, which
-execs `docker exec -i <project>-admin-1 /fwd <core_ipc_ip>:9999`); this lets the
-per-op sudoers `Cmnd_Spec` authorize it non-interactively, so separate-user attach
-is **headless-capable**. In `operator-rootless` mode attach uses the operator-local
-docker-exec ProxyCommand with no crossing. `fwd` carries a raw byte stream, so it
-emits no begin/exit framing and execs its target directly.
+`sandbox attach` connects the operator to the running agent over SSH; the ProxyCommand differs by mode.
+
+- **`separate-user`:** the ProxyCommand crosses via `sudo_pipe_cmd` carrying the streaming **`fwd`** op (`… dispatch fwd <inst> --project <P> --ip <IP>`, which execs `docker exec -i <project>-admin-1 /fwd <core_ipc_ip>:9999`); this lets the per-op sudoers `Cmnd_Spec` authorize it non-interactively, so separate-user attach is **headless-capable**. `fwd` carries a raw byte stream, so it emits no begin/exit framing and execs its target directly.
+- **`operator-rootless`:** attach uses the operator-local docker-exec ProxyCommand with no crossing.
 
 These attach residuals are **accepted, documented `does-NOT-defend` caveats — not
 fixed**:
@@ -273,14 +261,17 @@ flowchart TB
     squid -->|egress_net| net
 ```
 
-The five subnets: `isolated` (intra-sandbox), `core_proxy` (agent↔proxy),
-`dns` (resolver chain), `egress` (the only internet-facing network — proxy +
-CoreDNS only), `ipc` (admin↔core). All networks except `egress_net` are
-`internal: true` with IP-masquerade disabled; `egress_net` has IPv6 disabled.
-When enabled, the optional **Postgres** and **Firecrawl** services also sit on
-`isolated_net` (Firecrawl additionally on `core_proxy_net`/`dns_net`); like the
-agent, neither reaches `egress_net` — Firecrawl's own web fetches traverse the
-same authenticated proxy, restricted to safe methods.
+The five subnets (all `internal: true` with IP-masquerade disabled, except `egress` which is the only internet-facing network and has IPv6 disabled):
+
+| Subnet | Purpose | `internal: true`? | Attached services |
+|---|---|---|---|
+| `isolated` | intra-sandbox | yes | |
+| `core_proxy` | agent↔proxy | yes | |
+| `dns` | resolver chain | yes | |
+| `egress` | the only internet-facing network | no (IPv6 disabled) | proxy + CoreDNS only |
+| `ipc` | admin↔core | yes | |
+
+> **Optional services.** When enabled, the optional **Postgres** and **Firecrawl** services also sit on `isolated_net` (Firecrawl additionally on `core_proxy_net`/`dns_net`); like the agent, neither reaches `egress_net` — Firecrawl's own web fetches traverse the same authenticated proxy, restricted to safe methods.
 
 ### Egress proxy (squid)
 

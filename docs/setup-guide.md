@@ -4,16 +4,36 @@ Operator-facing walkthrough for `sudo sandbox setup` — the idempotent command 
 
 > Reference for the authoritative contract: `openspec/specs/sandbox-setup/spec.md`. Internal design rationale: `openspec/changes/sandbox-setup/design.md`. This guide is the operator-facing distillation.
 
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [First-time setup](#first-time-setup)
+- [Distro support tiers](#distro-support-tiers)
+- [Multi-operator hosts](#multi-operator-hosts)
+- [The `--update-runsc` lifecycle](#the---update-runsc-lifecycle)
+- [Production integrity posture](#production-integrity-posture)
+- [Manual uninstall recipe](#manual-uninstall-recipe)
+
 ## Prerequisites
 
 - A supported Linux distro (see [Distro support tiers](#distro-support-tiers)).
 - The `sandbox` CLI installed by the operator (`uv pip install sandbox-ai` or `uv tool install sandbox-ai`) — this lands on the operator's PATH.
 - `sudo` access (setup runs as root throughout).
 - Standard distro tooling on PATH: `sudo`, `machinectl`, `setfacl`, `getfacl`, `rsync`, `loginctl`, `useradd`, `usermod`, `groupadd`, `visudo`, `chattr`, `sysctl`, `tlog-rec`. L0 checks each and fails with a copy-pasteable, distro-conditional install command if any is missing (e.g. `tlog-rec`: `sudo apt install tlog` on Debian/Ubuntu, `sudo dnf install tlog` on Fedora/RHEL, `paru -S tlog` on Arch).
-- **Rootless Docker host-prep (varies by distro; not yet auto-checked).** L5 runs `dockerd-rootless-setuptool.sh install` as the unprivileged sandbox user, which has prerequisites L0 does **not** yet verify (a forthcoming change promotes these to early L0 checks — until then a missing one surfaces only as a mid-apply L5 failure). They must be reachable on a **system** PATH the sandbox user inherits — the crossing's PATH is the systemd default `/usr/*bin`, **not** any user's `~/bin`:
-  - **Debian/Ubuntu:** `sudo apt install docker-ce-rootless-extras uidmap` (`uidmap` supplies `newuidmap`/`newgidmap`; `docker-ce` brings the compose v2 plugin). On **Debian 13 (trixie)** `tlog` is not packaged — build it from source (`github.com/Scribery/tlog`: deps incl. `libutempter-dev`, then `autoreconf -i -f && ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var && make && sudo make install`); the `apt install tlog` hint above applies only to Ubuntu and Debian ≤12.
-  - **Fedora/RHEL:** `sudo dnf install docker-ce-rootless-extras` (`shadow-utils` supplies `newuidmap`/`newgidmap`).
-  - **Arch:** the `docker` package ships no system-PATH `dockerd-rootless-setuptool.sh` — install the upstream **static** docker + rootless-extras bundle (`download.docker.com/linux/static/stable/<arch>/`) into `/usr/local/bin`, plus `sudo pacman -S docker-compose slirp4netns fuse-overlayfs shadow`, and load `nf_tables` (`sudo modprobe nf_tables`; persist via `/etc/modules-load.d/`).
+
+**Rootless Docker host-prep is not yet auto-checked.** L5 runs `dockerd-rootless-setuptool.sh install` as the unprivileged sandbox user, which has prerequisites L0 does **not** yet verify (a forthcoming change promotes these to early L0 checks — until then a missing one surfaces only as a mid-apply L5 failure). They must be reachable on a **system** PATH the sandbox user inherits — the crossing's PATH is the systemd default `/usr/*bin`, **not** any user's `~/bin`.
+
+| Distro | Rootless-docker package | `newuidmap`/`newgidmap` source | `tlog` | Notes |
+|---|---|---|---|---|
+| Debian/Ubuntu | `sudo apt install docker-ce-rootless-extras uidmap` | `uidmap` | `sudo apt install tlog` (Ubuntu, Debian ≤12); Debian 13 (trixie): not packaged — build from source (see note) | `docker-ce` brings the compose v2 plugin. |
+| Fedora/RHEL | `sudo dnf install docker-ce-rootless-extras` | `shadow-utils` | `sudo dnf install tlog` | |
+| Arch | upstream **static** docker + rootless-extras bundle (`download.docker.com/linux/static/stable/<arch>/`) into `/usr/local/bin`, plus `sudo pacman -S docker-compose slirp4netns fuse-overlayfs shadow` | `shadow` | `paru -S tlog` | The `docker` package ships no system-PATH `dockerd-rootless-setuptool.sh`. Load `nf_tables` (`sudo modprobe nf_tables`; persist via `/etc/modules-load.d/`). |
+
+> **Note — Debian 13 (trixie) `tlog` build-from-source.** `tlog` is not packaged on trixie (the `apt install tlog` hint applies only to Ubuntu and Debian ≤12). Build it from source (`github.com/Scribery/tlog`; deps incl. `libutempter-dev`):
+>
+> ```
+> autoreconf -i -f && ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var && make && sudo make install
+> ```
 
 The `sandbox` CLI is **operator territory** (operator-owned, on PATH, typed directly). The dispatcher and runsc binaries setup installs are **setup territory** (`/usr/local/libexec/sandbox-ai/{dispatch,runsc}`, root-owned, not on PATH, `chattr +i`). Do not move binaries between territories — the split is a load-bearing trust boundary.
 
@@ -139,11 +159,14 @@ A future config setting (`[setup] auto_update_runsc = true`) for silent auto-upd
 
 The dispatcher/runsc tamper model layers from cheapest to strongest. One constraint is load-bearing: the sudoers `Digest_Spec` crypto pin is silently a no-op on Debian-family hosts, so the rendered sudoers rule deliberately contains no `Digest_Spec`. The compensating controls:
 
-- **`chattr +i`** (automatic, L6a/L6.5) — defense-in-depth against casual/automated tampering plus an audit signal. Root can clear the bit; this is not crypto tamper resistance.
-- **Doctor checks** — `dispatcher_sha_drift` (on-disk binary sha vs. the manifest's `compiled_sha512` + source-bundle sha; WARN on tamper or wheel-upgrade drift), `runsc_pinned_match` (on-disk runsc sha vs. the pin; WARN on drift), `setup_invariants` (owned-path/mode/ownership audit + machinectl-path stability + sudoers-rule content audit + sudo-version floor). All WARN, never FAIL.
-- **fapolicyd** (opt-in) — `sudo sandbox setup --enable-fapolicyd-integration` writes `/etc/fapolicyd/trust.d/sandbox-ai.trust` (one `<path> <size> <sha256>` line per managed binary, `# sandbox-ai managed` header) and runs `fapolicyd-cli --update`. Refuses with a distro install hint if fapolicyd or `/etc/fapolicyd/trust.d/` is absent; warns if fapolicyd is installed but not running.
-- **AIDE** (opt-in) — `sudo sandbox setup --enable-aide-integration` writes `/etc/aide/aide.conf.d/sandbox-ai.conf` (the `… dispatch NORMAL` / `… runsc NORMAL` snippet). Setup never runs `aide --init` (a 10+ minute filesystem walk); on first install with `/var/lib/aide/aide.db` absent it appends an `aide --init` prompt to the finalization summary. Schedule periodic `aide --check` runs yourself (e.g. a daily cron at off-peak hours).
-- **dm-verity / IMA-appraise** — operator-configured (kernel cmdline + boot config), beyond setup's reach. Setup does not bootstrap these.
+- **`chattr +i`** (automatic, L6a/L6.5) — defense-in-depth against casual/automated tampering, plus an audit signal. Root can clear the bit; not crypto tamper resistance.
+- **Doctor checks** — three checks, all WARN, never FAIL:
+  - `dispatcher_sha_drift` — on-disk binary sha vs. the manifest's `compiled_sha512` + source-bundle sha; WARN on tamper or wheel-upgrade drift.
+  - `runsc_pinned_match` — on-disk runsc sha vs. the pin; WARN on drift.
+  - `setup_invariants` — owned-path/mode/ownership audit + machinectl-path stability + sudoers-rule content audit + sudo-version floor.
+- **fapolicyd** (opt-in) — `sudo sandbox setup --enable-fapolicyd-integration` writes `/etc/fapolicyd/trust.d/sandbox-ai.trust` (one `<path> <size> <sha256>` line per managed binary, `# sandbox-ai managed` header), then runs `fapolicyd-cli --update`. Refuses with a distro install hint if fapolicyd or `/etc/fapolicyd/trust.d/` is absent; warns if installed but not running.
+- **AIDE** (opt-in) — `sudo sandbox setup --enable-aide-integration` writes `/etc/aide/aide.conf.d/sandbox-ai.conf` (the `… dispatch NORMAL` / `… runsc NORMAL` snippet). Never runs `aide --init` (a 10+ minute filesystem walk); when `/var/lib/aide/aide.db` is absent on first install it appends an `aide --init` prompt to the finalization summary. Schedule periodic `aide --check` runs yourself (e.g. a daily off-peak cron).
+- **dm-verity / IMA-appraise** — operator-configured (kernel cmdline + boot config), beyond setup's reach; setup does not bootstrap these.
 
 `sandbox doctor`'s `binary_integrity_posture` check probes dm-verity (`/proc/cmdline` + `dmsetup status`), IMA (`/sys/kernel/security/ima/policy`), fapolicyd (`systemctl is-active` + `fapolicyd-cli --check-status`), and AIDE (`which aide` + `/var/lib/aide/aide.db`), and reports structured state. It always PASSes (informational) — it detects and reports, it does not enforce or bootstrap.
 
