@@ -1,8 +1,6 @@
 # Per-instance sandbox state (generated at runtime)
 sandboxes/*/
 .state/
-.state/instances.json
-.state/ipam.json
 
 # Secrets — never commit
 .sandbox.env
@@ -13,7 +11,8 @@ sandbox-ai.toml
 .deprecated/
 temp/
 
-# Local-only exploration & backlog state (revisit when the repo goes public)
+# Maintainer-internal internal-tooling state — backlog, ongoing explorations,
+# validation records, findings, transcripts (not shipped to the public repo)
 openspec/explorations/
 
 # Tooling
@@ -26,7 +25,6 @@ openspec/explorations/
 # Python
 __pycache__/
 *.pyc
-/.venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
