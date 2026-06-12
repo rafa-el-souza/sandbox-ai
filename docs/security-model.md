@@ -247,11 +247,11 @@ touch the one network that reaches the internet.
 
 ```mermaid
 flowchart TB
-    agent["agent (core) container<br/>on isolated_net · core_proxy_net · ipc_net (all internal)<br/>NOT on egress_net — no direct internet path"]
-    opt["(optional) Postgres + Firecrawl<br/>also on isolated_net — neither on egress_net"]
-    dnsdist["dnsdist<br/>isolated + dns_net<br/>DNS-exfil: DROP if wire greater-than 65B or labels greater-than 7"]
-    coredns["CoreDNS<br/>dns_net + egress_net<br/>allowlist zones · DoT to Mullvad<br/>AAAA to NOERROR/NODATA (no address) · else NXDOMAIN"]
-    squid["squid proxy · core_proxy_net + egress_net<br/>deny-first ACL chain:<br/>source-IP bind · NCSA auth (bcrypt) · domain allowlist<br/>deny RFC1918/loopback/link-local/CGN/IP-literal · deny IPv6<br/>ports 80/443 only, CONNECT to 443 · write-deny on RO registries<br/>2 MB body · maxconn 50 · DEFAULT deny all"]
+    agent["agent (core) container<br/>internal nets only — no direct internet path"]
+    opt["(optional) Postgres + Firecrawl<br/>also internal-only — not on egress_net"]
+    dnsdist["dnsdist<br/>DNS-exfiltration guard"]
+    coredns["CoreDNS<br/>allowlist resolver · DoT upstream"]
+    squid["squid proxy<br/>authenticated, domain-allowlisted,<br/>deny-by-default egress"]
     net(("internet · IPv4 only"))
 
     agent -. shares isolated_net .- opt
@@ -261,6 +261,8 @@ flowchart TB
     coredns -->|egress_net| net
     squid -->|egress_net| net
 ```
+
+*Only the proxy and CoreDNS touch `egress_net` (the internet); the agent has no direct path out. Each node's full config is in the subnet table + the "Egress proxy" and "DNS chain" subsections below.*
 
 The five subnets (all `internal: true` with IP-masquerade disabled, except `egress` which is the only internet-facing network and has IPv6 disabled):
 
