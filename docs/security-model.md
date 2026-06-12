@@ -89,7 +89,7 @@ flowchart TB
     end
 ```
 
-*Containment is the message: the agent (Zone 3) sits inside Zone 1, held there by the mode-invariant foundation — gVisor + userns + deny-by-default egress (see §4–§5).*
+*No Zone 2 in this mode — the dedicated boundary user exists only in `separate-user` (next diagram), so `operator-rootless` jumps Zone 1 → Zone 3. Containment is the message: the agent (Zone 3) is held inside Zone 1 by the mode-invariant foundation — gVisor + userns + deny-by-default egress (§4–§5).*
 
 **`separate-user` (opt-in hardened):** a dedicated, dead-end boundary user owns the
 daemon; the orchestrator holds no Docker access and can only *ask* across the
