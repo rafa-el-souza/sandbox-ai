@@ -37,7 +37,7 @@ def ensure_registry_seed(home: Path) -> None:
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 # ─── S1: Directory Tree ──────────────────────────────────────────────────────
 
@@ -415,6 +415,111 @@ def prompt_secrets(
         )
 
     # Write back
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+# ─── S6 (non-interactive): flag-driven secret seeding ────────────────────────
+
+# Single source of truth for the required non-interactive secret set. Both the
+# resolution/validation (env + file) and the seeding derive from this tuple — do
+# NOT re-type the names elsewhere. FIRECRAWL_API_KEY is deliberately NOT a member:
+# a `--secrets-from-file` line with an unrecognized key is rejected.
+REQUIRED_INSTANCE_SECRETS: tuple[str, ...] = ("CORE_ANTHROPIC_API_KEY", "CORE_GITHUB_TOKEN")
+
+
+class SecretSeedingError(Exception):
+    """A `--secrets-from-env` / `--secrets-from-file` resolution refused before mutation.
+
+    Carries an operator-facing message naming exactly which required secrets are
+    missing, or which file key is unrecognized. The CLI translates this into a
+    red ``console.print`` + ``typer.Exit(1)``; the resolution itself stays pure
+    (no I/O side effects beyond reading the file) so it can run BEFORE any state
+    mutation.
+    """
+
+
+def resolve_secrets_from_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Resolve every required secret from a process-environment mapping.
+
+    Returns a new ``dict`` of all required secrets. Refuses (``SecretSeedingError``)
+    naming exactly which required secrets are absent or set to an empty value.
+    """
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for name in REQUIRED_INSTANCE_SECRETS:
+        value = env.get(name, "")
+        if value == "":
+            missing.append(name)
+        else:
+            resolved[name] = value
+    if missing:
+        raise SecretSeedingError(
+            "Cannot seed secrets from the environment: required secret(s) "
+            f"{missing} are unset or empty. Set them, or omit --secrets-from-env."
+        )
+    return resolved
+
+
+def parse_secrets_file(path: str) -> dict[str, str]:
+    """Parse a ``KEY=VALUE`` secrets file into the validated required-secret dict.
+
+    Format: one ``KEY=VALUE`` per line; a line whose first non-whitespace char is
+    ``#`` is a comment (ignored); blank lines ignored; no ``export `` prefix
+    accepted; every KEY MUST be a member of :data:`REQUIRED_INSTANCE_SECRETS`
+    (unrecognized key → refuse naming it); a required key absent OR with an empty
+    value → refuse naming it. File-not-found / unreadable → refuse (not traceback).
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError as exc:
+        raise SecretSeedingError(
+            f"Cannot read secrets file {path!r}: {exc.strerror or exc}."
+        ) from None
+
+    parsed: dict[str, str] = {}
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise SecretSeedingError(
+                f"Cannot parse secrets file {path!r}: line {lineno} is not a KEY=VALUE pair."
+            )
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        if key not in REQUIRED_INSTANCE_SECRETS:
+            raise SecretSeedingError(
+                f"Cannot seed secrets from {path!r}: unrecognized key {key!r} on line {lineno}. "
+                f"Allowed keys: {list(REQUIRED_INSTANCE_SECRETS)}."
+            )
+        parsed[key] = value.strip()
+
+    missing = [name for name in REQUIRED_INSTANCE_SECRETS if not parsed.get(name)]
+    if missing:
+        raise SecretSeedingError(
+            f"Cannot seed secrets from {path!r}: required secret(s) {missing} are "
+            "missing or empty in the file."
+        )
+    return {name: parsed[name] for name in REQUIRED_INSTANCE_SECRETS}
+
+
+def seed_secrets(env_path: str, secrets: Mapping[str, str]) -> None:
+    """Write resolved secret values into ``.sandbox.env``, replacing each ``KEY=""``.
+
+    Mirrors :func:`prompt_secrets`'s replacement form: each ``<NAME>=""`` slot is
+    replaced with ``<NAME>="<value>"``. Called at S6 in place of ``prompt_secrets``
+    when a secret-source flag was given (the values were already resolved+validated
+    before any state mutation).
+    """
+    with open(env_path, encoding="utf-8") as f:
+        content = f.read()
+    for secret_name, value in secrets.items():
+        content = content.replace(
+            f'{secret_name}=""',
+            f'{secret_name}="{value}"',
+        )
     with open(env_path, "w", encoding="utf-8") as f:
         f.write(content)
 

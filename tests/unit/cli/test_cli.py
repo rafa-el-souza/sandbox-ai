@@ -3301,6 +3301,252 @@ class TestInitNonTTY:
             assert result.exit_code == 0
 
 
+def _secret_seed_mock_config() -> InstanceConfig:
+    from core.hydration import InstanceConfig
+
+    return InstanceConfig.model_validate(
+        {
+            "instance": {"name": "newproject", "host_uid": "1000"},
+            "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/home/user/newproject"}},
+        }
+    )
+
+
+@contextlib.contextmanager
+def _secret_seed_scaffold_patches(
+    *, tty: bool = False
+) -> typing.Iterator[dict[str, MagicMock]]:
+    """Patch the full init scaffold surface for the secret-seeding tests.
+
+    Yields a dict of the named mocks so tests can assert on them. ``_stdin_is_tty``
+    defaults to non-TTY (CI shape); pass ``tty=True`` for the prompt-path assertions.
+    """
+    with (
+        patch("cli.main._detect_git_config", return_value=("", "")),
+        patch("cli.main.run_check_subset", return_value=[]),
+        patch("cli.main.subprocess.run", return_value=_crossed_ok()),
+        patch("cli.main._stdin_is_tty", return_value=tty),
+        patch("cli.main.create_instance_dirs") as mock_dirs,
+        patch("cli.main.write_sandbox_toml"),
+        patch("cli.main._load_config", return_value=_secret_seed_mock_config()),
+        patch("cli.main.create_env_file"),
+        patch("cli.main.apply_default_acls"),
+        patch("cli.main.seed_secrets") as mock_seed,
+        patch("cli.main.prompt_secrets") as mock_prompt,
+        patch("cli.main.write_initialized_sentinel"),
+    ):
+        yield {"dirs": mock_dirs, "seed": mock_seed, "prompt": mock_prompt}
+
+
+class TestInitSecretSeeding:
+    """D1: non-interactive secret seeding (`--secrets-from-env` / `--secrets-from-file`)."""
+
+    def test_secrets_from_env_missing_required_refuses_no_mutation(
+        self, runner: CliRunner
+    ) -> None:
+        """1.1 regression: --secrets-from-env with CORE_GITHUB_TOKEN unset refuses, no mutation."""
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "ak-123"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            _secret_seed_scaffold_patches() as mocks,
+        ):
+            os.environ.pop("CORE_GITHUB_TOKEN", None)
+            result = runner.invoke(app, ["init", "newproject", "--secrets-from-env"])
+        assert result.exit_code != 0, result.output
+        assert "CORE_GITHUB_TOKEN" in result.output
+        mocks["dirs"].assert_not_called()
+        mocks["seed"].assert_not_called()
+        mocks["prompt"].assert_not_called()
+
+    def test_secrets_from_env_populates_both(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "ak-123", "CORE_GITHUB_TOKEN": "gh-456"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            _secret_seed_scaffold_patches() as mocks,
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--secrets-from-env"])
+        assert result.exit_code == 0, result.output
+        mocks["seed"].assert_called_once()
+        assert mocks["seed"].call_args.args[1] == {
+            "CORE_ANTHROPIC_API_KEY": "ak-123",
+            "CORE_GITHUB_TOKEN": "gh-456",
+        }
+        mocks["prompt"].assert_not_called()
+
+    def test_secrets_from_file_populates_both(self, runner: CliRunner, tmp_path: Path) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text(
+            "# leading comment\n"
+            "\n"
+            'CORE_ANTHROPIC_API_KEY=ak-file\n'
+            "CORE_GITHUB_TOKEN=gh-file\n"
+        )
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code == 0, result.output
+        mocks["seed"].assert_called_once()
+        assert mocks["seed"].call_args.args[1] == {
+            "CORE_ANTHROPIC_API_KEY": "ak-file",
+            "CORE_GITHUB_TOKEN": "gh-file",
+        }
+        mocks["prompt"].assert_not_called()
+
+    def test_secrets_from_file_missing_key_refuses(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text('CORE_ANTHROPIC_API_KEY=ak-file\n')
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code != 0, result.output
+        assert "CORE_GITHUB_TOKEN" in result.output
+        mocks["dirs"].assert_not_called()
+
+    def test_secrets_from_file_unrecognized_key_refuses(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text(
+            'CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\nFIRECRAWL_API_KEY=fc\n'
+        )
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code != 0, result.output
+        assert "FIRECRAWL_API_KEY" in result.output
+        mocks["dirs"].assert_not_called()
+
+    def test_secrets_from_file_unreadable_refuses(self, runner: CliRunner, tmp_path: Path) -> None:
+        from cli.main import app
+
+        missing = tmp_path / "does-not-exist.env"
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app, ["init", "newproject", "--secrets-from-file", str(missing)]
+            )
+        assert result.exit_code != 0, result.output
+        mocks["dirs"].assert_not_called()
+
+    def test_both_flags_mutually_exclusive_no_mutation(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\n")
+        with _secret_seed_scaffold_patches() as mocks:
+            result = runner.invoke(
+                app,
+                ["init", "newproject", "--secrets-from-env", "--secrets-from-file", str(sfile)],
+            )
+        assert result.exit_code != 0, result.output
+        assert "mutually exclusive" in result.output
+        mocks["dirs"].assert_not_called()
+        mocks["seed"].assert_not_called()
+        mocks["prompt"].assert_not_called()
+
+    def test_no_flag_env_var_set_emits_hint_no_consume(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "leak-me"}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            _secret_seed_scaffold_patches() as mocks,
+        ):
+            os.environ.pop("CORE_GITHUB_TOKEN", None)
+            result = runner.invoke(app, ["init", "newproject"])
+        assert result.exit_code == 0, result.output
+        assert "CORE_ANTHROPIC_API_KEY" in result.output
+        assert "--secrets-from-env" in result.output
+        assert "leak-me" not in result.output  # names only, never values
+        # No-flag path leaves the existing prompt/stub seeding intact.
+        mocks["prompt"].assert_called_once()
+        mocks["seed"].assert_not_called()
+
+    def test_dry_run_reports_env_source_no_values(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        env = {"CORE_ANTHROPIC_API_KEY": "secret-value"}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("CORE_GITHUB_TOKEN", None)
+            with patch("cli.main._detect_git_config", return_value=("", "")):
+                result = runner.invoke(
+                    app, ["init", "newproject", "--dry-run", "--secrets-from-env"]
+                )
+        assert result.exit_code == 0, result.output
+        assert "environment variables" in result.output
+        assert "CORE_ANTHROPIC_API_KEY" in result.output
+        assert "CORE_GITHUB_TOKEN" in result.output  # flagged as currently unset
+        assert "secret-value" not in result.output  # never print values
+
+    def test_dry_run_reports_file_source(self, runner: CliRunner, tmp_path: Path) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\n")
+        with patch("cli.main._detect_git_config", return_value=("", "")):
+            result = runner.invoke(
+                app, ["init", "newproject", "--dry-run", "--secrets-from-file", str(sfile)]
+            )
+        assert result.exit_code == 0, result.output
+        assert "from file" in result.output
+        assert str(sfile) in result.output
+        assert "would fail" not in result.output
+
+    def test_dry_run_file_source_flags_would_fail(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from cli.main import app
+
+        sfile = tmp_path / "secrets.env"
+        sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\n")  # missing CORE_GITHUB_TOKEN
+        with patch("cli.main._detect_git_config", return_value=("", "")):
+            result = runner.invoke(
+                app, ["init", "newproject", "--dry-run", "--secrets-from-file", str(sfile)]
+            )
+        # Dry-run REPORTS (does not refuse) per the no-mutation contract.
+        assert result.exit_code == 0, result.output
+        assert "would fail" in result.output
+        assert "CORE_GITHUB_TOKEN" in result.output
+
+    def test_dry_run_no_flag_tty_reports_prompt(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "interactive prompt" in result.output
+
+    def test_dry_run_no_flag_non_tty_reports_stub(self, runner: CliRunner) -> None:
+        from cli.main import app
+
+        with (
+            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main._stdin_is_tty", return_value=False),
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "YOUR_<NAME>_HERE" in result.output
+
+
 class TestRequirePerUserStateInitialized:
     """Lifecycle commands fail with canonical error when state tree is uninitialized."""
 

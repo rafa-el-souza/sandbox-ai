@@ -10,12 +10,17 @@ from core.exceptions import SandboxExecutionError
 from core.host_config import ensure_per_user_state
 from core.scaffold import (
     INSTANCE_SUBDIRS,
+    REQUIRED_INSTANCE_SECRETS,
+    SecretSeedingError,
     WorkspaceSpec,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
     ensure_registry_seed,
+    parse_secrets_file,
     prompt_secrets,
+    resolve_secrets_from_env,
+    seed_secrets,
     write_initialized_sentinel,
     write_sandbox_toml,
 )
@@ -660,6 +665,101 @@ class TestPromptSecretsNonTTY:
         assert "CORE_FOO" in str(exc.value)
         # File contents must NOT have been stubbed to the canonical form.
         assert 'CORE_FOO="YOUR_CORE_FOO_HERE"' not in env_path.read_text()
+
+
+# ─── non-interactive secret seeding (D1) ─────────────────────────────────────
+
+
+class TestResolveSecretsFromEnv:
+    """`resolve_secrets_from_env` populate-or-refuse over the required set."""
+
+    def test_populates_all(self) -> None:
+        env = {"CORE_ANTHROPIC_API_KEY": "ak", "CORE_GITHUB_TOKEN": "gh", "OTHER": "x"}
+        assert resolve_secrets_from_env(env) == {
+            "CORE_ANTHROPIC_API_KEY": "ak",
+            "CORE_GITHUB_TOKEN": "gh",
+        }
+
+    def test_refuses_naming_missing(self) -> None:
+        env = {"CORE_ANTHROPIC_API_KEY": "ak"}
+        with pytest.raises(SecretSeedingError) as exc:
+            resolve_secrets_from_env(env)
+        assert "CORE_GITHUB_TOKEN" in str(exc.value)
+
+    def test_refuses_on_empty_value(self) -> None:
+        env = {"CORE_ANTHROPIC_API_KEY": "ak", "CORE_GITHUB_TOKEN": ""}
+        with pytest.raises(SecretSeedingError) as exc:
+            resolve_secrets_from_env(env)
+        assert "CORE_GITHUB_TOKEN" in str(exc.value)
+
+
+class TestParseSecretsFile:
+    """`parse_secrets_file` format + validation."""
+
+    def test_populates_with_comment_and_blank(self, tmp_path: Path) -> None:
+        f = tmp_path / "s.env"
+        f.write_text(
+            "# a comment\n\n  # indented comment\n"
+            "CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\n"
+        )
+        assert parse_secrets_file(str(f)) == {
+            "CORE_ANTHROPIC_API_KEY": "ak",
+            "CORE_GITHUB_TOKEN": "gh",
+        }
+
+    def test_missing_key_refuses(self, tmp_path: Path) -> None:
+        f = tmp_path / "s.env"
+        f.write_text("CORE_ANTHROPIC_API_KEY=ak\n")
+        with pytest.raises(SecretSeedingError) as exc:
+            parse_secrets_file(str(f))
+        assert "CORE_GITHUB_TOKEN" in str(exc.value)
+
+    def test_empty_value_refuses(self, tmp_path: Path) -> None:
+        f = tmp_path / "s.env"
+        f.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=\n")
+        with pytest.raises(SecretSeedingError) as exc:
+            parse_secrets_file(str(f))
+        assert "CORE_GITHUB_TOKEN" in str(exc.value)
+
+    def test_unrecognized_key_refuses(self, tmp_path: Path) -> None:
+        f = tmp_path / "s.env"
+        f.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\nFIRECRAWL_API_KEY=fc\n")
+        with pytest.raises(SecretSeedingError) as exc:
+            parse_secrets_file(str(f))
+        assert "FIRECRAWL_API_KEY" in str(exc.value)
+
+    def test_malformed_line_refuses(self, tmp_path: Path) -> None:
+        f = tmp_path / "s.env"
+        f.write_text("CORE_ANTHROPIC_API_KEY=ak\nnot_a_pair\n")
+        with pytest.raises(SecretSeedingError) as exc:
+            parse_secrets_file(str(f))
+        assert "KEY=VALUE" in str(exc.value)
+
+    def test_unreadable_file_refuses(self, tmp_path: Path) -> None:
+        missing = tmp_path / "absent.env"
+        with pytest.raises(SecretSeedingError) as exc:
+            parse_secrets_file(str(missing))
+        assert str(missing) in str(exc.value)
+
+
+class TestSeedSecrets:
+    """`seed_secrets` replaces each canonical `<NAME>=""` slot."""
+
+    def test_replaces_slots(self, tmp_path: Path) -> None:
+        env_path = tmp_path / ".sandbox.env"
+        env_path.write_text('CORE_ANTHROPIC_API_KEY=""\nCORE_GITHUB_TOKEN=""\nPG_PASSWORD="x"\n')
+        seed_secrets(
+            str(env_path),
+            {"CORE_ANTHROPIC_API_KEY": "ak", "CORE_GITHUB_TOKEN": "gh"},
+        )
+        text = env_path.read_text()
+        assert 'CORE_ANTHROPIC_API_KEY="ak"' in text
+        assert 'CORE_GITHUB_TOKEN="gh"' in text
+        assert 'PG_PASSWORD="x"' in text
+
+
+def test_required_instance_secrets_constant() -> None:
+    assert REQUIRED_INSTANCE_SECRETS == ("CORE_ANTHROPIC_API_KEY", "CORE_GITHUB_TOKEN")
 
 
 # ─── ensure_registry_seed ────────────────────────────────────────────────────
