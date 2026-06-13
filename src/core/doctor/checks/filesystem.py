@@ -9,9 +9,10 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core import dispatch
-from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
+from core.doctor.types import BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
@@ -19,6 +20,9 @@ from core.host_config import (
     minimal_host_config,
     sandbox_ai_home,
 )
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 _ACL_PROBE_FAILURES: tuple[type[BaseException], ...] = (subprocess.CalledProcessError, OSError)
 
@@ -37,7 +41,7 @@ def check_setfacl(user: str, distro: str | None) -> CheckResult:
         status="fail",
         name="setfacl",
         detail="setfacl not found on PATH",
-        remediation=get_install_cmd(distro, _BINARY_PACKAGES["setfacl"]),
+        remediation=get_install_cmd(distro, BINARY_PACKAGES["setfacl"]),
     )
 
 
@@ -249,7 +253,7 @@ def _no_sandbox_running(user: str, mode: DockerExecutionMode) -> bool:
     if not outcome.ok:
         return False
     try:
-        projects = json.loads(outcome.stdout.strip() or "[]")
+        projects: JsonValue = json.loads(outcome.stdout.strip() or "[]")
     except json.JSONDecodeError:
         return False
     return isinstance(projects, list) and len(projects) == 0

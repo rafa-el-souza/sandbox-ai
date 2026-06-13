@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from core import setup_state
+from core.exceptions import SandboxExecutionError
 from core.host_config import DockerExecutionMode
 
 
@@ -86,6 +87,24 @@ def test_write_mode_atomic_cleanup_on_failure(
     # No stray temp files left behind in the marker directory.
     leftovers = list(marker.parent.glob(".setup-state-*.tmp"))
     assert leftovers == []
+
+
+def test_write_mode_non_dict_marker_fails_closed(marker: Path) -> None:
+    """A malformed (non-object) root marker is refused, never silently overwritten."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("[1, 2, 3]")
+    with pytest.raises(SandboxExecutionError, match="not a JSON object"):
+        setup_state.write_mode("alice", DockerExecutionMode.SEPARATE_USER)
+    # The malformed marker is left untouched (not overwritten).
+    assert marker.read_text() == "[1, 2, 3]"
+
+
+def test_write_mode_non_dict_operators_field_fails_closed(marker: Path) -> None:
+    """A marker whose 'operators' field is not an object is refused fail-closed."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"operators": ["not", "a", "dict"]}))
+    with pytest.raises(SandboxExecutionError, match="non-object 'operators' field"):
+        setup_state.write_mode("alice", DockerExecutionMode.SEPARATE_USER)
 
 
 # ── resolve_execution_mode (runtime authority, D11) + write_mode_root_owned ──

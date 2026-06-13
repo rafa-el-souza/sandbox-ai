@@ -14,12 +14,12 @@ from typing import Any
 from unittest.mock import mock_open, patch
 
 from core.exceptions import SandboxExecutionError
-from core.setup.l6_daemon_json import _RESERVED_RUNTIME_KEY
+from core.setup.l6_daemon_json import RESERVED_RUNTIME_KEY
 
 # The runtime is registered under the reserved key "sandbox-ai-runsc" (F-024 —
 # the doctor previously looked up the wrong literal "runsc"; these fixtures had
 # encoded the same bug). Single-sourced from L6 so the test and the check agree.
-_RUNSC = _RESERVED_RUNTIME_KEY
+_RUNSC = RESERVED_RUNTIME_KEY
 
 
 def _ok(stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -138,7 +138,7 @@ class TestTlogBinary:
 
     def test_check_tlog_absent(self) -> None:
         from core.doctor import check_tlog
-        from core.doctor.types import _BINARY_PACKAGES
+        from core.doctor.types import BINARY_PACKAGES
 
         with patch("shutil.which", return_value=None):
             result = check_tlog("sandbox", "debian")
@@ -146,7 +146,7 @@ class TestTlogBinary:
             assert result.name == "tlog"
             assert result.detail == "tlog-rec not found on PATH"
             assert result.remediation is not None
-            assert _BINARY_PACKAGES["tlog"] in result.remediation
+            assert BINARY_PACKAGES["tlog"] in result.remediation
 
 
 class TestUserAndSystemdChecks:
@@ -386,7 +386,7 @@ class TestRunscJsonDecodeError:
 
 class TestCheckRunscRuntimeArgs:
     def test_expected_arg_present_passes_extra_args_ok(self, monkeypatch: Any) -> None:
-        # Expected args are single-sourced from l6._EXPECTED_RUNTIME
+        # Expected args are single-sourced from l6.EXPECTED_RUNTIME
         # (["--oci-seccomp", "--ignore-cgroups"]); an extra --debug-log on disk is
         # fine — only the expected set must be present.
         from core.doctor import check_runsc_runtimeargs
@@ -434,7 +434,7 @@ class TestCheckRunscRuntimeArgs:
         assert "--oci-seccomp" in result.detail
 
     def test_debug_log_not_expected_default_set_passes(self, monkeypatch: Any) -> None:
-        # --debug-log is NOT in l6._EXPECTED_RUNTIME (it is a deferred opt-in), so
+        # --debug-log is NOT in l6.EXPECTED_RUNTIME (it is a deferred opt-in), so
         # the default L6 config (--oci-seccomp + --ignore-cgroups) satisfies the
         # check (no false "Missing --debug-log" WARN — the F-024-pattern single-source fix).
         from core.doctor import check_runsc_runtimeargs

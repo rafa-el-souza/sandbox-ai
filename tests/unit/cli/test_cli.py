@@ -2392,7 +2392,7 @@ class TestComposeDownDirect:
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
             _compose_down("sandbox", self._config(), volumes=False)
-            (op, args, host_config), kwargs = mock_invoke.call_args
+            (op, args, host_config), _ = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t"]
             assert "--volumes" not in args
@@ -2405,7 +2405,7 @@ class TestComposeDownDirect:
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
             _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.SUDO)
-            (op, args, host_config), kwargs = mock_invoke.call_args
+            (op, args, host_config), _ = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t", "--volumes"]
             assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
@@ -2494,7 +2494,7 @@ class TestInitScaffoldDirect:
         )
 
         with (
-            patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
+            patch("cli.main.detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs") as mock_dirs,
@@ -2549,7 +2549,7 @@ class TestInitScaffoldDirect:
         )
 
         with (
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
@@ -2651,7 +2651,7 @@ class TestInitFirecrawl:
         )
 
         with (
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
@@ -3020,7 +3020,7 @@ class TestInitHappyPath:
         )
 
         with (
-            patch("cli.main._detect_git_config", return_value=("Jane", "j@e.com")),
+            patch("cli.main.detect_git_config", return_value=("Jane", "j@e.com")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
@@ -3052,7 +3052,7 @@ class TestInitPerUserTreeCreation:
         mock_config: object,
     ) -> list[typing.Any]:
         return [
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch(
                 "cli.main.subprocess.run",
@@ -3197,7 +3197,7 @@ class TestInitDryRun:
         """init --dry-run does not create any files or registry entries."""
         from cli.main import app
 
-        with patch("cli.main._detect_git_config", return_value=("", "")):
+        with patch("cli.main.detect_git_config", return_value=("", "")):
             result = runner.invoke(app, ["init", "newproject", "--dry-run"])
             assert result.exit_code == 0
 
@@ -3287,7 +3287,7 @@ class TestInitNonTTY:
         )
 
         with (
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.create_instance_dirs"),
@@ -3316,14 +3316,14 @@ def _secret_seed_mock_config() -> InstanceConfig:
 @contextlib.contextmanager
 def _secret_seed_scaffold_patches(
     *, tty: bool = False
-) -> typing.Iterator[dict[str, MagicMock]]:
+) -> typing.Generator[dict[str, MagicMock]]:
     """Patch the full init scaffold surface for the secret-seeding tests.
 
     Yields a dict of the named mocks so tests can assert on them. ``_stdin_is_tty``
     defaults to non-TTY (CI shape); pass ``tty=True`` for the prompt-path assertions.
     """
     with (
-        patch("cli.main._detect_git_config", return_value=("", "")),
+        patch("cli.main.detect_git_config", return_value=("", "")),
         patch("cli.main.run_check_subset", return_value=[]),
         patch("cli.main.subprocess.run", return_value=_crossed_ok()),
         patch("cli.main._stdin_is_tty", return_value=tty),
@@ -3485,7 +3485,7 @@ class TestInitSecretSeeding:
         env = {"CORE_ANTHROPIC_API_KEY": "secret-value"}
         with patch.dict(os.environ, env, clear=False):
             os.environ.pop("CORE_GITHUB_TOKEN", None)
-            with patch("cli.main._detect_git_config", return_value=("", "")):
+            with patch("cli.main.detect_git_config", return_value=("", "")):
                 result = runner.invoke(
                     app, ["init", "newproject", "--dry-run", "--secrets-from-env"]
                 )
@@ -3500,7 +3500,7 @@ class TestInitSecretSeeding:
 
         sfile = tmp_path / "secrets.env"
         sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\nCORE_GITHUB_TOKEN=gh\n")
-        with patch("cli.main._detect_git_config", return_value=("", "")):
+        with patch("cli.main.detect_git_config", return_value=("", "")):
             result = runner.invoke(
                 app, ["init", "newproject", "--dry-run", "--secrets-from-file", str(sfile)]
             )
@@ -3516,7 +3516,7 @@ class TestInitSecretSeeding:
 
         sfile = tmp_path / "secrets.env"
         sfile.write_text("CORE_ANTHROPIC_API_KEY=ak\n")  # missing CORE_GITHUB_TOKEN
-        with patch("cli.main._detect_git_config", return_value=("", "")):
+        with patch("cli.main.detect_git_config", return_value=("", "")):
             result = runner.invoke(
                 app, ["init", "newproject", "--dry-run", "--secrets-from-file", str(sfile)]
             )
@@ -3529,7 +3529,7 @@ class TestInitSecretSeeding:
         from cli.main import app
 
         with (
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main._stdin_is_tty", return_value=True),
         ):
             result = runner.invoke(app, ["init", "newproject", "--dry-run"])
@@ -3540,7 +3540,7 @@ class TestInitSecretSeeding:
         from cli.main import app
 
         with (
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main._stdin_is_tty", return_value=False),
         ):
             result = runner.invoke(app, ["init", "newproject", "--dry-run"])
@@ -3755,7 +3755,7 @@ class TestInitDryRunNoConfigFallback:
         from cli.main import app
 
         with (
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
         ):
             result = runner.invoke(app, ["init", "newproject", "--dry-run"])
@@ -3811,7 +3811,7 @@ class TestInitHostConfigResolution:
         with (
             patch("cli.main.HostConfig.from_toml", return_value=mock_project_config),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
@@ -3871,7 +3871,7 @@ class TestInitHostConfigResolution:
             patch("cli.main._stdin_is_tty", return_value=True),
             patch("cli.main.typer.prompt", side_effect=["sandbox-user", "sudo"]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
@@ -3921,7 +3921,7 @@ class TestInitHostConfigResolution:
             # First prompt returns empty → re-prompt; second is non-empty user; third is auth.
             patch("cli.main.typer.prompt", side_effect=["", "sandbox", "sudo"]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
@@ -3988,7 +3988,7 @@ class TestInitHostConfigResolution:
             ),
             patch("cli.main.typer.prompt") as mock_prompt,
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.create_instance_dirs"),
             patch("cli.main.write_sandbox_toml"),
@@ -4057,7 +4057,7 @@ class TestInitAuthProbe:
 
         with (
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
@@ -4132,7 +4132,7 @@ class TestInitAuthProbe:
                 side_effect=ModeMarkerMissing("no marker"),
             ),
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
             patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
@@ -4179,7 +4179,7 @@ class TestInitAuthProbe:
                 return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
             ),
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
-            patch("cli.main._detect_git_config", return_value=("", "")),
+            patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]) as mock_subset,
             patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
             patch("cli.main.create_instance_dirs"),
@@ -5196,6 +5196,8 @@ class TestACLPlanAsymmetry:
         )
         assert match is not None, "docker/core/entrypoint.sh missing from EXEC_FILE_RECIPES"
         parent, files, consumer_uid, mode = match
+        assert parent == "docker/core"
+        assert files == ("entrypoint.sh",)
         assert consumer_uid == 1000
         assert mode == 0o500, f"entrypoint mode must be 0500 owner-only; got 0o{mode:03o}"
         # Confirm executable-script kind is NOT duplicated in RO_FILE_RECIPES.

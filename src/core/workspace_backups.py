@@ -38,6 +38,8 @@ from core.workspace_copy import COPY_DEFAULT_EXCLUDES, scan_unsafe_symlinks
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from core.json_types import JsonValue
+
 SCHEMA_VERSION = 1
 TIMESTAMP_FORMAT = "%Y-%m-%d-%H-%M-%S"
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$")
@@ -64,6 +66,16 @@ class BackupSpecNotFoundError(BackupError):
     """A spec resolves to zero candidates."""
 
 
+def _empty_metadata() -> dict[str, JsonValue]:
+    """Typed empty-dict factory for :attr:`BackupInfo.metadata`.
+
+    A bare ``default_factory=dict`` infers ``dict[Unknown, Unknown]``, which
+    cannot reconcile with the declared ``dict[str, JsonValue]``; this names the
+    concrete element type without changing the runtime default (still ``{}``).
+    """
+    return {}
+
+
 @dataclass(frozen=True)
 class BackupInfo:
     """Locator + parsed metadata for an existing backup tree."""
@@ -73,7 +85,7 @@ class BackupInfo:
     source_workspace: str
     timestamp: str  # YYYY-MM-DD-HH-MM-SS (UTC)
     size_bytes: int
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, JsonValue] = field(default_factory=_empty_metadata)
 
 
 @dataclass(frozen=True)
@@ -126,7 +138,7 @@ def rsync_supports_xattrs() -> bool:
     return has_xattrs
 
 
-def _reset_rsync_caches() -> None:
+def reset_rsync_caches() -> None:
     """Test seam: clear the rsync probe caches so a monkeypatched ``Executor``
     is exercised on the next call."""
     global _xattrs_supported_cache, _rsync_version_cache
@@ -378,11 +390,15 @@ def create_backup(
     )
 
 
-def _read_backup_info(directory: Path) -> dict[str, Any]:
+def _read_backup_info(directory: Path) -> dict[str, JsonValue]:
     info_path = directory / BACKUP_INFO_FILENAME
     try:
         with open(info_path, encoding="utf-8") as f:
-            data = json.load(f)
+            # Name the parsed tree ``JsonValue`` so the ``isinstance(data, dict)``
+            # gate narrows to a concrete ``dict[str, JsonValue]`` (JSON object
+            # keys are always ``str``); a non-dict/unreadable file routes to the
+            # existing empty-dict fallback unchanged.
+            data: JsonValue = json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}

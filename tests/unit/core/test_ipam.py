@@ -127,7 +127,7 @@ class TestDeriveSubnets:
     def test_base_index_max_valid(self) -> None:
         """base_index=7986 → g=39930: verify correct subnet derivation."""
         g = 7986 * 5
-        expected = []
+        expected: list[str] = []
         for offset in range(5):
             gn = g + offset
             expected.append(f"10.{100 + gn // 256}.{gn % 256}.0/24")

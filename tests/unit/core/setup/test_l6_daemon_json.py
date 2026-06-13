@@ -131,7 +131,7 @@ def test_probe_already_correct(
     daemon_json: Path, registered: None, ctx: SetupContext
 ) -> None:
     """File deep-equal AND docker has loaded the runtime → ALREADY_CORRECT."""
-    _write(daemon_json, {"runtimes": {l6._RESERVED_RUNTIME_KEY: l6._EXPECTED_RUNTIME}})
+    _write(daemon_json, {"runtimes": {l6.RESERVED_RUNTIME_KEY: l6.EXPECTED_RUNTIME}})
     result, detail = l6.PHASE.probe(ctx)
     assert result == PhaseResult.ALREADY_CORRECT
     assert "loaded by docker" in detail
@@ -141,7 +141,7 @@ def test_probe_drift_when_file_correct_but_runtime_not_loaded(
     daemon_json: Path, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """F-023: file carries the key but docker has not loaded it → DRIFT (restart)."""
-    _write(daemon_json, {"runtimes": {l6._RESERVED_RUNTIME_KEY: l6._EXPECTED_RUNTIME}})
+    _write(daemon_json, {"runtimes": {l6.RESERVED_RUNTIME_KEY: l6.EXPECTED_RUNTIME}})
     monkeypatch.setattr(l6, "_runtime_registered", lambda _hc: False)
     result, detail = l6.PHASE.probe(ctx)
     assert result == PhaseResult.DRIFT
@@ -153,7 +153,7 @@ def test_probe_drift_when_value_differs(
 ) -> None:
     _write(
         daemon_json,
-        {"runtimes": {l6._RESERVED_RUNTIME_KEY: {"path": "/old/runsc"}}},
+        {"runtimes": {l6.RESERVED_RUNTIME_KEY: {"path": "/old/runsc"}}},
     )
     result, detail = l6.PHASE.probe(ctx)
     assert result == PhaseResult.DRIFT
@@ -197,7 +197,7 @@ def test_act_creates_and_merges_preserving_operator_runtimes(
     detail = l6.PHASE.act(ctx)
     doc = json.loads(daemon_json.read_text())
     assert doc["runtimes"]["op-runtime"] == {"path": "/usr/bin/op"}
-    assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
+    assert doc["runtimes"][l6.RESERVED_RUNTIME_KEY] == l6.EXPECTED_RUNTIME
     assert doc["debug"] is True
     assert "ensured" in detail
     assert any("restart --no-block docker" in r for r in restarts)
@@ -267,7 +267,7 @@ def test_act_fresh_file_when_absent(
 ) -> None:
     l6.PHASE.act(ctx)
     doc = json.loads(daemon_json.read_text())
-    assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
+    assert doc["runtimes"][l6.RESERVED_RUNTIME_KEY] == l6.EXPECTED_RUNTIME
 
 
 def test_act_always_restarts_even_when_byte_identical(
@@ -282,7 +282,7 @@ def test_act_always_restarts_even_when_byte_identical(
     """
     canonical = (
         json.dumps(
-            {"runtimes": {l6._RESERVED_RUNTIME_KEY: l6._EXPECTED_RUNTIME}},
+            {"runtimes": {l6.RESERVED_RUNTIME_KEY: l6.EXPECTED_RUNTIME}},
             indent=2,
             sort_keys=True,
         )
@@ -333,7 +333,7 @@ def test_act_replaces_non_dict_runtimes(
     _write(daemon_json, {"runtimes": "not-a-dict"})
     l6.PHASE.act(ctx)
     doc = json.loads(daemon_json.read_text())
-    assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
+    assert doc["runtimes"][l6.RESERVED_RUNTIME_KEY] == l6.EXPECTED_RUNTIME
 
 
 def test_act_handles_empty_file(
@@ -343,7 +343,7 @@ def test_act_handles_empty_file(
     daemon_json.write_text("   \n", encoding="utf-8")
     l6.PHASE.act(ctx)
     doc = json.loads(daemon_json.read_text())
-    assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
+    assert doc["runtimes"][l6.RESERVED_RUNTIME_KEY] == l6.EXPECTED_RUNTIME
 
 
 def test_reverify_true_after_act(
@@ -362,7 +362,7 @@ def test_reverify_false_when_absent(
 def test_reverify_false_when_value_wrong(
     daemon_json: Path, ctx: SetupContext
 ) -> None:
-    _write(daemon_json, {"runtimes": {l6._RESERVED_RUNTIME_KEY: {"path": "/x"}}})
+    _write(daemon_json, {"runtimes": {l6.RESERVED_RUNTIME_KEY: {"path": "/x"}}})
     assert l6.PHASE.reverify(ctx) is False
 
 
@@ -370,7 +370,7 @@ def test_reverify_false_when_runtime_not_loaded(
     daemon_json: Path, ctx: SetupContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """F-023: file deep-equal but docker has not loaded the runtime → False."""
-    _write(daemon_json, {"runtimes": {l6._RESERVED_RUNTIME_KEY: l6._EXPECTED_RUNTIME}})
+    _write(daemon_json, {"runtimes": {l6.RESERVED_RUNTIME_KEY: l6.EXPECTED_RUNTIME}})
     monkeypatch.setattr(l6, "_runtime_registered", lambda _hc: False)
     assert l6.PHASE.reverify(ctx) is False
 
@@ -399,7 +399,7 @@ def test_content_aware(
 ) -> None:
     _write(
         daemon_json,
-        {"runtimes": {l6._RESERVED_RUNTIME_KEY: l6._EXPECTED_RUNTIME}},
+        {"runtimes": {l6.RESERVED_RUNTIME_KEY: l6.EXPECTED_RUNTIME}},
     )
 
     def make_stale() -> None:
@@ -407,7 +407,7 @@ def test_content_aware(
         # is now stale content. Probe must flip to DRIFT, not stay correct.
         _write(
             daemon_json,
-            {"runtimes": {l6._RESERVED_RUNTIME_KEY: {"path": "/old", "runtimeArgs": []}}},
+            {"runtimes": {l6.RESERVED_RUNTIME_KEY: {"path": "/old", "runtimeArgs": []}}},
         )
 
     assert_phase_content_aware(l6.PHASE, ctx, make_stale)
@@ -494,7 +494,7 @@ def test_act_operator_rootless_local_writes_operator_home(
 
     daemon_json = home / ".config" / "docker" / "daemon.json"
     doc = json.loads(daemon_json.read_text())
-    assert doc["runtimes"][l6._RESERVED_RUNTIME_KEY] == l6._EXPECTED_RUNTIME
+    assert doc["runtimes"][l6.RESERVED_RUNTIME_KEY] == l6.EXPECTED_RUNTIME
     joined = [" ".join(c) for c, _ in seen]
     assert any("restart --no-block docker" in j for j in joined)
     assert all("machinectl" not in j for j in joined)
@@ -540,5 +540,5 @@ def test_expected_runtime_args_include_ignore_cgroups() -> None:
     """The L6 target carries --ignore-cgroups (F-057): rootless runsc cannot create
     its systemd cgroup scope on the user bus, so it must skip systemd cgroup setup
     or `sandbox start` fails at OCI task-create. Locks the runtimeArgs contract."""
-    assert l6._EXPECTED_RUNTIME["path"] == "/usr/local/libexec/sandbox-ai/runsc"
-    assert l6._EXPECTED_RUNTIME["runtimeArgs"] == ["--oci-seccomp", "--ignore-cgroups"]
+    assert l6.EXPECTED_RUNTIME["path"] == "/usr/local/libexec/sandbox-ai/runsc"
+    assert l6.EXPECTED_RUNTIME["runtimeArgs"] == ["--oci-seccomp", "--ignore-cgroups"]

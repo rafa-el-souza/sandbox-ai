@@ -62,7 +62,7 @@ _MANAGED_HEADER = "# sandbox-ai managed — do not edit; rerun 'sudo sandbox set
 _SYSTEMD_SYSTEM = Path("/etc/systemd/system")
 
 
-def _delegate_dropin_path_for_uid(uid: int) -> Path:
+def delegate_dropin_path_for_uid(uid: int) -> Path:
     """The narrow-scoped Delegate drop-in path for sandbox-user ``uid``."""
     return _SYSTEMD_SYSTEM / f"user-{uid}.service.d" / "sandbox-ai-delegate.conf"
 
@@ -76,7 +76,7 @@ def _delegate_dropin_path(host_config: HostConfig) -> Path:
     :func:`probe_sandbox_pw_or_missing`).
     """
     uid = resolve_sandbox_pw(host_config).pw_uid
-    return _delegate_dropin_path_for_uid(uid)
+    return delegate_dropin_path_for_uid(uid)
 
 
 def render_delegate_dropin() -> str:
@@ -102,7 +102,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     if not isinstance(pw, pwd.struct_passwd):
         return pw
 
-    dropin = _delegate_dropin_path_for_uid(pw.pw_uid)
+    dropin = delegate_dropin_path_for_uid(pw.pw_uid)
     observed = _read(dropin)
     expected = render_delegate_dropin()
     if observed is None:
@@ -112,7 +112,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     return PhaseResult.ALREADY_CORRECT, "Delegate drop-in matches source"
 
 
-def _write_root_file(path: Path, body: str, mode: int) -> None:
+def write_root_file(path: Path, body: str, mode: int) -> None:
     """Write ``body`` to ``path`` root:root at ``mode`` (parent dirs 0755)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
@@ -123,7 +123,7 @@ def _write_root_file(path: Path, body: str, mode: int) -> None:
 def _act(ctx: SetupContext) -> str:
     """Write the Delegate drop-in and reload systemd."""
     dropin = _delegate_dropin_path(ctx.host_config)
-    _write_root_file(dropin, render_delegate_dropin(), 0o644)
+    write_root_file(dropin, render_delegate_dropin(), 0o644)
     subprocess.run(
         ["systemctl", "daemon-reload"],
         capture_output=True,
@@ -158,5 +158,7 @@ PHASE = Phase(
 
 __all__ = [
     "PHASE",
+    "delegate_dropin_path_for_uid",
     "render_delegate_dropin",
+    "write_root_file",
 ]

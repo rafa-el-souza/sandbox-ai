@@ -112,7 +112,7 @@ _DEFAULT_SECURE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 _CANONICAL_MACHINECTL_DIRS: frozenset[str] = frozenset({"/usr/bin", "/usr/sbin"})
 
 # The V9c-validated sudo floor (task 5.1 / spec "Sudo-version compatibility").
-_SUDO_FLOOR: tuple[int, int, int, int] = (1, 9, 5, 2)
+SUDO_FLOOR: tuple[int, int, int, int] = (1, 9, 5, 2)
 
 _SECURE_PATH_RE = re.compile(r"secure_path\s*=\s*(?:\")?([^\"\n]+)(?:\")?")
 _SUDO_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:p(\d+))?")
@@ -356,7 +356,7 @@ def parse_sudo_version() -> tuple[int, int, int, int] | None:
 def sudo_floor_warning() -> str | None:
     """Return the non-blocking sub-floor sudo WARN text, or ``None`` if OK."""
     ver = parse_sudo_version()
-    if ver is None or ver >= _SUDO_FLOOR:
+    if ver is None or ver >= SUDO_FLOOR:
         return None
     rendered = f"{ver[0]}.{ver[1]}.{ver[2]}" + (f"p{ver[3]}" if ver[3] else "")
     return (
@@ -672,6 +672,7 @@ PHASE = Phase(
 
 __all__ = [
     "PHASE",
+    "SUDO_FLOOR",
     "MachinectlResolutionError",
     "OperatorResolutionError",
     "SystemdRunResolutionError",

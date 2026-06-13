@@ -23,10 +23,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+from core.doctor.checks.workspace_bridge import scan_instance_dirs
 from core.doctor.types import CheckResult
 from core.host_resources import host_cpu_count, host_ram_bytes, parse_docker_size
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    from core.json_types import JsonValue
 
 _CATEGORY = "Instance Resources"
 
@@ -42,7 +48,7 @@ class _ComposeAbsent:
     failure)."""
 
 
-def _load_service_limits(instance_dir: str) -> dict[str, dict[str, object]] | _ComposeAbsent:
+def _load_service_limits(instance_dir: str) -> dict[str, dict[str, JsonValue]] | _ComposeAbsent:
     """Load a registered instance's rendered compose and return its services map.
 
     Returns a ``{service_name: service_body}`` dict on success, or
@@ -56,9 +62,15 @@ def _load_service_limits(instance_dir: str) -> dict[str, dict[str, object]] | _C
     from ruamel.yaml.error import YAMLError
 
     compose_path = os.path.join(instance_dir, *_COMPOSE_LEAF)
+    parser: Any = YAML(typ="safe")
     try:
         with open(compose_path) as f:
-            data = YAML(typ="safe").load(f)
+            # ``YAML.load``'s stub types the bound method partially-unknown, so
+            # ``parser`` is aliased to ``Any`` at this single boundary. The
+            # parsed tree is named ``JsonValue`` so the ``services`` narrowing
+            # below stays concrete (safe-mode YAML yields the same structural
+            # kinds we read).
+            data: JsonValue = parser.load(f)
     except (OSError, YAMLError):
         return _ComposeAbsent()
     if not isinstance(data, dict):
@@ -72,7 +84,7 @@ def _load_service_limits(instance_dir: str) -> dict[str, dict[str, object]] | _C
 def check_host_cpu_capacity(host_user: str, distro: str | None) -> CheckResult:
     """WARN when any rendered service's ``cpus`` exceeds the host CPU count.
 
-    Iterates the registry (``_scan_instance_dirs``) and, for each instance with a
+    Iterates the registry (``scan_instance_dirs``) and, for each instance with a
     rendered compose, compares every service's ``cpus`` against
     ``host_cpu_count()``. Instances without a rendered compose are skipped.
     Advisory WARN only — never FAIL — so this never flips the doctor exit
@@ -82,7 +94,7 @@ def check_host_cpu_capacity(host_user: str, distro: str | None) -> CheckResult:
     del host_user, distro
     cpus = host_cpu_count()
     offenders: list[str] = []
-    for instance_dir in _scan_instance_dirs():
+    for instance_dir in scan_instance_dirs():
         services = _load_service_limits(instance_dir)
         if isinstance(services, _ComposeAbsent):
             continue
@@ -107,7 +119,7 @@ def check_host_cpu_capacity(host_user: str, distro: str | None) -> CheckResult:
     )
 
 
-def _cpu_offenders(instance_dir: str, services: dict[str, dict[str, object]], host_cpus: int) -> list[str]:
+def _cpu_offenders(instance_dir: str, services: dict[str, dict[str, JsonValue]], host_cpus: int) -> list[str]:
     """Return ``"<inst>/<service> cpus=<v>"`` strings for services over host CPUs.
 
     A service whose ``cpus`` is absent or unparseable contributes nothing — the
@@ -142,7 +154,7 @@ def check_instance_memory_overcommit(host_user: str, distro: str | None) -> Chec
     del host_user, distro
     ram = host_ram_bytes()
     overcommitted: list[str] = []
-    for instance_dir in _scan_instance_dirs():
+    for instance_dir in scan_instance_dirs():
         services = _load_service_limits(instance_dir)
         if isinstance(services, _ComposeAbsent):
             continue
@@ -171,7 +183,7 @@ def check_instance_memory_overcommit(host_user: str, distro: str | None) -> Chec
     )
 
 
-def _sum_mem_limits(services: dict[str, dict[str, object]]) -> int:
+def _sum_mem_limits(services: dict[str, dict[str, JsonValue]]) -> int:
     """Sum the services' ``mem_limit`` values in bytes.
 
     A service whose ``mem_limit`` is absent or unparseable contributes nothing —

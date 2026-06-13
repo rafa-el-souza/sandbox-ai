@@ -5,7 +5,7 @@ Compares the on-disk dispatcher binary against the manifest written by setup's
 L6.5 phase at ``/usr/local/libexec/sandbox-ai/dispatcher.manifest.json`` (the
 host-plane path alongside the binary, F-021; schema: ``compiled_sha512`` /
 ``source_bundle_sha512`` / ``compile_timestamp`` — "Dispatcher Manifest Schema"
-requirement). The path is imported (``_manifest_path``) from L6.5 — single
+requirement). The path is imported (``manifest_path``) from L6.5 — single
 source — so this check and the setup phase can never disagree on its location.
 
 Two independent integrity dimensions:
@@ -16,9 +16,9 @@ Two independent integrity dimensions:
    ``manifest.source_bundle_sha512``.
 
 The source-bundle sha512 is computed **by reusing setup L6.5's single-source
-helper** ``core.setup.l65_dispatcher._source_bundle_sha512`` (orchestrator
+helper** ``core.setup.l65_dispatcher.source_bundle_sha512`` (orchestrator
 decision 1 / F-011). That helper derives the file set from
-``core.dispatch._DISPATCH_SOURCE_ENTRIES`` (currently ``main.go``,
+``core.dispatch.DISPATCH_SOURCE_ENTRIES`` (currently ``main.go``,
 ``main_test.go``, ``go.mod``, ``go.sum``, ``vendor``, ``fixtures``) — NOT the
 narrower ``{go.mod, go.sum, main.go, vendor/**}`` subset, which omits
 ``main_test.go``/``fixtures/`` and would let a Python↔Go parity-fixture change
@@ -38,12 +38,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.dispatch import _DISPATCH_BINARY
+from core.dispatch import DISPATCH_BINARY
 from core.doctor.types import CheckResult
 
 # Reuse — never re-implement — setup L6.5's single-source manifest helpers
 # (orchestrator decision 1 / F-011: a divergent file set here = false WARN).
-from core.setup.l65_dispatcher import _file_sha512, _manifest_path, _read_manifest, _source_bundle_sha512
+from core.setup.l65_dispatcher import file_sha512, manifest_path, read_manifest, source_bundle_sha512
 
 # Truncation length for sha512 values shown in operator-facing detail strings.
 _SHA_PREFIX = 16
@@ -58,21 +58,21 @@ def check_dispatcher_sha_drift(user: str, distro: str | None) -> CheckResult:
     """
     del user, distro
 
-    manifest = _read_manifest()
+    manifest = read_manifest()
     if manifest is None:
         return CheckResult(
             status="skip",
             name="dispatcher sha drift",
-            detail=f"dispatcher manifest absent at {_manifest_path()}",
+            detail=f"dispatcher manifest absent at {manifest_path()}",
             remediation="run 'sudo sandbox setup' to install the dispatcher",
         )
 
-    binary_sha = _file_sha512(Path(_DISPATCH_BINARY))
+    binary_sha = file_sha512(Path(DISPATCH_BINARY))
     if binary_sha is None:
         return CheckResult(
             status="skip",
             name="dispatcher sha drift",
-            detail=f"dispatcher binary absent at {_DISPATCH_BINARY}",
+            detail=f"dispatcher binary absent at {DISPATCH_BINARY}",
             remediation="run 'sudo sandbox setup' to install the dispatcher",
         )
 
@@ -90,7 +90,7 @@ def check_dispatcher_sha_drift(user: str, distro: str | None) -> CheckResult:
             remediation="run 'sudo sandbox setup' to refresh the dispatcher",
         )
 
-    current_source = _source_bundle_sha512()
+    current_source = source_bundle_sha512()
     recorded_source = manifest.get("source_bundle_sha512")
     if recorded_source != current_source:
         return CheckResult(

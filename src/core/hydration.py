@@ -319,15 +319,24 @@ class InstanceConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_legacy_admin_section(cls, data: Any) -> Any:
+    def _reject_legacy_admin_section(cls, data: object) -> object:
         """Reject sandbox.toml inputs that carry a legacy [admin] section.
 
         Per admin-reframe, admin is a static binary with no configurable runtime
         knobs; the [admin] table is no longer recognized. Surface a concrete
         operator-facing message rather than Pydantic's generic "extra fields"
         text.
+
+        ``data`` is whatever pydantic feeds a ``mode="before"`` validator (a
+        mapping for our TOML inputs, but ``object`` is the honest upper bound);
+        we only inspect it and pass it through unchanged, so naming it ``object``
+        keeps the boundary fully-known without altering what is returned. The
+        ``isinstance`` probe narrows a throwaway alias so the dict-narrowing
+        never escapes onto ``data`` itself — ``data`` is returned with its
+        declared ``object`` type, exactly the value pydantic handed us.
         """
-        if isinstance(data, dict) and "admin" in data:
+        probe: object = data
+        if isinstance(probe, dict) and "admin" in probe:
             raise ValueError(
                 "Legacy [admin] section detected in sandbox.toml. Per "
                 "admin-reframe, the [admin] table is no longer recognized — "

@@ -16,6 +16,14 @@ from typing import TYPE_CHECKING, Literal
 
 from core.host_config import DockerExecutionMode
 
+__all__ = [
+    "BINARY_PACKAGES",
+    "Check",
+    "CheckResult",
+    "detect_distro",
+    "get_install_cmd",
+]
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -71,7 +79,7 @@ _INSTALL_CMD: dict[str, str] = {
 }
 
 
-_BINARY_PACKAGES: dict[str, str] = {
+BINARY_PACKAGES: dict[str, str] = {
     "sudo": "sudo",
     "machinectl": "systemd-container",
     "setfacl": "acl",

@@ -47,7 +47,7 @@ from core.setup.phase_runner import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
     from typer.testing import CliRunner
 
@@ -684,7 +684,7 @@ def test_operator_resolution_error_surfaced(runner: CliRunner) -> None:
 
 
 @contextlib.contextmanager
-def _root_ctx() -> Iterator[None]:
+def _root_ctx() -> Generator[None]:
     """Patch the root check + operator + distro gate + (empty) extras."""
     with (
         patch("cli.main.os.geteuid", return_value=0),

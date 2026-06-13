@@ -2,12 +2,12 @@
 """Workspace-bridge doctor checks.
 
 Covers the 11 workspace-bridge / per-instance health checks plus the per-instance
-scan helpers (``_scan_instance_dirs``, ``_scan_instance_workspace_paths``,
-``_default_uid_for_path``, ``_read_registry_raw``, ``_load_host_settings_or_skip``).
+scan helpers (``scan_instance_dirs``, ``_scan_instance_workspace_paths``,
+``_default_uid_for_path``, ``read_registry_raw``, ``_load_host_settings_or_skip``).
 
 Sole-caller locality keeps the helpers in this module: every helper is consumed
 by check functions defined here, so co-locating them preserves cohesion. Two
-helpers (``_scan_instance_dirs``, ``_read_registry_raw``) are also consumed by
+helpers (``scan_instance_dirs``, ``read_registry_raw``) are also consumed by
 ``checks/per_user_tree.py`` for the legacy-shape checks; per_user_tree imports
 them directly from this module.
 """
@@ -35,6 +35,8 @@ from core.host_config import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from core.json_types import JsonValue
 
 
 def _load_host_settings_or_skip(check_name: str) -> HostSettings | CheckResult:
@@ -172,7 +174,7 @@ def check_subuid_resolver_works(host_user: str, distro: str | None) -> CheckResu
     )
 
 
-def _scan_instance_dirs() -> list[str]:
+def scan_instance_dirs() -> list[str]:
     """Return registered instance directories from ``<home>/state/instances.json``.
 
     Per change-5's name-keyed registry, each entry has shape
@@ -186,7 +188,7 @@ def _scan_instance_dirs() -> list[str]:
     state_path = sandbox_ai_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
-            data = json.load(f)
+            data: JsonValue = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
     if not isinstance(data, dict):
@@ -204,7 +206,7 @@ def _scan_instance_dirs() -> list[str]:
 def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> CheckResult:
     """Warn-only: scan registered instances' secrets/ for world-readable mode bits."""
     del host_user, distro
-    instances = _scan_instance_dirs()
+    instances = scan_instance_dirs()
     leaks: list[str] = []
     for inst in instances:
         secrets_dir = os.path.join(inst, "secrets")
@@ -293,7 +295,7 @@ def check_pre_existing_instance_layout(
             category="Workspace Bridge",
         )
 
-    instances = _scan_instance_dirs()
+    instances = scan_instance_dirs()
     stale_paths: list[str] = []
     for inst in instances:
         for leaf in cache_log_leaves:
@@ -333,7 +335,7 @@ def check_pre_existing_instance_layout(
     )
 
 
-def _read_registry_raw() -> dict[str, object]:
+def read_registry_raw() -> dict[str, JsonValue]:
     """Return the raw parsed ``instances.json`` (for shape inspection).
 
     Returns an empty dict if missing or malformed. Used by checks that need to
@@ -342,7 +344,7 @@ def _read_registry_raw() -> dict[str, object]:
     state_path = sandbox_ai_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
-            data = json.load(f)
+            data: JsonValue = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -357,19 +359,25 @@ def _scan_instance_workspace_paths() -> list[tuple[str, str, str]]:
     import tomllib
 
     out: list[tuple[str, str, str]] = []
-    for inst_dir in _scan_instance_dirs():
+    for inst_dir in scan_instance_dirs():
         toml_path = os.path.join(inst_dir, "sandbox.toml")
         try:
             with open(toml_path, "rb") as f:
-                data = tomllib.load(f)
+                # ``tomllib.load`` is typed ``dict[str, Any]``; name the parsed
+                # tree as a JSON-shaped object so the workspace-table narrowing
+                # below stays concrete (TOML tables/scalars map onto the same
+                # structural kinds we read here).
+                data: dict[str, JsonValue] = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError):
             continue
         workspaces = data.get("workspaces", {})
         if not isinstance(workspaces, dict):
             continue
         for name, body in workspaces.items():
-            if isinstance(body, dict) and isinstance(body.get("path"), str):
-                out.append((inst_dir, name, body["path"]))
+            if isinstance(body, dict):
+                path = body.get("path")
+                if isinstance(path, str):
+                    out.append((inst_dir, name, path))
     return out
 
 

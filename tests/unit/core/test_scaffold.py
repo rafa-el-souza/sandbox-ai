@@ -439,7 +439,7 @@ class TestWriteSandboxTomlGitFields:
         assert 'git_email = ""' in content
 
 
-# ─── Task 2.2: _detect_git_config ────────────────────────────────────────────
+# ─── Task 2.2: detect_git_config ────────────────────────────────────────────
 
 
 class TestDetectGitConfig:
@@ -449,7 +449,7 @@ class TestDetectGitConfig:
         """Returns (name, email) when git config is available."""
         from unittest.mock import patch
 
-        from core.scaffold import _detect_git_config
+        from core.scaffold import detect_git_config
 
         def mock_run(cmd: list[str], **kwargs: object) -> object:
             import subprocess
@@ -461,7 +461,7 @@ class TestDetectGitConfig:
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=mock_run):
-            name, email = _detect_git_config()
+            name, email = detect_git_config()
             assert name == "Jane Doe"
             assert email == "jane@example.com"
 
@@ -469,10 +469,10 @@ class TestDetectGitConfig:
         """Returns ('', '') when git is not on PATH."""
         from unittest.mock import patch
 
-        from core.scaffold import _detect_git_config
+        from core.scaffold import detect_git_config
 
         with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
-            name, email = _detect_git_config()
+            name, email = detect_git_config()
             assert name == ""
             assert email == ""
 
@@ -481,11 +481,11 @@ class TestDetectGitConfig:
         import subprocess
         from unittest.mock import patch
 
-        from core.scaffold import _detect_git_config
+        from core.scaffold import detect_git_config
 
         mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
         with patch("subprocess.run", return_value=mock_result):
-            name, email = _detect_git_config()
+            name, email = detect_git_config()
             assert name == ""
             assert email == ""
 

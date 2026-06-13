@@ -22,8 +22,28 @@ from core.crypto import generate_credential
 from core.exceptions import SandboxExecutionError
 from core.hydration import IMAGE_REGISTRY
 
+__all__ = [
+    "INSTANCE_SUBDIRS",
+    "REQUIRED_INSTANCE_SECRETS",
+    "SecretSeedingError",
+    "WorkspaceSpec",
+    "apply_default_acls",
+    "create_env_file",
+    "create_instance_dirs",
+    "detect_git_config",
+    "ensure_registry_seed",
+    "mutate_workspaces",
+    "parse_secrets_file",
+    "prompt_secrets",
+    "resolve_secrets_from_env",
+    "seed_secrets",
+    "write_initialized_sentinel",
+    "write_sandbox_toml",
+]
+
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Any
 
 
 def ensure_registry_seed(home: Path) -> None:
@@ -261,10 +281,17 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
             ws_table[spec.name] = sub
 
     with open(toml_path, "w", encoding="utf-8") as f:
-        f.write(tomlkit.dumps(doc))
+        # ``tomlkit.dumps`` is documented to return ``str`` but its stub types
+        # the callable partially-unknown. Alias the module to ``Any`` at this
+        # single boundary so the member access isn't a partial-unknown leak,
+        # then name the documented ``str`` result — no ``Unknown`` flows past
+        # the seam into the write.
+        _tomlkit: Any = tomlkit
+        rendered: str = _tomlkit.dumps(doc)
+        f.write(rendered)
 
 
-def _detect_git_config() -> tuple[str, str]:
+def detect_git_config() -> tuple[str, str]:
     """Auto-detect git user.name and user.email from global config.
 
     Returns (name, email). Falls back to ('', '') if git is not installed

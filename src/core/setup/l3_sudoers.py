@@ -65,9 +65,16 @@ from typing import TYPE_CHECKING
 # :func:`core.dispatch.dispatch_payload` — never hand-retyped here. ``Op`` is the
 # single source of truth for the enumerated ops.
 from core.dispatch import Op, dispatch_payload, sudo_pipe_crossing_argv
-from core.host_config import _USERNAME_RE, DockerExecutionMode
+from core.host_config import USERNAME_RE, DockerExecutionMode
 from core.setup.l0_identity import resolve_systemd_run_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
+
+__all__ = [
+    "PHASE",
+    "RuleRenderError",
+    "drop_in_path",
+    "render_sudoers_rule",
+]
 
 if TYPE_CHECKING:
     from core.host_config import HostConfig
@@ -189,10 +196,10 @@ def render_sudoers_rule(
     guard — defense-in-depth even if the ``HostSettings`` field validator was
     somehow bypassed.
     """
-    if _USERNAME_RE.match(sandbox_user) is None:
+    if USERNAME_RE.match(sandbox_user) is None:
         raise RuleRenderError(
             f"sandbox_user {sandbox_user!r} is not a valid POSIX username "
-            f"(must match {_USERNAME_RE.pattern}); refusing to render the "
+            f"(must match {USERNAME_RE.pattern}); refusing to render the "
             f"sudoers Cmnd_Spec (a space/metacharacter would corrupt the rule)"
         )
     specs = [
@@ -230,7 +237,7 @@ def _sudoers_path(operator: str) -> Path:
     return _SUDOERS_DIR / f"sandbox-ai-machinectl-{operator}"
 
 
-def _drop_in_path(operator: str) -> Path:
+def drop_in_path(operator: str) -> Path:
     """The owned sudoers drop-in path."""
     return _sudoers_path(operator)
 
@@ -249,7 +256,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     """Content-aware probe: render expected body, byte-compare to on-disk."""
     operator = ctx.operator
     host_config = ctx.host_config
-    path = _drop_in_path(operator)
+    path = drop_in_path(operator)
     expected = _expected_body(host_config, operator)
     try:
         observed = path.read_text()
@@ -273,7 +280,7 @@ def _act(ctx: SetupContext) -> str:
     operator = ctx.operator
     host_config = ctx.host_config
     body = _expected_body(host_config, operator)
-    final_path = _drop_in_path(operator)
+    final_path = drop_in_path(operator)
 
     staged = Path(f"/tmp/sandbox-ai-machinectl-{operator}.staged")
     staged.write_text(body)
@@ -311,7 +318,7 @@ def _reverify(ctx: SetupContext) -> bool:
     """Confirm the on-disk drop-in is byte-identical to the expected body."""
     operator = ctx.operator
     host_config = ctx.host_config
-    path = _drop_in_path(operator)
+    path = drop_in_path(operator)
     try:
         return path.read_text() == _expected_body(host_config, operator)
     except FileNotFoundError:
@@ -325,7 +332,7 @@ def _rollback(ctx: SetupContext) -> None:
     run. ``missing_ok=True`` so a rollback of a never-installed file is a
     no-op (idempotent — design D1).
     """
-    _drop_in_path(ctx.operator).unlink(missing_ok=True)
+    drop_in_path(ctx.operator).unlink(missing_ok=True)
 
 
 PHASE = Phase(

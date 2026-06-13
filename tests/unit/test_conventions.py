@@ -20,6 +20,7 @@ Three structural guarantees, all AST-based:
 from __future__ import annotations
 
 import ast
+import json
 import re
 import tomllib
 from collections.abc import Iterator
@@ -1089,4 +1090,59 @@ def test_spdx_deliberate_violation_is_detected(tmp_path: Path) -> None:
     )
     assert headerful.as_posix() not in offenders, (
         "a file carrying the SPDX token was wrongly flagged"
+    )
+
+
+_PYRIGHT_TEST_RELAXATIONS = frozenset(
+    {
+        "reportPrivateUsage",
+        "reportUnknownLambdaType",
+        "reportUnknownArgumentType",
+        "reportUnknownMemberType",
+        "reportUnusedFunction",
+    }
+)
+
+
+def test_pyrightconfig_relaxations_whitelisted() -> None:
+    """pyright is strict on ``src/`` and relaxes ONLY a fixed whitelist of rules
+    for ``tests/``. The config is inverted on purpose — the whitelist is relaxed
+    at the top level (governing ``tests/``, where pyright resolves imports
+    correctly) and re-enabled for ``src/`` via a single execution environment,
+    because pyright cannot resolve a ``src/``-layout's first-party imports under a
+    subdirectory root.
+
+    This guards the pyright-strict gate against silent widening: any NEW
+    top-level relaxation, any relaxation set to something other than ``none``, or
+    any whitelisted rule the ``src/`` environment fails to re-enable to ``error``
+    fails here. It is the pyright analogue of
+    :func:`test_no_suppression_directives` — the gate is signal; keep it.
+    """
+    cfg_path = _REPO_ROOT / "pyrightconfig.json"
+    # pyright parses pyrightconfig.json as JSONC; strip ``//`` line comments.
+    raw = re.sub(r"(?m)^\s*//.*$", "", cfg_path.read_text())
+    cfg = json.loads(raw)
+
+    assert cfg.get("typeCheckingMode") == "strict", "pyright must run in strict mode"
+
+    top_overrides = {k: v for k, v in cfg.items() if k.startswith("report")}
+    assert set(top_overrides) == set(_PYRIGHT_TEST_RELAXATIONS), (
+        "top-level pyright rule overrides drifted from the whitelist: "
+        f"{set(top_overrides) ^ set(_PYRIGHT_TEST_RELAXATIONS)}"
+    )
+    assert all(v == "none" for v in top_overrides.values()), (
+        f"top-level pyright overrides must all be 'none': {top_overrides}"
+    )
+
+    envs = cfg.get("executionEnvironments", [])
+    assert len(envs) == 1, f"expected exactly one executionEnvironment (src/), got {len(envs)}"
+    src_env = envs[0]
+    assert src_env.get("root") == "src", "the sole executionEnvironment must be rooted at src/"
+    src_overrides = {k: v for k, v in src_env.items() if k.startswith("report")}
+    assert set(src_overrides) == set(_PYRIGHT_TEST_RELAXATIONS), (
+        "the src/ environment must re-enable exactly the whitelist (so src/ stays "
+        f"fully strict): {set(src_overrides) ^ set(_PYRIGHT_TEST_RELAXATIONS)}"
+    )
+    assert all(v == "error" for v in src_overrides.values()), (
+        f"the src/ environment must set every whitelisted rule to 'error': {src_overrides}"
     )

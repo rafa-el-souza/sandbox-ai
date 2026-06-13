@@ -80,7 +80,7 @@ def test_l1_does_not_resolve_an_os_user(
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "fedora")
     sysctl = tmp_path / "49-sandbox-ai.conf"
     sysctl.write_text(render_sysctl_dropin())
-    monkeypatch.setattr("core.setup.l1_kernel._SYSCTL_DROPIN", sysctl)
+    monkeypatch.setattr("core.setup.l1_kernel.SYSCTL_DROPIN", sysctl)
 
     def _boom(_n: str) -> object:
         raise KeyError("getpwnam(): name not found: 'sandbox'")
@@ -149,7 +149,7 @@ def test_probe_missing(
     _verify_ok(monkeypatch)
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     monkeypatch.setattr(
-        "core.setup.l1_kernel._SYSCTL_DROPIN", tmp_path / "absent.conf"
+        "core.setup.l1_kernel.SYSCTL_DROPIN", tmp_path / "absent.conf"
     )
     result, detail = PHASE.probe(_ctx())
     assert result == PhaseResult.MISSING
@@ -163,7 +163,7 @@ def test_probe_drift(
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     sysctl = tmp_path / "49-sandbox-ai.conf"
     sysctl.write_text("# stale\nuser.max_user_namespaces=1\n")
-    monkeypatch.setattr("core.setup.l1_kernel._SYSCTL_DROPIN", sysctl)
+    monkeypatch.setattr("core.setup.l1_kernel.SYSCTL_DROPIN", sysctl)
     result, detail = PHASE.probe(_ctx())
     assert result == PhaseResult.DRIFT
     assert "49-sandbox-ai.conf" in detail
@@ -176,7 +176,7 @@ def test_probe_already_correct(
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     sysctl = tmp_path / "49-sandbox-ai.conf"
     sysctl.write_text(render_sysctl_dropin())
-    monkeypatch.setattr("core.setup.l1_kernel._SYSCTL_DROPIN", sysctl)
+    monkeypatch.setattr("core.setup.l1_kernel.SYSCTL_DROPIN", sysctl)
     result, _ = PHASE.probe(_ctx())
     assert result == PhaseResult.ALREADY_CORRECT
 
@@ -190,7 +190,7 @@ def test_act_success(
     _verify_ok(monkeypatch)
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     sysctl = tmp_path / "49-sandbox-ai.conf"
-    monkeypatch.setattr("core.setup.l1_kernel._SYSCTL_DROPIN", sysctl)
+    monkeypatch.setattr("core.setup.l1_kernel.SYSCTL_DROPIN", sysctl)
     monkeypatch.setattr("os.chown", lambda *a: None)
     runs: list[list[str]] = []
 
@@ -215,7 +215,7 @@ def test_act_non_debian_skips_userns_clone(
     _verify_ok(monkeypatch)
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "fedora")
     monkeypatch.setattr(
-        "core.setup.l1_kernel._SYSCTL_DROPIN", tmp_path / "s.conf"
+        "core.setup.l1_kernel.SYSCTL_DROPIN", tmp_path / "s.conf"
     )
     monkeypatch.setattr("os.chown", lambda *a: None)
     runs: list[list[str]] = []
@@ -242,7 +242,7 @@ def test_act_failure_propagates(
     _verify_ok(monkeypatch)
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     monkeypatch.setattr(
-        "core.setup.l1_kernel._SYSCTL_DROPIN", tmp_path / "s.conf"
+        "core.setup.l1_kernel.SYSCTL_DROPIN", tmp_path / "s.conf"
     )
     monkeypatch.setattr("os.chown", lambda *a: None)
 
@@ -264,7 +264,7 @@ def test_reverify_true(
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     sysctl = tmp_path / "s.conf"
     sysctl.write_text(render_sysctl_dropin())
-    monkeypatch.setattr("core.setup.l1_kernel._SYSCTL_DROPIN", sysctl)
+    monkeypatch.setattr("core.setup.l1_kernel.SYSCTL_DROPIN", sysctl)
     assert PHASE.reverify(_ctx()) is True
 
 
@@ -274,7 +274,7 @@ def test_reverify_false(
     _verify_ok(monkeypatch)
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     monkeypatch.setattr(
-        "core.setup.l1_kernel._SYSCTL_DROPIN", tmp_path / "absent.conf"
+        "core.setup.l1_kernel.SYSCTL_DROPIN", tmp_path / "absent.conf"
     )
     assert PHASE.reverify(_ctx()) is False
 
@@ -326,7 +326,7 @@ def test_content_aware(
     monkeypatch.setattr("core.setup.l1_kernel.detect_distro", lambda: "debian")
     sysctl = tmp_path / "49-sandbox-ai.conf"
     sysctl.write_text(render_sysctl_dropin())
-    monkeypatch.setattr("core.setup.l1_kernel._SYSCTL_DROPIN", sysctl)
+    monkeypatch.setattr("core.setup.l1_kernel.SYSCTL_DROPIN", sysctl)
 
     def _make_stale() -> None:
         sysctl.write_text("# wheel upgrade changed the expected body\n")

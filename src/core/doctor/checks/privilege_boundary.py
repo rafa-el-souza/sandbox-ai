@@ -11,10 +11,10 @@ import json
 import re
 import shutil
 import subprocess
-from typing import Any, NamedTuple, cast, overload
+from typing import TYPE_CHECKING, Any, NamedTuple, cast, overload
 
 from core import dispatch
-from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
+from core.doctor.types import BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
@@ -27,11 +27,14 @@ from core.host_config import (
 # previously looked up the wrong literal "runsc"; and hardcoded a runtimeArgs
 # wishlist [--oci-seccomp, --debug-log] that diverged from what L6 actually
 # configures [--oci-seccomp, --ignore-cgroups], producing a permanent false "Missing --debug-log"
-# WARN). Deriving expected from l6._EXPECTED_RUNTIME makes the two single-source:
+# WARN). Deriving expected from l6.EXPECTED_RUNTIME makes the two single-source:
 # whatever L6 configures is exactly what doctor expects, so they cannot drift
-# (and a future opt-in that adds --debug-log to _EXPECTED_RUNTIME is followed
+# (and a future opt-in that adds --debug-log to EXPECTED_RUNTIME is followed
 # automatically). Precedent: dispatcher_sha_drift reusing l65's single source.
-from core.setup.l6_daemon_json import _EXPECTED_RUNTIME, _RESERVED_RUNTIME_KEY
+from core.setup.l6_daemon_json import EXPECTED_RUNTIME, RESERVED_RUNTIME_KEY
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 # Defense-in-depth parse ceiling for untrusted daemon stdout (M-2). Ops 4-8
 # reach a verdict by parsing the daemon's self-reported ``docker info`` /
@@ -44,16 +47,16 @@ _MAX_DAEMON_JSON_BYTES = 256 * 1024
 
 
 @overload
-def _safe_load_json(stdout: str, expected_type: type[dict[str, Any]]) -> dict[str, Any] | None: ...
+def _safe_load_json(stdout: str, expected_type: type[dict[str, Any]]) -> dict[str, JsonValue] | None: ...
 
 
 @overload
-def _safe_load_json(stdout: str, expected_type: type[list[Any]]) -> list[Any] | None: ...
+def _safe_load_json(stdout: str, expected_type: type[list[Any]]) -> list[JsonValue] | None: ...
 
 
 def _safe_load_json(
     stdout: str, expected_type: type[dict[str, Any]] | type[list[Any]]
-) -> dict[str, Any] | list[Any] | None:
+) -> dict[str, JsonValue] | list[JsonValue] | None:
     """Size-bound + strict-shape parse of untrusted daemon stdout (M-2).
 
     Returns the parsed value ONLY when it is well-formed AND an instance of
@@ -65,7 +68,7 @@ def _safe_load_json(
     if len(stdout.encode("utf-8", errors="ignore")) > _MAX_DAEMON_JSON_BYTES:
         return None
     try:
-        parsed = json.loads(stdout)
+        parsed: JsonValue = json.loads(stdout)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, expected_type):
@@ -82,7 +85,7 @@ def check_sudo(user: str, distro: str | None) -> CheckResult:
         status="fail",
         name="sudo",
         detail="sudo not found on PATH",
-        remediation=get_install_cmd(distro, _BINARY_PACKAGES["sudo"]),
+        remediation=get_install_cmd(distro, BINARY_PACKAGES["sudo"]),
     )
 
 
@@ -95,7 +98,7 @@ def check_tlog(user: str, distro: str | None) -> CheckResult:
         status="fail",
         name="tlog",
         detail="tlog-rec not found on PATH",
-        remediation=get_install_cmd(distro, _BINARY_PACKAGES["tlog"]),
+        remediation=get_install_cmd(distro, BINARY_PACKAGES["tlog"]),
     )
 
 
@@ -108,7 +111,7 @@ def check_machinectl(user: str, distro: str | None) -> CheckResult:
         status="fail",
         name="machinectl",
         detail="machinectl not found on PATH",
-        remediation=get_install_cmd(distro, _BINARY_PACKAGES["machinectl"]),
+        remediation=get_install_cmd(distro, BINARY_PACKAGES["machinectl"]),
     )
 
 
@@ -290,11 +293,11 @@ def _interpret_runsc_registered(outcome: dispatch.ProbeOutcome) -> CheckResult:
     """Interpret the ``docker-info ["runtimes"]`` outcome for runsc registration."""
     if outcome.ok:
         runtimes = _safe_load_json(outcome.stdout.strip(), dict)
-        if runtimes is not None and isinstance(runtimes.get(_RESERVED_RUNTIME_KEY), dict):
+        if runtimes is not None and isinstance(runtimes.get(RESERVED_RUNTIME_KEY), dict):
             return CheckResult(
                 status="pass",
                 name="gVisor runsc",
-                detail=f"{_RESERVED_RUNTIME_KEY} runtime registered in Docker",
+                detail=f"{RESERVED_RUNTIME_KEY} runtime registered in Docker",
             )
 
     return CheckResult(
@@ -313,7 +316,7 @@ def check_runsc_runtimeargs(
 ) -> CheckResult:
     """Check that runsc runtimeArgs match what L6 configures (single-sourced).
 
-    The expected args are read from ``l6._EXPECTED_RUNTIME["runtimeArgs"]`` — NOT
+    The expected args are read from ``l6.EXPECTED_RUNTIME["runtimeArgs"]`` — NOT
     hardcoded — so doctor expects exactly what setup configures and the two
     cannot drift (F-024 pattern). Today that is ``["--oci-seccomp",
     "--ignore-cgroups"]``; if a future opt-in adds ``--debug-log=<path>`` to the
@@ -345,12 +348,12 @@ def _interpret_runsc_runtimeargs(outcome: dispatch.ProbeOutcome, user: str) -> C
             remediation=f"Check ~{user}/.config/docker/daemon.json",
         )
 
-    runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
-    runsc_entry = runsc_entry if isinstance(runsc_entry, dict) else {}
+    runsc_raw = runtimes.get(RESERVED_RUNTIME_KEY, {})
+    runsc_entry = runsc_raw if isinstance(runsc_raw, dict) else {}
     raw_args = runsc_entry.get("runtimeArgs", [])
     runtime_args: list[str] = [a for a in raw_args if isinstance(a, str)] if isinstance(raw_args, list) else []
 
-    expected_args = cast("list[str]", _EXPECTED_RUNTIME["runtimeArgs"])
+    expected_args = cast("list[str]", EXPECTED_RUNTIME["runtimeArgs"])
     missing = [exp for exp in expected_args if not _runtime_arg_present(exp, runtime_args)]
 
     if not missing:
@@ -414,8 +417,8 @@ def _interpret_host_uds(outcome: dispatch.ProbeOutcome, user: str) -> CheckResul
             remediation=f"Check ~{user}/.config/docker/daemon.json",
         )
 
-    runsc_entry = runtimes.get(_RESERVED_RUNTIME_KEY, {})
-    runsc_entry = runsc_entry if isinstance(runsc_entry, dict) else {}
+    runsc_raw = runtimes.get(RESERVED_RUNTIME_KEY, {})
+    runsc_entry = runsc_raw if isinstance(runsc_raw, dict) else {}
     raw_args = runsc_entry.get("runtimeArgs", [])
     runtime_args: list[str] = [a for a in raw_args if isinstance(a, str)] if isinstance(raw_args, list) else []
 
@@ -469,9 +472,9 @@ def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) ->
     is total over any outcome it is handed.
     """
     from core.compose import compose_project_name
-    from core.doctor.checks.workspace_bridge import _read_registry_raw
+    from core.doctor.checks.workspace_bridge import read_registry_raw
 
-    registered = list(_read_registry_raw().keys())
+    registered = list(read_registry_raw().keys())
     if not registered:
         return CheckResult(
             status="pass",
@@ -479,7 +482,7 @@ def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) ->
             detail="no registered instances; nothing to check",
             category="Privilege Boundary",
         )
-    expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
+    expected = {compose_project_name(name) for name in registered}
 
     if outcome.timed_out:
         return CheckResult(
@@ -503,7 +506,10 @@ def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) ->
             detail="could not parse docker compose ls output",
             category="Privilege Boundary",
         )
-    daemon_names = {p.get("Name") for p in projects if isinstance(p, dict)}
+    raw_names = [p.get("Name") for p in projects if isinstance(p, dict)]
+    daemon_names: set[str | int | float | bool | None] = {
+        n for n in raw_names if not isinstance(n, (dict, list))
+    }
     # Collisions: a daemon project whose name matches an *expected* project for
     # a registered instance is normal (that instance's own running compose).
     # A daemon project whose name collides with what we'd construct for a

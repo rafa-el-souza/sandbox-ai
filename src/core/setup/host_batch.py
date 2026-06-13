@@ -247,13 +247,13 @@ def _apply_sysctl(params: BatchParams) -> None:
 
     Reuses l1's :func:`~core.setup.l1_kernel.render_sysctl_dropin` (which
     already self-branches on the debian-family for ``unprivileged_userns_clone``,
-    confirmed correct by validation) and ``_write_root_file`` + the ``sysctl -w``
+    confirmed correct by validation) and ``write_root_file`` + the ``sysctl -w``
     calls.
     """
     del params  # l1's renderer self-branches via detect_distro(); no param needed
-    l1_kernel._write_root_file(l1_kernel._SYSCTL_DROPIN, l1_kernel.render_sysctl_dropin(), 0o644)
-    _run(["sysctl", "-w", f"user.max_user_namespaces={l1_kernel._MAX_USER_NS}"])
-    if l1_kernel._is_debian_family():
+    l1_kernel.write_root_file(l1_kernel.SYSCTL_DROPIN, l1_kernel.render_sysctl_dropin(), 0o644)
+    _run(["sysctl", "-w", f"user.max_user_namespaces={l1_kernel.MAX_USER_NS}"])
+    if l1_kernel.is_debian_family():
         _run(["sysctl", "-w", "kernel.unprivileged_userns_clone=1"])
 
 
@@ -269,7 +269,7 @@ def _apply_nftables(params: BatchParams) -> None:
             _run(["modprobe", module])
     expected = _render_modules_load_dropin(params.distro_family)
     if _read(_MODULES_LOAD_DROPIN) != expected:
-        l1_kernel._write_root_file(_MODULES_LOAD_DROPIN, expected, 0o644)
+        l1_kernel.write_root_file(_MODULES_LOAD_DROPIN, expected, 0o644)
 
 
 def _apply_delegate(params: BatchParams) -> None:
@@ -279,8 +279,8 @@ def _apply_delegate(params: BatchParams) -> None:
     write logic, targeting ``user-<operator_uid>.service.d/`` + a
     ``systemctl daemon-reload``.
     """
-    dropin = l2a_delegate._delegate_dropin_path_for_uid(params.operator_uid)
-    l2a_delegate._write_root_file(dropin, l2a_delegate.render_delegate_dropin(), 0o644)
+    dropin = l2a_delegate.delegate_dropin_path_for_uid(params.operator_uid)
+    l2a_delegate.write_root_file(dropin, l2a_delegate.render_delegate_dropin(), 0o644)
     _run(["systemctl", "daemon-reload"])
 
 
@@ -391,7 +391,7 @@ def _subid_satisfied(operator: str) -> bool:
 
 def _sysctl_satisfied() -> bool:
     """``True`` iff the sysctl drop-in already matches l1's rendered source."""
-    return _read(l1_kernel._SYSCTL_DROPIN) == l1_kernel.render_sysctl_dropin()
+    return _read(l1_kernel.SYSCTL_DROPIN) == l1_kernel.render_sysctl_dropin()
 
 
 def _nftables_satisfied(distro_family: str) -> bool:
@@ -546,7 +546,7 @@ def _remediation_groupadd(params: BatchParams) -> str:
 
 def _remediation_sysctl(params: BatchParams) -> str:
     del params
-    return f"sudo tee {l1_kernel._SYSCTL_DROPIN} <<'EOF' && sudo sysctl --system"
+    return f"sudo tee {l1_kernel.SYSCTL_DROPIN} <<'EOF' && sudo sysctl --system"
 
 
 def _remediation_nftables(params: BatchParams) -> str:
@@ -555,7 +555,7 @@ def _remediation_nftables(params: BatchParams) -> str:
 
 
 def _remediation_delegate(params: BatchParams) -> str:
-    dropin = l2a_delegate._delegate_dropin_path_for_uid(params.operator_uid)
+    dropin = l2a_delegate.delegate_dropin_path_for_uid(params.operator_uid)
     return f"sudo install -Dm0644 /dev/stdin {dropin} && sudo systemctl daemon-reload"
 
 

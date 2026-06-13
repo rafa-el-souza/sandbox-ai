@@ -39,10 +39,16 @@ from core.host_config import (
     minimal_host_config,
 )
 
+__all__ = [
+    "hardened_docker_run",
+    "helper_chown_files",
+    "helper_mkdir_chown_dirs",
+]
+
 DEFAULT_HELPER_TIMEOUT_S = 30
 
 
-def _hardened_docker_run(image: str, parent: str, inner_sh: str) -> str:
+def hardened_docker_run(image: str, parent: str, inner_sh: str) -> str:
     """Build the ``docker run …`` command line with the full hardening baseline.
 
     ``parent`` is bind-mounted at ``/p`` inside the helper. ``inner_sh`` is the
@@ -90,7 +96,7 @@ def helper_chown_files(
     file_list = list(files)
     if not file_list:
         return
-    # Deferred import: ``core.dispatch`` imports ``_hardened_docker_run`` from
+    # Deferred import: ``core.dispatch`` imports ``hardened_docker_run`` from
     # this module at its top level (it is the single source of the hardened
     # ``docker run`` prefix the helper ops reuse), so a module-level import here
     # would be a circular import. The import is cheap and runs only on the

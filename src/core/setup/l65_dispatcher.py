@@ -24,7 +24,7 @@ Two C-001 reconciliations this phase honors (do NOT regress):
    ``enable-linger`` upstream) satisfies it.
 
 2. **The manifest's ``source_bundle_sha512`` is derived from
-   ``core.dispatch._DISPATCH_SOURCE_ENTRIES``** (the single source of truth —
+   ``core.dispatch.DISPATCH_SOURCE_ENTRIES``** (the single source of truth —
    currently ``main.go, main_test.go, go.mod, go.sum, vendor, fixtures``), NOT
    a hardcoded ``{go.mod, go.sum, main.go, vendor/**}`` subset (which omits
    ``main_test.go``/``fixtures/`` and would miss a Python↔Go parity-fixture
@@ -50,7 +50,7 @@ root-running phase would target ``/root/.sandbox-ai`` (``$HOME=/root`` under
 sudo), where the operator's ``sandbox doctor`` could never read it — the
 manifest is the one artifact only setup can produce, so it MUST land on a
 host path every operator can see. ``dispatcher_sha_drift`` imports
-``_manifest_path`` from this module (single source); the move is therefore a
+``manifest_path`` from this module (single source); the move is therefore a
 one-line change here.
 """
 
@@ -66,14 +66,22 @@ from importlib.resources import files as _resource_files
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from core.dispatch import _DISPATCH_SOURCE_ENTRIES, compile_dispatcher
+from core.dispatch import DISPATCH_SOURCE_ENTRIES, compile_dispatcher
 from core.exceptions import SandboxExecutionError
 from core.host_config import DockerExecutionMode
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
+__all__ = [
+    "file_sha512",
+    "manifest_path",
+    "read_manifest",
+    "source_bundle_sha512",
+]
+
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
 
+    from core.json_types import JsonValue
     from core.setup.phase_runner import SetupContext
 
 # The reserved, root-owned, non-PATH install target (design D4/D6).
@@ -81,7 +89,7 @@ _TARGET = Path("/usr/local/libexec/sandbox-ai/dispatch")
 _STAGING = Path("/usr/local/libexec/sandbox-ai/.dispatch.staging")
 
 
-def _manifest_path() -> Path:
+def manifest_path() -> Path:
     """Resolve the host-plane manifest path (alongside the binary, F-021).
 
     Derived from ``_TARGET.parent`` so the manifest is always the binary's
@@ -105,10 +113,10 @@ def _collect_files(node: Traversable, rel: str, into: dict[str, bytes]) -> None:
         into[rel] = node.read_bytes()
 
 
-def _source_bundle_sha512() -> str:
+def source_bundle_sha512() -> str:
     """sha512 of the C-001 compile-input file set (content-only, sorted paths).
 
-    The file set is **derived from** ``core.dispatch._DISPATCH_SOURCE_ENTRIES``
+    The file set is **derived from** ``core.dispatch.DISPATCH_SOURCE_ENTRIES``
     — not a hardcoded subset — so the drift coverage automatically tracks
     C-001's compile inputs if that tuple ever changes. The hash is over file
     content concatenated in deterministic alphabetical relative-path order; no
@@ -116,7 +124,7 @@ def _source_bundle_sha512() -> str:
     """
     dispatch_root = _resource_files("templates").joinpath("dispatch")
     files: dict[str, bytes] = {}
-    for entry in _DISPATCH_SOURCE_ENTRIES:
+    for entry in DISPATCH_SOURCE_ENTRIES:
         _collect_files(dispatch_root.joinpath(entry), entry, files)
     digest = hashlib.sha512()
     for rel in sorted(files):
@@ -124,7 +132,7 @@ def _source_bundle_sha512() -> str:
     return digest.hexdigest()
 
 
-def _file_sha512(path: Path) -> str | None:
+def file_sha512(path: Path) -> str | None:
     """Streamed sha512 of ``path`` (lowercase hex); ``None`` if absent."""
     if not path.is_file():
         return None
@@ -135,34 +143,34 @@ def _file_sha512(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def _read_manifest() -> dict[str, str] | None:
+def read_manifest() -> dict[str, str] | None:
     """Read the dispatcher manifest; ``None`` if absent or unreadable JSON."""
-    path = _manifest_path()
+    path = manifest_path()
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    parsed = json.loads(text)
+    parsed: JsonValue = json.loads(text)
     if not isinstance(parsed, dict):
         return None
-    return parsed
+    return {k: v for k, v in parsed.items() if isinstance(v, str)}
 
 
 def _probe(_ctx: SetupContext) -> tuple[PhaseResult, str]:
     """Content-aware probe: manifest compiled+source shas vs observed reality."""
-    manifest = _read_manifest()
+    manifest = read_manifest()
     if manifest is None:
         return (
             PhaseResult.MISSING,
             "dispatcher manifest absent; will compile + install + record",
         )
-    binary_sha = _file_sha512(_TARGET)
+    binary_sha = file_sha512(_TARGET)
     if binary_sha is None:
         return (
             PhaseResult.MISSING,
             f"{_TARGET} absent though manifest exists; will recompile",
         )
-    current_source = _source_bundle_sha512()
+    current_source = source_bundle_sha512()
     if (
         manifest.get("compiled_sha512") == binary_sha
         and manifest.get("source_bundle_sha512") == current_source
@@ -186,7 +194,7 @@ def _write_manifest(compiled_sha: str, source_sha: str) -> None:
     explicit ``chown`` keeps it root-owned even on a re-run that truncates a
     pre-existing file.
     """
-    path = _manifest_path()
+    path = manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {
         "compiled_sha512": compiled_sha,
@@ -243,28 +251,28 @@ def _act(ctx: SetupContext) -> str:
         if _STAGING.exists():
             _STAGING.unlink()
 
-    compiled_sha = _file_sha512(_TARGET)
+    compiled_sha = file_sha512(_TARGET)
     if compiled_sha is None:
         raise SandboxExecutionError(
             f"[FATAL] Sandbox Execution Fault: dispatcher missing at {_TARGET} "
             f"after install; refusing to record manifest."
         )
-    source_sha = _source_bundle_sha512()
+    source_sha = source_bundle_sha512()
     _write_manifest(compiled_sha, source_sha)
     return f"dispatcher compiled + installed at {_TARGET}; manifest recorded"
 
 
 def _reverify(_ctx: SetupContext) -> bool:
     """Confirm the manifest now matches the on-disk binary + source bundle."""
-    manifest = _read_manifest()
+    manifest = read_manifest()
     if manifest is None:
         return False
-    binary_sha = _file_sha512(_TARGET)
+    binary_sha = file_sha512(_TARGET)
     if binary_sha is None:
         return False
     return (
         manifest.get("compiled_sha512") == binary_sha
-        and manifest.get("source_bundle_sha512") == _source_bundle_sha512()
+        and manifest.get("source_bundle_sha512") == source_bundle_sha512()
     )
 
 

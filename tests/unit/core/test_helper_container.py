@@ -8,7 +8,7 @@ mock ``core.dispatch.invoke`` at the helper boundary and cover **call-shape
 only** — op name, the already-userns-translated uid/gid, parent/mode/leaf args,
 the raise-on-failure contract, and the timeout pass-through. The byte-faithful
 hardened ``docker run`` target argv is produced once by ``core.dispatch``'s
-op-builder (which reuses ``helper_container._hardened_docker_run``) and is
+op-builder (which reuses ``helper_container.hardened_docker_run``) and is
 covered by the dispatch fixture-parity suite; end-to-end ownership semantics
 (host-absolute uid/gid actually landing on disk via the daemon's userns
 translation) are exercised in

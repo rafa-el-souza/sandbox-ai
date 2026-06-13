@@ -12,7 +12,7 @@ The owner is resolved via ``core.host_config.resolve_daemon_owner`` — in
 operator-rootless that is the invoking operator (``getpass.getuser``), NEVER the
 stale ``docker_unprivileged_user`` default (the D7 owner-read convention guard).
 Admin-group membership is resolved through L2's single-source
-``_user_admin_groups`` so this check and the separate-user no-sudo daemon-user
+``user_admin_groups`` so this check and the separate-user no-sudo daemon-user
 invariant cannot disagree on what counts as an admin group.
 """
 
@@ -50,13 +50,13 @@ def check_daemon_owner_sudo(
     del distro
     host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
     owner = resolve_daemon_owner(host_config)
-    admin_groups = l2._user_admin_groups(owner)
+    admin_groups = l2.user_admin_groups(owner)
     # The owner IS the invoking operator (the current process user) in
     # operator-rootless, so query their OWN sudo privileges — self_query=True
     # uses ``sudo -n -l`` (no root, no ``-U``). This catches the policy-grant
     # path (``/etc/sudoers.d/`` drop-ins + ``NOPASSWD``) that group membership
     # alone misses (the cloud-VM / dev-box false-PASS that motivated C-005).
-    policy = l2._user_sudoers_grant(owner, self_query=True)
+    policy = l2.user_sudoers_grant(owner, self_query=True)
 
     if not admin_groups and not policy.granted:
         return CheckResult(

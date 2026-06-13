@@ -67,7 +67,7 @@ finally:
 
 _TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
 _PROBE_TIMEOUT_S = 10
-_DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
+DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 # Cache/log leaf inventory subset that this test exercises end-to-end.
 # Stays in sync with ``orchestrator-volumes``'s "Cache/Log Leaf Inventory"
@@ -92,11 +92,13 @@ def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
             raw = tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         pytest.skip(f"skipped: {real_toml} is malformed TOML: {exc}")
-    host_section = raw.get("host", {}) if isinstance(raw, dict) else {}
+    host_section: dict[str, object] = raw.get("host", {})
     user = host_section.get("docker_unprivileged_user")
     if not isinstance(user, str):
         pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
     auth_raw = host_section.get("machinectl_authentication", "sudo")
+    if not isinstance(auth_raw, str):
+        pytest.skip(f"skipped: non-string [host].machinectl_authentication={auth_raw!r}")
     try:
         auth = MachinectlAuth(auth_raw)
     except ValueError:
@@ -171,13 +173,13 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
         *machinectl_cmd(daemon_user),
         "/bin/bash",
         "-c",
-        f"test -x {_DISPATCH_BINARY}",
+        f"test -x {DISPATCH_BINARY}",
     ]
     try:
         Executor().run(dispatch_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
     except SandboxExecutionError as exc:
         pytest.skip(
-            f"skipped: dispatcher binary {_DISPATCH_BINARY} absent or non-executable "
+            f"skipped: dispatcher binary {DISPATCH_BINARY} absent or non-executable "
             f"for {daemon_user!r} (sentinel-recovered: {exc}; C-001 routes helper ops "
             f"through it; it is installed by sister change C-002 — run "
             f"`sudo sandbox setup` to install)"

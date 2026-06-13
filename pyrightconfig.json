@@ -2,6 +2,42 @@
   "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.14",
+  "typeCheckingMode": "strict",
   "include": ["src", "tests"],
-  "extraPaths": ["src"]
+  "extraPaths": ["src"],
+
+  // Test-scoped diagnostic relaxations. Structure is INVERTED on purpose: the
+  // five rules below are relaxed at the top level (which governs the tests/
+  // tree, where pyright's import resolution works correctly) and RE-ENABLED for
+  // src/ via the executionEnvironment below — so src/ stays fully strict. A
+  // tests/-rooted executionEnvironment would be tighter (per-subtree) but
+  // pyright cannot resolve a src/-layout's first-party imports under a
+  // subdirectory root (src/ collapses to library-mode and symbols read as
+  // unknown), so the relaxations apply to all of tests/ uniformly.
+  // Enforced by tests/unit/test_conventions.py::test_pyrightconfig_relaxations_whitelisted.
+  // Each relaxation encodes a real, irreducible invariant; every reducible case
+  // was fixed in code, not silenced:
+  //   reportPrivateUsage        - anti-hack rule 9: test code has no public API; reaching into _private to drive/observe a unit is sanctioned.
+  //   reportUnknownLambdaType   - monkeypatch/parametrize lambdas are intentionally-untyped dynamic doubles (Python has no lambda-param syntax; pylance #2621 can't scope to lambdas-only).
+  //   reportUnknownArgumentType - downstream of those untyped lambdas (the value handed to monkeypatch.setattr) + irreducible third-party mock surfaces.
+  //   reportUnknownMemberType   - same lambda/third-party-stub surface.
+  //   reportUnusedFunction      - pytest autouse fixtures are framework-registered and never referenced (pyright #1702).
+  "reportPrivateUsage": "none",
+  "reportUnknownLambdaType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnusedFunction": "none",
+
+  "executionEnvironments": [
+    {
+      // src/ is fully strict: re-enable every rule the top level relaxed.
+      "root": "src",
+      "extraPaths": ["src"],
+      "reportPrivateUsage": "error",
+      "reportUnknownLambdaType": "error",
+      "reportUnknownArgumentType": "error",
+      "reportUnknownMemberType": "error",
+      "reportUnusedFunction": "error"
+    }
+  ]
 }

@@ -3,9 +3,14 @@ import os
 import re
 import secrets
 import subprocess
-from typing import Any, NoReturn
+from typing import NoReturn
 
 from core.exceptions import SandboxExecutionError
+
+__all__ = [
+    "Executor",
+    "normalize_captured_output",
+]
 
 # Sentinel pattern: __SANDBOX_EXIT_{hex_token}_{exit_code}
 _SENTINEL_RE = re.compile(r"^__SANDBOX_EXIT_([0-9a-f]+)_(\d+)\s*$", re.MULTILINE)
@@ -53,7 +58,7 @@ class Executor:
     # preflight nonce-binding (H-1) reads this to bind the bundle markers to the
     # same nonce the frame used; ``run``'s public ``CompletedProcess`` contract
     # is unchanged, so every other caller is unaffected.
-    _last_frame_nonce: str | None = None
+    last_frame_nonce: str | None = None
 
     @staticmethod
     def _sanitize_pty_output(raw: str) -> str:
@@ -103,13 +108,7 @@ class Executor:
         if env:
             sterile_env.update(env)
 
-        kwargs: dict[str, Any] = {"check": True, "env": sterile_env}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-
-        if not interactive:
-            kwargs["capture_output"] = True
-            kwargs["text"] = True
+        check = True
 
         # Sentinel injection (wrap path): wrap the inner command for
         # non-interactive calls. The token is orchestrator-generated, so the
@@ -133,7 +132,7 @@ class Executor:
                 wrapped = f"( {inner_cmd} ); echo {sentinel_echo}"
                 cmd = [*cmd[:-1], wrapped]
                 # Disable check=True — we parse exit code from sentinel
-                kwargs["check"] = False
+                check = False
             else:
                 # sentinel requested on a non-`bash -c` command: no injection
                 # point, so no recovery (behaves as a normal checked run).
@@ -144,10 +143,28 @@ class Executor:
         # dispatcher's nonce-bound trailer, so the crossed (sudo-authorized)
         # payload stays the bare command the per-op rule matches.
         if framed and not interactive:
-            kwargs["check"] = False
+            check = False
 
         try:
-            result = subprocess.run(cmd, **kwargs)
+            # Explicit ``subprocess.run`` calls in place of the former
+            # ``kwargs: dict[str, Any]`` spread (which forced an opaque
+            # ``CompletedProcess[Any]``). ``text=True`` selects the overload that
+            # returns a concrete ``CompletedProcess[str]`` on both branches; the
+            # non-interactive path additionally sets ``capture_output=True`` (the
+            # recovery-eligible path that reads ``result.stdout`` as ``str``).
+            # The interactive path inherits stdio for PTY handover and captures
+            # nothing — with no pipe to decode, ``text`` is a runtime no-op
+            # there (stdout/stderr stay ``None``), so the only observable change
+            # vs. the prior dict is the kwarg's presence, not behaviour.
+            # ``timeout`` is forwarded unconditionally; ``timeout=None`` is the
+            # parameter's own default, identical to omitting it.
+            result: subprocess.CompletedProcess[str]
+            if interactive:
+                result = subprocess.run(cmd, check=check, env=sterile_env, timeout=timeout, text=True)
+            else:
+                result = subprocess.run(
+                    cmd, check=check, env=sterile_env, timeout=timeout, capture_output=True, text=True
+                )
         except subprocess.CalledProcessError as e:
             # Mask host topologies via opaque domain error
             error_msg = (
@@ -201,7 +218,7 @@ class Executor:
             # Surface the frame's nonce so core.dispatch can bind the preflight
             # bundle markers to it (H-1). Stash before any further fail-closed
             # branch so it reflects the begin line we actually recovered.
-            self._last_frame_nonce = expected
+            self.last_frame_nonce = expected
             spans.append((begin.start(), begin.end()))
         else:
             expected = injected_token

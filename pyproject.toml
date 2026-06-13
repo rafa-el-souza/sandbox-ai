@@ -35,6 +35,7 @@ Repository = "https://github.com/zerotrust-ai/sandbox-ai"
 [dependency-groups]
 dev = [
     "mypy>=1.20.1",
+    "pyright>=1.1.408",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
@@ -67,6 +68,7 @@ packages = ["core", "cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
+filterwarnings = ["error"]
 markers = [
     "integration: subprocess-level CLI tests (run with `make test-integration`)",
     "no_warm_mock: opt out of cli/conftest.py's autouse `_warm_check` patch (for tests that exercise the real function)",

@@ -51,12 +51,12 @@ if TYPE_CHECKING:
 
 _MANAGED_HEADER = "# sandbox-ai managed — do not edit; rerun 'sudo sandbox setup'"
 
-_SYSCTL_DROPIN = Path("/etc/sysctl.d/49-sandbox-ai.conf")
+SYSCTL_DROPIN = Path("/etc/sysctl.d/49-sandbox-ai.conf")
 
-_MAX_USER_NS = 15000
+MAX_USER_NS = 15000
 
 
-def _is_debian_family() -> bool:
+def is_debian_family() -> bool:
     """``True`` iff the host is Debian-family (``kernel.unprivileged_userns_clone``).
 
     The knob exists only on Debian-family kernels (design / spec); on
@@ -68,8 +68,8 @@ def _is_debian_family() -> bool:
 
 def render_sysctl_dropin() -> str:
     """Render the expected ``/etc/sysctl.d/49-sandbox-ai.conf`` body."""
-    lines = [_MANAGED_HEADER, f"user.max_user_namespaces={_MAX_USER_NS}"]
-    if _is_debian_family():
+    lines = [_MANAGED_HEADER, f"user.max_user_namespaces={MAX_USER_NS}"]
+    if is_debian_family():
         lines.append("kernel.unprivileged_userns_clone=1")
     return "\n".join(lines) + "\n"
 
@@ -122,16 +122,16 @@ def _probe(_ctx: SetupContext) -> tuple[PhaseResult, str]:
         )
 
     expected_sysctl = render_sysctl_dropin()
-    observed_sysctl = _read(_SYSCTL_DROPIN)
+    observed_sysctl = _read(SYSCTL_DROPIN)
 
     if observed_sysctl is None:
-        return PhaseResult.MISSING, f"{_SYSCTL_DROPIN} absent"
+        return PhaseResult.MISSING, f"{SYSCTL_DROPIN} absent"
     if observed_sysctl != expected_sysctl:
-        return PhaseResult.DRIFT, f"{_SYSCTL_DROPIN} content differs from source"
+        return PhaseResult.DRIFT, f"{SYSCTL_DROPIN} content differs from source"
     return PhaseResult.ALREADY_CORRECT, "sysctl drop-in matches source"
 
 
-def _write_root_file(path: Path, body: str, mode: int) -> None:
+def write_root_file(path: Path, body: str, mode: int) -> None:
     """Write ``body`` to ``path`` root:root at ``mode`` (parent dirs 0755)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
@@ -141,16 +141,16 @@ def _write_root_file(path: Path, body: str, mode: int) -> None:
 
 def _act(_ctx: SetupContext) -> str:
     """Write the sysctl drop-in and apply it immediately."""
-    _write_root_file(_SYSCTL_DROPIN, render_sysctl_dropin(), 0o644)
+    write_root_file(SYSCTL_DROPIN, render_sysctl_dropin(), 0o644)
 
-    applied = [f"user.max_user_namespaces={_MAX_USER_NS}"]
+    applied = [f"user.max_user_namespaces={MAX_USER_NS}"]
     subprocess.run(
-        ["sysctl", "-w", f"user.max_user_namespaces={_MAX_USER_NS}"],
+        ["sysctl", "-w", f"user.max_user_namespaces={MAX_USER_NS}"],
         capture_output=True,
         text=True,
         check=True,
     )
-    if _is_debian_family():
+    if is_debian_family():
         subprocess.run(
             ["sysctl", "-w", "kernel.unprivileged_userns_clone=1"],
             capture_output=True,
@@ -159,12 +159,12 @@ def _act(_ctx: SetupContext) -> str:
         )
         applied.append("kernel.unprivileged_userns_clone=1")
 
-    return f"wrote {_SYSCTL_DROPIN} ({', '.join(applied)})"
+    return f"wrote {SYSCTL_DROPIN} ({', '.join(applied)})"
 
 
 def _reverify(_ctx: SetupContext) -> bool:
     """L1 converged iff the sysctl drop-in now byte-matches rendered source."""
-    return _read(_SYSCTL_DROPIN) == render_sysctl_dropin()
+    return _read(SYSCTL_DROPIN) == render_sysctl_dropin()
 
 
 PHASE = Phase(
@@ -184,6 +184,10 @@ PHASE = Phase(
 )
 
 __all__ = [
+    "MAX_USER_NS",
     "PHASE",
+    "SYSCTL_DROPIN",
+    "is_debian_family",
     "render_sysctl_dropin",
+    "write_root_file",
 ]

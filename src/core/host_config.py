@@ -23,6 +23,42 @@ from pydantic import BaseModel, field_validator
 
 from core.exceptions import SandboxExecutionError
 
+__all__ = [
+    "DEFAULT_PROVISIONING_MODE",
+    "USERNAME_RE",
+    "DockerExecutionMode",
+    "HostConfig",
+    "HostSettings",
+    "MachinectlAuth",
+    "NoFreeGidInSubgidRangeError",
+    "NoSubgidRangeError",
+    "NoSubuidRangeError",
+    "SubgidOutOfRangeError",
+    "SubuidOutOfRangeError",
+    "WorkspaceBridgeGroupMissingError",
+    "autodetect_workspace_bridge_gid_recommendation",
+    "ensure_per_user_state",
+    "host_gid_for_in_container",
+    "host_id_for_in_container",
+    "in_container_gid_for_host_gid",
+    "in_container_uid_for_host_uid",
+    "ipam_lock_path",
+    "is_operator_rootless",
+    "machinectl_cmd",
+    "minimal_host_config",
+    "parse_subgid_for_user",
+    "parse_subuid_for_user",
+    "pipe_cmd",
+    "registry_lock_path",
+    "resolve_daemon_owner",
+    "resolve_daemon_owner_settings",
+    "sandbox_ai_home",
+    "state_lock_path",
+    "sudo_as_operator",
+    "sudo_pipe_cmd",
+    "workspace_bridge_gid",
+]
+
 # POSIX-portable username grammar (M-1). ``docker_unprivileged_user`` reaches the
 # ``--uid={user}`` operand of ``systemd-run``/``pipe_cmd`` and the rendered
 # sudoers ``Cmnd_Spec``, so a value carrying a space, an uppercase letter, or a
@@ -30,7 +66,7 @@ from core.exceptions import SandboxExecutionError
 # emitted rule or the crossing argv. Reject any non-conforming value at the
 # Pydantic boundary: lowercase initial letter or underscore, then up to 31 more
 # of ``[a-z0-9_-]`` (32-char useradd ceiling).
-_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def sandbox_ai_home() -> Path:
@@ -142,10 +178,10 @@ class HostSettings(BaseModel):
         sudoers ``Cmnd_Spec``; reject empty / spaces / uppercase / shell- or
         sudoers-metacharacters before it can corrupt a rendered rule.
         """
-        if _USERNAME_RE.match(value) is None:
+        if USERNAME_RE.match(value) is None:
             raise ValueError(
                 f"docker_unprivileged_user {value!r} is not a valid POSIX username "
-                f"(must match {_USERNAME_RE.pattern}: lowercase/underscore start, "
+                f"(must match {USERNAME_RE.pattern}: lowercase/underscore start, "
                 f"then [a-z0-9_-], max 32 chars — no spaces, uppercase, or "
                 f"shell/sudoers metacharacters)"
             )

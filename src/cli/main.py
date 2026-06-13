@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pydantic
 import typer
@@ -80,10 +81,10 @@ from core.scaffold import (
     REQUIRED_INSTANCE_SECRETS,
     SecretSeedingError,
     WorkspaceSpec,
-    _detect_git_config,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
+    detect_git_config,
     ensure_registry_seed,
     mutate_workspaces,
     parse_secrets_file,
@@ -121,6 +122,9 @@ from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 app = typer.Typer()
 workspace_app = typer.Typer(help="Workspace lifecycle commands")
@@ -354,7 +358,7 @@ def _container_status(
             if not line:
                 continue
             try:
-                data = _json.loads(line)
+                data: JsonValue = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
             # Strict shape: each NDJSON record must be a JSON object. A
@@ -362,13 +366,27 @@ def _container_status(
             # coerced into a ContainerInfo.
             if not isinstance(data, dict):
                 continue
+
+            # ``data`` is now ``dict[str, JsonValue]``; project each field to the
+            # ``str`` the daemon always emits via an inline isinstance gate whose
+            # else-branch is the SAME default the prior ``.get(key, default)``
+            # carried — so a missing OR non-``str`` field (only reachable via
+            # corrupt output) lands on that existing default rather than typing
+            # the field as ``JsonValue``. Docker's real NDJSON is ``str``
+            # throughout, so this is identity on well-formed output. ``Health``
+            # keeps the prior ``... or None`` semantics (empty/falsy → ``None``).
+            name = data.get("Name", "")
+            service = data.get("Service", "")
+            state = data.get("State", "")
+            status = data.get("Status", "")
+            health = data.get("Health", None)
             containers.append(
                 ContainerInfo(
-                    name=data.get("Name", ""),
-                    service=data.get("Service", ""),
-                    state=data.get("State", ""),
-                    health=data.get("Health", None) or None,
-                    status=data.get("Status", ""),
+                    name=name if isinstance(name, str) else "",
+                    service=service if isinstance(service, str) else "",
+                    state=state if isinstance(state, str) else "",
+                    health=health if isinstance(health, str) and health else None,
+                    status=status if isinstance(status, str) else "",
                 )
             )
     return containers
@@ -2397,7 +2415,7 @@ def setup(
 
 
 @app.command("_bootstrap-host", hidden=True)
-def _bootstrap_host(
+def bootstrap_host(
     items: list[str] = _BOOTSTRAP_ITEM_FLAG,
     operator: str = typer.Option(..., "--operator", help="The operator the batch provisions for"),
     operator_uid: int = typer.Option(..., "--operator-uid", help="The operator's numeric uid"),
@@ -3120,7 +3138,7 @@ def init(
 
     # Git config auto-detection (D-8)
     if not git_user or not git_email:
-        detected_name, detected_email = _detect_git_config()
+        detected_name, detected_email = detect_git_config()
         if not git_user:
             git_user = detected_name
         if not git_email:
@@ -3318,7 +3336,6 @@ def start(
         return
 
     # Phase 1: Locking
-    lock_fd: int | None = None
     try:
         lock_fd = _acquire_state_lock(instance_dir)
     except BlockingIOError:
@@ -3330,8 +3347,7 @@ def start(
 
     # Backup-lock check (after state.lock acquisition per cli-start spec).
     if is_backup_lock_held(inst):
-        if lock_fd is not None:
-            _release_lock(lock_fd)
+        _release_lock(lock_fd)
         console.print(
             f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
             style="red",
@@ -3359,8 +3375,7 @@ def start(
                 style="red bold",
                 markup=False,
             )
-            if lock_fd is not None:
-                _release_lock(lock_fd)
+            _release_lock(lock_fd)
             raise typer.Exit(code=1) from None
         console.print("✓ Workspace — shared-group recipe applied")
 
@@ -3430,13 +3445,11 @@ def start(
             acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths, auth)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
-        if lock_fd is not None:
-            _release_lock(lock_fd)
+        _release_lock(lock_fd)
         raise typer.Exit(code=1) from None
 
     # Phase 7: Handover — release lock first
-    if lock_fd is not None:
-        _release_lock(lock_fd)
+    _release_lock(lock_fd)
 
     if no_handover or not _stdin_is_tty():
         console.print(f"Sandbox '{inst}' started. Attach with: sandbox attach {inst}")

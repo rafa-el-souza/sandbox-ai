@@ -46,7 +46,7 @@ class _Result:
 class _Exec:
     """Fake Executor: records argv, drives per-command outcomes."""
 
-    calls: list[list[str]] = field(default_factory=list)
+    calls: list[list[str]] = field(default_factory=list[list[str]])
     help_supports_config_check: bool = True
     help_ok: bool = True
     config_check_ok: bool = True
