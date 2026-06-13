@@ -161,7 +161,7 @@ def check_legacy_registry_shape(host_user: str, distro: str | None) -> CheckResu
     """Warn if ``instances.json`` is path-keyed (pre-change-5 shape)."""
     del host_user, distro
     data = _read_registry_raw()
-    legacy_keys = [k for k in data if isinstance(k, str) and k.startswith("/")]
+    legacy_keys = [k for k in data if k.startswith("/")]
     if legacy_keys:
         return CheckResult(
             status="warn",

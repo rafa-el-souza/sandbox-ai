@@ -45,7 +45,7 @@ def is_path_keyed(data: dict[str, object]) -> bool:
     mapping to an ``instance_id`` string. The new shape keys by instance name
     (no leading ``/``) mapping to a record dict.
     """
-    return any(isinstance(k, str) and k.startswith("/") for k in data)
+    return any(k.startswith("/") for k in data)
 
 
 class InstanceNameInUseError(Exception):

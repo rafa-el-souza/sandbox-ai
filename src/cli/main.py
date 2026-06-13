@@ -3318,7 +3318,6 @@ def start(
         return
 
     # Phase 1: Locking
-    lock_fd: int | None = None
     try:
         lock_fd = _acquire_state_lock(instance_dir)
     except BlockingIOError:
@@ -3330,8 +3329,7 @@ def start(
 
     # Backup-lock check (after state.lock acquisition per cli-start spec).
     if is_backup_lock_held(inst):
-        if lock_fd is not None:
-            _release_lock(lock_fd)
+        _release_lock(lock_fd)
         console.print(
             f"Backup in progress for {inst!r}; wait or `sandbox doctor` to inspect.",
             style="red",
@@ -3359,8 +3357,7 @@ def start(
                 style="red bold",
                 markup=False,
             )
-            if lock_fd is not None:
-                _release_lock(lock_fd)
+            _release_lock(lock_fd)
             raise typer.Exit(code=1) from None
         console.print("✓ Workspace — shared-group recipe applied")
 
@@ -3430,13 +3427,11 @@ def start(
             acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths, auth)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
-        if lock_fd is not None:
-            _release_lock(lock_fd)
+        _release_lock(lock_fd)
         raise typer.Exit(code=1) from None
 
     # Phase 7: Handover — release lock first
-    if lock_fd is not None:
-        _release_lock(lock_fd)
+    _release_lock(lock_fd)
 
     if no_handover or not _stdin_is_tty():
         console.print(f"Sandbox '{inst}' started. Attach with: sandbox attach {inst}")

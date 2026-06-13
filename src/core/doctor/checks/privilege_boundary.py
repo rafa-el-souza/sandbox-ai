@@ -479,7 +479,7 @@ def _interpret_compose_project_name_collision(outcome: dispatch.ProbeOutcome) ->
             detail="no registered instances; nothing to check",
             category="Privilege Boundary",
         )
-    expected = {compose_project_name(name) for name in registered if isinstance(name, str)}
+    expected = {compose_project_name(name) for name in registered}
 
     if outcome.timed_out:
         return CheckResult(
