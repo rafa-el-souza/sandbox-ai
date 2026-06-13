@@ -3339,6 +3339,46 @@ def _secret_seed_scaffold_patches(
         yield {"dirs": mock_dirs, "seed": mock_seed, "prompt": mock_prompt}
 
 
+class TestInitGitAutoDetect:
+    """init git config auto-detection guard branches (D-8)."""
+
+    def test_both_provided_skips_detection(self, runner: CliRunner) -> None:
+        # Both --git-user and --git-email given → the `if not git_user or not
+        # git_email` false branch skips detect_git_config entirely (3145->3152).
+        from unittest.mock import MagicMock
+
+        from cli.main import app
+
+        detect = MagicMock()
+        with patch("cli.main.detect_git_config", detect):
+            result = runner.invoke(
+                app, ["init", "newproject", "--dry-run", "--git-user", "Jane", "--git-email", "j@e.com"]
+            )
+        assert result.exit_code == 0, result.output
+        detect.assert_not_called()
+        assert "Jane <j@e.com>" in result.output
+
+    def test_user_provided_email_detected(self, runner: CliRunner) -> None:
+        # --git-user only: the guard enters (email empty) but `if not git_user`
+        # is false (3147->3149) — the provided user wins, only email is detected.
+        from cli.main import app
+
+        with patch("cli.main.detect_git_config", return_value=("Detected", "det@e.com")):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run", "--git-user", "Jane"])
+        assert result.exit_code == 0, result.output
+        assert "Jane <det@e.com>" in result.output
+
+    def test_email_provided_user_detected(self, runner: CliRunner) -> None:
+        # --git-email only: `if not git_email` is false (3149->3152) — the
+        # provided email wins, only the user is detected.
+        from cli.main import app
+
+        with patch("cli.main.detect_git_config", return_value=("Detected", "det@e.com")):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run", "--git-email", "j@e.com"])
+        assert result.exit_code == 0, result.output
+        assert "Detected <j@e.com>" in result.output
+
+
 class TestInitSecretSeeding:
     """D1: non-interactive secret seeding (`--secrets-from-env` / `--secrets-from-file`)."""
 
@@ -3546,6 +3586,23 @@ class TestInitSecretSeeding:
             result = runner.invoke(app, ["init", "newproject", "--dry-run"])
         assert result.exit_code == 0, result.output
         assert "YOUR_<NAME>_HERE" in result.output
+
+
+    def test_dry_run_secret_source_env_all_set_omits_unset_suffix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # secrets-from-env with EVERY required secret present in the environment
+        # → the `if unset` false branch: the source line names the variables but
+        # carries no "(currently unset: ...)" suffix (2941 path).
+        from cli.main import _dry_run_secret_source_lines
+        from core.scaffold import REQUIRED_INSTANCE_SECRETS
+
+        for name in REQUIRED_INSTANCE_SECRETS:
+            monkeypatch.setenv(name, "present")
+        lines = _dry_run_secret_source_lines(True, None)
+        assert len(lines) == 1
+        assert "from environment variables" in lines[0]
+        assert "currently unset" not in lines[0]
 
 
 class TestRequirePerUserStateInitialized:
@@ -4245,6 +4302,24 @@ class TestDryRunExistingInstance:
             mock_warm.assert_not_called()
             assert result.exit_code == 0
 
+    def test_dry_run_complete_secrets_skip_warning(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
+        # A complete .sandbox.env (all required secrets populated) → _check_secrets
+        # returns [] → the `if missing_secrets` false branch skips the
+        # "Missing/empty secrets" block and falls through to the command preview.
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam("myproject", 0)
+        _create_tooling_plane(mock_sandbox_ai_home)
+        # VALID_TOML enables postgres → CORE_ANTHROPIC_API_KEY + PG_PASSWORD required.
+        (instance_dir / ".sandbox.env").write_text("CORE_ANTHROPIC_API_KEY=sk-123\nPG_PASSWORD=pw\n")
+
+        from cli.main import app
+
+        result = runner.invoke(app, ["start", inst, "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Commands that would execute" in result.output
+        assert "Missing/empty secrets" not in result.output
+
     def test_dry_run_existing_instance_exit_0(self, runner: CliRunner, mock_sandbox_ai_home: Path) -> None:
         """Existing instance dry-run passes with exit code 0."""
         inst = "myproject"
@@ -4467,6 +4542,52 @@ class TestCheckSecretsFirecrawl:
         result = runner.invoke(app, ["start", inst, "--dry-run"])
         out = result.output.lower()
         assert "firecrawl" in out or "missing" in out or "secret" in out
+
+
+class TestCheckSecretsBranches:
+    """Direct coverage of _check_secrets requirement + parse branches."""
+
+    def _config(self, *, postgres: bool, firecrawl: bool = False) -> InstanceConfig:
+        from core.hydration import InstanceConfig
+
+        return InstanceConfig.model_validate(
+            {
+                "instance": {"name": "t", "host_uid": "1000"},
+                "workspaces": {"main": {"bootstrap_mode": "empty", "path": "/x"}},
+                "components": {"mcp_firecrawl": firecrawl},
+                "components_db_postgres": {"enabled": postgres},
+            }
+        )
+
+    def test_postgres_disabled_omits_pg_password(self, tmp_path: Path) -> None:
+        # postgres disabled → the `if config.components_db_postgres.enabled`
+        # false branch skips appending PG_PASSWORD to the required set.
+        from cli.main import _check_secrets
+
+        env = tmp_path / ".sandbox.env"
+        env.write_text("CORE_ANTHROPIC_API_KEY=sk-123\n")
+        missing = _check_secrets(str(env), self._config(postgres=False))
+        assert missing == []
+
+    def test_postgres_enabled_requires_pg_password(self, tmp_path: Path) -> None:
+        # The true branch: PG_PASSWORD is required and reported when empty.
+        from cli.main import _check_secrets
+
+        env = tmp_path / ".sandbox.env"
+        env.write_text("CORE_ANTHROPIC_API_KEY=sk-123\n")
+        missing = _check_secrets(str(env), self._config(postgres=True))
+        assert "PG_PASSWORD" in missing
+
+    def test_comment_and_blank_lines_skipped(self, tmp_path: Path) -> None:
+        # Comment (#) and blank lines have no parseable `key=value` — the
+        # `if "=" in line and not line.startswith("#")` false branch skips them
+        # while real assignments are still parsed.
+        from cli.main import _check_secrets
+
+        env = tmp_path / ".sandbox.env"
+        env.write_text("# header\n\nCORE_ANTHROPIC_API_KEY=sk-123\n# trailing comment\n\n")
+        missing = _check_secrets(str(env), self._config(postgres=False))
+        assert missing == []
 
 
 # ── Container Status Function ────────────────────────────────────────────────
@@ -4702,6 +4823,28 @@ class TestStatusRunning:
             assert "network" in out
 
 
+    def test_status_running_without_ipam_entry_blank_network(self, runner: CliRunner) -> None:
+        # A running instance with containers but no IPAM ledger entry → peek
+        # returns is_existing=False (the `if is_existing` false branch, 4036):
+        # ip_map stays empty so the container table renders no IP. (Defensive
+        # path — IPAM is normally allocated before containers start.)
+        inst = "myproject"
+        _register_instance(inst)
+        # Deliberately NOT _write_ipam(inst): the instance is absent from IPAM.
+
+        from cli.main import ContainerInfo, app
+
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="healthy", status="Up 5s"),
+        ]
+        with patch("cli.main._container_status", return_value=containers):
+            result = runner.invoke(app, ["status", inst])
+            assert result.exit_code == 0
+            assert "core" in result.output.lower()
+            # No static IP is shown — the instance has no IPAM allocation.
+            assert "10.100" not in result.output
+
+
 class TestStatusStopped:
     """Task 7.1: sandbox status — stopped instance."""
 
@@ -4743,6 +4886,25 @@ class TestStatusDegraded:
             assert result.exit_code == 0
             out = result.output.lower()
             assert "degraded" in out
+
+
+    def test_status_intermediate_health_rendered_without_markup(self, runner: CliRunner) -> None:
+        # A health value that is neither "healthy" nor "unhealthy" (e.g.
+        # "starting") falls through both colour branches (the elif
+        # `== "healthy"` false branch, 4061) and is rendered as-is.
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam("myproject", 0)
+
+        from cli.main import ContainerInfo, app
+
+        containers = [
+            ContainerInfo(name="t-core-1", service="core", state="running", health="starting", status="Up"),
+        ]
+        with patch("cli.main._container_status", return_value=containers):
+            result = runner.invoke(app, ["status", inst])
+            assert result.exit_code == 0
+            assert "starting" in result.output.lower()
 
 
 class TestStatusIPAM:
@@ -4787,6 +4949,40 @@ class TestStatusConfigWarnings:
             assert result.exit_code == 0
             assert "⊘" in result.output
             assert "PG_PASSWORD" in result.output
+
+    def test_status_warns_when_env_file_missing(self, runner: CliRunner) -> None:
+        # A missing .sandbox.env is more severe than an incomplete one — status
+        # must surface it as a warning rather than silently reporting OK (the
+        # `if not os.path.exists(env_path)` true branch, folded-in fix).
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam("myproject", 0)
+        (instance_dir / ".sandbox.env").unlink()
+
+        from cli.main import app
+
+        with patch("cli.main._container_status", return_value=[]):
+            result = runner.invoke(app, ["status", inst])
+            assert result.exit_code == 0
+            assert "⊘" in result.output
+            assert ".sandbox.env not found" in result.output
+
+    def test_status_no_warnings_when_env_complete(self, runner: CliRunner) -> None:
+        # env present AND all required secrets populated → the `if missing`
+        # false branch: no Warnings section at all (4087 path).
+        inst = "myproject"
+        instance_dir = _register_instance(inst)
+        _write_ipam("myproject", 0)
+        # VALID_TOML enables postgres → CORE_ANTHROPIC_API_KEY + PG_PASSWORD required.
+        (instance_dir / ".sandbox.env").write_text("CORE_ANTHROPIC_API_KEY=sk-123\nPG_PASSWORD=pw\n")
+
+        from cli.main import app
+
+        with patch("cli.main._container_status", return_value=[]):
+            result = runner.invoke(app, ["status", inst])
+            assert result.exit_code == 0
+            assert "Warnings" not in result.output
+            assert "Missing secret" not in result.output
 
 
 # ── ACL Plan Function tests ──────────────────────────────────────────────────
@@ -5614,6 +5810,49 @@ class TestWorkspaceSharedGroup:
         count, sample = _workspace_shared_group_recursive(str(ws), os.stat(ws).st_gid)
         assert count == 1
         assert any("bad.txt" in s for s in sample)
+
+    def test_recursive_chown_failures_count_uncapped_sample_capped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # >5 chown failures: the true failure_count must reflect ALL of them
+        # while the sample list is capped at 5 (the `if len(failures) <
+        # sample_limit` false branch, exercised on failures 6+).
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        for i in range(7):
+            (ws / f"f{i}.txt").write_text("x")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise PermissionError("nope")
+
+        monkeypatch.setattr("cli.main.os.chown", _boom)
+        count, sample = _workspace_shared_group_recursive(str(ws), 200500)
+        assert count == 7
+        assert len(sample) == 5
+
+    def test_recursive_chmod_failures_count_uncapped_sample_capped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same, via the chmod handler: chown succeeds, chmod fails on all 7
+        # entries → count==7 (uncapped), sample==5 (the chmod-handler
+        # `if len(failures) < sample_limit` false branch, 1384 path).
+        from cli.main import _workspace_shared_group_recursive
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        for i in range(7):
+            (ws / f"f{i}.txt").write_text("x")
+        monkeypatch.setattr("cli.main.os.chown", lambda *a, **k: None)
+
+        def _raise_chmod(path: str, mode: int) -> None:
+            raise PermissionError("chmod denied")
+
+        monkeypatch.setattr("cli.main.os.chmod", _raise_chmod)
+        count, sample = _workspace_shared_group_recursive(str(ws), 200500)
+        assert count == 7
+        assert len(sample) == 5
 
     def test_plan_for_dry_run_includes_all_steps(self) -> None:
         from cli.main import _workspace_shared_group_plan
@@ -6782,6 +7021,26 @@ class TestDestroyBackupWorkspacesSpec:
 
         with pytest.raises(_typer.BadParameter, match="not found"):
             _resolve_backup_workspaces_spec("missing,also_missing", {"main"})
+
+
+class TestPromptBackupSelection:
+    """_prompt_backup_selection per-workspace TTY confirm loop."""
+
+    def test_declined_workspace_excluded_loop_continues(self) -> None:
+        # typer.confirm returning False for the first workspace exercises the
+        # `if typer.confirm(...)` false branch (3635->3634): that workspace is
+        # not selected and the loop continues to the next one.
+        from cli.main import _prompt_backup_selection
+
+        with patch("cli.main.typer.confirm", side_effect=[False, True]):
+            selected = _prompt_backup_selection(["a", "b"])
+        assert selected == ["b"]
+
+    def test_all_declined_returns_empty(self) -> None:
+        from cli.main import _prompt_backup_selection
+
+        with patch("cli.main.typer.confirm", return_value=False):
+            assert _prompt_backup_selection(["a", "b"]) == []
 
 
 class TestDestroyBackupFlows:

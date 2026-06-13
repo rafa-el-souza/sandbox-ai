@@ -32,6 +32,12 @@ if TYPE_CHECKING:
 class CheckResult:
     """Result of a single diagnostic check."""
 
+    # WARNING: render_results (core.doctor.render) matches pass/fail/warn
+    # explicitly and renders every other value as a "skip" row via a catch-all
+    # `else` — the 100%-branch gate forbids an unreachable `assert_never` arm, so
+    # there is no static or runtime guard here. Adding a member to this Literal
+    # WITHOUT extending that renderer will silently mislabel the new status as a
+    # skip. Update render_results in lockstep.
     status: Literal["pass", "fail", "skip", "warn"]
     name: str
     detail: str

@@ -93,5 +93,6 @@ exclude_also = [
 ]
 
 [tool.coverage.run]
+branch = true
 source = ["src/cli", "src/core"]
 omit = ["src/cli/__main__.py"]

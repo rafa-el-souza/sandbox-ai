@@ -289,6 +289,67 @@ def test_act_full_convergence(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "created user" in detail
 
 
+def test_act_appends_only_subgid_when_subuid_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Asymmetric subid: subuid present+adequate, subgid absent. subid_status is
+    # "absent" (one side missing), so act enters the block but must skip the
+    # subuid append via the `if not parse_subuid_for_user` false branch
+    # (344->347) and append only the missing subgid entry.
+    w = _World()
+    w.groups = {}
+    w.subuid = _FULL
+    w.subgid = []
+    _install(monkeypatch, w)
+    runs: list[list[str]] = []
+
+    class _P:
+        stdout = "active"
+        returncode = 0
+
+    def _run(argv: list[str], **_k: object) -> object:
+        runs.append(argv)
+        return _P()
+
+    monkeypatch.setattr("subprocess.run", _run)
+    monkeypatch.setattr(
+        "core.setup.l2_host_prereqs.autodetect_workspace_bridge_gid_recommendation",
+        lambda _u: 9000,
+    )
+    PHASE.act(_ctx())
+    joined = [" ".join(r) for r in runs]
+    assert any("--add-subgids" in j for j in joined)
+    assert not any("--add-subuids" in j for j in joined)
+
+
+def test_act_appends_only_subuid_when_subgid_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mirror: subgid present+adequate, subuid absent. act must skip the subgid
+    # append via the `if not parse_subgid_for_user` false branch (347->351) and
+    # append only the missing subuid entry.
+    w = _World()
+    w.groups = {}
+    w.subuid = []
+    w.subgid = _FULL
+    _install(monkeypatch, w)
+    runs: list[list[str]] = []
+
+    class _P:
+        stdout = "active"
+        returncode = 0
+
+    def _run(argv: list[str], **_k: object) -> object:
+        runs.append(argv)
+        return _P()
+
+    monkeypatch.setattr("subprocess.run", _run)
+    monkeypatch.setattr(
+        "core.setup.l2_host_prereqs.autodetect_workspace_bridge_gid_recommendation",
+        lambda _u: 9000,
+    )
+    PHASE.act(_ctx())
+    joined = [" ".join(r) for r in runs]
+    assert any("--add-subuids" in j for j in joined)
+    assert not any("--add-subgids" in j for j in joined)
+
+
 def test_act_already_converged(monkeypatch: pytest.MonkeyPatch) -> None:
     w = _World()
     _install(monkeypatch, w)

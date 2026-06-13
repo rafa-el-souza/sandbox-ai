@@ -61,7 +61,12 @@ def render_results(
                 console.print(f"    {r.detail}")
                 if r.remediation:
                     console.print(f"    Fix: {r.remediation}", style="yellow")
-            elif r.status == "skip":
+            else:
+                # status == "skip" — the closed Literal's only remaining value.
+                # Catch-all rather than `== "skip"`: the 100%-branch gate forbids
+                # an unreachable `assert_never` arm. A new CheckResult.status
+                # member would render here as a skip row until this match is
+                # extended (the Literal in types.py carries the matching warning).
                 console.print(Text(f"  ⊘ {r.name} — {r.detail}", style="dim"))
 
     # Summary line
