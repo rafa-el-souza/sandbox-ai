@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core import dispatch
-from core.doctor.types import _BINARY_PACKAGES, CheckResult, get_install_cmd
+from core.doctor.types import BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
@@ -41,7 +41,7 @@ def check_setfacl(user: str, distro: str | None) -> CheckResult:
         status="fail",
         name="setfacl",
         detail="setfacl not found on PATH",
-        remediation=get_install_cmd(distro, _BINARY_PACKAGES["setfacl"]),
+        remediation=get_install_cmd(distro, BINARY_PACKAGES["setfacl"]),
     )
 
 

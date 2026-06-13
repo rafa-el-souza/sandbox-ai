@@ -2,7 +2,7 @@
 """Unit tests for the L6.5 dispatcher-install phase.
 
 Covers: the 2-arg ``compile_dispatcher`` contract, the
-``_DISPATCH_SOURCE_ENTRIES``-derived source-bundle hash (no hardcoded subset),
+``DISPATCH_SOURCE_ENTRIES``-derived source-bundle hash (no hardcoded subset),
 probe branches (MISSING no-manifest, MISSING binary-absent, ALREADY_CORRECT
 both-match, DRIFT binary-drift, DRIFT source-drift), act compile + install +
 manifest, reverify true/false, the content-aware fixture, and the PHASE shape.
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from core.dispatch import _DISPATCH_SOURCE_ENTRIES
+from core.dispatch import DISPATCH_SOURCE_ENTRIES
 from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
 from core.setup import l65_dispatcher as l65
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -100,7 +100,7 @@ def source_sha(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     def fake_source() -> str:
         return holder["value"]
 
-    monkeypatch.setattr(l65, "_source_bundle_sha512", fake_source)
+    monkeypatch.setattr(l65, "source_bundle_sha512", fake_source)
     return holder
 
 
@@ -109,7 +109,7 @@ def _binary_sha(env: _Env) -> str:
 
 
 def _write_manifest(compiled: str, source: str) -> None:
-    path = l65._manifest_path()
+    path = l65.manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -126,11 +126,11 @@ def _write_manifest(compiled: str, source: str) -> None:
 def test_source_bundle_hash_derived_from_dispatch_source_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The hashed file set is derived from ``_DISPATCH_SOURCE_ENTRIES``.
+    """The hashed file set is derived from ``DISPATCH_SOURCE_ENTRIES``.
 
     Reconciliation #2: NOT a hardcoded ``{go.mod, go.sum, main.go,
     vendor/**}`` subset. We stub the resource tree so each top-level entry in
-    ``_DISPATCH_SOURCE_ENTRIES`` contributes a unique byte; the resulting hash
+    ``DISPATCH_SOURCE_ENTRIES`` contributes a unique byte; the resulting hash
     must change when any one entry's content changes, proving every entry
     (including ``main_test.go`` / ``fixtures``) participates.
     """
@@ -162,9 +162,9 @@ def test_source_bundle_hash_derived_from_dispatch_source_entries(
             return _Node("dispatch", None)
 
     monkeypatch.setattr(l65, "_resource_files", lambda _pkg: _Root())
-    digest = l65._source_bundle_sha512()
+    digest = l65.source_bundle_sha512()
     # Every entry in the single source of truth was visited.
-    assert seen == list(_DISPATCH_SOURCE_ENTRIES)
+    assert seen == list(DISPATCH_SOURCE_ENTRIES)
     assert "main_test.go" in seen
     assert "fixtures" in seen
     assert len(digest) == 128
@@ -221,7 +221,7 @@ def test_probe_drift_when_source_bundle_differs(
 def test_probe_handles_non_dict_manifest(
     env: _Env, source_sha: dict[str, str], ctx: SetupContext
 ) -> None:
-    path = l65._manifest_path()
+    path = l65.manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("[1, 2]", encoding="utf-8")
     result, _ = l65.PHASE.probe(ctx)
@@ -235,7 +235,7 @@ def test_act_compiles_installs_and_writes_manifest(
     assert l65._TARGET.read_bytes() == env.binary_bytes
     # 2-arg compile asserted inside the fake; one call made.
     assert len(env.compile_calls) == 1
-    manifest = json.loads(l65._manifest_path().read_text())
+    manifest = json.loads(l65.manifest_path().read_text())
     assert manifest["compiled_sha512"] == _binary_sha(env)
     assert manifest["source_bundle_sha512"] == source_sha["value"]
     assert "compile_timestamp" in manifest
@@ -248,7 +248,7 @@ def test_act_compiles_installs_and_writes_manifest(
     assert any("chattr +i" in c for c in env.chattr)
     assert "manifest recorded" in detail
     # Host-plane manifest is world-readable root:root 0644 (F-021), not 0600.
-    assert (l65._manifest_path().stat().st_mode & 0o777) == 0o644
+    assert (l65.manifest_path().stat().st_mode & 0o777) == 0o644
 
 
 def test_act_unseals_existing_immutable_target(
@@ -358,7 +358,7 @@ def test_manifest_path_is_binary_sibling_not_under_home(
     ``_TARGET`` to a separate tmp libexec dir; the manifest path must follow
     ``_TARGET.parent`` and be wholly independent of the home.
     """
-    manifest = l65._manifest_path()
+    manifest = l65.manifest_path()
     assert manifest == l65._TARGET.parent / "dispatcher.manifest.json"
     # Pre-fix tree resolved this under SANDBOX_AI_HOME/state — assert it does not.
     import os

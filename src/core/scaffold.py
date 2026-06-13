@@ -22,6 +22,25 @@ from core.crypto import generate_credential
 from core.exceptions import SandboxExecutionError
 from core.hydration import IMAGE_REGISTRY
 
+__all__ = [
+    "INSTANCE_SUBDIRS",
+    "REQUIRED_INSTANCE_SECRETS",
+    "SecretSeedingError",
+    "WorkspaceSpec",
+    "apply_default_acls",
+    "create_env_file",
+    "create_instance_dirs",
+    "detect_git_config",
+    "ensure_registry_seed",
+    "mutate_workspaces",
+    "parse_secrets_file",
+    "prompt_secrets",
+    "resolve_secrets_from_env",
+    "seed_secrets",
+    "write_initialized_sentinel",
+    "write_sandbox_toml",
+]
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -272,7 +291,7 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
         f.write(rendered)
 
 
-def _detect_git_config() -> tuple[str, str]:
+def detect_git_config() -> tuple[str, str]:
     """Auto-detect git user.name and user.email from global config.
 
     Returns (name, email). Falls back to ('', '') if git is not installed

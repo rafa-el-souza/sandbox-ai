@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from core.compose import compose_project_name
 from core.dispatch import (
-    _DISPATCH_BINARY,
+    DISPATCH_BINARY,
     OP_SPECS,
     DispatchValidationError,
     Op,
@@ -625,8 +625,8 @@ class TestTargetArgvFixture:
     ) -> None:
         # Spec scenario: "helper-chown-files target argv is byte-faithful to
         # the existing hardened helper". Assert the builder reuses
-        # _hardened_docker_run rather than re-deriving flags.
-        from core.helper_container import _hardened_docker_run
+        # hardened_docker_run rather than re-deriving flags.
+        from core.helper_container import hardened_docker_run
         from core.hydration import IMAGE_REGISTRY
 
         argv = build_target_argv(
@@ -639,7 +639,7 @@ class TestTargetArgvFixture:
             'unlink /p/"$f" && cp /tmp/"$f" /p/"$f" && '
             'chmod 0644 /p/"$f" && chown 1000:1000 /p/"$f"; done'
         )
-        expected_cmd = _hardened_docker_run(
+        expected_cmd = hardened_docker_run(
             IMAGE_REGISTRY["busybox_musl"].pinned, "/srv/cache", inner
         )
         assert argv == ["/bin/bash", "-c", expected_cmd]
@@ -649,7 +649,7 @@ class TestTargetArgvFixture:
         assert "--security-opt no-new-privileges:true" in argv[2]
 
     def test_helper_mkdir_chown_dirs_byte_faithful(self, host_config: HostConfig) -> None:
-        from core.helper_container import _hardened_docker_run
+        from core.helper_container import hardened_docker_run
         from core.hydration import IMAGE_REGISTRY
 
         argv = build_target_argv(
@@ -661,7 +661,7 @@ class TestTargetArgvFixture:
             'set -e; for d in logs cache; do mkdir -p /p/"$d" && '
             'chown 1000:1000 /p/"$d"; done'
         )
-        expected_cmd = _hardened_docker_run(
+        expected_cmd = hardened_docker_run(
             IMAGE_REGISTRY["busybox_musl"].pinned, "/srv/cache", inner
         )
         assert argv == ["/bin/bash", "-c", expected_cmd]
@@ -1462,13 +1462,13 @@ class TestSsotCrossingPrimitives:
     def test_dispatch_payload_no_wire(self) -> None:
         assert (
             dispatch_payload("auth-probe", [])
-            == f"{_DISPATCH_BINARY} auth-probe"
+            == f"{DISPATCH_BINARY} auth-probe"
         )
 
     def test_dispatch_payload_with_wire(self) -> None:
         assert (
             dispatch_payload("docker-info", ["runtimes"])
-            == f"{_DISPATCH_BINARY} docker-info runtimes"
+            == f"{DISPATCH_BINARY} docker-info runtimes"
         )
 
     def test_sudo_pipe_crossing_argv_drops_sudo_and_abspaths_launcher(
@@ -2128,7 +2128,7 @@ class TestDispatchSourceB64:
         import io
         import tarfile
 
-        from core.dispatch import _DISPATCH_SOURCE_ENTRIES, _dispatch_source_b64
+        from core.dispatch import DISPATCH_SOURCE_ENTRIES, _dispatch_source_b64
 
         b64 = _dispatch_source_b64()
         # ASCII, base64 alphabet only — safe to interpolate into a single-
@@ -2150,7 +2150,7 @@ class TestDispatchSourceB64:
         assert "fixtures/target_argv_cases.json" in names
         # Exactly the declared top-level entries (hermetic — no stray files).
         top = {n.split("/", 1)[0] for n in names}
-        assert top == set(_DISPATCH_SOURCE_ENTRIES)
+        assert top == set(DISPATCH_SOURCE_ENTRIES)
 
     def test_is_byte_deterministic_and_carries_fixture_content(self) -> None:
         import base64

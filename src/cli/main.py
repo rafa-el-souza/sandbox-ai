@@ -81,10 +81,10 @@ from core.scaffold import (
     REQUIRED_INSTANCE_SECRETS,
     SecretSeedingError,
     WorkspaceSpec,
-    _detect_git_config,
     apply_default_acls,
     create_env_file,
     create_instance_dirs,
+    detect_git_config,
     ensure_registry_seed,
     mutate_workspaces,
     parse_secrets_file,
@@ -2415,7 +2415,7 @@ def setup(
 
 
 @app.command("_bootstrap-host", hidden=True)
-def _bootstrap_host(
+def bootstrap_host(
     items: list[str] = _BOOTSTRAP_ITEM_FLAG,
     operator: str = typer.Option(..., "--operator", help="The operator the batch provisions for"),
     operator_uid: int = typer.Option(..., "--operator-uid", help="The operator's numeric uid"),
@@ -3138,7 +3138,7 @@ def init(
 
     # Git config auto-detection (D-8)
     if not git_user or not git_email:
-        detected_name, detected_email = _detect_git_config()
+        detected_name, detected_email = detect_git_config()
         if not git_user:
             git_user = detected_name
         if not git_email:

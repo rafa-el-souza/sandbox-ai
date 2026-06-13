@@ -138,7 +138,7 @@ def rsync_supports_xattrs() -> bool:
     return has_xattrs
 
 
-def _reset_rsync_caches() -> None:
+def reset_rsync_caches() -> None:
     """Test seam: clear the rsync probe caches so a monkeypatched ``Executor``
     is exercised on the next call."""
     global _xattrs_supported_cache, _rsync_version_cache

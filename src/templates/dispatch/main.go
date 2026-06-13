@@ -421,7 +421,7 @@ func buildHelperMkdirChownDirs(args []string) ([]string, string, error) {
 	return bashC(hardenedDockerRun(busyboxPinned, parent, inner)), "", nil
 }
 
-// hardenedDockerRun mirrors core.helper_container._hardened_docker_run
+// hardenedDockerRun mirrors core.helper_container.hardened_docker_run
 // byte-for-byte (the SPACE-separated --cap-drop ALL form, NOT --cap-drop=ALL).
 func hardenedDockerRun(image, parent, innerSh string) string {
 	return "docker run --rm " +

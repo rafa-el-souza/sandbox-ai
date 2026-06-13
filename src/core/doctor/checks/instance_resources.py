@@ -25,7 +25,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+from core.doctor.checks.workspace_bridge import scan_instance_dirs
 from core.doctor.types import CheckResult
 from core.host_resources import host_cpu_count, host_ram_bytes, parse_docker_size
 
@@ -80,7 +80,7 @@ def _load_service_limits(instance_dir: str) -> dict[str, dict[str, JsonValue]] |
 def check_host_cpu_capacity(host_user: str, distro: str | None) -> CheckResult:
     """WARN when any rendered service's ``cpus`` exceeds the host CPU count.
 
-    Iterates the registry (``_scan_instance_dirs``) and, for each instance with a
+    Iterates the registry (``scan_instance_dirs``) and, for each instance with a
     rendered compose, compares every service's ``cpus`` against
     ``host_cpu_count()``. Instances without a rendered compose are skipped.
     Advisory WARN only — never FAIL — so this never flips the doctor exit
@@ -90,7 +90,7 @@ def check_host_cpu_capacity(host_user: str, distro: str | None) -> CheckResult:
     del host_user, distro
     cpus = host_cpu_count()
     offenders: list[str] = []
-    for instance_dir in _scan_instance_dirs():
+    for instance_dir in scan_instance_dirs():
         services = _load_service_limits(instance_dir)
         if isinstance(services, _ComposeAbsent):
             continue
@@ -150,7 +150,7 @@ def check_instance_memory_overcommit(host_user: str, distro: str | None) -> Chec
     del host_user, distro
     ram = host_ram_bytes()
     overcommitted: list[str] = []
-    for instance_dir in _scan_instance_dirs():
+    for instance_dir in scan_instance_dirs():
         services = _load_service_limits(instance_dir)
         if isinstance(services, _ComposeAbsent):
             continue

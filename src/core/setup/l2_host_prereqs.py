@@ -64,7 +64,7 @@ def _user_exists(name: str) -> bool:
         return False
 
 
-def _group_exists(name: str) -> bool:
+def group_exists(name: str) -> bool:
     try:
         grp.getgrnam(name)
         return True
@@ -72,7 +72,7 @@ def _group_exists(name: str) -> bool:
         return False
 
 
-def _gid_in_subgid_range(gid: int, ranges: list[tuple[int, int]]) -> bool:
+def gid_in_subgid_range(gid: int, ranges: list[tuple[int, int]]) -> bool:
     """``True`` iff host ``gid`` falls inside one of the subgid ranges.
 
     The workspace bridge group MUST sit inside the sandbox user's subgid
@@ -84,7 +84,7 @@ def _gid_in_subgid_range(gid: int, ranges: list[tuple[int, int]]) -> bool:
     return any(first <= gid < first + count for first, count in ranges)
 
 
-def _operator_in_group(operator: str, group: str) -> bool:
+def operator_in_group(operator: str, group: str) -> bool:
     """``True`` iff ``operator`` is a member of ``group`` per ``/etc/group``."""
     try:
         members = set(grp.getgrnam(group).gr_mem)
@@ -104,15 +104,15 @@ def _operator_in_group(operator: str, group: str) -> bool:
 # (RHEL/Fedora/Arch), and the legacy ``admin`` group. This is the single source
 # for "what counts as an admin group" — the two C-005 doctor safety nets (the
 # no-sudo daemon-user invariant and the sudoer daemon-owner WARN) both resolve
-# membership through :func:`_user_admin_groups` so they cannot disagree.
+# membership through :func:`user_admin_groups` so they cannot disagree.
 _ADMIN_GROUPS: tuple[str, ...] = ("sudo", "wheel", "admin")
 
 
-def _user_admin_groups(user: str) -> list[str]:
+def user_admin_groups(user: str) -> list[str]:
     """Return the :data:`_ADMIN_GROUPS` the ``user`` is a member of.
 
     Membership is by supplementary-group listing **or** primary group (same
-    member-or-primary logic as :func:`_operator_in_group`). A user absent from
+    member-or-primary logic as :func:`operator_in_group`). A user absent from
     ``/etc/passwd`` (no primary gid to resolve) is treated as in no admin group.
     Empty list ⇒ the user cannot sudo-to-root via group membership.
     """
@@ -135,7 +135,7 @@ def _user_admin_groups(user: str) -> list[str]:
 class SudoersGrant:
     """Whether the **sudoers policy** grants a user sudo (drop-ins + NOPASSWD).
 
-    The companion to :func:`_user_admin_groups`: group membership is only one of
+    The companion to :func:`user_admin_groups`: group membership is only one of
     two ways a user reaches root. The sudoers *policy* — a ``/etc/sudoers.d/``
     drop-in (cloud-init's ``90-cloud-init-users``, the common cloud-VM / dev-box
     pattern) or an inline ``NOPASSWD`` rule — confers sudo independently of any
@@ -168,10 +168,10 @@ _SUDO_RUNNABLE_MARKERS = (
 )
 
 
-def _user_sudoers_grant(user: str, *, self_query: bool) -> SudoersGrant:
+def user_sudoers_grant(user: str, *, self_query: bool) -> SudoersGrant:
     """Detect whether the **sudoers policy** grants ``user`` sudo.
 
-    Complements :func:`_user_admin_groups` (group membership) with the
+    Complements :func:`user_admin_groups` (group membership) with the
     policy-grant path: ``/etc/sudoers.d/`` drop-ins and inline ``NOPASSWD``
     rules. Runs ``sudo -n -l`` non-interactively and parses the captured output
     version-tolerantly.
@@ -229,7 +229,7 @@ def _adequate_range(ranges: list[tuple[int, int]]) -> bool:
     return sum(count for _, count in ranges) >= _MIN_SUBID_RANGE
 
 
-def _subid_status(user: str) -> tuple[str, str]:
+def subid_status(user: str) -> tuple[str, str]:
     """Classify the subuid+subgid state for ``user``.
 
     Returns ``(status, detail)`` where status ∈
@@ -277,7 +277,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     if not _user_exists(sandbox_user):
         return PhaseResult.MISSING, f"sandbox user {sandbox_user!r} absent"
 
-    status, detail = _subid_status(sandbox_user)
+    status, detail = subid_status(sandbox_user)
     if status == "inadequate":
         return PhaseResult.CONFLICT, detail
     if status == "absent":
@@ -285,17 +285,17 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
 
     if not _machined_active():
         return PhaseResult.MISSING, "systemd-machined not active"
-    if not _group_exists(bridge_group):
+    if not group_exists(bridge_group):
         return PhaseResult.MISSING, f"bridge group {bridge_group!r} absent"
     bridge_gid = grp.getgrnam(bridge_group).gr_gid
-    if not _gid_in_subgid_range(bridge_gid, parse_subgid_for_user(sandbox_user)):
+    if not gid_in_subgid_range(bridge_gid, parse_subgid_for_user(sandbox_user)):
         return (
             PhaseResult.DRIFT,
             f"bridge group {bridge_group!r} exists at gid {bridge_gid} which "
             f"is outside {sandbox_user!r}'s /etc/subgid range; the group must "
             f"sit inside the subgid range",
         )
-    if not _operator_in_group(operator, bridge_group):
+    if not operator_in_group(operator, bridge_group):
         return (
             PhaseResult.MISSING,
             f"operator {operator!r} not in group {bridge_group!r}",
@@ -336,7 +336,7 @@ def _act(ctx: SetupContext) -> str:
         )
         actions.append(f"created user {sandbox_user}")
 
-    status, detail = _subid_status(sandbox_user)
+    status, detail = subid_status(sandbox_user)
     if status == "inadequate":
         # Defensive: the runner never calls act on CONFLICT, but never shrink.
         raise RuntimeError(detail)
@@ -348,13 +348,13 @@ def _act(ctx: SetupContext) -> str:
             _run(["usermod", "--add-subgids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", sandbox_user])
             actions.append("appended /etc/subgid entry")
 
-    if not _group_exists(bridge_group):
+    if not group_exists(bridge_group):
         gid = autodetect_workspace_bridge_gid_recommendation(sandbox_user)
         _run(["groupadd", "-g", str(gid), bridge_group])
         actions.append(f"created group {bridge_group} (gid {gid})")
     else:
         bridge_gid = grp.getgrnam(bridge_group).gr_gid
-        if not _gid_in_subgid_range(
+        if not gid_in_subgid_range(
             bridge_gid, parse_subgid_for_user(sandbox_user)
         ):
             raise RuntimeError(
@@ -364,7 +364,7 @@ def _act(ctx: SetupContext) -> str:
                 f"subgid range and re-run setup."
             )
 
-    if not _operator_in_group(operator, bridge_group):
+    if not operator_in_group(operator, bridge_group):
         _run(["usermod", "-aG", bridge_group, operator])
         actions.append(f"added {operator} to {bridge_group}")
 
@@ -381,15 +381,15 @@ def _reverify(ctx: SetupContext) -> bool:
         return False
     if not _user_exists(sandbox_user):
         return False
-    status, _ = _subid_status(sandbox_user)
+    status, _ = subid_status(sandbox_user)
     if status != "adequate":
         return False
-    if not _group_exists(bridge_group):
+    if not group_exists(bridge_group):
         return False
     bridge_gid = grp.getgrnam(bridge_group).gr_gid
-    if not _gid_in_subgid_range(bridge_gid, parse_subgid_for_user(sandbox_user)):
+    if not gid_in_subgid_range(bridge_gid, parse_subgid_for_user(sandbox_user)):
         return False
-    return _operator_in_group(operator, bridge_group)
+    return operator_in_group(operator, bridge_group)
 
 
 PHASE = Phase(
@@ -411,4 +411,13 @@ PHASE = Phase(
     applies_in=frozenset({DockerExecutionMode.SEPARATE_USER}),
 )
 
-__all__ = ["PHASE"]
+__all__ = [
+    "PHASE",
+    "SudoersGrant",
+    "gid_in_subgid_range",
+    "group_exists",
+    "operator_in_group",
+    "subid_status",
+    "user_admin_groups",
+    "user_sudoers_grant",
+]

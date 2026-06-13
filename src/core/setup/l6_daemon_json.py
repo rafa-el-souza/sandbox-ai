@@ -24,7 +24,7 @@ surprised by a rename.
 Content-aware probe (design D10): a deep-equal comparison of the *observed*
 ``runtimes["sandbox-ai-runsc"]`` value against the *expected* one
 (``{"path": "/usr/local/libexec/sandbox-ai/runsc", "runtimeArgs":
-["--oci-seccomp", "--ignore-cgroups"]}`` — see ``_EXPECTED_RUNTIME`` for why
+["--oci-seccomp", "--ignore-cgroups"]}`` — see ``EXPECTED_RUNTIME`` for why
 ``--ignore-cgroups`` is required under rootless). key (or file) absent →
 ``MISSING``; present + differing
 → ``DRIFT``; present + deep-equal **but the daemon has not loaded the runtime**
@@ -59,15 +59,19 @@ from core.setup.phase_runner import (
     wait_user_manager_ready,
 )
 
+__all__ = [
+    "EXPECTED_RUNTIME",
+    "RESERVED_RUNTIME_KEY",
+]
+
 if TYPE_CHECKING:
     from core.json_types import JsonValue
     from core.setup.phase_runner import SetupContext
 
 # The single reserved key + its expected value (the content-aware target). The
 # key is single-sourced from `core.hydration` (the compose `runtime` value must
-# equal what we register here) and re-exported under the private name so the
-# `cli-doctor` checks keep importing it from this module unchanged.
-_RESERVED_RUNTIME_KEY = RESERVED_RUNTIME_KEY
+# equal what we register here) and re-exported from this module so the
+# `cli-doctor` checks import it from here.
 # `--ignore-cgroups` is load-bearing under operator-rootless (F-057): rootless
 # docker runs the `systemd` cgroup driver, so it passes `--systemd-cgroup` to the
 # runtime. runsc's systemd-cgroup manager is NOT rootless-aware — it asks the
@@ -79,7 +83,7 @@ _RESERVED_RUNTIME_KEY = RESERVED_RUNTIME_KEY
 # entirely. Cost: runsc no longer enforces the OCI cgroup CPU/memory limits (the
 # C-008 clamp becomes render-time-only for gVisor containers) — restoring runtime
 # enforcement via the rootless `cgroupfs` driver is a tracked follow-up (F-057).
-_EXPECTED_RUNTIME: dict[str, JsonValue] = {
+EXPECTED_RUNTIME: dict[str, JsonValue] = {
     "path": "/usr/local/libexec/sandbox-ai/runsc",
     "runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"],
 }
@@ -122,7 +126,7 @@ def _observed_runtime(doc: dict[str, JsonValue]) -> JsonValue | None:
     """The observed ``runtimes['sandbox-ai-runsc']`` value (``None`` if absent)."""
     runtimes = doc.get("runtimes")
     if isinstance(runtimes, dict):
-        return runtimes.get(_RESERVED_RUNTIME_KEY)
+        return runtimes.get(RESERVED_RUNTIME_KEY)
     return None
 
 
@@ -151,7 +155,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
             PhaseResult.MISSING,
             f"{path} present but reserved runtime key absent; will merge",
         )
-    if observed != _EXPECTED_RUNTIME:
+    if observed != EXPECTED_RUNTIME:
         return (
             PhaseResult.DRIFT,
             f"{path} reserved runtime key differs from expected; will converge",
@@ -208,7 +212,7 @@ def _runtime_registered(ctx: SetupContext) -> bool:
         )
     except SandboxExecutionError:
         return False
-    return _RESERVED_RUNTIME_KEY in (result.stdout or "")
+    return RESERVED_RUNTIME_KEY in (result.stdout or "")
 
 
 def _restart_and_poll(ctx: SetupContext) -> None:
@@ -256,7 +260,7 @@ def _restart_and_poll(ctx: SetupContext) -> None:
     poll = (
         "for i in $(seq 1 30); do "
         "docker info --format '{{json .Runtimes}}' 2>/dev/null "
-        "| grep -qF " + _RESERVED_RUNTIME_KEY + " && exit 0; sleep 1; done; exit 1"
+        "| grep -qF " + RESERVED_RUNTIME_KEY + " && exit 0; sleep 1; done; exit 1"
     )
     Executor().run([*prefix, "/bin/bash", "-c", poll], sentinel=sentinel)
 
@@ -279,7 +283,7 @@ def _act(ctx: SetupContext) -> str:
     if not isinstance(runtimes, dict):
         runtimes = {}
         doc["runtimes"] = runtimes
-    runtimes[_RESERVED_RUNTIME_KEY] = _EXPECTED_RUNTIME
+    runtimes[RESERVED_RUNTIME_KEY] = EXPECTED_RUNTIME
 
     new_text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     try:
@@ -303,7 +307,7 @@ def _reverify(ctx: SetupContext) -> bool:
     doc = _read_doc(path)
     if doc is None:
         return False
-    if _observed_runtime(doc) != _EXPECTED_RUNTIME:
+    if _observed_runtime(doc) != EXPECTED_RUNTIME:
         return False
     return _runtime_registered(ctx)
 

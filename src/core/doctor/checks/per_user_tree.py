@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import tomllib
 
-from core.doctor.checks.workspace_bridge import _read_registry_raw, _scan_instance_dirs
+from core.doctor.checks.workspace_bridge import read_registry_raw, scan_instance_dirs
 from core.doctor.types import CheckResult
 from core.host_config import sandbox_ai_home
 
@@ -128,7 +128,7 @@ def check_legacy_workspace_in_user_project_root(host_user: str, distro: str | No
     del host_user, distro
 
     legacy: list[str] = []
-    for inst_dir in _scan_instance_dirs():
+    for inst_dir in scan_instance_dirs():
         toml_path = os.path.join(inst_dir, "sandbox.toml")
         try:
             with open(toml_path, "rb") as f:
@@ -160,7 +160,7 @@ def check_legacy_workspace_in_user_project_root(host_user: str, distro: str | No
 def check_legacy_registry_shape(host_user: str, distro: str | None) -> CheckResult:
     """Warn if ``instances.json`` is path-keyed (pre-change-5 shape)."""
     del host_user, distro
-    data = _read_registry_raw()
+    data = read_registry_raw()
     legacy_keys = [k for k in data if k.startswith("/")]
     if legacy_keys:
         return CheckResult(

@@ -222,33 +222,33 @@ def test_sysctl_applier_reuses_l1_helpers(monkeypatch: pytest.MonkeyPatch) -> No
     written: list[tuple[Path, str, int]] = []
     monkeypatch.setattr(
         l1_kernel,
-        "_write_root_file",
+        "write_root_file",
         lambda path, body, mode: written.append((path, body, mode)),
     )
     monkeypatch.setattr(l1_kernel, "render_sysctl_dropin", lambda: "BODY\n")
-    monkeypatch.setattr(l1_kernel, "_is_debian_family", lambda: True)
+    monkeypatch.setattr(l1_kernel, "is_debian_family", lambda: True)
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
     host_batch._apply_sysctl(_params())
 
-    assert written == [(l1_kernel._SYSCTL_DROPIN, "BODY\n", 0o644)]
+    assert written == [(l1_kernel.SYSCTL_DROPIN, "BODY\n", 0o644)]
     assert runs == [
-        ["sysctl", "-w", f"user.max_user_namespaces={l1_kernel._MAX_USER_NS}"],
+        ["sysctl", "-w", f"user.max_user_namespaces={l1_kernel.MAX_USER_NS}"],
         ["sysctl", "-w", "kernel.unprivileged_userns_clone=1"],
     ]
 
 
 def test_sysctl_applier_skips_userns_clone_off_debian(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(l1_kernel, "_write_root_file", lambda *_a: None)
+    monkeypatch.setattr(l1_kernel, "write_root_file", lambda *_a: None)
     monkeypatch.setattr(l1_kernel, "render_sysctl_dropin", lambda: "BODY\n")
-    monkeypatch.setattr(l1_kernel, "_is_debian_family", lambda: False)
+    monkeypatch.setattr(l1_kernel, "is_debian_family", lambda: False)
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
     host_batch._apply_sysctl(_params())
 
-    assert runs == [["sysctl", "-w", f"user.max_user_namespaces={l1_kernel._MAX_USER_NS}"]]
+    assert runs == [["sysctl", "-w", f"user.max_user_namespaces={l1_kernel.MAX_USER_NS}"]]
 
 
 @pytest.mark.parametrize(
@@ -273,7 +273,7 @@ def test_nftables_applier_loads_and_persists(monkeypatch: pytest.MonkeyPatch, tm
     written: list[tuple[Path, str, int]] = []
     monkeypatch.setattr(
         l1_kernel,
-        "_write_root_file",
+        "write_root_file",
         lambda path, body, mode: written.append((path, body, mode)),
     )
 
@@ -296,7 +296,7 @@ def test_nftables_applier_skips_loaded_and_matching_persist(
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
     monkeypatch.setattr(
         l1_kernel,
-        "_write_root_file",
+        "write_root_file",
         lambda *_a: pytest.fail("persist file should not be rewritten"),
     )
 
@@ -309,14 +309,14 @@ def test_delegate_applier_reuses_l2a(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     target = tmp_path / "delegate.conf"
     monkeypatch.setattr(
         l2a_delegate,
-        "_delegate_dropin_path_for_uid",
+        "delegate_dropin_path_for_uid",
         lambda uid: target if uid == 1234 else pytest.fail("wrong uid"),
     )
     monkeypatch.setattr(l2a_delegate, "render_delegate_dropin", lambda: "DELEGATE\n")
     written: list[tuple[Path, str, int]] = []
     monkeypatch.setattr(
         l2a_delegate,
-        "_write_root_file",
+        "write_root_file",
         lambda path, body, mode: written.append((path, body, mode)),
     )
     runs: list[list[str]] = []
@@ -641,7 +641,7 @@ def test_linger_satisfied_false_on_loginctl_error(monkeypatch: pytest.MonkeyPatc
 def test_sysctl_satisfied(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     dropin = tmp_path / "sysctl.conf"
     dropin.write_text("BODY\n")
-    monkeypatch.setattr(l1_kernel, "_SYSCTL_DROPIN", dropin)
+    monkeypatch.setattr(l1_kernel, "SYSCTL_DROPIN", dropin)
     monkeypatch.setattr(l1_kernel, "render_sysctl_dropin", lambda: "BODY\n")
     assert host_batch._sysctl_satisfied() is True
     monkeypatch.setattr(l1_kernel, "render_sysctl_dropin", lambda: "OTHER\n")
@@ -709,7 +709,7 @@ def test_render_remediation_block_each_item_renders() -> None:
     block = render_remediation_block(frozenset(BatchItem), _params(distro_family="arch"))
     assert "usermod --add-subuids" in block
     assert "groupadd" in block
-    assert str(l1_kernel._SYSCTL_DROPIN) in block
+    assert str(l1_kernel.SYSCTL_DROPIN) in block
     assert "modprobe nf_tables ip_tables" in block
     assert "daemon-reload" in block
     assert "loginctl enable-linger" in block

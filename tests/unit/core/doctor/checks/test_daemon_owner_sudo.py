@@ -5,7 +5,7 @@ Operator-rootless-only WARN when the daemon-owning operator is a sudoer. The
 owner is resolved via ``resolve_daemon_owner`` (the invoking operator in
 operator-rootless, never the stale ``docker_unprivileged_user`` default — the
 D7 convention guard). Admin-group membership is resolved through L2's
-single-source ``_user_admin_groups`` (lazy import — the tests patch the origin
+single-source ``user_admin_groups`` (lazy import — the tests patch the origin
 module attribute, not a bound name on the check module).
 """
 
@@ -28,7 +28,7 @@ def _grant(*, granted: bool, nopasswd: bool, determinable: bool = True) -> Any:
 def _no_policy_grant(monkeypatch: Any) -> None:
     """Stub the sudoers-policy detector to 'no grant' (group-only scenarios)."""
     monkeypatch.setattr(
-        "core.setup.l2_host_prereqs._user_sudoers_grant",
+        "core.setup.l2_host_prereqs.user_sudoers_grant",
         lambda u, *, self_query: _grant(granted=False, nopasswd=False),
     )
 
@@ -45,7 +45,7 @@ def test_l2_imported_lazily_no_bound_name() -> None:
     from core.doctor.checks import daemon_owner_sudo
 
     assert not hasattr(daemon_owner_sudo, "l2_host_prereqs")
-    assert not hasattr(daemon_owner_sudo, "_user_admin_groups")
+    assert not hasattr(daemon_owner_sudo, "user_admin_groups")
 
 
 def test_sudoer_operator_warns_with_both_remedies(monkeypatch: Any) -> None:
@@ -53,7 +53,7 @@ def test_sudoer_operator_warns_with_both_remedies(monkeypatch: Any) -> None:
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
     monkeypatch.setattr(
-        "core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"]
+        "core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["sudo"]
     )
     _no_policy_grant(monkeypatch)
     result = check_daemon_owner_sudo(
@@ -75,7 +75,7 @@ def test_wheel_membership_warns(monkeypatch: Any) -> None:
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "bob")
     monkeypatch.setattr(
-        "core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["wheel", "admin"]
+        "core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["wheel", "admin"]
     )
     _no_policy_grant(monkeypatch)
     result = check_daemon_owner_sudo(
@@ -89,7 +89,7 @@ def test_non_sudo_operator_passes(monkeypatch: Any) -> None:
     from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "carol")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
     _no_policy_grant(monkeypatch)
     result = check_daemon_owner_sudo(
         "sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS
@@ -113,7 +113,7 @@ def test_owner_resolved_via_invoking_operator_not_dedicated_user(monkeypatch: An
         return []
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", _record)
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", _record)
     _no_policy_grant(monkeypatch)
     # ``user`` arg is the dedicated-user name; it MUST be ignored for the owner.
     check_daemon_owner_sudo(
@@ -126,7 +126,7 @@ def test_distro_arg_ignored(monkeypatch: Any) -> None:
     from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
     _no_policy_grant(monkeypatch)
     result = check_daemon_owner_sudo(
         "sandbox", "debian", mode=DockerExecutionMode.OPERATOR_ROOTLESS
@@ -140,9 +140,9 @@ def test_nopasswd_policy_grant_warns_naming_drop_in(monkeypatch: Any) -> None:
     from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "ubuntu")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
     monkeypatch.setattr(
-        "core.setup.l2_host_prereqs._user_sudoers_grant",
+        "core.setup.l2_host_prereqs.user_sudoers_grant",
         lambda u, *, self_query: _grant(granted=True, nopasswd=True),
     )
     result = check_daemon_owner_sudo(
@@ -162,9 +162,9 @@ def test_password_gated_policy_grant_warns_not_passwordless(monkeypatch: Any) ->
     from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "dave")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
     monkeypatch.setattr(
-        "core.setup.l2_host_prereqs._user_sudoers_grant",
+        "core.setup.l2_host_prereqs.user_sudoers_grant",
         lambda u, *, self_query: _grant(granted=True, nopasswd=False),
     )
     result = check_daemon_owner_sudo(
@@ -180,9 +180,9 @@ def test_group_and_policy_both_named(monkeypatch: Any) -> None:
     from core.doctor.checks.daemon_owner_sudo import check_daemon_owner_sudo
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "eve")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["sudo"])
     monkeypatch.setattr(
-        "core.setup.l2_host_prereqs._user_sudoers_grant",
+        "core.setup.l2_host_prereqs.user_sudoers_grant",
         lambda u, *, self_query: _grant(granted=True, nopasswd=True),
     )
     result = check_daemon_owner_sudo(
@@ -205,7 +205,7 @@ def test_owner_policy_queried_with_self_query_true(monkeypatch: Any) -> None:
         return _grant(granted=False, nopasswd=False)
 
     monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
-    monkeypatch.setattr("core.setup.l2_host_prereqs._user_sudoers_grant", _record)
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
+    monkeypatch.setattr("core.setup.l2_host_prereqs.user_sudoers_grant", _record)
     check_daemon_owner_sudo("sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS)
     assert seen == [("alice", True)]

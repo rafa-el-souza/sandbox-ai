@@ -3,7 +3,7 @@
 
 Covers the two advisory (WARN-only) per-instance host-capacity checks plus the
 ``_load_service_limits`` compose-reading helper. Registered instances are seeded
-by monkeypatching the shared ``_scan_instance_dirs`` registry scan (string form,
+by monkeypatching the shared ``scan_instance_dirs`` registry scan (string form,
 no suppression directives); host CPU/RAM detection is monkeypatched via the
 ``core.host_resources`` string targets so the checks see deterministic values.
 """
@@ -111,7 +111,7 @@ class TestHostCpuCapacityCheck:
 
         inst = tmp_path / "myproj"
         _write_compose(inst, {"core": {"cpus": "4.0"}, "dnsdist": {"cpus": "0.5"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 2)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -127,7 +127,7 @@ class TestHostCpuCapacityCheck:
 
         inst = tmp_path / "myproj"
         _write_compose(inst, {"core": {"cpus": "2.0"}, "dnsdist": {"cpus": "0.5"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 4)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -142,7 +142,7 @@ class TestHostCpuCapacityCheck:
         # Registered but un-started instance: dir exists, no docker/compose.yml.
         inst = tmp_path / "fresh"
         inst.mkdir()
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 1)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -156,7 +156,7 @@ class TestHostCpuCapacityCheck:
         inst = tmp_path / "myproj"
         # `nolimit` has no cpus; `weird` has a non-numeric cpus; neither is flagged.
         _write_compose(inst, {"nolimit": {"mem_limit": "1g"}, "weird": {"cpus": "lots"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 1)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -168,7 +168,7 @@ class TestHostCpuCapacityCheck:
         inst = tmp_path / "myproj"
         # A YAML bool would float() to 1.0 but is not a real cpus request — guard it.
         _write_compose(inst, {"core": {"cpus": True}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 1)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -180,7 +180,7 @@ class TestHostCpuCapacityCheck:
         inst = tmp_path / "myproj"
         # A bare float (not a quoted string) is still a valid cpus request.
         _write_compose(inst, {"core": {"cpus": 8}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 2)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -195,7 +195,7 @@ class TestInstanceMemoryOvercommitCheck:
         inst = tmp_path / "myproj"
         # 8gb + 8gb = 16gb summed; host RAM 4gb → over-commit.
         _write_compose(inst, {"core": {"mem_limit": "8gb"}, "admin": {"mem_limit": "8gb"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_ram_bytes", lambda: 4 * 1024**3)
 
         result = check_instance_memory_overcommit("sandbox", None)
@@ -210,7 +210,7 @@ class TestInstanceMemoryOvercommitCheck:
 
         inst = tmp_path / "myproj"
         _write_compose(inst, {"core": {"mem_limit": "1gb"}, "admin": {"mem_limit": "512m"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_ram_bytes", lambda: 4 * 1024**3)
 
         result = check_instance_memory_overcommit("sandbox", None)
@@ -223,7 +223,7 @@ class TestInstanceMemoryOvercommitCheck:
 
         inst = tmp_path / "fresh"
         inst.mkdir()
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_ram_bytes", lambda: 1)
 
         result = check_instance_memory_overcommit("sandbox", None)
@@ -241,7 +241,7 @@ class TestInstanceMemoryOvercommitCheck:
             inst,
             {"nolimit": {"cpus": "1.0"}, "weird": {"mem_limit": "huge"}, "flag": {"mem_limit": True}},
         )
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_ram_bytes", lambda: 1)
 
         result = check_instance_memory_overcommit("sandbox", None)
@@ -253,7 +253,7 @@ class TestInstanceMemoryOvercommitCheck:
         inst = tmp_path / "myproj"
         # A bare int mem_limit is already bytes (parse_docker_size returns it as-is).
         _write_compose(inst, {"core": {"mem_limit": 2048}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_ram_bytes", lambda: 1024)
 
         result = check_instance_memory_overcommit("sandbox", None)
@@ -270,7 +270,7 @@ class TestAdvisoryDoesNotFlipExitContract:
 
         inst = tmp_path / "myproj"
         _write_compose(inst, {"core": {"cpus": "8.0"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_cpu_count", lambda: 1)
 
         result = check_host_cpu_capacity("sandbox", None)
@@ -283,7 +283,7 @@ class TestAdvisoryDoesNotFlipExitContract:
 
         inst = tmp_path / "myproj"
         _write_compose(inst, {"core": {"mem_limit": "16gb"}})
-        monkeypatch.setattr(f"{_MODULE}._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr(f"{_MODULE}.scan_instance_dirs", lambda: [str(inst)])
         monkeypatch.setattr(f"{_MODULE}.host_ram_bytes", lambda: 1)
 
         result = check_instance_memory_overcommit("sandbox", None)

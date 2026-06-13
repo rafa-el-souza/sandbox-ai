@@ -138,7 +138,7 @@ class TestCheckLegacyWorkspaceInUserProjectRoot:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text('[instance]\nname = "x"\n')
-        monkeypatch.setattr("core.doctor.checks.per_user_tree._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.per_user_tree.scan_instance_dirs", lambda: [str(inst)])
         result = check_legacy_workspace_in_user_project_root("u", None)
         assert result.status == "pass"
 
@@ -150,7 +150,7 @@ class TestCheckLegacyWorkspaceInUserProjectRoot:
         (inst / "sandbox.toml").write_text(
             '[instance]\nname = "myinst"\nuser_project_root = "/old/path"\n'
         )
-        monkeypatch.setattr("core.doctor.checks.per_user_tree._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.per_user_tree.scan_instance_dirs", lambda: [str(inst)])
         result = check_legacy_workspace_in_user_project_root("u", None)
         assert result.status == "warn"
         assert "myinst" in result.detail
@@ -161,7 +161,7 @@ class TestCheckLegacyWorkspaceInUserProjectRoot:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text("not = valid = toml = !!")
-        monkeypatch.setattr("core.doctor.checks.per_user_tree._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.per_user_tree.scan_instance_dirs", lambda: [str(inst)])
         result = check_legacy_workspace_in_user_project_root("u", None)
         # Skipped silently → pass (no legacy detected because we couldn't read).
         assert result.status == "pass"

@@ -7,6 +7,11 @@ from typing import NoReturn
 
 from core.exceptions import SandboxExecutionError
 
+__all__ = [
+    "Executor",
+    "normalize_captured_output",
+]
+
 # Sentinel pattern: __SANDBOX_EXIT_{hex_token}_{exit_code}
 _SENTINEL_RE = re.compile(r"^__SANDBOX_EXIT_([0-9a-f]+)_(\d+)\s*$", re.MULTILINE)
 
@@ -53,7 +58,7 @@ class Executor:
     # preflight nonce-binding (H-1) reads this to bind the bundle markers to the
     # same nonce the frame used; ``run``'s public ``CompletedProcess`` contract
     # is unchanged, so every other caller is unaffected.
-    _last_frame_nonce: str | None = None
+    last_frame_nonce: str | None = None
 
     @staticmethod
     def _sanitize_pty_output(raw: str) -> str:
@@ -213,7 +218,7 @@ class Executor:
             # Surface the frame's nonce so core.dispatch can bind the preflight
             # bundle markers to it (H-1). Stash before any further fail-closed
             # branch so it reflects the begin line we actually recovered.
-            self._last_frame_nonce = expected
+            self.last_frame_nonce = expected
             spans.append((begin.start(), begin.end()))
         else:
             expected = injected_token

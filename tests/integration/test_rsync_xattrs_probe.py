@@ -53,7 +53,7 @@ def test_probe_matches_rsync_version_output(monkeypatch: pytest.MonkeyPatch) -> 
     """The cached probe verdict matches what `rsync --version` actually reports."""
     from core import workspace_backups as wb
 
-    wb._reset_rsync_caches()
+    wb.reset_rsync_caches()
     monkeypatch.delenv("SANDBOX_AI_HOME", raising=False)  # probe doesn't need home
 
     raw = subprocess.run(
@@ -73,7 +73,7 @@ def test_recipe_includes_x_flag_iff_probe_passes(
     """The rsync command emitted by `_build_rsync_cmd` matches the probe."""
     from core import workspace_backups as wb
 
-    wb._reset_rsync_caches()
+    wb.reset_rsync_caches()
     use_xattrs = wb.rsync_supports_xattrs()
     cmd = wb._build_rsync_cmd(
         "/src",
@@ -98,7 +98,7 @@ def test_user_xattr_round_trips_when_supported(
     preserves them. Skipped otherwise."""
     from core import workspace_backups as wb
 
-    wb._reset_rsync_caches()
+    wb.reset_rsync_caches()
     if not wb.rsync_supports_xattrs():
         pytest.skip("rsync built without xattrs support")
     if not _fs_supports_user_xattrs(tmp_path):

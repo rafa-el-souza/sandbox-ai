@@ -62,9 +62,9 @@ def fake_executor(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeExecutor]:
     """Install ``_FakeExecutor`` into ``core.workspace_backups``."""
     fake = _FakeExecutor()
     monkeypatch.setattr(wb, "Executor", lambda: fake)
-    wb._reset_rsync_caches()
+    wb.reset_rsync_caches()
     yield fake
-    wb._reset_rsync_caches()
+    wb.reset_rsync_caches()
 
 
 def _populate_partial(cmd: list[str]) -> None:
@@ -100,7 +100,7 @@ class TestRsyncSupportsXattrs:
                 raise SandboxExecutionError("boom")
 
         monkeypatch.setattr(wb, "Executor", lambda: _Boom())
-        wb._reset_rsync_caches()
+        wb.reset_rsync_caches()
         assert wb.rsync_supports_xattrs() is False
 
     def test_caches_result(self, fake_executor: _FakeExecutor) -> None:
@@ -118,7 +118,7 @@ class TestRsyncSupportsXattrs:
                 return subprocess.CompletedProcess(["rsync"], 0, stdout="", stderr="")
 
         monkeypatch.setattr(wb, "Executor", lambda: _Empty())
-        wb._reset_rsync_caches()
+        wb.reset_rsync_caches()
         assert wb._query_rsync_version() == ""
         # Cached: even after swapping the executor, cached value wins.
         monkeypatch.setattr(wb, "Executor", lambda: _FakeExecutor())
@@ -132,7 +132,7 @@ class TestRsyncSupportsXattrs:
                 raise SandboxExecutionError("boom")
 
         monkeypatch.setattr(wb, "Executor", lambda: _Boom())
-        wb._reset_rsync_caches()
+        wb.reset_rsync_caches()
         assert wb._query_rsync_version() == ""
 
 

@@ -13,7 +13,7 @@ re-implemented here; a second copy would diverge and produce spurious WARNs):
 - ``core.setup.l0_identity.resolve_machinectl_path`` — machinectl-path
   re-enumeration on the sudoers ``secure_path`` basis (B-3, F-005), identical
   to L0 task 5.1;
-- ``core.setup.l0_identity.parse_sudo_version`` / ``_SUDO_FLOOR`` — the
+- ``core.setup.l0_identity.parse_sudo_version`` / ``SUDO_FLOOR`` — the
   V9c-validated sudo floor;
 - ``core.setup.l0_identity.resolve_operator`` — operator resolution precedence;
 - ``core.setup.l3_sudoers.render_sudoers_rule`` / ``_cmnd_specs`` /
@@ -39,7 +39,7 @@ import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from core.dispatch import _DISPATCH_BINARY, Op
+from core.dispatch import DISPATCH_BINARY, Op
 from core.doctor.types import CheckResult
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
@@ -70,10 +70,10 @@ _RESERVED_DIR = Path("/usr/local/libexec/sandbox-ai")
 # Extract each op-name segment from a rendered sudoers rule body. The L3
 # renderer emits ``… /bin/bash -c <dispatch>\ <op>[\ *]`` per Cmnd_Spec (F-004:
 # backslash-escaped whitespace, never shell-quoting). The dispatch path is
-# single-sourced from ``core.dispatch._DISPATCH_BINARY`` so a rename there is a
+# single-sourced from ``core.dispatch.DISPATCH_BINARY`` so a rename there is a
 # single-point change. The op segment is ``[a-z0-9-]+`` per the L3 op-name
 # shape gate.
-_CMND_SPEC_OP_RE = re.compile(re.escape(_DISPATCH_BINARY) + r"\\ ([a-z0-9-]+)")
+_CMND_SPEC_OP_RE = re.compile(re.escape(DISPATCH_BINARY) + r"\\ ([a-z0-9-]+)")
 
 
 def _audit_reserved_dir(violations: list[str]) -> None:
@@ -102,21 +102,21 @@ def _audit_subid_and_group(
     """
     from core.setup import l2_host_prereqs as l2
 
-    status, detail = l2._subid_status(user)
+    status, detail = l2.subid_status(user)
     if status != "adequate":
         violations.append(f"/etc/subuid|subgid for {user!r}: {detail}")
 
-    if not l2._group_exists(bridge_group):
+    if not l2.group_exists(bridge_group):
         violations.append(f"bridge group {bridge_group!r} absent per /etc/group")
         return
 
     bridge_gid = grp.getgrnam(bridge_group).gr_gid
-    if not l2._gid_in_subgid_range(bridge_gid, parse_subgid_for_user(user)):
+    if not l2.gid_in_subgid_range(bridge_gid, parse_subgid_for_user(user)):
         violations.append(
             f"bridge group {bridge_group!r} gid {bridge_gid} outside "
             f"{user!r}'s /etc/subgid range"
         )
-    if not l2._operator_in_group(operator, bridge_group):
+    if not l2.operator_in_group(operator, bridge_group):
         violations.append(
             f"operator {operator!r} not in {bridge_group!r} group per "
             f"/etc/group. Run 'sudo sandbox setup' to restore (and log "
@@ -134,7 +134,7 @@ def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) 
     account only if that account cannot escalate. WARN (never FAIL) — an operator
     who deliberately privileged the daemon user should be told, not hard-blocked.
 
-    Reuses L2's single-source admin-group resolver ``_user_admin_groups`` (lazy
+    Reuses L2's single-source admin-group resolver ``user_admin_groups`` (lazy
     import — see the module-top NOTE on the import-time cycle) so this audit and
     the operator-rootless sudoer-owner WARN cannot disagree on what counts as an
     admin group.
@@ -142,14 +142,14 @@ def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) 
     from core.setup import l2_host_prereqs as l2
 
     daemon_user = host_config.host.docker_unprivileged_user
-    admin_groups = l2._user_admin_groups(daemon_user)
+    admin_groups = l2.user_admin_groups(daemon_user)
     # The owner here is a *different* user (the dedicated daemon account), so the
     # policy query is ``sudo -n -l -U <daemon_user>`` — which needs root.
     # setup_invariants may run as the operator (plain ``sandbox doctor``) or as
     # root (``sudo sandbox doctor``); when not root the ``-U`` query is
     # indeterminate. Best-effort: WARN on a determinable grant, otherwise fall
     # back to group-only and note the gap — NEVER false-WARN on indeterminate.
-    policy = l2._user_sudoers_grant(daemon_user, self_query=False)
+    policy = l2.user_sudoers_grant(daemon_user, self_query=False)
 
     if not admin_groups and not (policy.determinable and policy.granted):
         if not policy.determinable:
@@ -317,13 +317,13 @@ def _extract_ops(drop_in_text: str) -> set[str]:
 def _audit_sudo_floor(violations: list[str]) -> None:
     """``sudo --version`` >= the V9c-validated floor 1.9.5p2.
 
-    Reuses L0's ``parse_sudo_version`` + ``_SUDO_FLOOR`` (lazy import — see the
+    Reuses L0's ``parse_sudo_version`` + ``SUDO_FLOOR`` (lazy import — see the
     module-top NOTE on the import-time cycle).
     """
     from core.setup import l0_identity as l0
 
     ver = l0.parse_sudo_version()
-    if ver is None or ver >= l0._SUDO_FLOOR:
+    if ver is None or ver >= l0.SUDO_FLOOR:
         return
     rendered = f"{ver[0]}.{ver[1]}.{ver[2]}" + (f"p{ver[3]}" if ver[3] else "")
     violations.append(
@@ -394,7 +394,7 @@ def check_setup_invariants(
             remediation="run 'sudo sandbox setup' to restore canonical setup state",
         )
 
-    drop_in_path = l3._drop_in_path(operator)
+    drop_in_path = l3.drop_in_path(operator)
     drop_in_text: str | None
     # ``drop_in_readable`` is False when the drop-in EXISTS but the current
     # (non-root) process cannot read it — the normal case under a plain

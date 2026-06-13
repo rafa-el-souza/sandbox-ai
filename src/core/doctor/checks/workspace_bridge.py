@@ -2,12 +2,12 @@
 """Workspace-bridge doctor checks.
 
 Covers the 11 workspace-bridge / per-instance health checks plus the per-instance
-scan helpers (``_scan_instance_dirs``, ``_scan_instance_workspace_paths``,
-``_default_uid_for_path``, ``_read_registry_raw``, ``_load_host_settings_or_skip``).
+scan helpers (``scan_instance_dirs``, ``_scan_instance_workspace_paths``,
+``_default_uid_for_path``, ``read_registry_raw``, ``_load_host_settings_or_skip``).
 
 Sole-caller locality keeps the helpers in this module: every helper is consumed
 by check functions defined here, so co-locating them preserves cohesion. Two
-helpers (``_scan_instance_dirs``, ``_read_registry_raw``) are also consumed by
+helpers (``scan_instance_dirs``, ``read_registry_raw``) are also consumed by
 ``checks/per_user_tree.py`` for the legacy-shape checks; per_user_tree imports
 them directly from this module.
 """
@@ -174,7 +174,7 @@ def check_subuid_resolver_works(host_user: str, distro: str | None) -> CheckResu
     )
 
 
-def _scan_instance_dirs() -> list[str]:
+def scan_instance_dirs() -> list[str]:
     """Return registered instance directories from ``<home>/state/instances.json``.
 
     Per change-5's name-keyed registry, each entry has shape
@@ -206,7 +206,7 @@ def _scan_instance_dirs() -> list[str]:
 def check_secrets_hydrated_restrictively(host_user: str, distro: str | None) -> CheckResult:
     """Warn-only: scan registered instances' secrets/ for world-readable mode bits."""
     del host_user, distro
-    instances = _scan_instance_dirs()
+    instances = scan_instance_dirs()
     leaks: list[str] = []
     for inst in instances:
         secrets_dir = os.path.join(inst, "secrets")
@@ -295,7 +295,7 @@ def check_pre_existing_instance_layout(
             category="Workspace Bridge",
         )
 
-    instances = _scan_instance_dirs()
+    instances = scan_instance_dirs()
     stale_paths: list[str] = []
     for inst in instances:
         for leaf in cache_log_leaves:
@@ -335,7 +335,7 @@ def check_pre_existing_instance_layout(
     )
 
 
-def _read_registry_raw() -> dict[str, JsonValue]:
+def read_registry_raw() -> dict[str, JsonValue]:
     """Return the raw parsed ``instances.json`` (for shape inspection).
 
     Returns an empty dict if missing or malformed. Used by checks that need to
@@ -359,7 +359,7 @@ def _scan_instance_workspace_paths() -> list[tuple[str, str, str]]:
     import tomllib
 
     out: list[tuple[str, str, str]] = []
-    for inst_dir in _scan_instance_dirs():
+    for inst_dir in scan_instance_dirs():
         toml_path = os.path.join(inst_dir, "sandbox.toml")
         try:
             with open(toml_path, "rb") as f:

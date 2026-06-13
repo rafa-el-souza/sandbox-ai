@@ -17,7 +17,7 @@ from __future__ import annotations
 import socket
 from typing import Any
 
-from core.dispatch import _DISPATCH_BINARY, Op
+from core.dispatch import DISPATCH_BINARY, Op
 from core.host_config import MachinectlAuth
 from core.setup.l3_sudoers import render_sudoers_rule
 
@@ -39,7 +39,7 @@ def test_setup_modules_imported_lazily_no_cycle() -> None:
 
     assert not hasattr(setup_invariants, "resolve_machinectl_path")
     assert not hasattr(setup_invariants, "render_sudoers_rule")
-    assert not hasattr(setup_invariants, "_subid_status")
+    assert not hasattr(setup_invariants, "subid_status")
 
 
 def test_reuses_l0_l3_l2_single_source() -> None:
@@ -50,7 +50,7 @@ def test_reuses_l0_l3_l2_single_source() -> None:
 
     assert callable(l0_identity.resolve_machinectl_path)
     assert callable(l3_sudoers.render_sudoers_rule)
-    assert callable(l2_host_prereqs._subid_status)
+    assert callable(l2_host_prereqs.subid_status)
 
 
 def _grant(*, granted: bool, nopasswd: bool, determinable: bool) -> Any:
@@ -252,12 +252,12 @@ class TestAuditSubidAndGroup:
     def test_inadequate_subid(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._subid_status", lambda u: ("absent", "no entry"))
-        monkeypatch.setattr("core.setup.l2_host_prereqs._group_exists", lambda g: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.subid_status", lambda u: ("absent", "no entry"))
+        monkeypatch.setattr("core.setup.l2_host_prereqs.group_exists", lambda g: True)
         monkeypatch.setattr(f"{_MOD}.grp.getgrnam", lambda g: type("G", (), {"gr_gid": 100000})())
         monkeypatch.setattr(f"{_MOD}.parse_subgid_for_user", lambda u: [(100000, 65536)])
-        monkeypatch.setattr("core.setup.l2_host_prereqs._gid_in_subgid_range", lambda gid, r: True)
-        monkeypatch.setattr("core.setup.l2_host_prereqs._operator_in_group", lambda op, g: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.gid_in_subgid_range", lambda gid, r: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.operator_in_group", lambda op, g: True)
         v: list[str] = []
         m._audit_subid_and_group("sandbox", "alice", "sb-ws", v)
         assert any("/etc/subuid|subgid" in x for x in v)
@@ -265,8 +265,8 @@ class TestAuditSubidAndGroup:
     def test_group_absent(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._subid_status", lambda u: ("adequate", "ok"))
-        monkeypatch.setattr("core.setup.l2_host_prereqs._group_exists", lambda g: False)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.subid_status", lambda u: ("adequate", "ok"))
+        monkeypatch.setattr("core.setup.l2_host_prereqs.group_exists", lambda g: False)
         v: list[str] = []
         m._audit_subid_and_group("sandbox", "alice", "sb-ws", v)
         assert any("bridge group 'sb-ws' absent" in x for x in v)
@@ -274,12 +274,12 @@ class TestAuditSubidAndGroup:
     def test_gid_outside_range_and_operator_not_member(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._subid_status", lambda u: ("adequate", "ok"))
-        monkeypatch.setattr("core.setup.l2_host_prereqs._group_exists", lambda g: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.subid_status", lambda u: ("adequate", "ok"))
+        monkeypatch.setattr("core.setup.l2_host_prereqs.group_exists", lambda g: True)
         monkeypatch.setattr(f"{_MOD}.grp.getgrnam", lambda g: type("G", (), {"gr_gid": 5})())
         monkeypatch.setattr(f"{_MOD}.parse_subgid_for_user", lambda u: [(100000, 65536)])
-        monkeypatch.setattr("core.setup.l2_host_prereqs._gid_in_subgid_range", lambda gid, r: False)
-        monkeypatch.setattr("core.setup.l2_host_prereqs._operator_in_group", lambda op, g: False)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.gid_in_subgid_range", lambda gid, r: False)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.operator_in_group", lambda op, g: False)
         v: list[str] = []
         m._audit_subid_and_group("sandbox", "alice", "sb-ws", v)
         assert any("outside" in x for x in v)
@@ -288,12 +288,12 @@ class TestAuditSubidAndGroup:
     def test_all_green(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._subid_status", lambda u: ("adequate", "ok"))
-        monkeypatch.setattr("core.setup.l2_host_prereqs._group_exists", lambda g: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.subid_status", lambda u: ("adequate", "ok"))
+        monkeypatch.setattr("core.setup.l2_host_prereqs.group_exists", lambda g: True)
         monkeypatch.setattr(f"{_MOD}.grp.getgrnam", lambda g: type("G", (), {"gr_gid": 100100})())
         monkeypatch.setattr(f"{_MOD}.parse_subgid_for_user", lambda u: [(100000, 65536)])
-        monkeypatch.setattr("core.setup.l2_host_prereqs._gid_in_subgid_range", lambda gid, r: True)
-        monkeypatch.setattr("core.setup.l2_host_prereqs._operator_in_group", lambda op, g: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.gid_in_subgid_range", lambda gid, r: True)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.operator_in_group", lambda op, g: True)
         v: list[str] = []
         m._audit_subid_and_group("sandbox", "alice", "sb-ws", v)
         assert v == []
@@ -315,9 +315,9 @@ class TestAuditDaemonUserNoAdmin:
         """No admin group AND a determinable no-grant from the sudoers policy."""
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=False, nopasswd=False, determinable=True
             ),
@@ -330,10 +330,10 @@ class TestAuditDaemonUserNoAdmin:
         from core.doctor.checks import setup_invariants as m
 
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo", "wheel"]
+            "core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["sudo", "wheel"]
         )
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=False, nopasswd=False, determinable=True
             ),
@@ -351,9 +351,9 @@ class TestAuditDaemonUserNoAdmin:
         cloud-init drop-in pattern that group-only detection missed)."""
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=True, nopasswd=True, determinable=True
             ),
@@ -368,9 +368,9 @@ class TestAuditDaemonUserNoAdmin:
     def test_password_gated_policy_grant_warns_not_nopasswd(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=True, nopasswd=False, determinable=True
             ),
@@ -384,9 +384,9 @@ class TestAuditDaemonUserNoAdmin:
     def test_group_and_policy_grant_both_named(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["sudo"])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=True, nopasswd=True, determinable=True
             ),
@@ -402,9 +402,9 @@ class TestAuditDaemonUserNoAdmin:
         + a note pointing at 'sudo sandbox doctor'."""
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=False, nopasswd=False, determinable=False
             ),
@@ -421,9 +421,9 @@ class TestAuditDaemonUserNoAdmin:
         is indeterminate — WARN on the group, no spurious note."""
         from core.doctor.checks import setup_invariants as m
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["wheel"])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["wheel"])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: self._grant(
                 granted=False, nopasswd=False, determinable=False
             ),
@@ -449,9 +449,9 @@ class TestAuditDaemonUserNoAdmin:
             seen_policy.append((u, self_query))
             return self._grant(granted=False, nopasswd=False, determinable=True)
 
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", _record)
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", _record)
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant", _record_policy
+            "core.setup.l2_host_prereqs.user_sudoers_grant", _record_policy
         )
         hc = minimal_host_config("dockerd-svc", MachinectlAuth.SUDO)
         m._audit_daemon_user_no_admin(hc, [])
@@ -474,9 +474,9 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: ["sudo"])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: ["sudo"])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: _grant(granted=False, nopasswd=False, determinable=True),
         )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
@@ -498,9 +498,9 @@ class TestDaemonUserNoAdminInCheck:
         monkeypatch.setattr(f"{_MOD}._audit_systemd_run_stability", lambda hc, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_rule_body", lambda hc, op, t, v: None)
         monkeypatch.setattr(f"{_MOD}._audit_sudo_floor", lambda v: None)
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: _grant(granted=True, nopasswd=True, determinable=True),
         )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
@@ -513,9 +513,9 @@ class TestDaemonUserNoAdminInCheck:
         from core.doctor.checks.setup_invariants import check_setup_invariants
 
         _patch_all_green(monkeypatch)
-        monkeypatch.setattr("core.setup.l2_host_prereqs._user_admin_groups", lambda u: [])
+        monkeypatch.setattr("core.setup.l2_host_prereqs.user_admin_groups", lambda u: [])
         monkeypatch.setattr(
-            "core.setup.l2_host_prereqs._user_sudoers_grant",
+            "core.setup.l2_host_prereqs.user_sudoers_grant",
             lambda u, *, self_query: _grant(granted=False, nopasswd=False, determinable=True),
         )
         monkeypatch.setattr("pathlib.Path.read_text", lambda self: "rule-body")
@@ -695,7 +695,7 @@ class TestAuditRuleBody:
         body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         first_op = next(iter(Op)).value
         stale = "\n".join(
-            line for line in body.splitlines() if f"{_DISPATCH_BINARY}\\ {first_op}" not in line
+            line for line in body.splitlines() if f"{DISPATCH_BINARY}\\ {first_op}" not in line
         )
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", stale, v)
@@ -721,9 +721,9 @@ class TestAuditRuleBody:
         body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         # Drop ONLY the fwd spec (the streaming op's lone ``\\ *`` Cmnd_Spec).
         stale = "\n".join(
-            line for line in body.splitlines() if f"{_DISPATCH_BINARY}\\ {Op.FWD.value}\\ *" not in line
+            line for line in body.splitlines() if f"{DISPATCH_BINARY}\\ {Op.FWD.value}\\ *" not in line
         )
-        assert f"{_DISPATCH_BINARY}\\ {Op.FWD.value}" not in stale
+        assert f"{DISPATCH_BINARY}\\ {Op.FWD.value}" not in stale
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", stale, v)
         assert any("installed op set != core.dispatch.Op" in x for x in v)

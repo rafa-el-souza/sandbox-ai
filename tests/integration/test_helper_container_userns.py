@@ -51,7 +51,7 @@ finally:
 
 _TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
 _PROBE_TIMEOUT_S = 10
-_DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
+DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 
 def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
@@ -152,13 +152,13 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
         *machinectl_cmd(daemon_user),
         "/bin/bash",
         "-c",
-        f"test -x {_DISPATCH_BINARY}",
+        f"test -x {DISPATCH_BINARY}",
     ]
     try:
         Executor().run(dispatch_probe, sentinel=True, timeout=_PROBE_TIMEOUT_S)
     except SandboxExecutionError as exc:
         pytest.skip(
-            f"skipped: dispatcher binary {_DISPATCH_BINARY} absent or non-executable "
+            f"skipped: dispatcher binary {DISPATCH_BINARY} absent or non-executable "
             f"for {daemon_user!r} (sentinel-recovered: {exc}; C-001 routes helper ops "
             f"through it; it is installed by sister change C-002 — run "
             f"`sudo sandbox setup` to install)"

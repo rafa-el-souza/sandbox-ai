@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 from core.compose import compose_project_name
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor, normalize_captured_output
-from core.helper_container import _hardened_docker_run
+from core.helper_container import hardened_docker_run
 from core.host_config import (
     is_operator_rootless,
     pipe_cmd,
@@ -64,18 +64,47 @@ from core.ipam import IPAMLedger, derive_static_ips
 from core.journal_audit import emit_op_audit
 from core.registry import InstanceRegistry
 
+__all__ = [
+    "DISPATCH_BINARY",
+    "DISPATCH_SOURCE_ENTRIES",
+    "OP_SPECS",
+    "_COMPILE_INNER",
+    "DispatchValidationError",
+    "Op",
+    "OpSpec",
+    "ProbeOutcome",
+    "StreamingOpError",
+    "_compile_payload",
+    "_dispatch_source_b64",
+    "_expand_compose_wire",
+    "_expand_fwd_wire",
+    "_invoke_with_nonce",
+    "_preflight_inner",
+    "build_invocation",
+    "build_target_argv",
+    "compile_dispatcher",
+    "dispatch_payload",
+    "invoke",
+    "parse_preflight_outcome",
+    "probe",
+    "proxy_argv",
+    "resolve_fwd_state",
+    "sudo_pipe_crossing_argv",
+    "validate_args",
+]
+
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
 
     from core.host_config import HostConfig
 
-_DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
+DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 # The Go dispatcher source tar'd into the crossed payload and compiled
 # offline. ``vendor`` / ``fixtures`` are directories; the rest are files. The
 # producer tars exactly these so the build context is hermetic (no stray host
 # files).
-_DISPATCH_SOURCE_ENTRIES = ("main.go", "main_test.go", "go.mod", "go.sum", "vendor", "fixtures")
+DISPATCH_SOURCE_ENTRIES = ("main.go", "main_test.go", "go.mod", "go.sum", "vendor", "fixtures")
 
 # In-container build dir (the bind-mount target). The host build directory is
 # an ephemeral per-call ``mktemp -d`` under the lingering daemon user's
@@ -864,7 +893,7 @@ def _build_helper_chown_files(args: Sequence[str], host_config: HostConfig) -> l
         f'chown {uid}:{gid} /p/"$f"; '
         "done"
     )
-    return _bash_c(_hardened_docker_run(image, parent, inner))
+    return _bash_c(hardened_docker_run(image, parent, inner))
 
 
 def _build_helper_mkdir_chown_dirs(args: Sequence[str], host_config: HostConfig) -> list[str]:
@@ -876,7 +905,7 @@ def _build_helper_mkdir_chown_dirs(args: Sequence[str], host_config: HostConfig)
         f'mkdir -p /p/"$d" && chown {uid}:{gid} /p/"$d"; '
         "done"
     )
-    return _bash_c(_hardened_docker_run(image, parent, inner))
+    return _bash_c(hardened_docker_run(image, parent, inner))
 
 
 # ─── fwd: the streaming attach-ProxyCommand op (C-010) ───────────────────────
@@ -1114,7 +1143,7 @@ def dispatch_payload(op_value: str, wire_args: Sequence[str]) -> str:
     F-004-escaped ``\\ *`` / exact shape itself) and the expanded Q6 wire form at
     runtime; both share this prefix.
     """
-    return f"{_DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
+    return f"{DISPATCH_BINARY} {op_value} {shlex.join(wire_args)}".rstrip()
 
 
 def sudo_pipe_crossing_argv(launcher_path: str, user: str) -> list[str]:
@@ -1382,7 +1411,7 @@ def _invoke_with_nonce(
 
     - **separate-user (framed)** — the dispatcher mints the nonce for its
       ``__SANDBOX_BEGIN_<nonce>`` frame; the :class:`~core.executor.Executor`
-      stashes the recovered begin nonce on ``_last_frame_nonce`` (its public
+      stashes the recovered begin nonce on ``last_frame_nonce`` (its public
       ``CompletedProcess`` contract is unchanged), which we surface here.
     - **operator-rootless (local)** — there is no dispatcher to mint a nonce, so
       for a ``preflight`` crossing we mint one locally (``secrets.token_hex(8)``,
@@ -1410,7 +1439,7 @@ def _invoke_with_nonce(
         return normalized, nonce
     ex = Executor()
     cp = ex.run(argv, framed=True, timeout=timeout)
-    return cp, ex._last_frame_nonce
+    return cp, ex.last_frame_nonce
 
 
 def probe(
@@ -1482,7 +1511,7 @@ def probe(
 # *captured* back over stdout, so neither caller (root ``sandbox setup`` L6.5
 # nor the dev integration test) ever touches the build dir:
 #
-#   * source-in:  the host tars ``_DISPATCH_SOURCE_ENTRIES`` (gzip-9) and
+#   * source-in:  the host tars ``DISPATCH_SOURCE_ENTRIES`` (gzip-9) and
 #     base64-w0-encodes it (~20 KB, 6x under Linux ``MAX_ARG_STRLEN`` 131072);
 #     the literal is interpolated into the ``bash -c`` payload.
 #   * build dir:  the crossed script, running AS claude-sandbox, derives
@@ -1549,11 +1578,11 @@ def _dispatch_source_b64() -> str:
     """
     dispatch_root = _resource_files("templates").joinpath("dispatch")
     with tempfile.TemporaryDirectory() as staging:
-        for entry in _DISPATCH_SOURCE_ENTRIES:
+        for entry in DISPATCH_SOURCE_ENTRIES:
             _stage_resource(dispatch_root.joinpath(entry), os.path.join(staging, entry))
         tar_buf = io.BytesIO()
         with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-            for entry in sorted(_DISPATCH_SOURCE_ENTRIES):
+            for entry in sorted(DISPATCH_SOURCE_ENTRIES):
                 tar.add(
                     os.path.join(staging, entry),
                     arcname=entry,

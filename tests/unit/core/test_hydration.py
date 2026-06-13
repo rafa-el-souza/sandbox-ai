@@ -572,9 +572,11 @@ class TestComposeRuntimeName:
     def test_render_matches_daemon_registered_runtime(self) -> None:
         """Single-source guard: the compose runtime name and the daemon.json
         registration key are the same value (cross-module), so they cannot drift."""
-        from core.setup.l6_daemon_json import _RESERVED_RUNTIME_KEY
+        from core.setup.l6_daemon_json import (
+            RESERVED_RUNTIME_KEY as L6_RESERVED_RUNTIME_KEY,
+        )
 
-        assert RESERVED_RUNTIME_KEY == _RESERVED_RUNTIME_KEY
+        assert RESERVED_RUNTIME_KEY == L6_RESERVED_RUNTIME_KEY
 
 
 class TestRenderTemplates:

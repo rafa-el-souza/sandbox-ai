@@ -2,7 +2,7 @@
 """Tests for core.doctor.checks.workspace_bridge.
 
 Covers the 11 workspace-bridge checks plus the per-instance scan helpers
-(``_scan_instance_dirs``, ``_scan_instance_workspace_paths``) that live in
+(``scan_instance_dirs``, ``_scan_instance_workspace_paths``) that live in
 this module per sole-caller locality.
 """
 
@@ -28,9 +28,9 @@ def test_module_exposes_ten_check_functions() -> None:
         "check_workspace_path_in_walker_boundary",
     }
     assert set(workspace_bridge.__all__) == expected
-    assert callable(workspace_bridge._scan_instance_dirs)
+    assert callable(workspace_bridge.scan_instance_dirs)
     assert callable(workspace_bridge._scan_instance_workspace_paths)
-    assert callable(workspace_bridge._read_registry_raw)
+    assert callable(workspace_bridge.read_registry_raw)
     assert callable(workspace_bridge._default_uid_for_path)
     assert callable(workspace_bridge._load_host_settings_or_skip)
 
@@ -45,27 +45,27 @@ def test_public_re_exports_resolve_to_topic_module() -> None:
 
 class TestScanInstanceDirs:
     def test_returns_empty_when_state_missing(self, isolated_sandbox_ai_home: Any) -> None:
-        from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+        from core.doctor.checks.workspace_bridge import scan_instance_dirs
 
-        assert _scan_instance_dirs() == []
+        assert scan_instance_dirs() == []
 
     def test_returns_empty_on_corrupt_json(self, isolated_sandbox_ai_home: Any) -> None:
-        from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+        from core.doctor.checks.workspace_bridge import scan_instance_dirs
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True, exist_ok=True)
         (state / "instances.json").write_text("{not json")
-        assert _scan_instance_dirs() == []
+        assert scan_instance_dirs() == []
 
     def test_returns_empty_when_instances_field_wrong_shape(self, isolated_sandbox_ai_home: Any) -> None:
         import json as _json
 
-        from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+        from core.doctor.checks.workspace_bridge import scan_instance_dirs
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True, exist_ok=True)
         (state / "instances.json").write_text(_json.dumps({"instances": []}))
-        assert _scan_instance_dirs() == []
+        assert scan_instance_dirs() == []
 
     def test_returns_registered_instance_dirs(self, isolated_sandbox_ai_home: Any, tmp_path: Any) -> None:
         """Iterates the name-keyed registry; yields each entry's instance_dir
@@ -87,26 +87,26 @@ class TestScanInstanceDirs:
                 }
             )
         )
-        from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+        from core.doctor.checks.workspace_bridge import scan_instance_dirs
 
-        assert _scan_instance_dirs() == [str(present)]
+        assert scan_instance_dirs() == [str(present)]
 
     def test_returns_empty_when_top_level_not_dict(self, isolated_sandbox_ai_home: Any) -> None:
         import json as _json
 
-        from core.doctor.checks.workspace_bridge import _scan_instance_dirs
+        from core.doctor.checks.workspace_bridge import scan_instance_dirs
 
         state = isolated_sandbox_ai_home / "state"
         state.mkdir(parents=True, exist_ok=True)
         (state / "instances.json").write_text(_json.dumps([1, 2, 3]))
-        assert _scan_instance_dirs() == []
+        assert scan_instance_dirs() == []
 
 
 class TestScanInstanceWorkspacePaths:
     def test_skips_missing_sandbox_toml(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor.checks.workspace_bridge import _scan_instance_workspace_paths
 
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: ["/no/such/dir"])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: ["/no/such/dir"])
         assert _scan_instance_workspace_paths() == []
 
     def test_skips_unparseable_toml(self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any) -> None:
@@ -115,7 +115,7 @@ class TestScanInstanceWorkspacePaths:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text("garbage = =")
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         assert _scan_instance_workspace_paths() == []
 
     def test_skips_non_dict_workspaces_block(
@@ -126,7 +126,7 @@ class TestScanInstanceWorkspacePaths:
         inst = tmp_path / "inst"
         inst.mkdir()
         (inst / "sandbox.toml").write_text("workspaces = []\n")
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         assert _scan_instance_workspace_paths() == []
 
     def test_yields_each_workspace(self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any) -> None:
@@ -138,7 +138,7 @@ class TestScanInstanceWorkspacePaths:
             '[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p1"\n'
             '[workspaces.scratch]\nbootstrap_mode = "empty"\npath = "/p2"\n'
         )
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = sorted(_scan_instance_workspace_paths())
         assert result == [(str(inst), "main", "/p1"), (str(inst), "scratch", "/p2")]
 
@@ -364,7 +364,7 @@ class TestCheckSecretsHydratedRestrictively:
     def test_pass_when_no_instances(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_secrets_hydrated_restrictively
 
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
@@ -378,7 +378,7 @@ class TestCheckSecretsHydratedRestrictively:
         leak.write_text("k")
         os.chmod(leak, 0o644)
 
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "warn"
         assert "ipc_host_key" in result.detail
@@ -390,7 +390,7 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
 
         inst = tmp_path / "inst"
         inst.mkdir()
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
@@ -410,7 +410,7 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
             return real_stat(path, **kw)
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.stat", _raise_on_x)
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
 
@@ -422,7 +422,7 @@ class TestCheckPreExistingInstanceLayout:
         inst = tmp_path / "inst"
         inst.mkdir(parents=True)
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
         assert result.detail == "no stale cache/log leaf ownership detected"
@@ -435,7 +435,7 @@ class TestCheckPreExistingInstanceLayout:
             (inst / leaf).mkdir(parents=True)
         target_uid = os.stat(inst / "cache/core/.claude").st_uid
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: target_uid)
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
 
@@ -451,7 +451,7 @@ class TestCheckPreExistingInstanceLayout:
             (inst / leaf).mkdir(parents=True)
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "warn"
         assert "2 cache/log leaf(s)" in result.detail
@@ -483,7 +483,7 @@ class TestCheckPreExistingInstanceLayout:
             "core.doctor.checks.workspace_bridge.host_id_for_in_container",
             lambda n, u: consumer_subuid,
         )
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None, uid_for_path=resolver)
         assert result.status == "warn"
         assert "1 cache/log leaf(s)" in result.detail
@@ -503,7 +503,7 @@ class TestCheckPreExistingInstanceLayout:
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: 999999)
         monkeypatch.setattr(
-            "core.doctor.checks.workspace_bridge._scan_instance_dirs",
+            "core.doctor.checks.workspace_bridge.scan_instance_dirs",
             lambda: [str(inst_a), str(inst_b)],
         )
         result = check_pre_existing_instance_layout("u", None)
@@ -521,7 +521,7 @@ class TestCheckPreExistingInstanceLayout:
         target_uid = (inst / "log/core").stat().st_uid
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.host_id_for_in_container", lambda n, u: target_uid)
-        monkeypatch.setattr("core.doctor.checks.workspace_bridge._scan_instance_dirs", lambda: [str(inst)])
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_pre_existing_instance_layout("u", None)
         assert result.status == "pass"
 

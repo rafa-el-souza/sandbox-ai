@@ -389,7 +389,7 @@ def test_operator_in_group_primary_lookup_keyerror(
         raise KeyError(_n)
 
     monkeypatch.setattr("pwd.getpwnam", _boom)
-    assert l2_host_prereqs._operator_in_group("ghost", "sb-ws") is False
+    assert l2_host_prereqs.operator_in_group("ghost", "sb-ws") is False
 
 
 def test_user_admin_groups_supplementary_and_primary(
@@ -411,13 +411,13 @@ def test_user_admin_groups_supplementary_and_primary(
 
     monkeypatch.setattr("grp.getgrnam", _getgrnam)
     monkeypatch.setattr("pwd.getpwnam", lambda _n: type("P", (), {"pw_gid": 10})())
-    assert l2_host_prereqs._user_admin_groups("alice") == ["sudo", "wheel"]
+    assert l2_host_prereqs.user_admin_groups("alice") == ["sudo", "wheel"]
 
 
 def test_user_admin_groups_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("grp.getgrnam", lambda _n: type("G", (), {"gr_gid": 27, "gr_mem": []})())
     monkeypatch.setattr("pwd.getpwnam", lambda _n: type("P", (), {"pw_gid": 1000})())
-    assert l2_host_prereqs._user_admin_groups("sandbox") == []
+    assert l2_host_prereqs.user_admin_groups("sandbox") == []
 
 
 def test_user_admin_groups_unknown_user_no_primary(
@@ -435,7 +435,7 @@ def test_user_admin_groups_unknown_user_no_primary(
 
     monkeypatch.setattr("grp.getgrnam", _getgrnam)
     monkeypatch.setattr("pwd.getpwnam", _boom)
-    assert l2_host_prereqs._user_admin_groups("ghost") == ["sudo"]
+    assert l2_host_prereqs.user_admin_groups("ghost") == ["sudo"]
 
 
 class _Proc:
@@ -464,7 +464,7 @@ def test_sudoers_grant_not_allowed_no_grant(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch,
         _Proc(stderr="Sorry, user bob is not allowed to run sudo on host.", returncode=1),
     )
-    g = l2_host_prereqs._user_sudoers_grant("bob", self_query=True)
+    g = l2_host_prereqs.user_sudoers_grant("bob", self_query=True)
     assert g.determinable is True
     assert g.granted is False
     assert g.nopasswd is False
@@ -475,7 +475,7 @@ def test_sudoers_grant_self_query_omits_dash_u(monkeypatch: pytest.MonkeyPatch) 
         monkeypatch,
         _Proc(stderr="user is not allowed to run sudo", returncode=1),
     )
-    l2_host_prereqs._user_sudoers_grant("alice", self_query=True)
+    l2_host_prereqs.user_sudoers_grant("alice", self_query=True)
     assert calls == [["sudo", "-n", "-l"]]
 
 
@@ -484,7 +484,7 @@ def test_sudoers_grant_other_user_adds_dash_u(monkeypatch: pytest.MonkeyPatch) -
         monkeypatch,
         _Proc(stdout="User sandbox may run the following commands:\n  (ALL) ALL"),
     )
-    g = l2_host_prereqs._user_sudoers_grant("sandbox", self_query=False)
+    g = l2_host_prereqs.user_sudoers_grant("sandbox", self_query=False)
     assert calls == [["sudo", "-n", "-l", "-U", "sandbox"]]
     assert g.granted is True
     assert g.nopasswd is False
@@ -504,7 +504,7 @@ def test_sudoers_grant_nopasswd_drop_in(monkeypatch: pytest.MonkeyPatch) -> None
             )
         ),
     )
-    g = l2_host_prereqs._user_sudoers_grant("ubuntu", self_query=True)
+    g = l2_host_prereqs.user_sudoers_grant("ubuntu", self_query=True)
     assert g.granted is True
     assert g.nopasswd is True
     assert g.determinable is True
@@ -516,7 +516,7 @@ def test_sudoers_grant_case_insensitive_marker(monkeypatch: pytest.MonkeyPatch) 
         monkeypatch,
         _Proc(stdout="User x may run the following command:\n  (ALL) NOPASSWD: /bin/ls"),
     )
-    g = l2_host_prereqs._user_sudoers_grant("x", self_query=True)
+    g = l2_host_prereqs.user_sudoers_grant("x", self_query=True)
     assert g.granted is True
     assert g.nopasswd is True
 
@@ -528,7 +528,7 @@ def test_sudoers_grant_password_gated_nonzero_exit(monkeypatch: pytest.MonkeyPat
         monkeypatch,
         _Proc(stderr="sudo: a password is required", returncode=1),
     )
-    g = l2_host_prereqs._user_sudoers_grant("dave", self_query=True)
+    g = l2_host_prereqs.user_sudoers_grant("dave", self_query=True)
     assert g.granted is True
     assert g.nopasswd is False
     assert g.determinable is True
@@ -541,7 +541,7 @@ def test_sudoers_grant_may_not_list_indeterminate(monkeypatch: pytest.MonkeyPatc
         monkeypatch,
         _Proc(stderr="Sorry, user alice may not list user sandbox's privileges", returncode=1),
     )
-    g = l2_host_prereqs._user_sudoers_grant("sandbox", self_query=False)
+    g = l2_host_prereqs.user_sudoers_grant("sandbox", self_query=False)
     assert g.determinable is False
     assert g.granted is False
     assert g.nopasswd is False
@@ -552,7 +552,7 @@ def test_sudoers_grant_clean_exit_unparseable_indeterminate(
 ) -> None:
     # Exit 0 with no recognizable marker — do not guess.
     _patch_sudo(monkeypatch, _Proc(stdout="", returncode=0))
-    g = l2_host_prereqs._user_sudoers_grant("x", self_query=True)
+    g = l2_host_prereqs.user_sudoers_grant("x", self_query=True)
     assert g.determinable is False
     assert g.granted is False
 
@@ -562,7 +562,7 @@ def test_sudoers_grant_oserror_indeterminate(monkeypatch: pytest.MonkeyPatch) ->
         raise OSError
 
     monkeypatch.setattr("subprocess.run", _boom)
-    g = l2_host_prereqs._user_sudoers_grant("x", self_query=True)
+    g = l2_host_prereqs.user_sudoers_grant("x", self_query=True)
     assert g.determinable is False
     assert g.granted is False
     assert g.nopasswd is False
