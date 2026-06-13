@@ -12,6 +12,8 @@ uv run pytest tests/unit/core/test_ipam.py::test_name   # single test
 make coverage                   # enforces 100% on core/ + cli/
 make lint                       # ruff
 make typecheck                  # mypy --strict
+make pyright                    # pyright --strict (src/ strict; tests/ scoped)
+make check                      # the full gate: lint → typecheck → pyright → coverage
 ```
 
 `pytest.testpaths = ["tests/unit"]` — integration tests under `tests/integration/` are not collected by default and must be invoked explicitly.
@@ -24,6 +26,7 @@ The CLI entrypoint is `sandbox = "cli.main:app"` (typer). Run as `uv run sandbox
 
 - 100% coverage gate on `src/core/` and `src/cli/` — new code without tests will fail `make coverage`.
 - mypy is strict, ruff line-length 120, target `py314`. Selected rules: `E,F,W,I,UP,B,SIM,TCH,RUF`.
+- pyright runs `--strict` as a gate step in `make check` (after mypy). `src/` is fully strict; `tests/` relax a fixed five-rule whitelist (untyped test-double lambdas, sanctioned `_private` access, autouse fixtures) — re-enabled for `src/` via a `src`-rooted execution environment and pinned by `test_pyrightconfig_relaxations_whitelisted` so the gate can't silently widen.
 - `src/cli/__main__.py` is excluded from coverage (`tool.coverage.run.omit`).
 - Tests live in `tests/unit/` mirroring the `src/core/` and `src/cli/` layout.
 

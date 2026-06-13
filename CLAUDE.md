@@ -18,6 +18,8 @@ uv run pytest tests/unit/core/test_ipam.py::test_name   # single test
 make coverage                   # enforces 100% on core/ + cli/
 make lint                       # ruff
 make typecheck                  # mypy --strict
+make pyright                    # pyright --strict (src/ strict; tests/ scoped)
+make check                      # the full gate: lint → typecheck → pyright → coverage
 ```
 
 `pytest.testpaths = ["tests/unit"]` — integration tests under `tests/integration/` are not collected by default and must be invoked explicitly.
