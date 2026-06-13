@@ -65,6 +65,11 @@ ignore = ["SIM105"]
 strict = true
 mypy_path = "src"
 packages = ["core", "cli"]
+# `make typecheck` runs `mypy .`, which recurses the whole worktree. Exclude
+# third-party plugin working dirs that install into the repo root (e.g. the
+# bmad skill drops untyped `_bmad/` + `_bmad-output/`); they are not project
+# code and are gitignored, but `mypy .` does not honor .gitignore.
+exclude = ['(^|/)_bmad(-output)?/']
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]

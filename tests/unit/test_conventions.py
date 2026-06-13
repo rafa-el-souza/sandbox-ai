@@ -8,9 +8,9 @@ Three structural guarantees, all AST-based:
    helpers imported across modules. Type-only imports under
    ``TYPE_CHECKING`` are exempt — those are type aliases, not behavior.
 2. **No suppression directives.** ``# noqa``, ``# type: ignore``,
-   ``# pragma: no cover`` are forbidden across `src/` and `tests/` per
-   the global rule. Restructure code or remove unreachable branches
-   instead of silencing the linter.
+   ``# pragma: no cover``, ``# pyright: ignore`` are forbidden across `src/`
+   and `tests/` per the global rule. Restructure code or remove unreachable
+   branches instead of silencing the linter/type-checker.
 3. **Every custom `@pytest.mark.X` is registered in `pyproject.toml`.**
    Catches typo'd or undeclared markers. Pytest builtins
    (``parametrize``, ``usefixtures``, ``skip``, ``skipif``, ``xfail``,
@@ -127,6 +127,7 @@ _SUPPRESSION_PATTERNS = (
     re.compile(r"#\s*noqa(?:\b|:)"),
     re.compile(r"#\s*type:\s*ignore"),
     re.compile(r"#\s*pragma:\s*no\s*cover"),
+    re.compile(r"#\s*pyright:\s*ignore"),
 )
 
 
@@ -1108,9 +1109,9 @@ def test_pyrightconfig_relaxations_whitelisted() -> None:
     """pyright is strict on ``src/`` and relaxes ONLY a fixed whitelist of rules
     for ``tests/``. The config is inverted on purpose — the whitelist is relaxed
     at the top level (governing ``tests/``, where pyright resolves imports
-    correctly) and re-enabled for ``src/`` via a single execution environment,
-    because pyright cannot resolve a ``src/``-layout's first-party imports under a
-    subdirectory root.
+    correctly) and re-enabled for the production trees ``src/`` and ``scripts/``
+    via per-root execution environments, because pyright cannot resolve a
+    ``src/``-layout's first-party imports under a subdirectory root.
 
     This guards the pyright-strict gate against silent widening: any NEW
     top-level relaxation, any relaxation set to something other than ``none``, or
@@ -1134,15 +1135,32 @@ def test_pyrightconfig_relaxations_whitelisted() -> None:
         f"top-level pyright overrides must all be 'none': {top_overrides}"
     )
 
+    # Pin the analyzed scope so a future edit can't silently SHRINK it
+    # (axis-e widening): no dropped include entry, no exclude/ignore escape hatch.
+    assert cfg.get("include") == ["src", "tests", "scripts"], (
+        f"pyright 'include' (the analyzed scope) drifted: {cfg.get('include')}"
+    )
+    assert cfg.get("extraPaths") == ["src"], f"pyright 'extraPaths' drifted: {cfg.get('extraPaths')}"
+    for shrink_key in ("exclude", "ignore"):
+        assert shrink_key not in cfg, (
+            f"pyrightconfig must not set top-level '{shrink_key}' — it can silently "
+            "shrink the analyzed scope below the pinned include set"
+        )
+
+    # Every production tree (src/, scripts/) gets its OWN env re-enabling the
+    # full whitelist to 'error', so all production code stays fully strict.
+    _strict_roots = {"src", "scripts"}
     envs = cfg.get("executionEnvironments", [])
-    assert len(envs) == 1, f"expected exactly one executionEnvironment (src/), got {len(envs)}"
-    src_env = envs[0]
-    assert src_env.get("root") == "src", "the sole executionEnvironment must be rooted at src/"
-    src_overrides = {k: v for k, v in src_env.items() if k.startswith("report")}
-    assert set(src_overrides) == set(_PYRIGHT_TEST_RELAXATIONS), (
-        "the src/ environment must re-enable exactly the whitelist (so src/ stays "
-        f"fully strict): {set(src_overrides) ^ set(_PYRIGHT_TEST_RELAXATIONS)}"
+    assert {e.get("root") for e in envs} == _strict_roots and len(envs) == len(_strict_roots), (
+        f"executionEnvironments must be exactly the strict production roots {_strict_roots}, "
+        f"got {[e.get('root') for e in envs]}"
     )
-    assert all(v == "error" for v in src_overrides.values()), (
-        f"the src/ environment must set every whitelisted rule to 'error': {src_overrides}"
-    )
+    for env in envs:
+        overrides = {k: v for k, v in env.items() if k.startswith("report")}
+        assert set(overrides) == set(_PYRIGHT_TEST_RELAXATIONS), (
+            f"the {env.get('root')}/ env must re-enable exactly the whitelist (so it stays "
+            f"fully strict): {set(overrides) ^ set(_PYRIGHT_TEST_RELAXATIONS)}"
+        )
+        assert all(v == "error" for v in overrides.values()), (
+            f"the {env.get('root')}/ env must set every whitelisted rule to 'error': {overrides}"
+        )

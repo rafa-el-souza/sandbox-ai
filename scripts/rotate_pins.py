@@ -17,9 +17,12 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from core.hydration import BINARY_REGISTRY, IMAGE_REGISTRY
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 # ── Signature Verification Registry ─────────────────────────────────────────
 # Maps IMAGE_REGISTRY keys to their signature verification method.
@@ -110,11 +113,15 @@ def _resolve_image_drift() -> list[DriftEntry]:
             continue
 
         try:
-            manifest = json.loads(result.stdout.strip())
-            current_digest = manifest.get("digest", "")
+            manifest: JsonValue = json.loads(result.stdout.strip())
         except json.JSONDecodeError:
             print(f"  ⚠ {key}: invalid JSON from manifest inspect", file=sys.stderr)
             continue
+        if not isinstance(manifest, dict):
+            print(f"  ⚠ {key}: manifest inspect did not return a JSON object", file=sys.stderr)
+            continue
+        digest = manifest.get("digest", "")
+        current_digest = digest if isinstance(digest, str) else ""
 
         if current_digest and current_digest != pin.digest:
             drift.append(
