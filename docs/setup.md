@@ -63,7 +63,7 @@ Phases are **named, not counted** — never re-introduce a brittle "N-phase" int
 
 ## Content-aware probes
 
-Every phase whose mutation can drift across wheel upgrades renders expected state from current sources (the `core.dispatch.Op` enum, `BINARY_REGISTRY`/`IMAGE_REGISTRY` pins, the dispatcher source bundle derived from `core.dispatch._DISPATCH_SOURCE_ENTRIES`, the toml/daemon.json contents) and compares it to observed on-disk state; the act is skipped only on an exact match. This is why an idempotent re-run on a converged host completes in <5s with every phase `already correct`.
+Every phase whose mutation can drift across wheel upgrades renders expected state from current sources (the `core.dispatch.Op` enum, `BINARY_REGISTRY`/`IMAGE_REGISTRY` pins, the dispatcher source bundle derived from `core.dispatch.DISPATCH_SOURCE_ENTRIES`, the toml/daemon.json contents) and compares it to observed on-disk state; the act is skipped only on an exact match. This is why an idempotent re-run on a converged host completes in <5s with every phase `already correct`.
 
 ## Reserved-namespace principle
 

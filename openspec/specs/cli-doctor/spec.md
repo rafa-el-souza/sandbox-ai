@@ -115,16 +115,16 @@ The system SHALL verify that the gVisor runtime is registered in Docker **under 
 
 ### Requirement: runsc RuntimeArgs Validation
 
-The system SHALL verify that the reserved `sandbox-ai-runsc` runtime's `runtimeArgs` contain **exactly the args setup's L6 phase configures, single-sourced from `core.setup.l6_daemon_json._EXPECTED_RUNTIME["runtimeArgs"]`** — NOT a hardcoded list. This makes the doctor expectation and the setup configuration one source so they cannot drift: whatever L6 configures is exactly what doctor expects (the F-024 pattern, extended from the reserved-key to the runtimeArgs). The check SHALL use `warn` severity — it is a defense-in-depth advisory.
+The system SHALL verify that the reserved `sandbox-ai-runsc` runtime's `runtimeArgs` contain **exactly the args setup's L6 phase configures, single-sourced from `core.setup.l6_daemon_json.EXPECTED_RUNTIME["runtimeArgs"]`** — NOT a hardcoded list. This makes the doctor expectation and the setup configuration one source so they cannot drift: whatever L6 configures is exactly what doctor expects (the F-024 pattern, extended from the reserved-key to the runtimeArgs). The check SHALL use `warn` severity — it is a defense-in-depth advisory.
 
-The current `_EXPECTED_RUNTIME["runtimeArgs"]` is `["--oci-seccomp"]`. `--debug-log` is NOT in the default expectation — gVisor syscall-level debug logging is a deferred **opt-in** (poor always-on default: perf overhead + unbounded disk), so doctor MUST NOT WARN about its absence by default. If a future opt-in adds `--debug-log=<path>` to `_EXPECTED_RUNTIME`, this check follows automatically with no further change. (The `--host-uds=all` prohibition is a separate check, unchanged.)
+The current `EXPECTED_RUNTIME["runtimeArgs"]` is `["--oci-seccomp"]`. `--debug-log` is NOT in the default expectation — gVisor syscall-level debug logging is a deferred **opt-in** (poor always-on default: perf overhead + unbounded disk), so doctor MUST NOT WARN about its absence by default. If a future opt-in adds `--debug-log=<path>` to `EXPECTED_RUNTIME`, this check follows automatically with no further change. (The `--host-uds=all` prohibition is a separate check, unchanged.)
 
 A value-bearing expected arg (e.g. a future `--debug-log=<path>`) is matched on its flag token, so any configured value satisfies it; a flag-only arg (`--oci-seccomp`) matches exactly.
 
 **Dependencies:** gVisor Runtime Registration (`runsc` check)
 
 #### Scenario: All expected args present
-- **WHEN** the `sandbox-ai-runsc` runtime's `runtimeArgs` contains every arg in `_EXPECTED_RUNTIME["runtimeArgs"]` (extra args, e.g. an operator-added `--debug-log`, are permitted)
+- **WHEN** the `sandbox-ai-runsc` runtime's `runtimeArgs` contains every arg in `EXPECTED_RUNTIME["runtimeArgs"]` (extra args, e.g. an operator-added `--debug-log`, are permitted)
 - **THEN** the check reports PASS listing the configured expected args
 
 #### Scenario: --oci-seccomp only — passes (no false --debug-log WARN)
@@ -132,7 +132,7 @@ A value-bearing expected arg (e.g. a future `--debug-log=<path>`) is matched on 
 - **THEN** the check reports PASS — `--debug-log` is a deferred opt-in, NOT expected by default
 
 #### Scenario: A required arg is missing
-- **WHEN** the `runtimeArgs` does not contain an arg in `_EXPECTED_RUNTIME["runtimeArgs"]` (e.g. `--oci-seccomp` absent)
+- **WHEN** the `runtimeArgs` does not contain an arg in `EXPECTED_RUNTIME["runtimeArgs"]` (e.g. `--oci-seccomp` absent)
 - **THEN** the check reports WARN naming the missing arg(s) with remediation referencing `~<user>/.config/docker/daemon.json`
 
 ### Requirement: Host UDS Runtime Validation
@@ -471,7 +471,7 @@ The doctor SHALL include a warn-only check `pre_existing_instance_layout` that d
 - **Leaf present and consumer-subuid-owned** — pass. The helper recipe ran successfully on a prior start; on-disk ownership matches the contract.
 - **Leaf present and dev-owned** — warn. Either a legacy instance from before the scaffold-vs-helper boundary was enforced (pre-Change-D scaffold pre-created the leaf as `dev:dev`), or a misconfiguration where the helper recipe failed silently on a prior start. The check SHALL recommend `rm -rf <home>/instances/<inst>/<leaf-path>` for each affected leaf; running the remediation lets the next `sandbox start` succeed because the helper recipe creates the leaf fresh as claude-sandbox-owned.
 
-The check uses `core.doctor.checks.workspace_bridge._scan_instance_dirs` to iterate registered instances (per the "Doctor Instance Scan Uses Registry" requirement). (This is the post-refactor module path; the function's behavior, signature, and return value are unchanged from its prior package-level location — only the import path moved.)
+The check uses `core.doctor.checks.workspace_bridge.scan_instance_dirs` to iterate registered instances (per the "Doctor Instance Scan Uses Registry" requirement). (This is the post-refactor module path; the function's behavior, signature, and return value are unchanged from its prior package-level location — only the import path moved.)
 
 The per-leaf ownership lookup used by the check SHALL be expressed as an injectable callable (`uid_for_path: Callable[[str], int]`) with a default that wraps `os.stat(path).st_uid`. Tests MAY override the resolver to make per-path ownership deterministic without monkeypatching `os.stat`. Production behavior MUST remain identical to direct `os.stat` use, including raising `OSError` for absent leaves so the absent-leaf branch is reached as before.
 
@@ -497,14 +497,14 @@ The per-leaf ownership lookup used by the check SHALL be expressed as an injecta
 
 ### Requirement: Doctor Instance Scan Uses Registry
 
-The doctor's per-instance scanning helper (`core.doctor.checks.workspace_bridge._scan_instance_dirs`) SHALL iterate registered instances from `<sandbox_ai_home()>/state/instances.json` rather than walking `__file__` parents to discover a `sandboxes/` tree. This implementation change is install-mode-independent: doctor checks that depend on per-instance scanning (notably `secrets_hydrated_restrictively` and `pre_existing_instance_layout`) work correctly in both dev checkouts and wheel installs.
+The doctor's per-instance scanning helper (`core.doctor.checks.workspace_bridge.scan_instance_dirs`) SHALL iterate registered instances from `<sandbox_ai_home()>/state/instances.json` rather than walking `__file__` parents to discover a `sandboxes/` tree. This implementation change is install-mode-independent: doctor checks that depend on per-instance scanning (notably `secrets_hydrated_restrictively` and `pre_existing_instance_layout`) work correctly in both dev checkouts and wheel installs.
 
 (This is the post-refactor module path; the function's behavior, signature, and return value are unchanged from its prior package-level location — only the import path moved.)
 
 This requirement closes change-4's deferred behavior where these checks SKIPped in wheel installs because `__file__` resolved into `site-packages/`.
 
 #### Scenario: Scan iterates registry
-- **WHEN** any doctor check that uses `_scan_instance_dirs` runs
+- **WHEN** any doctor check that uses `scan_instance_dirs` runs
 - **THEN** the helper reads `<sandbox_ai_home()>/state/instances.json` and yields each registered instance's `instance_dir`; `__file__`-derived discovery is NOT used
 
 #### Scenario: Scan works in wheel install

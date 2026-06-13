@@ -3,13 +3,14 @@
   "venv": ".venv",
   "pythonVersion": "3.14",
   "typeCheckingMode": "strict",
-  "include": ["src", "tests"],
+  "include": ["src", "tests", "scripts"],
   "extraPaths": ["src"],
 
   // Test-scoped diagnostic relaxations. Structure is INVERTED on purpose: the
   // five rules below are relaxed at the top level (which governs the tests/
   // tree, where pyright's import resolution works correctly) and RE-ENABLED for
-  // src/ via the executionEnvironment below — so src/ stays fully strict. A
+  // the production trees src/ and scripts/ via the executionEnvironments below —
+  // so all production code stays fully strict. A
   // tests/-rooted executionEnvironment would be tighter (per-subtree) but
   // pyright cannot resolve a src/-layout's first-party imports under a
   // subdirectory root (src/ collapses to library-mode and symbols read as
@@ -32,6 +33,17 @@
     {
       // src/ is fully strict: re-enable every rule the top level relaxed.
       "root": "src",
+      "extraPaths": ["src"],
+      "reportPrivateUsage": "error",
+      "reportUnknownLambdaType": "error",
+      "reportUnknownArgumentType": "error",
+      "reportUnknownMemberType": "error",
+      "reportUnusedFunction": "error"
+    },
+    {
+      // scripts/ is production code (e.g. rotate_pins.py rotates security pins) —
+      // fully strict, same as src/.
+      "root": "scripts",
       "extraPaths": ["src"],
       "reportPrivateUsage": "error",
       "reportUnknownLambdaType": "error",

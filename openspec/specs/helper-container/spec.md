@@ -66,7 +66,7 @@ Every helper invocation SHALL apply a wall-clock timeout (default 30 seconds; co
 
 ### Requirement: Helper Test Mocking Policy
 
-Tests that mock the `Executor.run` invocation issued by `helper_chown_files` or `helper_mkdir_chown_dirs` (or that mock the docker argv assembled by `_hardened_docker_run`) MUST document the rationale at the mock site via an inline comment. Mocks are acceptable for argv-shape assertions (verifying the presence of `--cap-drop ALL`, the pinned image digest, the absence of `--userns=host`, the read-only rootfs flag, the bind-mount target, and similar argv-level invariants) but MUST NOT be the sole coverage for end-to-end ownership semantics.
+Tests that mock the `Executor.run` invocation issued by `helper_chown_files` or `helper_mkdir_chown_dirs` (or that mock the docker argv assembled by `hardened_docker_run`) MUST document the rationale at the mock site via an inline comment. Mocks are acceptable for argv-shape assertions (verifying the presence of `--cap-drop ALL`, the pinned image digest, the absence of `--userns=host`, the read-only rootfs flag, the bind-mount target, and similar argv-level invariants) but MUST NOT be the sole coverage for end-to-end ownership semantics.
 
 The capability SHALL maintain at least one integration test under `tests/integration/` that invokes a real helper container against a real rootless userns and asserts that, after the helper completes, the resulting on-disk file or directory's `st_uid` and `st_gid` (as reported by `os.stat`) match the host-absolute target uid/gid passed to the helper. The test SHALL be invocable via `make test-integration` on any host with the prerequisites configured (daemon user reachable via `machinectl shell`, `/etc/subuid` entry for that user, rootless docker, busybox image accessible). The test MAY skip with a clear `pytest.skip(reason)` message when any prerequisite is unavailable; the skip reason MUST be specific enough to identify which precondition failed so the operator (or future CI log reader) can act on it.
 
@@ -141,7 +141,7 @@ The `owner_uid` and `owner_gid` parameters SHALL be interpreted as **host-absolu
 - **THEN** `in_container_uid_for_host_uid` raises `SubuidOutOfRangeError` (or `NoSubuidRangeError`) before any docker run is issued; no helper container is launched and no directory is created
 
 #### Scenario: --userns=host is never added to the docker run command
-- **WHEN** `helper_mkdir_chown_dirs` constructs its docker run command via `_hardened_docker_run`
+- **WHEN** `helper_mkdir_chown_dirs` constructs its docker run command via `hardened_docker_run`
 - **THEN** the command does NOT contain `--userns=host`; the helper inherits the daemon's default rootless userns map
 
 ### Requirement: Helper Container Bind-Mount Source
