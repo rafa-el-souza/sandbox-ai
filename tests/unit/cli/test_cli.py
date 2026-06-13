@@ -2392,7 +2392,7 @@ class TestComposeDownDirect:
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
             _compose_down("sandbox", self._config(), volumes=False)
-            (op, args, host_config), kwargs = mock_invoke.call_args
+            (op, args, host_config), _ = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t"]
             assert "--volumes" not in args
@@ -2405,7 +2405,7 @@ class TestComposeDownDirect:
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
             _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.SUDO)
-            (op, args, host_config), kwargs = mock_invoke.call_args
+            (op, args, host_config), _ = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t", "--volumes"]
             assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
@@ -5196,6 +5196,8 @@ class TestACLPlanAsymmetry:
         )
         assert match is not None, "docker/core/entrypoint.sh missing from EXEC_FILE_RECIPES"
         parent, files, consumer_uid, mode = match
+        assert parent == "docker/core"
+        assert files == ("entrypoint.sh",)
         assert consumer_uid == 1000
         assert mode == 0o500, f"entrypoint mode must be 0500 owner-only; got 0o{mode:03o}"
         # Confirm executable-script kind is NOT duplicated in RO_FILE_RECIPES.

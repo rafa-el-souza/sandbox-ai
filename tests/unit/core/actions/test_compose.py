@@ -73,15 +73,6 @@ def _ctx(
     )
 
 
-class _FakeExecutor:
-    def __init__(self) -> None:
-        self.invocations: list[tuple[list[str], dict[str, object]]] = []
-
-    def run(self, cmd: list[str], **kw: object) -> object:
-        self.invocations.append((cmd, dict(kw)))
-        return None
-
-
 def test_action_carries_typed_instance_name_only() -> None:
     action = ComposeUpAction(instance_name="demo")
     assert action.instance_name == "demo"

@@ -164,6 +164,10 @@ def test_probe_missing_subid_one_side_absent(
     _install(monkeypatch, w)
     result, detail = PHASE.probe(_ctx())
     assert result == PhaseResult.MISSING
+    # The detail must name subid and flag the one-side-absent case specifically
+    # (distinct from the both-sides-empty message).
+    assert "subid" in detail
+    assert "one of" in detail
 
 
 def test_probe_missing_machined(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -32,13 +32,6 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _env(home: Path) -> dict[str, str]:
-    """Build a subprocess env that redirects per-user home to ``home``."""
-    env = os.environ.copy()
-    env["SANDBOX_AI_HOME"] = str(home)
-    return env
-
-
 def _is_root() -> bool:
     return os.geteuid() == 0
 
@@ -146,29 +139,6 @@ requires_docker_user = pytest.mark.skipif(
     not _docker_unprivileged_user_configured(),
     reason="requires a configured rootless docker user in ~/.sandbox-ai/config/sandbox-ai.toml",
 )
-
-
-def _setup_bridge_group(group_name: str = "sb-ws-itest") -> int:
-    """Create a temporary bridge group at a free gid in claude-sandbox's subgid range.
-
-    Returns the gid. Caller is responsible for cleanup via groupdel.
-    """
-    sys.path.insert(0, str(REPO_ROOT / "src"))
-    try:
-        from core.host_config import (
-            HostConfig,
-            autodetect_workspace_bridge_gid_recommendation,
-        )
-    finally:
-        sys.path.pop(0)
-    host = HostConfig.from_toml().host
-    gid = autodetect_workspace_bridge_gid_recommendation(host.docker_unprivileged_user)
-    subprocess.run(["sudo", "groupadd", "-g", str(gid), group_name], check=True)
-    return gid
-
-
-def _teardown_bridge_group(group_name: str) -> None:
-    subprocess.run(["sudo", "groupdel", group_name], check=False)
 
 
 _E2E_SKIP_REASON = (

@@ -663,7 +663,7 @@ class TestRenderTemplates:
 
     def test_renders_compose(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """compose.yml is rendered with Jinja2 substitutions."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=False)
@@ -749,7 +749,7 @@ class TestRenderTemplates:
 
     def test_renders_dockerfile_by_distro(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Core Dockerfile selected by base_distro_family; admin Dockerfile is static-copied."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
@@ -766,7 +766,7 @@ class TestRenderTemplates:
 
     def test_disabled_component_skips_extra(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Disabled components do not have their extras rendered."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
@@ -776,7 +776,7 @@ class TestRenderTemplates:
 
     def test_enabled_component_renders_extra(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Enabled components have their extras rendered."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=False)
@@ -786,7 +786,7 @@ class TestRenderTemplates:
 
     def test_precious_state_never_overwritten(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Precious state files (sandbox.toml, .sandbox.env, custom/, cache/, log/) are never touched."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         # Write precious state files
@@ -806,7 +806,7 @@ class TestRenderTemplates:
 
     def test_renders_corefile(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """Corefile is rendered with whitelist domains."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
@@ -816,7 +816,7 @@ class TestRenderTemplates:
 
     def test_generates_allowed_domains(self, tooling_and_instance: tuple[Path, Path]) -> None:
         """allowed_domains.txt is generated from whitelist domains."""
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
@@ -830,7 +830,7 @@ class TestRenderTemplates:
         .bashrc, .npmrc, .gitconfig, and CLAUDE.md are rendered through the
         Jinja2 pipeline. Per admin-reframe, no config/admin/* files are emitted.
         """
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=False, mcp_firecrawl=False)
@@ -856,7 +856,7 @@ class TestRenderTemplates:
         content-level coverage requires T2/T3 integration tests against the real
         tooling plane (separate change).
         """
-        tooling, instance = tooling_and_instance
+        _tooling, instance = tooling_and_instance
         ctx = _build_test_context(str(instance))
 
         render_templates(ctx, str(instance), db_postgres=True, mcp_firecrawl=True)
@@ -1154,6 +1154,8 @@ class TestValidateTemplates:
             mcp_firecrawl=False,
         )
         assert any("Template not found" in e for e in errors)
+        # All 15 patched-tooling items validate except the one removed template.
+        assert count == 14
 
     def test_validate_undefined_variable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Undefined variable in template produces UndefinedError."""
@@ -1169,6 +1171,8 @@ class TestValidateTemplates:
             mcp_firecrawl=False,
         )
         assert any("Undefined variable" in e for e in errors)
+        # compose.yml raises UndefinedError and is excluded from the count.
+        assert count == 14
 
     def test_validate_syntax_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Syntax error in template produces TemplateSyntaxError."""
@@ -1184,6 +1188,8 @@ class TestValidateTemplates:
             mcp_firecrawl=False,
         )
         assert any("Syntax error" in e for e in errors)
+        # compose.yml raises TemplateSyntaxError and is excluded from the count.
+        assert count == 14
 
     def test_validate_missing_static_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing static file produces error."""
@@ -1200,6 +1206,8 @@ class TestValidateTemplates:
         )
         assert any("Static file missing" in e for e in errors)
         assert any("ERR_SANDBOX_403" in e for e in errors)
+        # The missing static file is the only item excluded from the count.
+        assert count == 14
 
 
 def _build_minimal_tooling(tmp_path: Path) -> Path:
@@ -3333,9 +3341,10 @@ class TestHydrationPipelineRegistration:
         tooling = _build_minimal_tooling(tmp_path)
         ctx = _build_test_context(str(tmp_path / "inst"))
 
-        # Baseline count without coredns Dockerfile considered
+        # Baseline count with every template + static file present and valid.
         count, errors = validate_templates(ctx, db_postgres=False, mcp_firecrawl=False)
         assert errors == [], f"Unexpected errors: {errors}"
+        assert count == 15
 
         # The coredns Dockerfile must be included in validated count.
         # We verify by checking that removing it causes a validation error.
@@ -3350,6 +3359,9 @@ class TestHydrationPipelineRegistration:
         assert any("Dockerfile.coredns" in e for e in errors_missing), (
             "validate_templates must report missing Dockerfile.coredns as error"
         )
+        # Removing exactly the coredns Dockerfile drops the validated count by one:
+        # it was counted in the baseline and is now the sole excluded item.
+        assert count_missing == count - 1
 
     def test_unconditional_files_includes_coredns_dockerfile(self) -> None:
         """(d) _UNCONDITIONAL_FILES contains 'docker/coredns/Dockerfile.coredns' and has length 14."""

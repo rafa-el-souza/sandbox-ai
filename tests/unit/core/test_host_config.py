@@ -469,10 +469,6 @@ class TestSudoAsOperator:
 # ─── Subuid / subgid resolvers ──────────────────────────────────────────────
 
 
-def _write_subid_file(path: Path, body: str) -> None:
-    path.write_text(body)
-
-
 def _patch_subuid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
     """Redirect production's /etc/subuid path constant to a tmp file."""
     f = tmp_path / "subuid"
