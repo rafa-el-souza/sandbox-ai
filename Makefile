@@ -1,4 +1,4 @@
-.PHONY: test test-file test-integration coverage lint format typecheck check
+.PHONY: test test-file test-integration coverage lint format typecheck pyright check
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
@@ -30,4 +30,7 @@ format:  # apply ruff's SAFE autofixes only (NOT `ruff format`, which is bugged)
 typecheck:
 	@uv run --quiet mypy --no-error-summary . && echo "✓ types clean (exit 0)"
 
-check: lint typecheck coverage  # the full gate: lint -> typecheck -> coverage
+pyright:  # pyright --strict (src fully strict; tests scoped per pyrightconfig.json). Prints "0 errors …" on a clean pass.
+	@uv run --quiet pyright
+
+check: lint typecheck pyright coverage  # the full gate: lint -> typecheck (mypy) -> pyright -> coverage

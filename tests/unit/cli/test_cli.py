@@ -3316,7 +3316,7 @@ def _secret_seed_mock_config() -> InstanceConfig:
 @contextlib.contextmanager
 def _secret_seed_scaffold_patches(
     *, tty: bool = False
-) -> typing.Iterator[dict[str, MagicMock]]:
+) -> typing.Generator[dict[str, MagicMock]]:
     """Patch the full init scaffold surface for the secret-seeding tests.
 
     Yields a dict of the named mocks so tests can assert on them. ``_stdin_is_tty``

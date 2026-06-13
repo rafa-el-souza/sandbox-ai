@@ -30,6 +30,8 @@ from core.doctor.types import CheckResult
 from core.host_resources import host_cpu_count, host_ram_bytes, parse_docker_size
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from core.json_types import JsonValue
 
 _CATEGORY = "Instance Resources"
@@ -60,12 +62,14 @@ def _load_service_limits(instance_dir: str) -> dict[str, dict[str, JsonValue]] |
     from ruamel.yaml.error import YAMLError
 
     compose_path = os.path.join(instance_dir, *_COMPOSE_LEAF)
-    parser = YAML(typ="safe")
+    parser: Any = YAML(typ="safe")
     try:
         with open(compose_path) as f:
-            # ``YAML.load`` is typed ``-> Any``; name the parsed tree as a
-            # JSON-shaped object so the ``services`` narrowing below stays
-            # concrete (safe-mode YAML yields the same structural kinds we read).
+            # ``YAML.load``'s stub types the bound method partially-unknown, so
+            # ``parser`` is aliased to ``Any`` at this single boundary. The
+            # parsed tree is named ``JsonValue`` so the ``services`` narrowing
+            # below stays concrete (safe-mode YAML yields the same structural
+            # kinds we read).
             data: JsonValue = parser.load(f)
     except (OSError, YAMLError):
         return _ComposeAbsent()

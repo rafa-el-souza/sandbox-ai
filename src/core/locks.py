@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from core.host_config import sandbox_ai_home
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from pathlib import Path
 
     from core.json_types import JsonValue
@@ -110,7 +110,7 @@ def is_backup_lock_held(instance_name: str) -> bool:
 
 
 @contextlib.contextmanager
-def acquire_backup_lock(instance_name: str) -> Iterator[Path]:
+def acquire_backup_lock(instance_name: str) -> Generator[Path]:
     """Acquire the per-instance backup lock with ``LOCK_EX | LOCK_NB``.
 
     Writes ``{"pid": <pid>, "started_at_utc": <iso>}`` to the lockfile so a

@@ -43,6 +43,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Any
 
 
 def ensure_registry_seed(home: Path) -> None:
@@ -281,13 +282,12 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
 
     with open(toml_path, "w", encoding="utf-8") as f:
         # ``tomlkit.dumps`` is documented to return ``str`` but its stub types
-        # the callable as partially-unknown (``Mapping[Unknown, Unknown] ->
-        # str``); naming the documented ``str`` in a thin typed local keeps the
-        # *return* boundary fully-known (no ``Unknown`` flows into the write).
-        # The residual ``reportUnknownMemberType`` on ``dumps`` itself is a
-        # third-party stub limitation, irreducible without a forbidden
-        # suppression/cast.
-        rendered: str = tomlkit.dumps(doc)
+        # the callable partially-unknown. Alias the module to ``Any`` at this
+        # single boundary so the member access isn't a partial-unknown leak,
+        # then name the documented ``str`` result — no ``Unknown`` flows past
+        # the seam into the write.
+        _tomlkit: Any = tomlkit
+        rendered: str = _tomlkit.dumps(doc)
         f.write(rendered)
 
 
