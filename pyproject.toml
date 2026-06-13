@@ -67,6 +67,7 @@ packages = ["core", "cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
+filterwarnings = ["error"]
 markers = [
     "integration: subprocess-level CLI tests (run with `make test-integration`)",
     "no_warm_mock: opt out of cli/conftest.py's autouse `_warm_check` patch (for tests that exercise the real function)",
