@@ -80,9 +80,8 @@ class TestResolveImageDrift:
         from core.hydration import IMAGE_REGISTRY
         from scripts.rotate_pins import resolve_drift
 
-        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            cmd = args[0] if args else kwargs.get("args", [])
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd_str = " ".join(cmd)
             for _key, pin in IMAGE_REGISTRY.items():
                 if pin.tagged in cmd_str:
                     return subprocess.CompletedProcess(
@@ -105,9 +104,8 @@ class TestResolveImageDrift:
         keys = list(IMAGE_REGISTRY.keys())
         new_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            cmd = args[0] if args else kwargs.get("args", [])
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd_str = " ".join(cmd)
             if IMAGE_REGISTRY[keys[0]].tagged in cmd_str:
                 return subprocess.CompletedProcess(
                     args=[],
@@ -404,9 +402,8 @@ class TestMainAutoCommit:
         def fake_resolve(kind: str) -> list[DriftEntry]:
             return [drift_entry] if kind == "image" else []
 
-        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            cmd = args[0] if args else kwargs.get("args", [])
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd_str = " ".join(cmd)
             if "status" in cmd_str and "porcelain" in cmd_str:
                 return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             if "cosign" in cmd_str or "verify" in cmd_str:

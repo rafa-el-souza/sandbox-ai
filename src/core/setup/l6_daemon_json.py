@@ -60,6 +60,7 @@ from core.setup.phase_runner import (
 )
 
 if TYPE_CHECKING:
+    from core.json_types import JsonValue
     from core.setup.phase_runner import SetupContext
 
 # The single reserved key + its expected value (the content-aware target). The
@@ -78,7 +79,7 @@ _RESERVED_RUNTIME_KEY = RESERVED_RUNTIME_KEY
 # entirely. Cost: runsc no longer enforces the OCI cgroup CPU/memory limits (the
 # C-008 clamp becomes render-time-only for gVisor containers) — restoring runtime
 # enforcement via the rootless `cgroupfs` driver is a tracked follow-up (F-057).
-_EXPECTED_RUNTIME: dict[str, object] = {
+_EXPECTED_RUNTIME: dict[str, JsonValue] = {
     "path": "/usr/local/libexec/sandbox-ai/runsc",
     "runtimeArgs": ["--oci-seccomp", "--ignore-cgroups"],
 }
@@ -95,7 +96,7 @@ def _daemon_json_path(ctx: SetupContext) -> Path:
     return Path(home) / ".config" / "docker" / "daemon.json"
 
 
-def _read_doc(path: Path) -> dict[str, object] | None:
+def _read_doc(path: Path) -> dict[str, JsonValue] | None:
     """Read + parse the daemon.json document; ``None`` if the file is absent.
 
     An empty file parses as a fresh empty document (dockerd treats it the same
@@ -108,7 +109,7 @@ def _read_doc(path: Path) -> dict[str, object] | None:
         return None
     if not text.strip():
         return {}
-    parsed = json.loads(text)
+    parsed: JsonValue = json.loads(text)
     if not isinstance(parsed, dict):
         raise SandboxExecutionError(
             f"[FATAL] Sandbox Execution Fault: {path} is not a JSON object; "
@@ -117,7 +118,7 @@ def _read_doc(path: Path) -> dict[str, object] | None:
     return parsed
 
 
-def _observed_runtime(doc: dict[str, object]) -> object | None:
+def _observed_runtime(doc: dict[str, JsonValue]) -> JsonValue | None:
     """The observed ``runtimes['sandbox-ai-runsc']`` value (``None`` if absent)."""
     runtimes = doc.get("runtimes")
     if isinstance(runtimes, dict):

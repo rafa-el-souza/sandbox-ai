@@ -2450,7 +2450,7 @@ def _synthetic_bundle(segments: list[tuple[str, str, int]], *, nonce: str = _TES
     synthetic outcome's ``preflight_nonce`` so :func:`parse_preflight_outcome`
     can verify it.
     """
-    parts = []
+    parts: list[str] = []
     for name, body, rc in segments:
         parts.append(f"__PREFLIGHT_Q_{nonce}_{name}__\n{body}\n__PREFLIGHT_RC_{nonce}_{name}_{rc}__")
     return "\n".join(parts)

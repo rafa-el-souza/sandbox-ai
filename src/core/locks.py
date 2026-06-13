@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from core.json_types import JsonValue
+
 STALE_GRACE_SECONDS = 60
 
 
@@ -41,16 +43,20 @@ def _utcnow() -> _dt.datetime:
     return _dt.datetime.now(tz=_dt.UTC)
 
 
-def _read_lock_metadata(path: Path) -> dict[str, str] | None:
+def _read_lock_metadata(path: Path) -> dict[str, JsonValue] | None:
     try:
         with open(path) as f:
-            data = json.load(f)
+            data: JsonValue = json.load(f)
     except OSError:
         return None
     except json.JSONDecodeError:
         return None
     if not isinstance(data, dict):
         return None
+    # ``data`` is now a known ``dict[str, JsonValue]`` (JSON object keys are
+    # always ``str``). Values stay structurally typed but opaque to this layer —
+    # the caller (:func:`is_lock_stale`) re-narrows ``started_at_utc`` with its
+    # own isinstance gate.
     return data
 
 

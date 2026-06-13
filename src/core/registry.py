@@ -17,8 +17,12 @@ import fcntl
 import json
 import os
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 from core.host_config import registry_lock_path, sandbox_ai_home
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 
 def _utcnow_iso() -> str:
@@ -38,12 +42,27 @@ def _default_registry_path() -> str:
     return str(sandbox_ai_home() / "state" / "instances.json")
 
 
-def is_path_keyed(data: dict[str, object]) -> bool:
+def _str_fields(body: dict[str, JsonValue]) -> dict[str, str]:
+    """Project a parsed record to its ``str``-valued fields only.
+
+    A registry record this module writes is ``str``→``str`` throughout
+    (``asdict(RegistryEntry)``), so this is identity on well-formed state. It
+    exists to give the untrusted ``json.load`` boundary a concrete
+    ``dict[str, str]`` shape without a ``cast`` over the parsed data — non-``str``
+    fields (only reachable via a hand-corrupted file) are elided.
+    """
+    return {key: value for key, value in body.items() if isinstance(value, str)}
+
+
+def is_path_keyed(data: dict[str, JsonValue]) -> bool:
     """Detect a legacy path-keyed registry shape.
 
     The legacy shape used absolute path strings (starting with ``/``) as keys
     mapping to an ``instance_id`` string. The new shape keys by instance name
     (no leading ``/``) mapping to a record dict.
+
+    ``data`` is a JSON object whose keys are strings (``json.load`` only ever
+    produces ``str`` object-keys); we inspect only the keys here.
     """
     return any(k.startswith("/") for k in data)
 
@@ -63,14 +82,22 @@ class InstanceRegistry:
             return {}
         with open(self._path) as f:
             try:
-                data = json.load(f)
+                data: JsonValue = json.load(f)
             except json.JSONDecodeError:
                 return {}
         if not isinstance(data, dict):
             return {}
+        # ``data`` is now a known ``dict[str, JsonValue]`` (JSON object keys are
+        # always ``str``). The per-record isinstance gate keeps only dict-shaped
+        # entries; ``_str_fields`` then keeps only each record's ``str``-valued
+        # fields. Records this registry writes are ``str``→``str`` throughout
+        # (``asdict(RegistryEntry)``), so this is identity on well-formed state;
+        # a non-``str`` field in a hand-corrupted file drops out, routing the
+        # caller (``get``/``all``) through its existing missing-key skip/None
+        # path rather than constructing a malformed entry.
         if is_path_keyed(data):
             return {}
-        return {k: v for k, v in data.items() if isinstance(v, dict)}
+        return {name: _str_fields(body) for name, body in data.items() if isinstance(body, dict)}
 
     def _open_lock(self) -> int:
         lock_path = str(registry_lock_path())

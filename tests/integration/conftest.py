@@ -93,7 +93,7 @@ def _resolve_daemon_user() -> str:
             raw = tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         pytest.skip(f"skipped: {real_toml} is malformed TOML: {exc}")
-    host_section = raw.get("host", {}) if isinstance(raw, dict) else {}
+    host_section: dict[str, object] = raw.get("host", {})
     user = host_section.get("docker_unprivileged_user")
     if not isinstance(user, str):
         pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")

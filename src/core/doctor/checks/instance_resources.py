@@ -23,10 +23,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from core.doctor.checks.workspace_bridge import _scan_instance_dirs
 from core.doctor.types import CheckResult
 from core.host_resources import host_cpu_count, host_ram_bytes, parse_docker_size
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 _CATEGORY = "Instance Resources"
 
@@ -42,7 +46,7 @@ class _ComposeAbsent:
     failure)."""
 
 
-def _load_service_limits(instance_dir: str) -> dict[str, dict[str, object]] | _ComposeAbsent:
+def _load_service_limits(instance_dir: str) -> dict[str, dict[str, JsonValue]] | _ComposeAbsent:
     """Load a registered instance's rendered compose and return its services map.
 
     Returns a ``{service_name: service_body}`` dict on success, or
@@ -56,9 +60,13 @@ def _load_service_limits(instance_dir: str) -> dict[str, dict[str, object]] | _C
     from ruamel.yaml.error import YAMLError
 
     compose_path = os.path.join(instance_dir, *_COMPOSE_LEAF)
+    parser = YAML(typ="safe")
     try:
         with open(compose_path) as f:
-            data = YAML(typ="safe").load(f)
+            # ``YAML.load`` is typed ``-> Any``; name the parsed tree as a
+            # JSON-shaped object so the ``services`` narrowing below stays
+            # concrete (safe-mode YAML yields the same structural kinds we read).
+            data: JsonValue = parser.load(f)
     except (OSError, YAMLError):
         return _ComposeAbsent()
     if not isinstance(data, dict):
@@ -107,7 +115,7 @@ def check_host_cpu_capacity(host_user: str, distro: str | None) -> CheckResult:
     )
 
 
-def _cpu_offenders(instance_dir: str, services: dict[str, dict[str, object]], host_cpus: int) -> list[str]:
+def _cpu_offenders(instance_dir: str, services: dict[str, dict[str, JsonValue]], host_cpus: int) -> list[str]:
     """Return ``"<inst>/<service> cpus=<v>"`` strings for services over host CPUs.
 
     A service whose ``cpus`` is absent or unparseable contributes nothing — the
@@ -171,7 +179,7 @@ def check_instance_memory_overcommit(host_user: str, distro: str | None) -> Chec
     )
 
 
-def _sum_mem_limits(services: dict[str, dict[str, object]]) -> int:
+def _sum_mem_limits(services: dict[str, dict[str, JsonValue]]) -> int:
     """Sum the services' ``mem_limit`` values in bytes.
 
     A service whose ``mem_limit`` is absent or unparseable contributes nothing —

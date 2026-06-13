@@ -74,6 +74,7 @@ from core.setup.phase_runner import Identity, Phase, PhaseResult
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
 
+    from core.json_types import JsonValue
     from core.setup.phase_runner import SetupContext
 
 # The reserved, root-owned, non-PATH install target (design D4/D6).
@@ -142,10 +143,10 @@ def _read_manifest() -> dict[str, str] | None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    parsed = json.loads(text)
+    parsed: JsonValue = json.loads(text)
     if not isinstance(parsed, dict):
         return None
-    return parsed
+    return {k: v for k, v in parsed.items() if isinstance(v, str)}
 
 
 def _probe(_ctx: SetupContext) -> tuple[PhaseResult, str]:

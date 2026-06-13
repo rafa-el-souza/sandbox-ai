@@ -30,7 +30,12 @@ def test_executor_runs_synchronously_with_default_capture(monkeypatch: pytest.Mo
         result = executor.run(["ls"])
 
         mock_run.assert_called_once_with(
-            ["ls"], capture_output=True, check=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, text=True
+            ["ls"],
+            capture_output=True,
+            check=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            text=True,
+            timeout=None,
         )
         assert result.stdout == "output"
 
@@ -44,7 +49,9 @@ def test_executor_interactive_mode_forgoes_capture(monkeypatch: pytest.MonkeyPat
 
         executor.run(["bash"], interactive=True)
 
-        mock_run.assert_called_once_with(["bash"], check=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+        mock_run.assert_called_once_with(
+            ["bash"], check=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, text=True, timeout=None
+        )
 
 
 def test_executor_wraps_errors_in_sandbox_error() -> None:
@@ -77,6 +84,7 @@ def test_executor_merges_custom_env(monkeypatch: pytest.MonkeyPatch) -> None:
             check=True,
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "CUSTOM_VAR": "custom_value"},
             text=True,
+            timeout=None,
         )
 
 

@@ -261,7 +261,15 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
             ws_table[spec.name] = sub
 
     with open(toml_path, "w", encoding="utf-8") as f:
-        f.write(tomlkit.dumps(doc))
+        # ``tomlkit.dumps`` is documented to return ``str`` but its stub types
+        # the callable as partially-unknown (``Mapping[Unknown, Unknown] ->
+        # str``); naming the documented ``str`` in a thin typed local keeps the
+        # *return* boundary fully-known (no ``Unknown`` flows into the write).
+        # The residual ``reportUnknownMemberType`` on ``dumps`` itself is a
+        # third-party stub limitation, irreducible without a forbidden
+        # suppression/cast.
+        rendered: str = tomlkit.dumps(doc)
+        f.write(rendered)
 
 
 def _detect_git_config() -> tuple[str, str]:

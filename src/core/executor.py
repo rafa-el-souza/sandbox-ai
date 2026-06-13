@@ -3,7 +3,7 @@ import os
 import re
 import secrets
 import subprocess
-from typing import Any, NoReturn
+from typing import NoReturn
 
 from core.exceptions import SandboxExecutionError
 
@@ -103,13 +103,7 @@ class Executor:
         if env:
             sterile_env.update(env)
 
-        kwargs: dict[str, Any] = {"check": True, "env": sterile_env}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-
-        if not interactive:
-            kwargs["capture_output"] = True
-            kwargs["text"] = True
+        check = True
 
         # Sentinel injection (wrap path): wrap the inner command for
         # non-interactive calls. The token is orchestrator-generated, so the
@@ -133,7 +127,7 @@ class Executor:
                 wrapped = f"( {inner_cmd} ); echo {sentinel_echo}"
                 cmd = [*cmd[:-1], wrapped]
                 # Disable check=True — we parse exit code from sentinel
-                kwargs["check"] = False
+                check = False
             else:
                 # sentinel requested on a non-`bash -c` command: no injection
                 # point, so no recovery (behaves as a normal checked run).
@@ -144,10 +138,28 @@ class Executor:
         # dispatcher's nonce-bound trailer, so the crossed (sudo-authorized)
         # payload stays the bare command the per-op rule matches.
         if framed and not interactive:
-            kwargs["check"] = False
+            check = False
 
         try:
-            result = subprocess.run(cmd, **kwargs)
+            # Explicit ``subprocess.run`` calls in place of the former
+            # ``kwargs: dict[str, Any]`` spread (which forced an opaque
+            # ``CompletedProcess[Any]``). ``text=True`` selects the overload that
+            # returns a concrete ``CompletedProcess[str]`` on both branches; the
+            # non-interactive path additionally sets ``capture_output=True`` (the
+            # recovery-eligible path that reads ``result.stdout`` as ``str``).
+            # The interactive path inherits stdio for PTY handover and captures
+            # nothing — with no pipe to decode, ``text`` is a runtime no-op
+            # there (stdout/stderr stay ``None``), so the only observable change
+            # vs. the prior dict is the kwarg's presence, not behaviour.
+            # ``timeout`` is forwarded unconditionally; ``timeout=None`` is the
+            # parameter's own default, identical to omitting it.
+            result: subprocess.CompletedProcess[str]
+            if interactive:
+                result = subprocess.run(cmd, check=check, env=sterile_env, timeout=timeout, text=True)
+            else:
+                result = subprocess.run(
+                    cmd, check=check, env=sterile_env, timeout=timeout, capture_output=True, text=True
+                )
         except subprocess.CalledProcessError as e:
             # Mask host topologies via opaque domain error
             error_msg = (

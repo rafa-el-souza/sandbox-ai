@@ -28,9 +28,14 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core.binary_install import RESERVED_DIR
+from core.exceptions import SandboxExecutionError
 from core.host_config import DockerExecutionMode
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 # Single-source the marker path off the reserved binary directory (D6).
 MARKER_PATH = RESERVED_DIR / "setup-state.json"
@@ -67,14 +72,27 @@ def write_mode(operator: str, mode: DockerExecutionMode) -> None:
     batch's concern — this writer is called under whatever identity the caller
     holds).
     """
+    data: dict[str, JsonValue]
     try:
         raw = MARKER_PATH.read_text()
-        data = json.loads(raw)
     except FileNotFoundError:
         data = {}
-    operators = dict(data.get("operators", {}))
-    operators = {**operators, operator: {"mode": mode.value}}
-    merged = {**data, "operators": operators}
+    else:
+        parsed: JsonValue = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise SandboxExecutionError(
+                f"[FATAL] Sandbox Execution Fault: {MARKER_PATH} is not a JSON "
+                f"object; refusing to overwrite a malformed mode marker."
+            )
+        data = parsed
+    raw_operators: JsonValue = data.get("operators", {})
+    if not isinstance(raw_operators, dict):
+        raise SandboxExecutionError(
+            f"[FATAL] Sandbox Execution Fault: {MARKER_PATH} has a non-object "
+            f"'operators' field; refusing to overwrite a malformed mode marker."
+        )
+    operators: dict[str, JsonValue] = {**raw_operators, operator: {"mode": mode.value}}
+    merged: dict[str, JsonValue] = {**data, "operators": operators}
 
     MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(MARKER_PATH.parent), prefix=".setup-state-", suffix=".tmp")

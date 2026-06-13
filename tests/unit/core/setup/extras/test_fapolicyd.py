@@ -42,7 +42,7 @@ def ctx() -> SetupContext:
 class _Exec:
     """Fake Executor: records argv, drives per-command outcomes."""
 
-    calls: list[list[str]] = field(default_factory=list)
+    calls: list[list[str]] = field(default_factory=list[list[str]])
     update_ok: bool = True
     is_active_ok: bool = True
     check_trust_ok: bool = True

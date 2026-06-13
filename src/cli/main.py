@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pydantic
 import typer
@@ -121,6 +122,9 @@ from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from core.json_types import JsonValue
 
 app = typer.Typer()
 workspace_app = typer.Typer(help="Workspace lifecycle commands")
@@ -354,7 +358,7 @@ def _container_status(
             if not line:
                 continue
             try:
-                data = _json.loads(line)
+                data: JsonValue = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
             # Strict shape: each NDJSON record must be a JSON object. A
@@ -362,13 +366,27 @@ def _container_status(
             # coerced into a ContainerInfo.
             if not isinstance(data, dict):
                 continue
+
+            # ``data`` is now ``dict[str, JsonValue]``; project each field to the
+            # ``str`` the daemon always emits via an inline isinstance gate whose
+            # else-branch is the SAME default the prior ``.get(key, default)``
+            # carried — so a missing OR non-``str`` field (only reachable via
+            # corrupt output) lands on that existing default rather than typing
+            # the field as ``JsonValue``. Docker's real NDJSON is ``str``
+            # throughout, so this is identity on well-formed output. ``Health``
+            # keeps the prior ``... or None`` semantics (empty/falsy → ``None``).
+            name = data.get("Name", "")
+            service = data.get("Service", "")
+            state = data.get("State", "")
+            status = data.get("Status", "")
+            health = data.get("Health", None)
             containers.append(
                 ContainerInfo(
-                    name=data.get("Name", ""),
-                    service=data.get("Service", ""),
-                    state=data.get("State", ""),
-                    health=data.get("Health", None) or None,
-                    status=data.get("Status", ""),
+                    name=name if isinstance(name, str) else "",
+                    service=service if isinstance(service, str) else "",
+                    state=state if isinstance(state, str) else "",
+                    health=health if isinstance(health, str) and health else None,
+                    status=status if isinstance(status, str) else "",
                 )
             )
     return containers

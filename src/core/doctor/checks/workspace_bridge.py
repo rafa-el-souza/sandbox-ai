@@ -36,6 +36,8 @@ from core.host_config import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from core.json_types import JsonValue
+
 
 def _load_host_settings_or_skip(check_name: str) -> HostSettings | CheckResult:
     """Helper: load HostSettings or return a CheckResult skip if absent."""
@@ -186,7 +188,7 @@ def _scan_instance_dirs() -> list[str]:
     state_path = sandbox_ai_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
-            data = json.load(f)
+            data: JsonValue = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
     if not isinstance(data, dict):
@@ -333,7 +335,7 @@ def check_pre_existing_instance_layout(
     )
 
 
-def _read_registry_raw() -> dict[str, object]:
+def _read_registry_raw() -> dict[str, JsonValue]:
     """Return the raw parsed ``instances.json`` (for shape inspection).
 
     Returns an empty dict if missing or malformed. Used by checks that need to
@@ -342,7 +344,7 @@ def _read_registry_raw() -> dict[str, object]:
     state_path = sandbox_ai_home() / "state" / "instances.json"
     try:
         with open(state_path) as f:
-            data = json.load(f)
+            data: JsonValue = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -361,15 +363,21 @@ def _scan_instance_workspace_paths() -> list[tuple[str, str, str]]:
         toml_path = os.path.join(inst_dir, "sandbox.toml")
         try:
             with open(toml_path, "rb") as f:
-                data = tomllib.load(f)
+                # ``tomllib.load`` is typed ``dict[str, Any]``; name the parsed
+                # tree as a JSON-shaped object so the workspace-table narrowing
+                # below stays concrete (TOML tables/scalars map onto the same
+                # structural kinds we read here).
+                data: dict[str, JsonValue] = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError):
             continue
         workspaces = data.get("workspaces", {})
         if not isinstance(workspaces, dict):
             continue
         for name, body in workspaces.items():
-            if isinstance(body, dict) and isinstance(body.get("path"), str):
-                out.append((inst_dir, name, body["path"]))
+            if isinstance(body, dict):
+                path = body.get("path")
+                if isinstance(path, str):
+                    out.append((inst_dir, name, path))
     return out
 
 

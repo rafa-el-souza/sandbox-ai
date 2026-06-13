@@ -36,8 +36,8 @@ class _Env:
     """Typed fake-world state for the L6.5 phase under test."""
 
     binary_bytes: bytes = b"COMPILED-DISPATCHER-V1"
-    compile_calls: list[str] = field(default_factory=list)
-    chattr: list[str] = field(default_factory=list)
+    compile_calls: list[str] = field(default_factory=list[str])
+    chattr: list[str] = field(default_factory=list[str])
 
 
 @pytest.fixture
