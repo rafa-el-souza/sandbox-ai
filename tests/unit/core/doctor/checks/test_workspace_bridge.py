@@ -161,6 +161,34 @@ class TestCheckWorkspaceBridgeGroupExists:
         assert result.status == "pass"
         assert "200500" in result.detail
 
+    def test_threaded_mode_overlays_owner_resolution(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        # Regression F-069: F-051 flipped from_toml()'s default execution mode to
+        # operator-rootless. Without overlaying the marker-resolved mode, the
+        # daemon owner mis-resolves to the invoking operator and the bridge gid is
+        # validated against the wrong /etc/subgid range (false-failed on fedora).
+        # The threaded SEPARATE_USER mode must reach `host` so the owner resolves
+        # to the configured docker_unprivileged_user, not the operator.
+        from core.doctor.checks.workspace_bridge import check_workspace_bridge_group_exists
+        from core.host_config import DockerExecutionMode, resolve_daemon_owner_settings
+
+        config_dir = isolated_sandbox_ai_home / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        # No execution-mode field (removed post-D11) → from_toml defaults to op-rootless.
+        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "sandbox"\n')
+
+        captured: dict[str, Any] = {}
+
+        def _capture(host: Any) -> int:
+            captured["host"] = host
+            return 200500
+
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _capture)
+        result = check_workspace_bridge_group_exists("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
+        assert result.status == "pass"
+        assert captured["host"].docker_execution_mode is DockerExecutionMode.SEPARATE_USER
+        # The fix: owner resolves to the configured user, NOT the invoking operator.
+        assert resolve_daemon_owner_settings(captured["host"]) == "sandbox"
+
     def test_fail_when_group_missing_with_recommendation(
         self, isolated_sandbox_ai_home: Any, monkeypatch: Any
     ) -> None:

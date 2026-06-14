@@ -381,7 +381,7 @@ CT=$(sudo -u sandbox env XDG_RUNTIME_DIR=/run/user/$SBUID DOCKER_HOST=unix:///ru
 echo "$CT" | grep -q -- '-smoke-admin-1' && echo ATTACH_PRECOND_ADMIN_RUNNING_OK || { echo ATTACH_PRECOND_ADMIN_NOT_RUNNING_FAIL; rc=1; }
 
 echo '== obtain the REAL ProxyCommand from the product surface (proxy_argv, NOT hand-typed) =='
-PROXY=$(PYTHONPATH="$SBROOT/src" "$SBROOT/.venv/bin/python3" -c "import shlex; from core.dispatch import proxy_argv, Op; from core.host_config import minimal_host_config, MachinectlAuth; hc = minimal_host_config('sandbox', MachinectlAuth.SUDO); print(shlex.join(proxy_argv(Op.FWD, ['smoke'], hc)))" 2>/tmp/proxy_build.err)
+PROXY=$(PYTHONPATH="$SBROOT/src" "$SBROOT/.venv/bin/python3" -c "import shlex; from core.dispatch import proxy_argv, Op; from core.host_config import minimal_host_config, MachinectlAuth, DockerExecutionMode; hc = minimal_host_config('sandbox', MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER); print(shlex.join(proxy_argv(Op.FWD, ['smoke'], hc)))" 2>/tmp/proxy_build.err)
 if [ -z "$PROXY" ]; then echo "--- proxy build err ---"; tail -8 /tmp/proxy_build.err; echo ATTACH_PROXY_BUILD_FAIL; rc=1; echo "$rc" >/dev/null; exit $rc; fi
 echo "PROXY=$PROXY"
 echo "$PROXY" | grep -q 'dispatch fwd' && echo ATTACH_PROXY_IS_DISPATCH_FWD_OK || { echo ATTACH_PROXY_NOT_DISPATCH_FWD_FAIL; rc=1; }
