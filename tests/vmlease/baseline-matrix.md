@@ -53,8 +53,8 @@ reference baseline.
 
 ## Sources + totals
 
-- **op-rootless** — `vmlease-c012-base-oprootless-20260611T204900Z.summary.json` (2026-06-11) — {FAIL: 0, PASS: 64} — re-run on the C-012 (`retire-polkit-mode`) tree; green across all 4 distros (the POLKIT removal does not touch the op-rootless path).
-- **separate-user · SUDO** — `vmlease-c012-base-su-sudo-20260611T211500Z.summary.json` (2026-06-11, debian/fedora/arch) + `vmlease-c012-su-sudo-ubuntu-recheck-20260611T212500Z.summary.json` (2026-06-11, ubuntu) — {FAIL: 0, PASS: 72} — re-run on the C-012 tree; green across all 4 distros. (ubuntu was re-confirmed in a single-distro re-run after a transient `apk add` package-download failure during the docker image build on the first attempt — an environmental build-time flake, unrelated to sandbox-ai.)
+- **op-rootless** — `vmlease-baseline-branch-cov-oprootless-20260613-20260613t221716z.summary.json` (2026-06-13) — {FAIL: 0, PASS: 64} — re-run on the branch-coverage + F-069 tree; green across all 4 distros (the branch-coverage and F-069 changes do not touch the op-rootless path).
+- **separate-user · SUDO** — `vmlease-baseline-f069-fix-sepuser-20260614-20260614t124655z.summary.json` (2026-06-14) — {FAIL: 0, PASS: 72} — re-run on the F-069 fix; green across all 4 distros. (This bundle had regressed to {FAIL: 5, PASS: 67} on the pre-fix tree — `doctor` false-failed on fedora and the `attach` probe failed on all 4 — when F-051's execution-mode default-collapse left two un-overlaid mode reads defaulting to operator-rootless; the F-069 fix restored green and this run confirms it. See finding F-069.)
 
 ## Reading the matrix
 
