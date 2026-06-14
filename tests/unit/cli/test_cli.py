@@ -4136,16 +4136,52 @@ class TestInitAuthProbe:
             assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_probe_failure_exits_with_remediation(self, runner: CliRunner) -> None:
-        """Probe failure (not-ok, not-timeout) exits with error + remediation."""
+        """Probe failure (not-ok, not-timeout) exits with error + remediation.
+
+        The autouse host-config fixture resolves the mode to separate-user, so
+        this exercises the dispatcher-boundary remediation arm (the
+        operator-rootless arm is covered by
+        ``test_probe_failure_op_rootless_remediation``).
+        """
         from cli.main import app
 
         with patch("cli.main.dispatch.probe", return_value=self._fail(message="boom: exit status 1")):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
-            assert "probe failed" in result.output.lower()
+            # Mode-aware header (drops the stale ``machinectl`` hint post-C-009).
+            assert "preflight crossing failed" in result.output.lower()
             assert "remediation" in result.output.lower()
+            # separate-user arm: the root-owned dispatcher / NOPASSWD sudoers rule.
+            assert "dispatcher" in result.output.lower()
+            assert "sandbox setup" in result.output.lower()
             # Restored diagnostic fidelity: the real failure context from
             # ProbeOutcome.message is surfaced (not the prior generic string).
+            assert "boom: exit status 1" in result.output
+
+    def test_probe_failure_op_rootless_remediation(self, runner: CliRunner) -> None:
+        """Probe failure in operator-rootless mode hits the no-crossing remediation arm.
+
+        Overrides the autouse separate-user resolver so the OTHER branch of the
+        mode-aware remediation in ``_emit_auth_probe_failure`` is exercised (branch
+        coverage). Op-rootless has no privilege crossing — the guidance points at
+        rootless Docker, not the dispatcher boundary."""
+        from cli.main import app
+        from core.host_config import DockerExecutionMode
+
+        with (
+            patch("cli.main.dispatch.probe", return_value=self._fail(message="boom: exit status 1")),
+            patch(
+                "cli.main.resolve_execution_mode",
+                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
+            ),
+        ):
+            result = runner.invoke(app, ["init", "probeproject"])
+            assert result.exit_code == 1
+            assert "preflight crossing failed" in result.output.lower()
+            assert "remediation" in result.output.lower()
+            # op-rootless arm: rootless Docker, explicitly NO privilege crossing.
+            assert "no privilege crossing" in result.output.lower()
+            assert "rootless docker" in result.output.lower()
             assert "boom: exit status 1" in result.output
 
     def test_probe_timeout_exits_with_error(self, runner: CliRunner) -> None:
@@ -4277,7 +4313,7 @@ class TestInitAuthProbe:
             # The distinct ENOENT SandboxExecutionError text reaches the
             # operator via ProbeOutcome.message (restored fidelity).
             assert "ENOENT-machinectl-missing" in result.output
-            assert "probe failed" in result.output.lower()
+            assert "preflight crossing failed" in result.output.lower()
 
 
 @pytest.mark.usefixtures("stub_bridge_resolution")
