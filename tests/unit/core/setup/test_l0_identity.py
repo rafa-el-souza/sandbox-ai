@@ -164,6 +164,17 @@ def test_classify_validated(monkeypatch: pytest.MonkeyPatch) -> None:
     assert classify_distro() == ("validated", "ubuntu", "24.04")
 
 
+def test_classify_skips_comment_and_blank_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Real /etc/os-release files carry comment (#) and blank lines with no `=`;
+    # the parse loop must skip them (the `if "=" in line` false branch, 209->208)
+    # and still resolve ID/VERSION_ID.
+    _fake_os_release(
+        monkeypatch,
+        "# /etc/os-release\n\nID=ubuntu\n\n# comment tail\nVERSION_ID=\"24.04\"\n",
+    )
+    assert classify_distro() == ("validated", "ubuntu", "24.04")
+
+
 def test_classify_untested(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_os_release(monkeypatch, 'ID=fedora\nVERSION_ID="40"\n')
     assert classify_distro() == ("untested", "fedora", "40")
@@ -264,6 +275,23 @@ def test_missing_binaries_some_absent(
 
 def test_binary_install_cmd_arch_tlog_aur() -> None:
     assert l0_identity._binary_install_cmd("tlog-rec", "arch") == "paru -S tlog"
+
+
+def test_binary_install_cmd_tlog_other_distro_falls_through() -> None:
+    # tlog-rec on a distro family that is neither arch nor debian must fall past
+    # both special-cases (the `if distro_family == "debian"` false branch,
+    # 320->322) to the generic per-distro install command for the `tlog` package.
+    from core.doctor.types import get_install_cmd
+
+    assert l0_identity._binary_install_cmd("tlog-rec", "fedora") == get_install_cmd("fedora", "tlog")
+
+
+def test_binary_install_cmd_tlog_unknown_distro_generic() -> None:
+    # And with no distro family at all, the generic (non-package-manager) form.
+    cmd = l0_identity._binary_install_cmd("tlog-rec", None)
+    assert "tlog" in cmd
+    assert "paru" not in cmd
+    assert "apt" not in cmd
 
 
 def test_binary_install_cmd_debian_tlog_source_build() -> None:
@@ -594,6 +622,24 @@ def test_secure_path_from_sudoers_file(
     monkeypatch.setattr(
         "core.setup.l0_identity.Path.read_text",
         lambda self: 'Defaults    secure_path="/x:/y"\n',
+    )
+    assert l0_identity._secure_path_dirs() == ["/x", "/y"]
+
+
+def test_secure_path_skips_nonmatching_defaults_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A sudoers line that starts with "Defaults" and contains the substring
+    # "secure_path" but does NOT match the assignment regex (e.g. `Defaults
+    # !secure_path`) must fail `if m:` (305->301) and the loop must continue to
+    # the real assignment on the next line.
+    class _Proc:
+        stdout = "nothing useful\n"
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        "core.setup.l0_identity.Path.read_text",
+        lambda self: 'Defaults !secure_path\nDefaults    secure_path="/x:/y"\n',
     )
     assert l0_identity._secure_path_dirs() == ["/x", "/y"]
 

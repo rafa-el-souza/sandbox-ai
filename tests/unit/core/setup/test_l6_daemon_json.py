@@ -508,6 +508,31 @@ def test_act_operator_rootless_local_writes_operator_home(
     assert all(s is False for _, s in seen)
 
 
+def test_probe_operator_rootless_skips_sandbox_user_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """op-rootless probe skips the sandbox-user guard (141->148).
+
+    The daemon owner in operator-rootless is the always-present invoking
+    operator, so the `if not is_operator_rootless` guard body does not run.
+    Prove it by making ``pwd.getpwnam`` raise: in separate-user that KeyError is
+    the MISSING signal, but here the guard is never reached, so a correct file
+    still reports ALREADY_CORRECT.
+    """
+    path = tmp_path / ".config" / "docker" / "daemon.json"
+
+    def _boom(_u: str) -> object:
+        raise KeyError("getpwnam(): name not found")
+
+    monkeypatch.setattr("pwd.getpwnam", _boom)
+    monkeypatch.setattr(l6, "_daemon_json_path", lambda _hc: path)
+    monkeypatch.setattr(l6, "_runtime_registered", lambda _hc: True)
+    _write(path, {"runtimes": {l6.RESERVED_RUNTIME_KEY: l6.EXPECTED_RUNTIME}})
+
+    result, _ = l6.PHASE.probe(_oprootless_ctx())
+    assert result == PhaseResult.ALREADY_CORRECT
+
+
 def test_runtime_registered_operator_rootless_local(monkeypatch: pytest.MonkeyPatch) -> None:
     """op-rootless ``_runtime_registered`` queries docker LOCAL with the injected
     session env (no machinectl, sentinel off) — finding 8.11."""

@@ -69,6 +69,25 @@ def test_executor_wraps_errors_in_sandbox_error() -> None:
         assert "fatal error" in error_text or "some error" in error_text or "failing" in error_text
 
 
+def test_executor_error_omits_trace_when_stderr_empty() -> None:
+    # A non-interactive CalledProcessError with no stderr must take the
+    # `if not interactive and e.stderr` false branch (173->175): the error is
+    # raised with the masked exit-status message but no "Error Trace:" section.
+    executor = Executor()
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = subprocess.CalledProcessError(
+            returncode=2, cmd=["failing"], output=None, stderr=None
+        )
+        with pytest.raises(SandboxExecutionError) as exc_info:
+            executor.run(["failing"])
+
+    error_text = str(exc_info.value)
+    assert "exit status 2" in error_text
+    assert "failing" in error_text
+    assert "Error Trace:" not in error_text
+
+
 def test_executor_merges_custom_env(monkeypatch: pytest.MonkeyPatch) -> None:
     executor = Executor()
     monkeypatch.setattr(os, "environ", {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
@@ -208,6 +227,56 @@ class TestSentinelParsing:
                     sentinel=True,
                 )
             assert "exit status 1" in str(exc_info.value)
+
+    def test_nonzero_exit_omits_output_when_stdout_empty(self) -> None:
+        # A non-zero recovered exit whose cleaned stdout is empty (the captured
+        # output was nothing but the sentinel line) must take the
+        # `if recovered.stdout` false branch (248->250): the raised error keeps
+        # the stderr trace but has no "Output:" section.
+        executor = Executor()
+
+        with patch("subprocess.run") as mock_run:
+            # Only the sentinel line — its `\s*$` match consumes the trailing
+            # newline, so after stripping the span the cleaned stdout is "".
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="__SANDBOX_EXIT_abcdef0123456789_1\n", stderr="boom\n"
+            )
+            with (
+                patch("core.executor.secrets.token_hex", return_value="abcdef0123456789"),
+                pytest.raises(SandboxExecutionError) as exc_info,
+            ):
+                executor.run(
+                    ["sudo", "machinectl", "shell", "user@.host", "/bin/bash", "-c", "false"],
+                    sentinel=True,
+                )
+        error_text = str(exc_info.value)
+        assert "exit status 1" in error_text
+        assert "Error Trace:" in error_text
+        assert "boom" in error_text
+        assert "Output:" not in error_text
+
+    def test_nonzero_exit_empty_stdout_and_stderr_is_terse(self) -> None:
+        # Gotcha: a non-zero recovered exit with neither stdout nor stderr yields
+        # the barest diagnostic — just the masked exit-status line, with no trace
+        # and no output. This locks in the (terse but coherent) failure mode.
+        executor = Executor()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="__SANDBOX_EXIT_abcdef0123456789_3\n", stderr=""
+            )
+            with (
+                patch("core.executor.secrets.token_hex", return_value="abcdef0123456789"),
+                pytest.raises(SandboxExecutionError) as exc_info,
+            ):
+                executor.run(
+                    ["sudo", "machinectl", "shell", "user@.host", "/bin/bash", "-c", "false"],
+                    sentinel=True,
+                )
+        error_text = str(exc_info.value)
+        assert "exit status 3" in error_text
+        assert "Error Trace:" not in error_text
+        assert "Output:" not in error_text
 
     def test_sentinel_line_stripped_from_output(self) -> None:
         """WHEN sentinel parsed, THEN sentinel line is removed from stdout."""

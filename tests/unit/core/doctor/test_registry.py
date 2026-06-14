@@ -69,6 +69,30 @@ class TestCheckRunner:
         assert ids.index("a") < ids.index("b")
         assert ids.index("b") < ids.index("c")
 
+    def test_topological_sort_ignores_dangling_dependency(self) -> None:
+        # `topological_sort` is a public export; callers other than
+        # `run_check_subset` (which pre-validates) may pass a check whose
+        # depends_on references an ID outside the list. The `if dep in
+        # id_to_check` guard must ignore the dangling dep — otherwise the
+        # check's in-degree would be over-counted and it would be silently
+        # dropped from the output. Assert it survives AND real deps still order.
+        from core.doctor import Check, CheckResult, topological_sort
+
+        def noop(u: str, d: str | None) -> CheckResult:
+            return CheckResult(status="pass", name="n", detail="")
+
+        checks = [
+            Check(id="ghosted", name="G", category="t", depends_on=["does-not-exist"], run=noop, remediation=""),
+            Check(id="a", name="A", category="t", depends_on=[], run=noop, remediation=""),
+            Check(id="b", name="B", category="t", depends_on=["a"], run=noop, remediation=""),
+        ]
+        sorted_checks = topological_sort(checks)
+        ids = [c.id for c in sorted_checks]
+        # The dangling-dep check is not dropped (the guard prevented the bug).
+        assert set(ids) == {"ghosted", "a", "b"}
+        # Real dependency ordering is still honoured.
+        assert ids.index("a") < ids.index("b")
+
     def test_runner_cascading_skip(self) -> None:
         from core.doctor import Check, CheckResult, run_checks
 

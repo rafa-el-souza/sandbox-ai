@@ -145,6 +145,35 @@ class TestDetectDistro:
         with patch("builtins.open", mock_open(read_data=content)):
             assert detect_distro() == "debian"
 
+    def test_skips_comment_and_blank_lines(self) -> None:
+        # Real /etc/os-release files contain comment (#) and blank lines that
+        # have no `=` — the parse loop must skip them (the `if "=" in line`
+        # false branch) and still resolve ID.
+        from core.doctor.types import detect_distro
+
+        content = "# os-release for testing\n\nID=debian\n\n# trailing comment\n"
+        with patch("builtins.open", mock_open(read_data=content)):
+            assert detect_distro() == "debian"
+
+    def test_id_like_first_token_unknown_then_known(self) -> None:
+        # ID itself is unknown, and ID_LIKE leads with a token absent from the
+        # distro map before a known one — the loop must skip the unknown token
+        # (the `if like in _DISTRO_MAP` false branch) and match the later one.
+        from core.doctor.types import detect_distro
+
+        content = 'ID=mystery\nID_LIKE="gentoo debian"\n'
+        with patch("builtins.open", mock_open(read_data=content)):
+            assert detect_distro() == "debian"
+
+    def test_id_like_all_unknown_returns_none(self) -> None:
+        # ID unknown and every ID_LIKE token absent from the map — exhausts the
+        # loop with no match and falls through to the final `return None`.
+        from core.doctor.types import detect_distro
+
+        content = 'ID=mystery\nID_LIKE="gentoo exotic"\n'
+        with patch("builtins.open", mock_open(read_data=content)):
+            assert detect_distro() is None
+
     def test_fedora_detected(self) -> None:
         from core.doctor.types import detect_distro
 

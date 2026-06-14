@@ -1359,11 +1359,14 @@ def _workspace_needs_recursive_setup(workspace: str, bridge_gid: int) -> bool:
 def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[int, list[str]]:
     """Apply chgrp + chmod recursively, best-effort.
 
-    Returns (failure_count, sample_failure_paths). Per-file failures (typically
-    EPERM on non-dev-owned files) are collected and reported in aggregate per
-    Decision 17 — the orchestrator does not escalate via sudo.
+    Returns (failure_count, sample_failure_paths). ``failure_count`` is the true
+    total; ``sample_failure_paths`` is capped at ``sample_limit`` to keep the
+    aggregate report bounded. Per-file failures (typically EPERM on non-dev-owned
+    files) are collected and reported in aggregate per Decision 17 — the
+    orchestrator does not escalate via sudo.
     """
     failures: list[str] = []
+    failure_count = 0
     sample_limit = 5
     for root, dirs, files in os.walk(workspace):
         for name in (*dirs, *files):
@@ -1371,6 +1374,7 @@ def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[
             try:
                 os.chown(path, -1, bridge_gid, follow_symlinks=False)
             except OSError:
+                failure_count += 1
                 if len(failures) < sample_limit:
                     failures.append(path)
                 continue
@@ -1381,9 +1385,10 @@ def _workspace_shared_group_recursive(workspace: str, bridge_gid: int) -> tuple[
                     if not os.path.islink(path):
                         os.chmod(path, 0o0660)
             except OSError:
+                failure_count += 1
                 if len(failures) < sample_limit:
                     failures.append(path)
-    return len(failures), failures
+    return failure_count, failures
 
 
 def _workspace_shared_group_plan(
@@ -4082,7 +4087,12 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
 
     # Config completeness warnings
     env_path = os.path.join(instance_dir, ".sandbox.env")
-    if os.path.exists(env_path):
+    if not os.path.exists(env_path):
+        # A missing secrets file is more severe than a present-but-incomplete
+        # one — surface it explicitly rather than silently reporting "all OK".
+        console.print("\n[yellow bold]Warnings[/yellow bold]")
+        console.print("  ⊘ Missing secrets file: .sandbox.env not found", style="yellow")
+    else:
         missing = _check_secrets(env_path, config)
         if missing:
             console.print("\n[yellow bold]Warnings[/yellow bold]")

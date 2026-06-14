@@ -35,6 +35,33 @@ class TestRichRenderer:
         assert "✓" in output
         assert "Test Check" in output
 
+    def test_pass_marker_no_detail(self, captured_console: CapturedConsole) -> None:
+        # A passing check with an empty detail must render the ✓ + name without
+        # appending a dim detail fragment (the `if r.detail:` false branch).
+        from core.doctor import CheckResult, render_results
+
+        results = [CheckResult(status="pass", name="Quiet Check", detail="")]
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "✓ Quiet Check" in output
+        # No trailing detail text beyond the name on that line.
+        pass_line = next(ln for ln in output.splitlines() if "Quiet Check" in ln)
+        assert pass_line.strip() == "✓ Quiet Check"
+
+    def test_fail_marker_no_remediation_no_doc_ref(self, captured_console: CapturedConsole) -> None:
+        # A failing check with neither remediation nor doc_ref skips both the
+        # Fix: and Docs: lines (the `if r.remediation:` false branch, 55->57).
+        from core.doctor import CheckResult, render_results
+
+        results = [CheckResult(status="fail", name="Bare Failure", detail="it broke")]
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "✗" in output
+        assert "Bare Failure" in output
+        assert "it broke" in output
+        assert "Fix:" not in output
+        assert "Docs:" not in output
+
     def test_fail_marker_with_expansion(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results
 
@@ -145,6 +172,22 @@ class TestWarnRendering:
         assert "1/3 passed" in output
         assert "1 warnings" in output
         assert "1 failed" in output
+
+    def test_render_warn_no_remediation(self, captured_console: CapturedConsole) -> None:
+        # An advisory with nothing actionable (remediation=None) renders the ⚠
+        # and detail but no Fix: line (the warn-block `if r.remediation:` false
+        # branch, 62->46).
+        from core.doctor import CheckResult, render_results
+
+        results = [
+            CheckResult(status="warn", name="Bare Advisory", detail="nothing to do", category="Test"),
+        ]
+        render_results(results, console=captured_console.console)
+        output = captured_console.plain_output
+        assert "⚠" in output
+        assert "Bare Advisory" in output
+        assert "nothing to do" in output
+        assert "Fix:" not in output
 
     def test_render_warn_display(self, captured_console: CapturedConsole) -> None:
         from core.doctor import CheckResult, render_results

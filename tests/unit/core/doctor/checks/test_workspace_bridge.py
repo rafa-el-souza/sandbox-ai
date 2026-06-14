@@ -142,6 +142,41 @@ class TestScanInstanceWorkspacePaths:
         result = sorted(_scan_instance_workspace_paths())
         assert result == [(str(inst), "main", "/p1"), (str(inst), "scratch", "/p2")]
 
+    def test_skips_scalar_workspace_body_keeps_iterating(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        # `workspaces` is a dict, but one entry's body is a scalar rather than a
+        # table — the `if isinstance(body, dict)` false branch must skip it and
+        # the loop must continue to yield the well-formed entry (377->376).
+        from core.doctor.checks.workspace_bridge import _scan_instance_workspace_paths
+
+        inst = tmp_path / "inst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text(
+            "[workspaces]\nscalar_ws = \"not-a-table\"\n"
+            '[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p1"\n'
+        )
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
+        assert _scan_instance_workspace_paths() == [(str(inst), "main", "/p1")]
+
+    def test_skips_workspace_table_without_string_path(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        # A dict body whose `path` is absent (and one whose `path` is non-str)
+        # must be dropped via the `if isinstance(path, str)` false branch
+        # (379->376), while a sibling with a real string path still yields.
+        from core.doctor.checks.workspace_bridge import _scan_instance_workspace_paths
+
+        inst = tmp_path / "inst"
+        inst.mkdir()
+        (inst / "sandbox.toml").write_text(
+            '[workspaces.nopath]\nbootstrap_mode = "empty"\n'
+            "[workspaces.intpath]\npath = 123\n"
+            '[workspaces.main]\nbootstrap_mode = "empty"\npath = "/p1"\n'
+        )
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
+        assert _scan_instance_workspace_paths() == [(str(inst), "main", "/p1")]
+
 
 class TestCheckWorkspaceBridgeGroupExists:
     def test_skip_when_no_host_config(self, isolated_sandbox_ai_home: Any) -> None:
@@ -390,6 +425,47 @@ class TestCheckSecretsHydratedRestrictivelyEdges:
 
         inst = tmp_path / "inst"
         inst.mkdir()
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
+        result = check_secrets_hydrated_restrictively("u", None)
+        assert result.status == "pass"
+
+    def test_restrictive_secret_not_flagged_alongside_leak(self, tmp_path: Any, monkeypatch: Any) -> None:
+        # A restrictively-permissioned secret (mode & 0o004 == 0) must take the
+        # `if mode & 0o004` false branch (221->215) and be skipped, while a
+        # world-readable sibling in the same dir is still flagged.
+        from core.doctor import check_secrets_hydrated_restrictively
+
+        inst = tmp_path / "inst"
+        secrets = inst / "secrets"
+        secrets.mkdir(parents=True)
+        safe = secrets / "locked_key"
+        safe.write_text("k")
+        os.chmod(safe, 0o600)
+        leak = secrets / "ipc_host_key"
+        leak.write_text("k")
+        os.chmod(leak, 0o644)
+
+        monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
+        result = check_secrets_hydrated_restrictively("u", None)
+        assert result.status == "warn"
+        assert "ipc_host_key" in result.detail
+        # The restrictive file is not reported.
+        assert "locked_key" not in result.detail
+        assert "1 secret(s) world-readable" in result.detail
+
+    def test_all_restrictive_secrets_pass(self, tmp_path: Any, monkeypatch: Any) -> None:
+        # When every secret is restrictive, the loop exhausts via the false
+        # branch and the check passes.
+        from core.doctor import check_secrets_hydrated_restrictively
+
+        inst = tmp_path / "inst"
+        secrets = inst / "secrets"
+        secrets.mkdir(parents=True)
+        for name in ("a", "b"):
+            f = secrets / name
+            f.write_text("k")
+            os.chmod(f, 0o600)
+
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.scan_instance_dirs", lambda: [str(inst)])
         result = check_secrets_hydrated_restrictively("u", None)
         assert result.status == "pass"
@@ -727,6 +803,36 @@ class TestCheckWorkspacePathInWalkerBoundary:
         result = check_workspace_path_in_walker_boundary("u", None)
         assert result.status == "fail"
         assert "/etc" in result.detail
+
+    def test_safe_path_not_flagged_alongside_boundary(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
+    ) -> None:
+        # A non-boundary workspace must take the `if real in BOUNDARY_PATHS`
+        # false branch (519->514) and be skipped, while a boundary sibling is
+        # still reported — proving the loop continues past the safe entry.
+        from core.doctor import check_workspace_path_in_walker_boundary
+
+        monkeypatch.setattr(
+            "core.doctor.checks.workspace_bridge._scan_instance_workspace_paths",
+            lambda: [("/i", "safe", "/home/dev/projects/myws"), ("/i", "main", "/etc")],
+        )
+        result = check_workspace_path_in_walker_boundary("u", None)
+        assert result.status == "fail"
+        assert "/etc" in result.detail
+        assert "1 workspace(s) at boundary" in result.detail
+        assert "myws" not in result.detail
+
+    def test_pass_when_all_paths_safe(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
+        # Every workspace is outside the boundary set — the loop exhausts via the
+        # false branch and the check passes.
+        from core.doctor import check_workspace_path_in_walker_boundary
+
+        monkeypatch.setattr(
+            "core.doctor.checks.workspace_bridge._scan_instance_workspace_paths",
+            lambda: [("/i", "a", "/home/dev/projects/x"), ("/i", "b", "/home/dev/projects/y")],
+        )
+        result = check_workspace_path_in_walker_boundary("u", None)
+        assert result.status == "pass"
 
     def test_realpath_oserror_skipped(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_path_in_walker_boundary
