@@ -2,8 +2,8 @@
 """Disposable-helper-container primitives.
 
 The helper container is a short-lived busybox-musl container invoked across
-the privilege boundary (via ``machinectl shell <docker_user>@.host``) to
-perform host-side ownership operations that survive the runsc gofer's
+the privilege boundary (through the root-owned dispatcher boundary, via
+``dispatch.invoke``) to perform host-side ownership operations that survive the runsc gofer's
 named-ACL stripping. Two primitives are exposed:
 
 - :func:`helper_chown_files` — for read-only single files: copy → chmod →

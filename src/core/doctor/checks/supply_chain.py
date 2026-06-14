@@ -23,7 +23,7 @@ def check_image_digests(
     """Check that all IMAGE_REGISTRY digests are resolvable against container registries.
 
     Iterates IMAGE_REGISTRY and runs ``docker manifest inspect <ref>@<digest>``
-    via machinectl for each entry. Returns PASS if all resolve, FAIL if any are
+    through the root-owned dispatcher boundary for each entry. Returns PASS if all resolve, FAIL if any are
     stale, or SKIP if the registry is unreachable (timeout/network error).
 
     Additionally checks for tag drift (upstream tag re-pushed with a different

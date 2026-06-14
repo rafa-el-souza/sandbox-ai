@@ -2,7 +2,8 @@
 """Sandbox CLI orchestrator — full lifecycle implementation.
 
 Commands: init, start, stop, attach, destroy, doctor, status.
-All Docker operations cross the dev/sandbox privilege boundary via machinectl.
+All Docker operations cross the dev/sandbox privilege boundary through the root-owned
+dispatcher (separate-user) or run locally (operator-rootless).
 """
 
 from __future__ import annotations
@@ -2083,14 +2084,33 @@ def _resolve_full_host_config() -> HostConfig:
     )
 
 
-def _emit_auth_probe_failure(user: str, detail: str) -> None:
-    """Print remediation guidance when the init-time auth probe fails."""
-    console.print(f"machinectl auth probe failed for user '{user}': {detail}", style="red")
-    console.print(
-        "Remediation: Verify 'sudo machinectl shell' works for this user. "
-        "Ensure the user exists and sudo is configured.",
-        style="yellow",
-    )
+def _emit_auth_probe_failure(user: str, detail: str, mode: DockerExecutionMode) -> None:
+    """Print mode-aware remediation guidance when the init-time preflight crossing fails.
+
+    The preflight probe crosses the root-owned dispatcher boundary in
+    separate-user mode, but runs locally with NO privilege crossing in
+    operator-rootless mode — so the remediation differs per mode (the legacy
+    ``machinectl`` hint was stale post-C-009 and wrong in both modes).
+    """
+    console.print(f"preflight crossing failed for user '{user}': {detail}", style="red")
+    if mode is DockerExecutionMode.SEPARATE_USER:
+        console.print(
+            "Remediation: separate-user ops cross via the root-owned dispatcher "
+            "boundary, authorized by a NOPASSWD sudoers rule that `sandbox setup` "
+            "writes to /etc/sudoers.d/. A timeout usually means a sudo password "
+            "prompt — the per-op dispatcher rule is missing or not passwordless; "
+            "re-run `sandbox setup` to (re)install it. Confirm the dedicated user "
+            "exists and systemd-machined is running.",
+            style="yellow",
+        )
+    else:
+        console.print(
+            "Remediation: in operator-rootless mode the daemon runs as your own "
+            "account with no privilege crossing. Ensure rootless Docker is installed "
+            "and running for your user (run `sandbox doctor`); re-run `sandbox setup` "
+            "if the host has not been provisioned.",
+            style="yellow",
+        )
 
 
 # ─── CLI Commands ────────────────────────────────────────────────────────────
@@ -2137,8 +2157,9 @@ def _refuse_wrong_setup_identity(ctx: SetupContext) -> None:
     the identity gate):
 
     - **separate-user** REQUIRES root: it creates the dedicated daemon user, the
-      sudoers rule, and the dispatcher, and crosses via ``machinectl``. A
-      non-root invocation is refused with the existing message.
+      per-op sudoers rule, and the dispatcher; its root setup phases cross via
+      ``machinectl`` while runtime ops cross the root-owned dispatcher boundary.
+      A non-root invocation is refused with the existing message.
     - **operator-rootless** REFUSES root: it runs as the operator's own account
       (the rootless daemon runs as that user; running as root would own the
       daemon as the wrong user and create ``/root/.sandbox-ai``). A root
@@ -3107,13 +3128,13 @@ def init(
         gate = evaluate_preflight_gate(probe_outcome)
         if not gate.reachable:
             if probe_outcome.timed_out:
-                _emit_auth_probe_failure(resolved_user, "probe timed out after 15 seconds")
+                _emit_auth_probe_failure(resolved_user, "probe timed out after 15 seconds", probe_mode)
             else:
                 auth_probe_segment = gate.per_op.get("auth-probe")
                 detail = probe_outcome.message or (
                     auth_probe_segment.message if auth_probe_segment is not None else "preflight crossing failed"
                 )
-                _emit_auth_probe_failure(resolved_user, detail)
+                _emit_auth_probe_failure(resolved_user, detail, probe_mode)
             raise typer.Exit(code=1)
 
         # Doctor pre-flight: Chain 2 (Filesystem) + Chain 3 (Repo Integrity)

@@ -179,8 +179,11 @@ def _interpret_machinectl_reachable(
     """Interpret the ``auth-probe`` outcome (the seam reused by ``start`` preflight)."""
     if outcome.timed_out:
         timeout_remediation = (
-            "Configure passwordless machinectl access in /etc/sudoers.d/:\n"
-            f"  <your_user> ALL=(root) NOPASSWD: /usr/bin/machinectl shell {user}@.host *"
+            "A timeout usually means a sudo password prompt: the per-op dispatcher "
+            "sudoers rule is missing or not passwordless. Separate-user ops cross via "
+            "the root-owned dispatcher boundary, authorized by a NOPASSWD Cmnd_Spec that "
+            "`sandbox setup` writes to /etc/sudoers.d/ — re-run `sandbox setup` to "
+            "(re)install it (it must require no password)."
         )
         return CheckResult(
             status="fail",
@@ -208,7 +211,7 @@ def check_docker_available(
     distro: str | None,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> CheckResult:
-    """Check that Docker is installed and accessible via machinectl."""
+    """Check that Docker is installed and reachable through the root-owned dispatcher boundary."""
     outcome = dispatch.probe("docker-version", [], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15)
     return _interpret_docker_available(outcome, user)
 
@@ -224,7 +227,7 @@ def _interpret_docker_available(outcome: dispatch.ProbeOutcome, user: str) -> Ch
     return CheckResult(
         status="fail",
         name="Docker available",
-        detail="Docker not accessible via machinectl",
+        detail="Docker not reachable through the dispatcher boundary",
         remediation=f"Install Docker in rootless mode for user '{user}'",
         doc_ref="https://docs.docker.com/engine/security/rootless/",
     )
@@ -449,8 +452,8 @@ def check_compose_project_name_collision(
 ) -> CheckResult:
     """Fail if a daemon-side compose project already exists for any registered instance.
 
-    Queries ``docker compose ls --format json`` via machinectl and checks for
-    collisions with each registered instance's prefixed project name
+    Queries ``docker compose ls --format json`` through the root-owned dispatcher
+    boundary and checks for collisions with each registered instance's prefixed project name
     (``<sanitized-dev-username>-<inst>`` per ``instance-registry``).
     """
     del distro

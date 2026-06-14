@@ -1390,6 +1390,6 @@ class TestInterpretPreflightBundle:
         results = interpret_preflight_bundle(per_op, "sandbox")
         by_name = {r.name: r for r in results}
         assert by_name["Docker available"].status == "fail"
-        assert "Docker not accessible" in by_name["Docker available"].detail
+        assert "Docker not reachable" in by_name["Docker available"].detail
         # the reachability segment was fine, so machinectl-reachable still passes
         assert by_name["machinectl reachable"].status == "pass"
