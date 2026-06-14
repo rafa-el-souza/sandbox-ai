@@ -99,7 +99,7 @@ def check_daemon_owner_sudo(
             f"account (one in no {remedy_groups} group and with no sudoers-policy "
             "grant), or (b) set "
             "docker_execution_mode = separate-user to run the daemon as a dedicated "
-            "dead-end user behind the machinectl crossing"
+            "dead-end user reached only through the root-owned dispatcher boundary"
         ),
     )
 
