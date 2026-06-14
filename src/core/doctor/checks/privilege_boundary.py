@@ -452,8 +452,8 @@ def check_compose_project_name_collision(
 ) -> CheckResult:
     """Fail if a daemon-side compose project already exists for any registered instance.
 
-    Queries ``docker compose ls --format json`` via machinectl and checks for
-    collisions with each registered instance's prefixed project name
+    Queries ``docker compose ls --format json`` through the root-owned dispatcher
+    boundary and checks for collisions with each registered instance's prefixed project name
     (``<sanitized-dev-username>-<inst>`` per ``instance-registry``).
     """
     del distro

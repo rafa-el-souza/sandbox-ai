@@ -2,7 +2,8 @@
 """Sandbox CLI orchestrator — full lifecycle implementation.
 
 Commands: init, start, stop, attach, destroy, doctor, status.
-All Docker operations cross the dev/sandbox privilege boundary via machinectl.
+All Docker operations cross the dev/sandbox privilege boundary through the root-owned
+dispatcher (separate-user) or run locally (operator-rootless).
 """
 
 from __future__ import annotations
@@ -2137,8 +2138,9 @@ def _refuse_wrong_setup_identity(ctx: SetupContext) -> None:
     the identity gate):
 
     - **separate-user** REQUIRES root: it creates the dedicated daemon user, the
-      sudoers rule, and the dispatcher, and crosses via ``machinectl``. A
-      non-root invocation is refused with the existing message.
+      per-op sudoers rule, and the dispatcher; its root setup phases cross via
+      ``machinectl`` while runtime ops cross the root-owned dispatcher boundary.
+      A non-root invocation is refused with the existing message.
     - **operator-rootless** REFUSES root: it runs as the operator's own account
       (the rootless daemon runs as that user; running as root would own the
       daemon as the wrong user and create ``/root/.sandbox-ai``). A root
