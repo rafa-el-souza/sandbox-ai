@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 from core.doctor.types import CheckResult
 from core.host_config import (
+    DEFAULT_PROVISIONING_MODE,
+    DockerExecutionMode,
     HostConfig,
     HostSettings,
     NoFreeGidInSubgidRangeError,
@@ -52,13 +54,20 @@ def _load_host_settings_or_skip(check_name: str) -> HostSettings | CheckResult:
         )
 
 
-def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> CheckResult:
+def check_workspace_bridge_group_exists(
+    host_user: str, distro: str | None, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
+) -> CheckResult:
     """Validate the workspace bridge group exists at a gid in the daemon's subgid range."""
     del distro
     settings_or_skip = _load_host_settings_or_skip("workspace bridge group")
     if isinstance(settings_or_skip, CheckResult):
         return settings_or_skip
-    host = settings_or_skip
+    # F-069: `from_toml()` carries no execution mode (removed post-D11), so the
+    # loaded settings default to operator-rootless. Overlay the marker-resolved
+    # mode before owner resolution — otherwise the daemon owner (and thus the
+    # /etc/subgid range the bridge gid is validated against) is mis-resolved to
+    # the operator on a real separate-user host.
+    host = settings_or_skip.model_copy(update={"docker_execution_mode": mode})
     name = f"workspace bridge group {host.workspace_bridge_group!r}"
     try:
         gid = workspace_bridge_gid(host)
@@ -98,7 +107,9 @@ def check_workspace_bridge_group_exists(host_user: str, distro: str | None) -> C
     )
 
 
-def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> CheckResult:
+def check_dev_in_workspace_bridge_group(
+    host_user: str, distro: str | None, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
+) -> CheckResult:
     """Validate dev's current process has the bridge gid in supplementary groups."""
     del distro
     import grp
@@ -107,7 +118,8 @@ def check_dev_in_workspace_bridge_group(host_user: str, distro: str | None) -> C
     settings_or_skip = _load_host_settings_or_skip("operator in workspace bridge group")
     if isinstance(settings_or_skip, CheckResult):
         return settings_or_skip
-    host = settings_or_skip
+    # F-069: overlay the marker-resolved mode (see check_workspace_bridge_group_exists).
+    host = settings_or_skip.model_copy(update={"docker_execution_mode": mode})
     try:
         bridge_gid = workspace_bridge_gid(host)
     except (WorkspaceBridgeGroupMissingError, SubgidOutOfRangeError, NoSubgidRangeError) as exc:

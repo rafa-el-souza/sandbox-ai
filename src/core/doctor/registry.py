@@ -295,7 +295,7 @@ def build_check_registry(
             name="workspace bridge group",
             category="Workspace Bridge",
             depends_on=[],
-            run=check_workspace_bridge_group_exists,
+            run=functools.partial(check_workspace_bridge_group_exists, mode=mode),
             remediation="",
         ),
         Check(
@@ -303,7 +303,7 @@ def build_check_registry(
             name="operator in workspace bridge group",
             category="Workspace Bridge",
             depends_on=["workspace_bridge_group_exists"],
-            run=check_dev_in_workspace_bridge_group,
+            run=functools.partial(check_dev_in_workspace_bridge_group, mode=mode),
             remediation="",
         ),
         Check(
