@@ -38,7 +38,6 @@ try:
     from core.executor import Executor
     from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
     from core.host_config import (
-        MachinectlAuth,
         host_gid_for_in_container,
         host_id_for_in_container,
         machinectl_cmd,
@@ -54,15 +53,15 @@ _PROBE_TIMEOUT_S = 10
 DISPATCH_BINARY = "/usr/local/libexec/sandbox-ai/dispatch"
 
 
-def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
-    """Return ``(daemon_user, auth)`` or call ``pytest.skip`` with a specific reason.
+def _resolve_test_environment() -> str:
+    """Return ``daemon_user`` or call ``pytest.skip`` with a specific reason.
 
-    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var (auth defaults
-    to SUDO); otherwise parse ``~/.sandbox-ai/config/sandbox-ai.toml``.
+    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var; otherwise parse
+    ``~/.sandbox-ai/config/sandbox-ai.toml``.
     """
     override = os.environ.get(_TEST_USER_ENV)
     if override is not None:
-        return override, MachinectlAuth.SUDO
+        return override
     real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
     if not real_toml.exists():
         pytest.skip(f"skipped: {real_toml} not present and {_TEST_USER_ENV} unset")
@@ -75,22 +74,15 @@ def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
     user = host_section.get("docker_unprivileged_user")
     if not isinstance(user, str):
         pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
-    auth_raw = host_section.get("machinectl_authentication", "sudo")
-    if not isinstance(auth_raw, str):
-        pytest.skip(f"skipped: non-string [host].machinectl_authentication={auth_raw!r}")
-    try:
-        auth = MachinectlAuth(auth_raw)
-    except ValueError:
-        pytest.skip(f"skipped: invalid [host].machinectl_authentication={auth_raw!r}")
-    return user, auth
+    return user
 
 
-def _check_preconditions() -> tuple[str, MachinectlAuth]:
+def _check_preconditions() -> str:
     """Verify every precondition the helpers need; skip with a specific reason if any fails."""
     if shutil.which("docker") is None:
         pytest.skip("skipped: docker binary not on PATH")
 
-    daemon_user, auth = _resolve_test_environment()
+    daemon_user = _resolve_test_environment()
 
     try:
         pwd.getpwnam(daemon_user)
@@ -164,14 +156,14 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
             f"`sudo sandbox setup` to install)"
         )
 
-    return daemon_user, auth
+    return daemon_user
 
 
 def test_helper_mkdir_chown_dirs_lands_host_absolute_ownership(
     cross_boundary_tmpdir: Path,
     grant_parent_access: Callable[[Path], None],
 ) -> None:
-    daemon_user, _ = _check_preconditions()
+    daemon_user = _check_preconditions()
     tmp_path = cross_boundary_tmpdir
     grant_parent_access(tmp_path)
 
@@ -200,7 +192,7 @@ def test_helper_chown_files_lands_host_absolute_ownership_and_mode(
     cross_boundary_tmpdir: Path,
     grant_parent_access: Callable[[Path], None],
 ) -> None:
-    daemon_user, _ = _check_preconditions()
+    daemon_user = _check_preconditions()
     tmp_path = cross_boundary_tmpdir
     grant_parent_access(tmp_path)
 

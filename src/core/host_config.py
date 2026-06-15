@@ -29,7 +29,6 @@ __all__ = [
     "DockerExecutionMode",
     "HostConfig",
     "HostSettings",
-    "MachinectlAuth",
     "NoFreeGidInSubgidRangeError",
     "NoSubgidRangeError",
     "NoSubuidRangeError",
@@ -122,12 +121,6 @@ def ensure_per_user_state(home: Path) -> None:
     os.makedirs(home / "workspaces", mode=0o700, exist_ok=True)
 
 
-class MachinectlAuth(StrEnum):
-    """Machinectl privilege escalation mode."""
-
-    SUDO = "sudo"
-
-
 class DockerExecutionMode(StrEnum):
     """Selects how Docker runtime ops reach the daemon.
 
@@ -157,17 +150,9 @@ DEFAULT_PROVISIONING_MODE = DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 class HostSettings(BaseModel):
-    """[host] section of sandbox-ai.toml.
-
-    ``machinectl_authentication`` is **inert** when
-    ``docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS``: there
-    is no crossing to authorize, so the value is accepted and ignored rather
-    than rejected. The two fields are intentionally not cross-validated —
-    Pydantic accepting both together IS the inert behavior.
-    """
+    """[host] section of sandbox-ai.toml."""
 
     docker_unprivileged_user: str
-    machinectl_authentication: MachinectlAuth = MachinectlAuth.SUDO
 
     @field_validator("docker_unprivileged_user")
     @classmethod

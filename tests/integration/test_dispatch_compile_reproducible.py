@@ -35,8 +35,8 @@ transport, no PTY), these precondition probes ALSO cross via ``pipe_cmd``
 the REAL exit and the image-absent / unreachable cases skip correctly
 instead of failing OPEN behind the masked ``machinectl`` returncode. The
 ``HostConfig`` it needs is built from the real-toml-resolved
-``(daemon_user, auth)`` via :func:`core.host_config.minimal_host_config`
-(``compile_dispatcher`` reads only those two boundary fields) — NOT via
+``daemon_user`` via :func:`core.host_config.minimal_host_config`
+(``compile_dispatcher`` reads only the daemon-user boundary field) — NOT via
 ``HostConfig.from_toml``, which the integration harness's
 ``SANDBOX_AI_HOME``→tmp redirect makes permanently unresolvable.
 """
@@ -54,7 +54,6 @@ from pathlib import Path
 import pytest
 from core.dispatch import compile_dispatcher
 from core.host_config import (
-    MachinectlAuth,
     minimal_host_config,
     parse_subgid_for_user,
     parse_subuid_for_user,
@@ -68,15 +67,15 @@ _TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
 _PROBE_TIMEOUT_S = 10
 
 
-def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
-    """Return ``(daemon_user, auth)`` or call ``pytest.skip`` with a specific reason.
+def _resolve_test_environment() -> str:
+    """Return ``daemon_user`` or call ``pytest.skip`` with a specific reason.
 
-    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var (auth defaults
-    to SUDO); otherwise parse ``~/.sandbox-ai/config/sandbox-ai.toml``.
+    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var; otherwise parse
+    ``~/.sandbox-ai/config/sandbox-ai.toml``.
     """
     override = os.environ.get(_TEST_USER_ENV)
     if override is not None:
-        return override, MachinectlAuth.SUDO
+        return override
     real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
     if not real_toml.exists():
         pytest.skip(f"skipped: {real_toml} not present and {_TEST_USER_ENV} unset")
@@ -89,22 +88,15 @@ def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
     user = host_section.get("docker_unprivileged_user")
     if not isinstance(user, str):
         pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
-    auth_raw = host_section.get("machinectl_authentication", "sudo")
-    if not isinstance(auth_raw, str):
-        pytest.skip(f"skipped: non-string [host].machinectl_authentication={auth_raw!r}")
-    try:
-        auth = MachinectlAuth(auth_raw)
-    except ValueError:
-        pytest.skip(f"skipped: invalid [host].machinectl_authentication={auth_raw!r}")
-    return user, auth
+    return user
 
 
-def _check_preconditions() -> tuple[str, MachinectlAuth]:
+def _check_preconditions() -> str:
     """Verify every precondition the compile recipe needs; skip with a specific reason if any fails."""
     if shutil.which("docker") is None:
         pytest.skip("skipped: docker binary not on PATH")
 
-    daemon_user, auth = _resolve_test_environment()
+    daemon_user = _resolve_test_environment()
 
     try:
         pwd.getpwnam(daemon_user)
@@ -165,7 +157,7 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
             f"`{' '.join(pipe_cmd(daemon_user))} /bin/bash -c 'docker pull {pin}'`"
         )
 
-    return daemon_user, auth
+    return daemon_user
 
 
 def _sha512(path: Path) -> str:
@@ -174,8 +166,8 @@ def _sha512(path: Path) -> str:
 
 def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     """Two compiles of identical source + pinned image are sha512-identical."""
-    daemon_user, _ = _check_preconditions()
-    # ``_check_preconditions`` resolved ``(daemon_user, auth)`` from the REAL
+    daemon_user = _check_preconditions()
+    # ``_check_preconditions`` resolved ``daemon_user`` from the REAL
     # per-host ``~/.sandbox-ai/config/sandbox-ai.toml`` via
     # ``_resolve_test_environment`` (the sibling idiom in
     # ``test_helper_container_userns.py`` — read the real path directly, do

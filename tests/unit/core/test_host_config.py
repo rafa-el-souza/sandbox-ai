@@ -11,7 +11,6 @@ from core.host_config import (
     DockerExecutionMode,
     HostConfig,
     HostSettings,
-    MachinectlAuth,
     NoFreeGidInSubgidRangeError,
     NoSubgidRangeError,
     NoSubuidRangeError,
@@ -105,12 +104,6 @@ docker_unprivileged_user = "sandbox"
 machinectl_authentication = "sudo"
 """
 
-VALID_PROJECT_TOML_NO_AUTH = """\
-[host]
-docker_unprivileged_user = "sandbox"
-"""
-
-
 def _seed_host_config(home: Path, body: str) -> Path:
     """Write `body` to ``<home>/config/sandbox-ai.toml`` and return the file path."""
     config_dir = home / "config"
@@ -128,7 +121,6 @@ class TestHostConfigFromToml:
         _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML)
         config = HostConfig.from_toml()
         assert config.host.docker_unprivileged_user == "sandbox"
-        assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_missing_file_raises_file_not_found(self, isolated_sandbox_ai_home: Path) -> None:
         """Missing sandbox-ai.toml raises FileNotFoundError with canonical path."""
@@ -138,13 +130,6 @@ class TestHostConfigFromToml:
     def test_missing_required_field_raises_validation_error(self, isolated_sandbox_ai_home: Path) -> None:
         """Missing docker_unprivileged_user raises ValidationError."""
         _seed_host_config(isolated_sandbox_ai_home, '[host]\nmachinectl_authentication = "sudo"\n')
-        with pytest.raises(ValidationError):
-            HostConfig.from_toml()
-
-    def test_invalid_enum_value_raises_validation_error(self, isolated_sandbox_ai_home: Path) -> None:
-        """Invalid machinectl_authentication value raises ValidationError."""
-        bad_toml = '[host]\ndocker_unprivileged_user = "sandbox"\nmachinectl_authentication = "pkexec"\n'
-        _seed_host_config(isolated_sandbox_ai_home, bad_toml)
         with pytest.raises(ValidationError):
             HostConfig.from_toml()
 
@@ -169,12 +154,6 @@ class TestHostConfigFromToml:
         """
         with pytest.raises(ValidationError, match="valid POSIX username"):
             HostSettings(docker_unprivileged_user=bad_user)
-
-    def test_default_auth_mode_is_sudo(self, isolated_sandbox_ai_home: Path) -> None:
-        """Omitted machinectl_authentication defaults to 'sudo'."""
-        _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML_NO_AUTH)
-        config = HostConfig.from_toml()
-        assert config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_docker_execution_mode_in_toml_rejected(self, isolated_sandbox_ai_home: Path) -> None:
         """docker_execution_mode is setup-determined (the marker), not a toml field (D11).
@@ -211,24 +190,9 @@ class TestHostSettingsModel:
     """HostSettings nested model structure."""
 
     def test_host_config_attributes(self) -> None:
-        """HostSettings exposes docker_unprivileged_user and machinectl_authentication."""
-        hc = HostSettings(docker_unprivileged_user="sandbox", machinectl_authentication=MachinectlAuth.SUDO)
+        """HostSettings exposes docker_unprivileged_user."""
+        hc = HostSettings(docker_unprivileged_user="sandbox")
         assert hc.docker_unprivileged_user == "sandbox"
-        assert hc.machinectl_authentication == MachinectlAuth.SUDO
-
-
-class TestMachinectlAuthEnum:
-    """MachinectlAuth StrEnum members."""
-
-    def test_exactly_one_member(self) -> None:
-        """MachinectlAuth contains exactly SUDO (POLKIT retired — C-012)."""
-        members = list(MachinectlAuth)
-        assert len(members) == 1
-        assert MachinectlAuth.SUDO in members
-
-    def test_string_values(self) -> None:
-        """Enum values are the expected strings."""
-        assert MachinectlAuth.SUDO.value == "sudo"
 
 
 class TestDockerExecutionMode:
@@ -265,18 +229,6 @@ class TestDockerExecutionMode:
             HostSettings.model_validate(
                 {"docker_unprivileged_user": "sandbox", "docker_execution_mode": "rootful"}
             )
-
-    def test_machinectl_auth_inert_under_operator_rootless(self) -> None:
-        """operator-rootless together with machinectl_authentication=sudo validates (inert, not error)."""
-        hc = HostSettings.model_validate(
-            {
-                "docker_unprivileged_user": "sandbox",
-                "docker_execution_mode": "operator-rootless",
-                "machinectl_authentication": "sudo",
-            }
-        )
-        assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
-        assert hc.machinectl_authentication == MachinectlAuth.SUDO
 
 
 class TestMinimalHostConfigMode:

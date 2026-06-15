@@ -53,7 +53,6 @@ try:
     from core.executor import Executor
     from core.helper_container import helper_mkdir_chown_dirs
     from core.host_config import (
-        MachinectlAuth,
         host_gid_for_in_container,
         host_id_for_in_container,
         machinectl_cmd,
@@ -79,11 +78,11 @@ HELPER_RECIPE_CACHE_LEAVES: tuple[tuple[str, str], ...] = (
 )
 
 
-def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
-    """Return ``(daemon_user, auth)`` or call ``pytest.skip`` with a specific reason."""
+def _resolve_test_environment() -> str:
+    """Return ``daemon_user`` or call ``pytest.skip`` with a specific reason."""
     override = os.environ.get(_TEST_USER_ENV)
     if override is not None:
-        return override, MachinectlAuth.SUDO
+        return override
     real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
     if not real_toml.exists():
         pytest.skip(f"skipped: {real_toml} not present and {_TEST_USER_ENV} unset")
@@ -96,22 +95,15 @@ def _resolve_test_environment() -> tuple[str, MachinectlAuth]:
     user = host_section.get("docker_unprivileged_user")
     if not isinstance(user, str):
         pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
-    auth_raw = host_section.get("machinectl_authentication", "sudo")
-    if not isinstance(auth_raw, str):
-        pytest.skip(f"skipped: non-string [host].machinectl_authentication={auth_raw!r}")
-    try:
-        auth = MachinectlAuth(auth_raw)
-    except ValueError:
-        pytest.skip(f"skipped: invalid [host].machinectl_authentication={auth_raw!r}")
-    return user, auth
+    return user
 
 
-def _check_preconditions() -> tuple[str, MachinectlAuth]:
+def _check_preconditions() -> str:
     """Verify every precondition the helpers need; skip with a specific reason if any fails."""
     if shutil.which("docker") is None:
         pytest.skip("skipped: docker binary not on PATH")
 
-    daemon_user, auth = _resolve_test_environment()
+    daemon_user = _resolve_test_environment()
 
     try:
         pwd.getpwnam(daemon_user)
@@ -185,7 +177,7 @@ def _check_preconditions() -> tuple[str, MachinectlAuth]:
             f"`sudo sandbox setup` to install)"
         )
 
-    return daemon_user, auth
+    return daemon_user
 
 
 def test_post_init_leaves_absent(cross_boundary_tmpdir: Path) -> None:
@@ -218,7 +210,7 @@ def test_post_helper_leaves_consumer_owned(
     grant_parent_access: Callable[[Path], None],
 ) -> None:
     """``helper_mkdir_chown_dirs`` creates each cache leaf and chowns to the consumer subuid."""
-    daemon_user, _ = _check_preconditions()
+    daemon_user = _check_preconditions()
     instance_dir = cross_boundary_tmpdir / "instances" / "regression-target"
     create_instance_dirs(str(instance_dir))
 

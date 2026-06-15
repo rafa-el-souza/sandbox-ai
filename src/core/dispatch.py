@@ -1700,9 +1700,9 @@ def compile_dispatcher(
     and no ``onlcr`` (see :func:`~core.host_config.pipe_cmd` for the underlying
     transport). This is the correct application of the CLAUDE.md
     byte-pipe-for-binary-frames doctrine, not a violation of the "dispatcher is
-    minimal / machinectl for ops" stance. ``pipe_cmd`` is auth-mode-independent
-    (its ``manage-units`` polkit action is the only authorization layer); the
-    per-host ``machinectl_authentication`` setting is unused on this path. The PAM-skip
+    minimal / machinectl for ops" stance. ``pipe_cmd``'s ``manage-units`` polkit
+    action is the only authorization layer on this path — there is no per-host
+    authorization layer to apply. The PAM-skip
     trade-off is acceptable here per the boundary-primitive doctrine: this is a
     fixed, audited, one-shot build path with a session-bounded lifetime.
 
@@ -1747,9 +1747,8 @@ def compile_dispatcher(
             derived inside the crossing — callers never supply or see it.
         host_config: Resolved :class:`~core.host_config.HostConfig` supplying
             the unprivileged docker user for the byte-pipe boundary crossing.
-            The ``machinectl_authentication`` field is unused on this path
-            (``pipe_cmd`` is auth-mode-independent); the parameter is retained
-            for signature symmetry with :func:`invoke`.
+            ``pipe_cmd`` applies no per-host authorization layer on this path;
+            the parameter is retained for signature symmetry with :func:`invoke`.
 
     Raises:
         SandboxExecutionError: ``go test`` failed (fixture drift / build
