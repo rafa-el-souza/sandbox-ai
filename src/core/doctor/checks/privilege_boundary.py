@@ -186,21 +186,21 @@ def _interpret_machinectl_reachable(
         )
         return CheckResult(
             status="fail",
-            name="machinectl reachable",
+            name="boundary reachable",
             detail="Probe timed out after 10 seconds (likely sudo prompt)",
             remediation=timeout_remediation,
         )
     if not outcome.ok:
         return CheckResult(
             status="fail",
-            name="machinectl reachable",
+            name="boundary reachable",
             detail=f"Shell probe failed: {outcome.message}",
             remediation=("Ensure systemd-machined is running and the user exists. Check stderr for details."),
         )
 
     return CheckResult(
         status="pass",
-        name="machinectl reachable",
+        name="boundary reachable",
         detail=f"Shell probe succeeded for {user}@.host",
     )
 

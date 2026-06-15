@@ -529,7 +529,7 @@ class TestStartDoctorChain1PreFlight:
         _register_instance(inst)
 
         failed_results = [
-            CheckResult(status="pass", name="machinectl reachable", detail="ok"),
+            CheckResult(status="pass", name="boundary reachable", detail="ok"),
             CheckResult(status="fail", name="Docker rootless", detail="Docker is NOT running in rootless mode"),
         ]
 
@@ -573,7 +573,7 @@ class TestStartDoctorChain1PreFlight:
             # Downstream checks are NOT interpreted on an unreachable crossing.
             mock_bundle.assert_not_called()
             reachability = mock_render.call_args.args[0][0]
-            assert reachability.name == "machinectl reachable"
+            assert reachability.name == "boundary reachable"
             assert reachability.status == "fail"
             mock_warm.assert_not_called()
 

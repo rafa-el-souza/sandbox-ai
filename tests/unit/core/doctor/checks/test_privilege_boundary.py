@@ -1224,7 +1224,7 @@ class TestInterpretPreflightReachability:
 
         result = interpret_preflight_reachability(_outcome(ok=True), "sandbox")
         assert result.status == "pass"
-        assert result.name == "machinectl reachable"
+        assert result.name == "boundary reachable"
 
     def test_failed_outcome_fails_with_reachability_message(self) -> None:
         from core.doctor import interpret_preflight_reachability
@@ -1341,7 +1341,7 @@ class TestInterpretPreflightBundle:
         results = interpret_preflight_bundle(per_op, "sandbox")
         names = [r.name for r in results]
         assert names == [
-            "machinectl reachable",
+            "boundary reachable",
             "Docker available",
             "Docker rootless",
             "gVisor runsc",
@@ -1389,4 +1389,4 @@ class TestInterpretPreflightBundle:
         assert by_name["Docker available"].status == "fail"
         assert "Docker not reachable" in by_name["Docker available"].detail
         # the reachability segment was fine, so machinectl-reachable still passes
-        assert by_name["machinectl reachable"].status == "pass"
+        assert by_name["boundary reachable"].status == "pass"

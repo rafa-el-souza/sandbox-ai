@@ -637,8 +637,8 @@ class TestRunCheckSubsetThreadsMode:
         )
         by_name = {r.name: r for r in results}
         # The crossing-only checks are mode-skipped, not run / not PASS.
-        assert by_name["machinectl reachable"].status == "skip"
-        assert by_name["machinectl reachable"].detail == "skipped (operator-rootless)"
+        assert by_name["boundary reachable"].status == "skip"
+        assert by_name["boundary reachable"].detail == "skipped (operator-rootless)"
         assert by_name["unprivileged user"].status == "skip"
         assert by_name["systemd-machined"].status == "skip"
 
@@ -656,7 +656,7 @@ class TestRunCheckSubsetThreadsMode:
         # The crossing-only checks carry the operator-rootless mode-skip detail.
         assert by_name["unprivileged user"].status == "skip"
         assert by_name["unprivileged user"].detail == "skipped (operator-rootless)"
-        assert by_name["machinectl reachable"].status == "skip"
+        assert by_name["boundary reachable"].status == "skip"
 
 
 class TestL1PrerequisitesSurfaceInOperatorRootless:

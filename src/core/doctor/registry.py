@@ -143,7 +143,7 @@ def build_check_registry(
         ),
         Check(
             id="machinectl_reachable",
-            name="machinectl reachable",
+            name="boundary reachable",
             category="Privilege Boundary",
             depends_on=machinectl_reachable_deps,
             run=functools.partial(check_machinectl_reachable, mode=mode),
