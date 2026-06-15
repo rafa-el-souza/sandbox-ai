@@ -22,7 +22,7 @@ This module is the **single source** of the marker path and the only place that
 parses/serializes the marker file. It is deliberately dependency-light: it imports
 ``RESERVED_DIR`` from :mod:`core.binary_install` (to single-source the directory)
 and :class:`DockerExecutionMode` from :mod:`core.host_config` (a one-way
-dependency — ``core.host_config`` may read this module in a later milestone
+dependency — ``HostConfig.from_marker`` reads this module (function-locally)
 without an import cycle, which is why the marker reader lives at
 ``core.setup_state`` rather than under ``core.setup`` — ``core.setup.*`` imports
 ``core.host_config``).

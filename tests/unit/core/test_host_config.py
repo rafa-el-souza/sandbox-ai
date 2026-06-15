@@ -240,7 +240,7 @@ class TestDockerExecutionMode:
         assert DockerExecutionMode.OPERATOR_ROOTLESS.value == "operator-rootless"
 
     def test_defaults_to_operator_rootless_when_omitted(self) -> None:
-        """A [host] section without docker_execution_mode defaults to the single
+        """A HostSettings without docker_execution_mode defaults to the single
         system-wide default DEFAULT_PROVISIONING_MODE (OPERATOR_ROOTLESS, F-051)."""
         hc = HostSettings.model_validate({"docker_unprivileged_user": "sandbox"})
         assert hc.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS

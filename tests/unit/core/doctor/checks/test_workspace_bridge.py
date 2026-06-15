@@ -235,13 +235,12 @@ class TestCheckWorkspaceBridgeGroupExists:
         # setup-determined execution mode. No mode overlay is applied — the mode
         # the marker records reaches `host` directly, so the daemon owner resolves
         # to the configured docker_unprivileged_user, not the invoking operator
-        # (the false-failure on fedora). The check's `mode` param is now inert.
+        # (the false-failure on fedora). The check no longer takes a `mode` param.
         from core.doctor.checks.workspace_bridge import check_workspace_bridge_group_exists
         from core.host_config import DockerExecutionMode, resolve_daemon_owner_settings
 
-        # The marker records SEPARATE_USER; the check's `mode` arg is intentionally
-        # the contradicting OPERATOR_ROOTLESS to prove the overlay is gone and the
-        # marker's mode wins.
+        # The marker records SEPARATE_USER, which is the sole source of the mode
+        # (the F-069 overlay is gone — the check has no `mode` param to contradict).
         _stub_marker(monkeypatch, user="sandbox", mode=DockerExecutionMode.SEPARATE_USER)
 
         captured: dict[str, Any] = {}
@@ -251,9 +250,7 @@ class TestCheckWorkspaceBridgeGroupExists:
             return 200500
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _capture)
-        result = check_workspace_bridge_group_exists(
-            "sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS
-        )
+        result = check_workspace_bridge_group_exists("sandbox", None)
         assert result.status == "pass"
         assert captured["host"].docker_execution_mode is DockerExecutionMode.SEPARATE_USER
         # The owner resolves to the configured user, NOT the invoking operator.

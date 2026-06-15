@@ -2038,7 +2038,7 @@ def _check_secrets(env_path: str, config: InstanceConfig) -> list[str]:
 
 
 def _resolve_full_host_config() -> HostConfig:
-    """Resolve the full ``HostConfig`` (toml + marker-resolved execution mode).
+    """Resolve the full ``HostConfig`` from the per-operator setup-state marker (D-B).
 
     The runtime daemon owner is :func:`core.host_config.resolve_daemon_owner` of
     this config (the operator in operator-rootless, ``docker_unprivileged_user``
@@ -2051,8 +2051,12 @@ def _resolve_full_host_config() -> HostConfig:
     # (no marker entry).
     try:
         return HostConfig.from_marker(getpass.getuser())
-    except ModeMarkerMissing as exc:
-        console.print(str(exc), style="red", markup=False)
+    except ModeMarkerMissing:
+        console.print(
+            "This host isn't set up yet. Run `sudo sandbox setup` first.",
+            style="red",
+            markup=False,
+        )
         raise typer.Exit(code=1) from None
 
 

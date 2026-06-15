@@ -1311,9 +1311,9 @@ def invoke(
       strings the dispatcher will receive; per-op validation happens here
       before the boundary is crossed).
     - ``host_config``: the resolved :class:`~core.host_config.HostConfig`,
-      supplying the unprivileged docker user and machinectl auth mode used to
-      build the boundary-crossing prefix, plus instance-derived state for
-      compose ops' target-argv construction.
+      supplying the unprivileged docker user used to build the
+      boundary-crossing prefix, plus instance-derived state for compose ops'
+      target-argv construction.
     - ``timeout``: keyword-only; forwarded to the underlying subprocess. ``None``
       (the default) means no timeout.
 

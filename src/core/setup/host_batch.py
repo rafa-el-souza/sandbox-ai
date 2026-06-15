@@ -353,11 +353,16 @@ def _apply_marker(params: BatchParams) -> None:
     the root-owned marker write shared with separate-user setup): atomic content
     write + mode ``0644`` + ``chown root:root``.
     """
+    # Record the ACTUAL group gid from /etc/group (not the fresh autodetect
+    # value in ``params.bridge_gid``): ``_apply_groupadd`` ran earlier in this
+    # batch, and on a re-provision the group may pre-exist at a divergent gid, so
+    # ``getgrnam`` is the faithful source (matching the separate-user
+    # ``_record_separate_user_mode``, which already resolves via ``getgrnam``).
     write_mode_root_owned(
         params.operator,
         params.mode,
         workspace_bridge_group=params.bridge_group,
-        workspace_bridge_gid=params.bridge_gid,
+        workspace_bridge_gid=grp.getgrnam(params.bridge_group).gr_gid,
     )
 
 

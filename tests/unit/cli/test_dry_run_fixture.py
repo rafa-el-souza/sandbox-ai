@@ -4,8 +4,8 @@
 Section 5.1-5.3 of the ``refactor-plan-tuples-to-actions`` change.
 
 This is the load-bearing structural gate that pins the dry-run command
-preview output to a checked-in fixture for the ``sudo``
-``machinectl_authentication`` mode. Any unintended divergence in an Action's
+preview output to a checked-in fixture for the separate-user
+``docker_execution_mode``. Any unintended divergence in an Action's
 ``.describe()`` rendering surfaces here as a byte-diff against the fixture.
 
 Determinism strategy:

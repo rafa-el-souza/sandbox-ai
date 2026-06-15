@@ -26,7 +26,7 @@ from core.setup.host_batch import (
     render_remediation_block,
 )
 from core.setup.phase_runner import SetupContext
-from core.setup_state import MarkerEntry, read_mode
+from core.setup_state import MarkerEntry, read_entry, read_mode
 
 
 def _params(
@@ -426,10 +426,17 @@ def test_marker_applier_writes_mode_and_root_owns(monkeypatch: pytest.MonkeyPatc
     chowns: list[tuple[Path, int, int]] = []
     monkeypatch.setattr(os, "chmod", lambda p, m: chmods.append((p, m)))
     monkeypatch.setattr(os, "chown", lambda p, u, g: chowns.append((p, u, g)))
+    # The marker records the ACTUAL group gid from getgrnam, NOT the fresh
+    # autodetect value in params.bridge_gid (100500). Mock a DIVERGENT gid to
+    # prove the recorded gid tracks /etc/group, faithful on a re-provision.
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(200500))
 
     host_batch._apply_marker(_params(operator="dave"))
 
     assert read_mode("dave") is DockerExecutionMode.OPERATOR_ROOTLESS
+    entry = read_entry("dave")
+    assert entry is not None
+    assert entry.workspace_bridge_gid == 200500
     assert (marker, 0o644) in chmods
     assert (marker, 0, 0) in chowns
 

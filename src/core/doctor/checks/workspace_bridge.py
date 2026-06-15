@@ -21,8 +21,6 @@ from typing import TYPE_CHECKING
 
 from core.doctor.types import CheckResult
 from core.host_config import (
-    DEFAULT_PROVISIONING_MODE,
-    DockerExecutionMode,
     HostConfig,
     HostSettings,
     NoFreeGidInSubgidRangeError,
@@ -57,10 +55,10 @@ def _load_host_settings_or_skip(check_name: str) -> HostSettings | CheckResult:
 
 
 def check_workspace_bridge_group_exists(
-    host_user: str, distro: str | None, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
+    host_user: str, distro: str | None
 ) -> CheckResult:
     """Validate the workspace bridge group exists at a gid in the daemon's subgid range."""
-    del distro, mode
+    del distro
     settings_or_skip = _load_host_settings_or_skip("workspace bridge group")
     if isinstance(settings_or_skip, CheckResult):
         return settings_or_skip
@@ -108,10 +106,10 @@ def check_workspace_bridge_group_exists(
 
 
 def check_dev_in_workspace_bridge_group(
-    host_user: str, distro: str | None, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
+    host_user: str, distro: str | None
 ) -> CheckResult:
     """Validate dev's current process has the bridge gid in supplementary groups."""
-    del distro, mode
+    del distro
     import grp
     import pwd
 

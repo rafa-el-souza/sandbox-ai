@@ -66,7 +66,7 @@ class _FrozenDatetime:
         return _STABLE_TIMESTAMP
 
 
-def _capture_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_mode: str) -> list[str]:
+def _capture_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     from cli.main import _build_attach_argv
     from core.host_config import HostConfig
 
@@ -111,7 +111,6 @@ def _capture_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_mode: st
         {
             "host": {
                 "docker_unprivileged_user": _STABLE_SBUSER,
-                "machinectl_authentication": auth_mode,
                 "docker_execution_mode": "separate-user",
             }
         }
@@ -164,7 +163,7 @@ class TestAttachArgvFixtureGate:
     def test_attach_argv_matches_fixture_sudo(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        argv = _capture_argv(monkeypatch, tmp_path, "sudo")
+        argv = _capture_argv(monkeypatch, tmp_path)
         _assert_or_regen(_argv_to_text(argv), FIXTURE_SUDO)
 
 class TestAttachArgvStructural:
@@ -177,7 +176,7 @@ class TestAttachArgvStructural:
     """
 
     def _argv(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
-        return _capture_argv(monkeypatch, tmp_path, "sudo")
+        return _capture_argv(monkeypatch, tmp_path)
 
     def test_argv_starts_with_tlog_rec_writer_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

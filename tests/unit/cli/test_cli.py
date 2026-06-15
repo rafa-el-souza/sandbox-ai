@@ -7050,7 +7050,7 @@ class TestDryRunAuthModePreview:
 
         from cli.main import app
 
-        base_cfg = project_config_factory(user="sandbox", auth="sudo")
+        base_cfg = project_config_factory(user="sandbox")
         sudo_cfg = base_cfg.model_copy(
             update={
                 "host": base_cfg.host.model_copy(
@@ -7105,6 +7105,7 @@ class TestPostInitMissingHostConfig:
 
         assert result.exit_code == 1, f"{command} should exit 1 without a setup marker"
         assert "sudo sandbox setup" in result.output
+        assert "setup-state" not in result.output.lower()
 
 
 # ── Group 6 coverage: handover cwd, backup-lock check, attach ws selection, status views ──
