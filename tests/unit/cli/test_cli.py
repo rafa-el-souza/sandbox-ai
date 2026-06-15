@@ -156,12 +156,29 @@ def _default_project_config() -> typing.Iterator[None]:
     exercise the FileNotFoundError path can re-patch in their own `with patch(...)`
     block — pytest's mock stacks override this autouse fixture.
     """
-    from core.host_config import HostConfig
+    from core.host_config import DockerExecutionMode, HostConfig
 
     default = HostConfig.model_validate(
         {"host": {"docker_unprivileged_user": HOST_USER, "machinectl_authentication": "sudo"}}
     )
-    with patch("cli.main.HostConfig.from_toml", return_value=default):
+    # Runtime commands now read host config from the per-operator marker
+    # (``from_marker``), which carries the setup-determined mode. The default
+    # runtime mode here is separate-user — matching the prior behavior where the
+    # autouse ``resolve_execution_mode`` stub overlaid SEPARATE_USER. init/doctor
+    # still read host config via ``from_toml`` (default op-rootless carrier) until
+    # their own rewires land. Patch both so post-init commands don't exit early;
+    # tests that exercise a specific path re-patch in their own ``with patch(...)``.
+    marker_default = default.model_copy(
+        update={
+            "host": default.host.model_copy(
+                update={"docker_execution_mode": DockerExecutionMode.SEPARATE_USER}
+            )
+        }
+    )
+    with (
+        patch("cli.main.HostConfig.from_toml", return_value=default),
+        patch("cli.main.HostConfig.from_marker", return_value=marker_default),
+    ):
         yield
 
 
@@ -672,11 +689,7 @@ class TestStartDoctorChain1PreFlight:
             return _healthy_preflight_outcome()
 
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
-            patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+            patch("cli.main.HostConfig.from_marker", return_value=_operator_rootless_config()),
             patch("cli.main._check_secrets", return_value=[]),
             patch("cli.main.dispatch.probe", side_effect=_capture),
             # Fail the interpreted bundle so start exits right after the gate.
@@ -1280,47 +1293,39 @@ def _operator_rootless_config() -> HostConfig:
     )
 
 
-class TestResolveFullHostConfigOverlaysMarkerMode:
-    """`_resolve_full_host_config` overlays the marker-resolved mode (D11/§7.2)."""
+class TestResolveFullHostConfigReadsMarker:
+    """`_resolve_full_host_config` reads the host config from the per-operator
+    setup-state marker via ``from_marker`` (D-B)."""
 
     @staticmethod
-    def _toml_cfg() -> HostConfig:
+    def _marker_cfg() -> HostConfig:
         from core.host_config import HostConfig
 
         return HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
+            {
+                "host": {
+                    "docker_unprivileged_user": "sandbox",
+                    "machinectl_authentication": "sudo",
+                    "docker_execution_mode": "operator-rootless",
+                }
+            }
         )
 
     @pytest.mark.no_host_config_mock
-    def test_overlays_operator_rootless_from_marker(self) -> None:
-        """The mode comes from the marker, not the toml — toml fields preserved."""
+    def test_reads_host_config_from_marker(self) -> None:
+        """The runtime command path resolves host config via ``from_marker``,
+        not ``from_toml`` — the marker carries the mode and bridge name."""
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=self._toml_cfg()),
             patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+                "cli.main.HostConfig.from_marker", return_value=self._marker_cfg()
+            ) as from_marker,
+            patch("cli.main.HostConfig.from_toml") as from_toml,
         ):
             resolved = _cli_main_module._resolve_full_host_config()
+        assert from_marker.called
+        assert not from_toml.called
         assert resolved.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
         assert resolved.host.docker_unprivileged_user == "sandbox"
-
-    @pytest.mark.no_host_config_mock
-    def test_rejects_toml_with_removed_mode_field(self) -> None:
-        """from_toml's ValueError (a toml that sets the removed mode field, D11)
-        surfaces as a clean exit 1, not an uncaught traceback."""
-        with (
-            patch(
-                "cli.main.HostConfig.from_toml",
-                side_effect=ValueError(
-                    "docker_execution_mode is no longer a sandbox-ai.toml field; "
-                    "it is setup-determined."
-                ),
-            ),
-            pytest.raises(typer.Exit) as exc,
-        ):
-            _cli_main_module._resolve_full_host_config()
-        assert exc.value.exit_code == 1
 
     @pytest.mark.no_host_config_mock
     def test_fails_closed_when_marker_absent(self) -> None:
@@ -1328,11 +1333,10 @@ class TestResolveFullHostConfigOverlaysMarkerMode:
         from core.setup_state import ModeMarkerMissing
 
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=self._toml_cfg()),
             patch(
-                "cli.main.resolve_execution_mode",
+                "cli.main.HostConfig.from_marker",
                 side_effect=ModeMarkerMissing(
-                    "no execution mode recorded for operator 'dev'. Run `sudo sandbox setup` first."
+                    "no setup-state entry for operator 'dev'. Run `sudo sandbox setup` first."
                 ),
             ),
             pytest.raises(typer.Exit) as exc,
@@ -1362,11 +1366,7 @@ class TestLifecycleThreadsExecutionMode:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
-            patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+            patch("cli.main.HostConfig.from_marker", return_value=_operator_rootless_config()),
             patch("cli.main._warm_check", return_value=True),
             patch("cli.main._revoke_acls"),
             patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
@@ -1394,11 +1394,7 @@ class TestLifecycleThreadsExecutionMode:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
-            patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+            patch("cli.main.HostConfig.from_marker", return_value=_operator_rootless_config()),
             patch("cli.main._acquire_state_lock", return_value=99),
             patch("cli.main._revoke_acls"),
             patch("cli.main._phase_stop_unlink_consumer_files", return_value=[]),
@@ -4428,11 +4424,7 @@ class TestDryRunExistingInstance:
         from cli.main import app
 
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=_operator_rootless_config()),
-            patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+            patch("cli.main.HostConfig.from_marker", return_value=_operator_rootless_config()),
         ):
             result = runner.invoke(app, ["start", inst, "--dry-run"])
         assert result.exit_code == 0
@@ -7323,9 +7315,16 @@ class TestDryRunAuthModePreview:
 
         from cli.main import app
 
-        sudo_cfg = project_config_factory(user="sandbox", auth="sudo")
+        base_cfg = project_config_factory(user="sandbox", auth="sudo")
+        sudo_cfg = base_cfg.model_copy(
+            update={
+                "host": base_cfg.host.model_copy(
+                    update={"docker_execution_mode": DockerExecutionMode.SEPARATE_USER}
+                )
+            }
+        )
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=sudo_cfg),
+            patch("cli.main.HostConfig.from_marker", return_value=sudo_cfg),
         ):
             result = runner.invoke(app, ["start", inst, "--dry-run"])
 
@@ -7346,10 +7345,11 @@ class TestPostInitMissingHostConfig:
     """
 
     @pytest.mark.parametrize("command", ["start", "stop", "attach", "destroy", "status"])
-    def test_post_init_command_exits_when_sandbox_ai_toml_missing(
+    def test_post_init_command_exits_when_marker_missing(
         self, runner: CliRunner, mock_sandbox_ai_home: Path, command: str
     ) -> None:
         from cli.main import app
+        from core.setup_state import ModeMarkerMissing
 
         inst = "myproject"
         _register_instance(inst)
@@ -7357,8 +7357,10 @@ class TestPostInitMissingHostConfig:
 
         with (
             patch(
-                "cli.main.HostConfig.from_toml",
-                side_effect=FileNotFoundError("No sandbox-ai.toml found. Run sandbox init."),
+                "cli.main.HostConfig.from_marker",
+                side_effect=ModeMarkerMissing(
+                    "no setup-state entry for operator 'dev'. Run `sudo sandbox setup` first."
+                ),
             ),
         ):
             args = [command, inst]
@@ -7366,8 +7368,8 @@ class TestPostInitMissingHostConfig:
                 args.append("--force")
             result = runner.invoke(app, args)
 
-        assert result.exit_code == 1, f"{command} should exit 1 without sandbox-ai.toml"
-        assert "sandbox-ai.toml" in result.output
+        assert result.exit_code == 1, f"{command} should exit 1 without a setup marker"
+        assert "sudo sandbox setup" in result.output
 
 
 # ── Group 6 coverage: handover cwd, backup-lock check, attach ws selection, status views ──

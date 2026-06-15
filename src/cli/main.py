@@ -2045,28 +2045,15 @@ def _resolve_full_host_config() -> HostConfig:
     in separate-user) — runtime commands MUST resolve the owner through it, never
     by reading ``docker_unprivileged_user`` directly (D7).
     """
+    # The host config is setup-determined: read it from the per-operator
+    # setup-state marker (D-B), which carries the mode AND the per-operator
+    # ``sb-ws-<op>`` bridge name. Fail closed when the host is not provisioned
+    # (no marker entry).
     try:
-        host_config = HostConfig.from_toml()
-    except FileNotFoundError as exc:
-        console.print(str(exc), style="red")
-        raise typer.Exit(code=1) from None
-    except ValueError as exc:
-        # A malformed managed toml — pydantic ValidationError / tomllib
-        # TOMLDecodeError / the D11 removed-field (docker_execution_mode) rejection,
-        # all ValueError subclasses — surfaced cleanly rather than as a traceback.
-        console.print(str(exc), style="red", markup=False)
-        raise typer.Exit(code=1) from None
-    # The execution mode is no longer a toml field (D11) — resolve it from the
-    # per-operator setup-state marker and overlay it onto the in-memory carrier.
-    # Fail closed when the host is not provisioned (no marker entry).
-    try:
-        mode = resolve_execution_mode(getpass.getuser())
+        return HostConfig.from_marker(getpass.getuser())
     except ModeMarkerMissing as exc:
         console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=1) from None
-    return host_config.model_copy(
-        update={"host": host_config.host.model_copy(update={"docker_execution_mode": mode})}
-    )
 
 
 def _emit_auth_probe_failure(user: str, detail: str, mode: DockerExecutionMode) -> None:

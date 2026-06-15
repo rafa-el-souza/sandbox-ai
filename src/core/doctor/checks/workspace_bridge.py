@@ -14,6 +14,7 @@ them directly from this module.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 from typing import TYPE_CHECKING
@@ -34,6 +35,7 @@ from core.host_config import (
     sandbox_ai_home,
     workspace_bridge_gid,
 )
+from core.setup_state import ModeMarkerMissing
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,12 +46,12 @@ if TYPE_CHECKING:
 def _load_host_settings_or_skip(check_name: str) -> HostSettings | CheckResult:
     """Helper: load HostSettings or return a CheckResult skip if absent."""
     try:
-        return HostConfig.from_toml().host
-    except FileNotFoundError:
+        return HostConfig.from_marker(getpass.getuser()).host
+    except ModeMarkerMissing:
         return CheckResult(
             status="skip",
             name=check_name,
-            detail="sandbox-ai.toml not found; run `sandbox init` first",
+            detail="not set up yet — run `sudo sandbox setup`",
             category="Workspace Bridge",
         )
 
@@ -58,16 +60,14 @@ def check_workspace_bridge_group_exists(
     host_user: str, distro: str | None, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
 ) -> CheckResult:
     """Validate the workspace bridge group exists at a gid in the daemon's subgid range."""
-    del distro
+    del distro, mode
     settings_or_skip = _load_host_settings_or_skip("workspace bridge group")
     if isinstance(settings_or_skip, CheckResult):
         return settings_or_skip
-    # F-069: `from_toml()` carries no execution mode (removed post-D11), so the
-    # loaded settings default to operator-rootless. Overlay the marker-resolved
-    # mode before owner resolution — otherwise the daemon owner (and thus the
-    # /etc/subgid range the bridge gid is validated against) is mis-resolved to
-    # the operator on a real separate-user host.
-    host = settings_or_skip.model_copy(update={"docker_execution_mode": mode})
+    # F-069: the host config is read from the per-operator setup-state marker
+    # (`from_marker`), which already carries the setup-determined execution mode
+    # AND the per-operator bridge name — no mode overlay is needed here.
+    host = settings_or_skip
     name = f"workspace bridge group {host.workspace_bridge_group!r}"
     try:
         gid = workspace_bridge_gid(host)
@@ -111,15 +111,16 @@ def check_dev_in_workspace_bridge_group(
     host_user: str, distro: str | None, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
 ) -> CheckResult:
     """Validate dev's current process has the bridge gid in supplementary groups."""
-    del distro
+    del distro, mode
     import grp
     import pwd
 
     settings_or_skip = _load_host_settings_or_skip("operator in workspace bridge group")
     if isinstance(settings_or_skip, CheckResult):
         return settings_or_skip
-    # F-069: overlay the marker-resolved mode (see check_workspace_bridge_group_exists).
-    host = settings_or_skip.model_copy(update={"docker_execution_mode": mode})
+    # F-069: the marker-sourced host config already carries the correct mode
+    # (see check_workspace_bridge_group_exists).
+    host = settings_or_skip
     try:
         bridge_gid = workspace_bridge_gid(host)
     except (WorkspaceBridgeGroupMissingError, SubgidOutOfRangeError, NoSubgidRangeError) as exc:

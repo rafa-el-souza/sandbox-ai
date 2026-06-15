@@ -12,6 +12,39 @@ import os
 from typing import Any
 
 
+def _stub_marker(
+    monkeypatch: Any,
+    *,
+    user: str = "claude-sandbox",
+    mode: Any = None,
+    workspace_bridge_group: str = "sb-ws",
+) -> None:
+    """Stub ``HostConfig.from_marker`` so the workspace-bridge checks read a
+    setup-determined host config (the runtime path post-D-B) instead of toml.
+
+    The marker already carries the execution mode and per-operator bridge name,
+    so the check functions consume it directly with no mode overlay.
+    """
+    from core.host_config import (
+        DEFAULT_PROVISIONING_MODE,
+        HostConfig,
+        HostSettings,
+    )
+
+    resolved_mode = DEFAULT_PROVISIONING_MODE if mode is None else mode
+    cfg = HostConfig(
+        host=HostSettings(
+            docker_unprivileged_user=user,
+            docker_execution_mode=resolved_mode,
+            workspace_bridge_group=workspace_bridge_group,
+        )
+    )
+    monkeypatch.setattr(
+        "core.doctor.checks.workspace_bridge.HostConfig.from_marker",
+        classmethod(lambda cls, operator: cfg),
+    )
+
+
 def test_module_exposes_ten_check_functions() -> None:
     from core.doctor.checks import workspace_bridge
 
@@ -188,28 +221,28 @@ class TestCheckWorkspaceBridgeGroupExists:
     def test_pass_when_group_resolves(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_workspace_bridge_group_exists
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
         result = check_workspace_bridge_group_exists("claude-sandbox", None)
         assert result.status == "pass"
         assert "200500" in result.detail
 
-    def test_threaded_mode_overlays_owner_resolution(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
-        # Regression F-069: F-051 flipped from_toml()'s default execution mode to
-        # operator-rootless. Without overlaying the marker-resolved mode, the
-        # daemon owner mis-resolves to the invoking operator and the bridge gid is
-        # validated against the wrong /etc/subgid range (false-failed on fedora).
-        # The threaded SEPARATE_USER mode must reach `host` so the owner resolves
-        # to the configured docker_unprivileged_user, not the operator.
+    def test_mode_comes_from_marker_for_owner_resolution(
+        self, isolated_sandbox_ai_home: Any, monkeypatch: Any
+    ) -> None:
+        # Regression F-069: the host config is now read from the per-operator
+        # setup-state marker (`from_marker`), which already carries the
+        # setup-determined execution mode. No mode overlay is applied — the mode
+        # the marker records reaches `host` directly, so the daemon owner resolves
+        # to the configured docker_unprivileged_user, not the invoking operator
+        # (the false-failure on fedora). The check's `mode` param is now inert.
         from core.doctor.checks.workspace_bridge import check_workspace_bridge_group_exists
         from core.host_config import DockerExecutionMode, resolve_daemon_owner_settings
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        # No execution-mode field (removed post-D11) → from_toml defaults to op-rootless.
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "sandbox"\n')
+        # The marker records SEPARATE_USER; the check's `mode` arg is intentionally
+        # the contradicting OPERATOR_ROOTLESS to prove the overlay is gone and the
+        # marker's mode wins.
+        _stub_marker(monkeypatch, user="sandbox", mode=DockerExecutionMode.SEPARATE_USER)
 
         captured: dict[str, Any] = {}
 
@@ -218,10 +251,12 @@ class TestCheckWorkspaceBridgeGroupExists:
             return 200500
 
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", _capture)
-        result = check_workspace_bridge_group_exists("sandbox", None, mode=DockerExecutionMode.SEPARATE_USER)
+        result = check_workspace_bridge_group_exists(
+            "sandbox", None, mode=DockerExecutionMode.OPERATOR_ROOTLESS
+        )
         assert result.status == "pass"
         assert captured["host"].docker_execution_mode is DockerExecutionMode.SEPARATE_USER
-        # The fix: owner resolves to the configured user, NOT the invoking operator.
+        # The owner resolves to the configured user, NOT the invoking operator.
         assert resolve_daemon_owner_settings(captured["host"]) == "sandbox"
 
     def test_fail_when_group_missing_with_recommendation(
@@ -230,11 +265,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text(
-            '[host]\ndocker_unprivileged_user = "claude-sandbox"\nworkspace_bridge_group = "sb-ws"\n'
-        )
+        _stub_marker(monkeypatch, user="claude-sandbox", workspace_bridge_group="sb-ws")
 
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
@@ -255,9 +286,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import NoSubgidRangeError, WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
 
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
@@ -280,9 +309,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import NoFreeGidInSubgidRangeError, WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
 
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")
@@ -303,9 +330,7 @@ class TestCheckWorkspaceBridgeGroupExists:
         from core.doctor import check_workspace_bridge_group_exists
         from core.host_config import SubgidOutOfRangeError
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
 
         def _raise(host: Any) -> int:
             raise SubgidOutOfRangeError("gid 99 not in any range")
@@ -326,9 +351,7 @@ class TestCheckDevInWorkspaceBridgeGroup:
     def test_pass_when_in_supplementary_groups(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getgroups", lambda: [200500, 1000])
         result = check_dev_in_workspace_bridge_group("u", None)
@@ -337,9 +360,7 @@ class TestCheckDevInWorkspaceBridgeGroup:
     def test_fail_relogin_path(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getgroups", lambda: [1000])
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getuid", lambda: 1000)
@@ -366,9 +387,7 @@ class TestCheckDevInWorkspaceBridgeGroup:
     def test_fail_usermod_path(self, isolated_sandbox_ai_home: Any, monkeypatch: Any) -> None:
         from core.doctor import check_dev_in_workspace_bridge_group
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.workspace_bridge_gid", lambda h: 200500)
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getgroups", lambda: [1000])
         monkeypatch.setattr("core.doctor.checks.workspace_bridge.os.getuid", lambda: 1000)
@@ -389,9 +408,7 @@ class TestCheckDevInWorkspaceBridgeGroup:
         from core.doctor import check_dev_in_workspace_bridge_group
         from core.host_config import WorkspaceBridgeGroupMissingError
 
-        config_dir = isolated_sandbox_ai_home / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "sandbox-ai.toml").write_text('[host]\ndocker_unprivileged_user = "claude-sandbox"\n')
+        _stub_marker(monkeypatch, user="claude-sandbox")
 
         def _raise(host: Any) -> int:
             raise WorkspaceBridgeGroupMissingError("group missing")

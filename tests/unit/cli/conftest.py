@@ -162,13 +162,25 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
     cfg = HostConfig.model_validate(
         {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
     )
-    # The runtime resolves the execution mode from the per-operator marker (D11)
-    # via ``_resolve_full_host_config`` → ``resolve_execution_mode``. The marker
-    # lives at a root-owned ``/usr/local/libexec`` path absent in tests, so stub
-    # the resolver to the default separate-user mode; op-rootless tests override
-    # it (or use ``@pytest.mark.no_host_config_mock``).
+    # The runtime command path now resolves the host config from the per-operator
+    # setup-state marker (D-B) via ``_resolve_full_host_config`` → ``from_marker``;
+    # the marker-carrying separate-user config stubs that read. ``from_toml`` is
+    # still patched because init/doctor read host config through it until their
+    # own rewires land (Groups 9/10). ``resolve_execution_mode`` is still patched
+    # because init's probe_mode + doctor read the mode through it. The marker lives
+    # at a root-owned ``/usr/local/libexec`` path absent in tests, so the resolver
+    # is stubbed to the default separate-user mode; op-rootless tests override it
+    # (or use ``@pytest.mark.no_host_config_mock``).
+    marker_cfg = cfg.model_copy(
+        update={
+            "host": cfg.host.model_copy(
+                update={"docker_execution_mode": DockerExecutionMode.SEPARATE_USER}
+            )
+        }
+    )
     with (
         patch("cli.main.HostConfig.from_toml", return_value=cfg),
+        patch("cli.main.HostConfig.from_marker", return_value=marker_cfg),
         patch(
             "cli.main.resolve_execution_mode",
             return_value=DockerExecutionMode.SEPARATE_USER,
