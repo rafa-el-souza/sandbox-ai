@@ -30,17 +30,24 @@ mandate is *thorough* cleanup.
 
 from __future__ import annotations
 
+import getpass
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
-import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+try:
+    from core.host_config import HostConfig, resolve_daemon_owner
+    from core.setup_state import read_entry
+finally:
+    sys.path.pop(0)
 
 _TEST_USER_ENV = "SANDBOX_AI_TEST_DAEMON_USER"
 
@@ -77,27 +84,24 @@ def _resolve_daemon_user() -> str:
 
     Resolution order (identical to each test file's
     ``_resolve_test_environment``): ``SANDBOX_AI_TEST_DAEMON_USER`` env var,
-    else ``[host].docker_unprivileged_user`` from the real per-host
-    ``~/.sandbox-ai/config/sandbox-ai.toml``. Skips with a specific reason if
-    neither is available — so a grant requested before the user is resolvable
-    is a clean skip, never a silent un-revoked grant.
+    else the setup-state marker for the current operator (host config is the
+    root-owned marker post-C-013, not a user-editable toml). Skips with a
+    specific reason if neither is available — so a grant requested before the
+    user is resolvable is a clean skip, never a silent un-revoked grant. The
+    daemon owner is resolved via ``resolve_daemon_owner`` so it is correct in
+    both execution modes (op-rootless → the operator; separate-user → the
+    marker's ``docker_unprivileged_user``).
     """
     override = os.environ.get(_TEST_USER_ENV)
     if override is not None:
         return override
-    real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
-    if not real_toml.exists():
-        pytest.skip(f"skipped: {real_toml} not present and {_TEST_USER_ENV} unset")
-    try:
-        with open(real_toml, "rb") as f:
-            raw = tomllib.load(f)
-    except tomllib.TOMLDecodeError as exc:
-        pytest.skip(f"skipped: {real_toml} is malformed TOML: {exc}")
-    host_section: dict[str, object] = raw.get("host", {})
-    user = host_section.get("docker_unprivileged_user")
-    if not isinstance(user, str):
-        pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
-    return user
+    operator = getpass.getuser()
+    if read_entry(operator) is None:
+        pytest.skip(
+            f"skipped: host not set up (no marker); run `sudo sandbox setup` "
+            f"and {_TEST_USER_ENV} unset"
+        )
+    return resolve_daemon_owner(HostConfig.from_marker(operator))
 
 
 @pytest.fixture

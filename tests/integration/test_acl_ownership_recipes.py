@@ -37,23 +37,23 @@ def _is_root() -> bool:
 
 
 def _docker_unprivileged_user_configured() -> bool:
-    """Best-effort check: a [host] sandbox-ai.toml in the dev's real home references
-    a user that exists. Used by the heavy end-to-end tests to skip in unconfigured
-    environments without depending on any specific user name."""
+    """Best-effort check: the host is provisioned (setup-state marker present for
+    the operator) and the resolved daemon owner exists. Used by the heavy
+    end-to-end tests to skip in unprovisioned environments without depending on
+    any specific user name. Host config is the root-owned marker post-C-013, not
+    a user-editable toml."""
+    import pwd
+
+    sys.path.insert(0, str(REPO_ROOT / "src"))
     try:
-        import pwd
-        import tomllib
-    except ImportError:
+        from core.host_config import HostConfig, resolve_daemon_owner
+        from core.setup_state import read_entry
+    finally:
+        sys.path.pop(0)
+    operator = getpass.getuser()
+    if read_entry(operator) is None:
         return False
-    real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
-    try:
-        with open(real_toml, "rb") as f:
-            raw = tomllib.load(f)
-    except (FileNotFoundError, tomllib.TOMLDecodeError):
-        return False
-    user = raw.get("host", {}).get("docker_unprivileged_user")
-    if not isinstance(user, str):
-        return False
+    user = resolve_daemon_owner(HostConfig.from_marker(operator))
     try:
         pwd.getpwnam(user)
     except KeyError:
@@ -137,7 +137,7 @@ def test_helper_container_hardening_flags() -> None:
 requires_root = pytest.mark.skipif(not _is_root(), reason="requires root for groupadd/usermod")
 requires_docker_user = pytest.mark.skipif(
     not _docker_unprivileged_user_configured(),
-    reason="requires a configured rootless docker user in ~/.sandbox-ai/config/sandbox-ai.toml",
+    reason="requires a provisioned host (setup-state marker present) with a rootless docker user",
 )
 
 

@@ -4,8 +4,8 @@
 Marked ``@pytest.mark.integration`` — NOT collected by the default
 ``make test`` / ``make coverage`` gate (``pytest.testpaths = ["tests/unit"]``).
 Runs only via ``make test-integration`` on a real-docker host with the
-sandbox-ai privilege boundary configured (a real ``sandbox-ai.toml`` present
-at ``~/.sandbox-ai/config/sandbox-ai.toml``, read directly — see below).
+sandbox-ai privilege boundary provisioned (a real setup-state marker present
+for the operator, read via ``HostConfig.from_marker`` — see below).
 
 It invokes :func:`core.dispatch.compile_dispatcher` twice into two distinct
 output paths against identical source + the same digest-pinned
@@ -44,23 +44,26 @@ permanently unresolvable anyway.
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import os
 import pwd
 import shutil
 import subprocess
-import tomllib
 from pathlib import Path
 
 import pytest
 from core.dispatch import compile_dispatcher
 from core.host_config import (
+    HostConfig,
     minimal_host_config,
     parse_subgid_for_user,
     parse_subuid_for_user,
     pipe_cmd,
+    resolve_daemon_owner,
 )
 from core.hydration import IMAGE_REGISTRY
+from core.setup_state import read_entry
 
 pytestmark = pytest.mark.integration
 
@@ -71,25 +74,18 @@ _PROBE_TIMEOUT_S = 10
 def _resolve_test_environment() -> str:
     """Return ``daemon_user`` or call ``pytest.skip`` with a specific reason.
 
-    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var; otherwise parse
-    ``~/.sandbox-ai/config/sandbox-ai.toml``.
+    Resolution order: ``SANDBOX_AI_TEST_DAEMON_USER`` env var; otherwise the
+    setup-state marker for the current operator (host config is the root-owned
+    marker post-C-013). Resolves the daemon owner via ``resolve_daemon_owner``
+    (correct in both execution modes).
     """
     override = os.environ.get(_TEST_USER_ENV)
     if override is not None:
         return override
-    real_toml = Path("~/.sandbox-ai/config/sandbox-ai.toml").expanduser()
-    if not real_toml.exists():
-        pytest.skip(f"skipped: {real_toml} not present and {_TEST_USER_ENV} unset")
-    try:
-        with open(real_toml, "rb") as f:
-            raw = tomllib.load(f)
-    except tomllib.TOMLDecodeError as exc:
-        pytest.skip(f"skipped: {real_toml} is malformed TOML: {exc}")
-    host_section: dict[str, object] = raw.get("host", {})
-    user = host_section.get("docker_unprivileged_user")
-    if not isinstance(user, str):
-        pytest.skip(f"skipped: {real_toml} missing [host].docker_unprivileged_user")
-    return user
+    operator = getpass.getuser()
+    if read_entry(operator) is None:
+        pytest.skip("skipped: host not set up (no marker); run `sudo sandbox setup`")
+    return resolve_daemon_owner(HostConfig.from_marker(operator))
 
 
 def _check_preconditions() -> str:
@@ -169,12 +165,11 @@ def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     """Two compiles of identical source + pinned image are sha512-identical."""
     daemon_user = _check_preconditions()
     # ``_check_preconditions`` resolved ``daemon_user`` from the REAL
-    # per-host ``~/.sandbox-ai/config/sandbox-ai.toml`` via
-    # ``_resolve_test_environment`` (the sibling idiom in
-    # ``test_helper_container_userns.py`` — resolve the daemon user directly,
-    # never reading a host config file: host facts are setup-marker-sourced,
-    # and the integration harness's ``SANDBOX_AI_HOME``→tmp redirect would make
-    # any such read permanently unresolvable to an empty dir → permanent skip).
+    # setup-state marker via ``_resolve_test_environment`` (the sibling idiom in
+    # ``test_helper_container_userns.py`` — resolve the daemon user from the
+    # root-owned marker: host facts are setup-marker-sourced, and the marker
+    # lives at a fixed root path outside the harness's ``SANDBOX_AI_HOME``→tmp
+    # redirect, so an unprovisioned host is a clean skip).
     # ``compile_dispatcher`` reads only the daemon-user boundary field, so build
     # the minimal HostConfig from the resolved user — the same construction
     # ``minimal_host_config`` exists for.
