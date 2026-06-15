@@ -108,24 +108,6 @@ domains = [".github.com"]
 RENAMED_TOML_CONTENT = VALID_TOML_CONTENT.replace(b'name = "myproject"', b'name = "renamed-instance"')
 
 
-# Real seeder captured at import time; the autouse fixture below patches
-# ``cli.main._seed_host_config_if_absent`` at test-setup, so tests opt back
-# in via ``wraps=_REAL_SEED_HOST_CONFIG``.
-_REAL_SEED_HOST_CONFIG = _cli_main_module._seed_host_config_if_absent
-
-
-@pytest.fixture(autouse=True)
-def _noop_init_seeder() -> typing.Iterator[None]:
-    """Skip the interactive host-config seeder during init tests.
-
-    The seeder normally prompts (TTY) or fails (non-TTY) when
-    ``<home>/config/sandbox-ai.toml`` is missing. CLI tests provide host
-    config via the ``_default_project_config`` autouse mock instead.
-    """
-    with patch("cli.main._seed_host_config_if_absent"):
-        yield
-
-
 @pytest.fixture
 def stub_bridge_resolution() -> typing.Iterator[None]:
     """Opt-in patch for the workspace bridge gid + subuid resolvers.
@@ -2992,39 +2974,6 @@ class TestDoctorRunnerInvoked:
 class TestInitHappyPath:
     """Task 3.1: sandbox init --user — happy path scaffold."""
 
-    def test_init_rejects_malformed_toml(self, runner: CliRunner) -> None:
-        """A malformed managed toml (any ValueError — ValidationError /
-        TOMLDecodeError / the D11 removed-field rejection) surfaces cleanly as
-        exit 1, not an uncaught traceback (finding 9). init exits at from_toml,
-        before the scaffold steps."""
-        from cli.main import app
-
-        with patch(
-            "cli.main.HostConfig.from_toml",
-            side_effect=ValueError("docker_execution_mode is no longer a sandbox-ai.toml field"),
-        ):
-            result = runner.invoke(app, ["init", "newproject"])
-        assert result.exit_code == 1
-        assert "docker_execution_mode is no longer" in result.output
-        assert not isinstance(result.exception, ValueError)  # surfaced, not propagated
-
-    def test_init_none_toml_user_errors(self, runner: CliRunner) -> None:
-        """Fail-closed: a toml config carrying a None docker_unprivileged_user
-        (model_construct, bypassing the validator) exits 1 with a clear message
-        rather than resolving the daemon user to None."""
-        from cli.main import app
-        from core.host_config import DockerExecutionMode, HostConfig, HostSettings
-
-        host = HostSettings.model_construct(
-            docker_unprivileged_user=None,
-            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
-        )
-        mock_pc = HostConfig.model_construct(host=host)
-        with patch("cli.main.HostConfig.from_toml", return_value=mock_pc):
-            result = runner.invoke(app, ["init", "newproject"])
-        assert result.exit_code == 1
-        assert "docker_unprivileged_user" in result.output
-
     def test_init_creates_instance(self, runner: CliRunner) -> None:
         """init scaffolds a new instance successfully."""
         project_dir = "/home/user/newproject"
@@ -3828,35 +3777,59 @@ class TestPreflightWorkspaceSource:
         assert any("larger than 5 GB" in w for w in warnings)
 
 
-class TestInitDryRunNoConfigFallback:
-    """Dry-run with absent host config falls back to placeholder values."""
+class TestInitSetupFirst:
+    """D-E: init is unconditionally setup-first, fail loud.
 
-    def test_dry_run_without_config_uses_dry_run_user(self, runner: CliRunner) -> None:
-        from cli.main import app
+    A marker-absent host (``from_marker`` raises :class:`ModeMarkerMissing`)
+    stops init BEFORE any per-user state is scaffolded — no ``<home>/`` tree,
+    no boundary-crossing probe — with a friendly message that does NOT name the
+    internal marker. The dry-run path is identical (init no longer guesses a
+    mode, so there is no ``<dry-run>`` placeholder fallback).
+    """
 
-        with (
-            patch("cli.main.detect_git_config", return_value=("", "")),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
-        ):
-            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
-        # dry-run path tolerates missing host config; auth defaults to sudo
-        assert result.exit_code == 0, result.output
+    _EXPECTED = "This host isn't set up yet. Run `sudo sandbox setup` first, then `sandbox init`."
 
-
-class TestInitNoConfigPostSeedFails:
-    """Defensive branch: missing config after seed (e.g. seed mocked)."""
-
-    def test_missing_config_after_seed_in_non_dry_run_exits(
-        self, runner: CliRunner, mock_sandbox_ai_home: Path
+    @pytest.mark.no_seed_registry
+    def test_marker_absent_exits_setup_first_no_tree_no_probe(
+        self, runner: CliRunner, isolated_sandbox_ai_home: Path
     ) -> None:
         from cli.main import app
+        from core.setup_state import ModeMarkerMissing
 
         with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_marker", side_effect=ModeMarkerMissing("op")),
+            patch("cli.main.ensure_per_user_state") as mock_tree,
+            patch("cli.main.dispatch.probe") as mock_probe,
         ):
             result = runner.invoke(app, ["init", "newproject"])
-        assert result.exit_code == 1
-        assert "no host config" in result.output.lower()
+        assert result.exit_code == 1, result.output
+        assert self._EXPECTED in result.output.replace("\n", "")
+        # Guard is hoisted BEFORE ensure_per_user_state — no tree, no crossing.
+        mock_tree.assert_not_called()
+        mock_probe.assert_not_called()
+        # The internal marker machinery is never named in the user-facing message.
+        assert "marker" not in result.output.lower()
+        # No per-user tree was created on disk.
+        assert not (isolated_sandbox_ai_home / "config").exists()
+        assert not (isolated_sandbox_ai_home / "state").exists()
+
+    @pytest.mark.no_seed_registry
+    def test_marker_absent_dry_run_also_exits_setup_first(
+        self, runner: CliRunner, isolated_sandbox_ai_home: Path
+    ) -> None:
+        from cli.main import app
+        from core.setup_state import ModeMarkerMissing
+
+        with (
+            patch("cli.main.HostConfig.from_marker", side_effect=ModeMarkerMissing("op")),
+            patch("cli.main.ensure_per_user_state") as mock_tree,
+            patch("cli.main.detect_git_config", return_value=("", "")),
+        ):
+            result = runner.invoke(app, ["init", "newproject", "--dry-run"])
+        assert result.exit_code == 1, result.output
+        assert self._EXPECTED in result.output.replace("\n", "")
+        mock_tree.assert_not_called()
+        assert not (isolated_sandbox_ai_home / "config").exists()
 
 
 class TestStdinIsTty:
@@ -3868,28 +3841,34 @@ class TestStdinIsTty:
 
 
 class TestInitHostConfigResolution:
-    """Tasks 3.8-3.9: init user resolution via sandbox-ai.toml."""
+    """init resolves the daemon owner from the per-operator setup marker."""
 
-    def test_init_with_project_config_no_user_flag(self, runner: CliRunner) -> None:
-        """init succeeds without --user when sandbox-ai.toml provides docker_unprivileged_user."""
+    def test_init_with_marker_config_no_user_flag(self, runner: CliRunner) -> None:
+        """init succeeds without --user — the daemon owner is resolved from the
+        marker-sourced host config via ``resolve_daemon_owner``."""
         from cli.main import app
-        from core.host_config import HostConfig
+        from core.host_config import DockerExecutionMode, HostConfig
         from core.hydration import InstanceConfig
 
-        project_dir = "/home/user/tomlproject"
+        project_dir = "/home/user/markerproject"
 
-        mock_project_config = HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
+        mock_marker_config = HostConfig.model_validate(
+            {
+                "host": {
+                    "docker_unprivileged_user": "sandbox",
+                    "docker_execution_mode": DockerExecutionMode.SEPARATE_USER.value,
+                }
+            }
         )
         mock_config = InstanceConfig.model_validate(
             {
-                "instance": {"name": "tomlproject", "host_uid": "1000"},
+                "instance": {"name": "markerproject", "host_uid": "1000"},
                 "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
             }
         )
 
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=mock_project_config),
+            patch("cli.main.HostConfig.from_marker", return_value=mock_marker_config),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -3901,168 +3880,8 @@ class TestInitHostConfigResolution:
             patch("cli.main.prompt_secrets"),
             patch("cli.main.write_initialized_sentinel"),
         ):
-            result = runner.invoke(app, ["init", "tomlproject"])
-            assert result.exit_code == 0
-
-    def test_init_non_tty_without_config_fails_with_guidance(
-        self,
-        runner: CliRunner,
-        mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_home: Path,
-    ) -> None:
-        """init in non-TTY mode without canonical host config exits with guidance."""
-        from cli.main import app
-
-        with (
-            # Disable the autouse no-op so the real seeder runs.
-            patch("cli.main._seed_host_config_if_absent", wraps=_REAL_SEED_HOST_CONFIG),
-            patch("cli.main._stdin_is_tty", return_value=False),
-        ):
-            result = runner.invoke(app, ["init", "tomlproject"])
-        assert result.exit_code == 1, result.output
-        assert "non-interactive" in result.output.lower()
-        # Rich may line-wrap long paths; collapse newlines before substring check.
-        assert "sandbox-ai.toml" in result.output.replace("\n", "")
-
-    def test_init_tty_seeds_host_config(
-        self,
-        runner: CliRunner,
-        mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_home: Path,
-    ) -> None:
-        """init in TTY mode prompts and writes <home>/config/sandbox-ai.toml when absent."""
-        from cli.main import app
-        from core.hydration import InstanceConfig
-
-        project_dir = "/home/user/seedproj"
-        mock_config = InstanceConfig.model_validate(
-            {
-                "instance": {"name": "seedproj", "host_uid": "1000"},
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
-            }
-        )
-
-        with (
-            # Run the real seeder
-            patch(
-                "cli.main._seed_host_config_if_absent",
-                wraps=_REAL_SEED_HOST_CONFIG,
-            ),
-            patch("cli.main._stdin_is_tty", return_value=True),
-            patch("cli.main.typer.prompt", side_effect=["sandbox-user"]),
-            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main.detect_git_config", return_value=("", "")),
-            patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.create_instance_dirs"),
-            patch("cli.main.write_sandbox_toml"),
-            patch("cli.main._load_config", return_value=mock_config),
-            patch("cli.main.create_env_file"),
-            patch("cli.main.apply_default_acls"),
-            patch("cli.main.prompt_secrets"),
-            patch("cli.main.write_initialized_sentinel"),
-        ):
-            result = runner.invoke(app, ["init", "seedproj"])
-        seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
-        assert seeded.exists(), f"output={result.output!r} exit={result.exit_code}"
-        body = seeded.read_text()
-        # D10 stopgap: a leading managed-comment header guards the setup-determined
-        # fields against hand-edits (the mode is no longer a toml field at all).
-        assert body.startswith("# sandbox-ai managed —")
-        assert "do not edit (rerun setup to change)" in body.splitlines()[0]
-        assert 'docker_unprivileged_user = "sandbox-user"' in body
-        assert "machinectl_authentication" not in body
-        assert "docker_execution_mode" not in body
-        assert result.exit_code == 0, result.output
-
-    def test_init_tty_rejects_empty_user(
-        self,
-        runner: CliRunner,
-        mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_home: Path,
-    ) -> None:
-        """Empty docker_unprivileged_user is re-prompted until non-empty."""
-        from cli.main import app
-        from core.hydration import InstanceConfig
-
-        project_dir = "/home/user/empty"
-        mock_config = InstanceConfig.model_validate(
-            {
-                "instance": {"name": "empty", "host_uid": "1000"},
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
-            }
-        )
-
-        with (
-            patch(
-                "cli.main._seed_host_config_if_absent",
-                wraps=_REAL_SEED_HOST_CONFIG,
-            ),
-            patch("cli.main._stdin_is_tty", return_value=True),
-            # First prompt returns empty → re-prompt; second is the non-empty user.
-            patch("cli.main.typer.prompt", side_effect=["", "sandbox"]),
-            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main.detect_git_config", return_value=("", "")),
-            patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.create_instance_dirs"),
-            patch("cli.main.write_sandbox_toml"),
-            patch("cli.main._load_config", return_value=mock_config),
-            patch("cli.main.create_env_file"),
-            patch("cli.main.apply_default_acls"),
-            patch("cli.main.prompt_secrets"),
-            patch("cli.main.write_initialized_sentinel"),
-        ):
-            result = runner.invoke(app, ["init", "empty"])
-        assert result.exit_code == 0, result.output
-        seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
-        assert 'docker_unprivileged_user = "sandbox"' in seeded.read_text()
-
-    def test_init_existing_host_config_not_overwritten(
-        self,
-        runner: CliRunner,
-        mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_home: Path,
-    ) -> None:
-        """When the canonical host config exists, init does not prompt and does not overwrite."""
-        from cli.main import app
-        from core.host_config import ensure_per_user_state
-        from core.hydration import InstanceConfig
-
-        ensure_per_user_state(isolated_sandbox_ai_home)
-        existing_body = '[host]\ndocker_unprivileged_user = "preserved"\nmachinectl_authentication = "sudo"\n'
-        cfg_path = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
-        cfg_path.write_text(existing_body)
-
-        project_dir = "/home/user/preserve"
-        mock_config = InstanceConfig.model_validate(
-            {
-                "instance": {"name": "preserve", "host_uid": "1000"},
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
-            }
-        )
-
-        with (
-            patch(
-                "cli.main._seed_host_config_if_absent",
-                wraps=_REAL_SEED_HOST_CONFIG,
-            ),
-            patch("cli.main.typer.prompt") as mock_prompt,
-            patch("cli.main.subprocess.run", return_value=_crossed_ok()),
-            patch("cli.main.detect_git_config", return_value=("", "")),
-            patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.create_instance_dirs"),
-            patch("cli.main.write_sandbox_toml"),
-            patch("cli.main._load_config", return_value=mock_config),
-            patch("cli.main.create_env_file"),
-            patch("cli.main.apply_default_acls"),
-            patch("cli.main.prompt_secrets"),
-            patch("cli.main.write_initialized_sentinel"),
-        ):
-            result = runner.invoke(app, ["init", "preserve"])
-        assert result.exit_code == 0, result.output
-        # No prompts issued because file existed
-        mock_prompt.assert_not_called()
-        # File untouched
-        assert cfg_path.read_text() == existing_body
+            result = runner.invoke(app, ["init", "markerproject"])
+            assert result.exit_code == 0, result.output
 
 
 class TestInitAuthProbe:
@@ -4167,14 +3986,19 @@ class TestInitAuthProbe:
         coverage). Op-rootless has no privilege crossing — the guidance points at
         rootless Docker, not the dispatcher boundary."""
         from cli.main import app
-        from core.host_config import DockerExecutionMode
+        from core.host_config import DockerExecutionMode, HostConfig
 
+        op_rootless_marker = HostConfig.model_validate(
+            {
+                "host": {
+                    "docker_unprivileged_user": None,
+                    "docker_execution_mode": DockerExecutionMode.OPERATOR_ROOTLESS.value,
+                }
+            }
+        )
         with (
             patch("cli.main.dispatch.probe", return_value=self._fail(message="boom: exit status 1")),
-            patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+            patch("cli.main.HostConfig.from_marker", return_value=op_rootless_marker),
         ):
             result = runner.invoke(app, ["init", "probeproject"])
             assert result.exit_code == 1
@@ -4195,55 +4019,6 @@ class TestInitAuthProbe:
             assert result.exit_code == 1
             assert "probe timed out after 15 seconds" in result.output.lower()
 
-    def test_probe_mode_marker_missing_falls_back_to_operator_rootless(
-        self, runner: CliRunner
-    ) -> None:
-        """F-051 (C-006 Group 9): an un-setup host has no marker entry —
-        ``resolve_execution_mode`` raises ``ModeMarkerMissing``, so init's auth-probe
-        falls back to operator-rootless (DEFAULT_PROVISIONING_MODE — the single
-        system-wide default), and the probe owner is the invoking OPERATOR
-        (``getpass.getuser()``), not the configured dedicated user. Mirrors the
-        doctor() marker-less fallback."""
-        import getpass
-
-        from cli.main import app
-        from core.host_config import DockerExecutionMode
-        from core.hydration import InstanceConfig
-        from core.setup_state import ModeMarkerMissing
-
-        project_dir = "/home/user/nomarker"
-        mock_config = InstanceConfig.model_validate(
-            {
-                "instance": {"name": "nomarker", "host_uid": "1000"},
-                "workspaces": {"main": {"bootstrap_mode": "empty", "path": project_dir}},
-            }
-        )
-        operator = getpass.getuser()
-
-        with (
-            patch(
-                "cli.main.resolve_execution_mode",
-                side_effect=ModeMarkerMissing("no marker"),
-            ),
-            patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
-            patch("cli.main.detect_git_config", return_value=("", "")),
-            patch("cli.main.run_check_subset", return_value=[]),
-            patch("cli.main.interpret_compose_collision_segment", return_value=self._collision_pass()),
-            patch("cli.main.create_instance_dirs"),
-            patch("cli.main.write_sandbox_toml"),
-            patch("cli.main._load_config", return_value=mock_config),
-            patch("cli.main.create_env_file"),
-            patch("cli.main.apply_default_acls"),
-            patch("cli.main.prompt_secrets"),
-            patch("cli.main.write_initialized_sentinel"),
-        ):
-            result = runner.invoke(app, ["init", "nomarker"])
-            assert result.exit_code == 0
-            (_op, _args, host_config), _kwargs = mock_probe.call_args
-            # Operator-rootless fallback: owner is the invoking operator (local path).
-            assert host_config.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
-            assert host_config.host.docker_unprivileged_user == operator
-
     def test_probe_operator_rootless_uses_operator_owner_and_local_mode(
         self, runner: CliRunner
     ) -> None:
@@ -4255,7 +4030,7 @@ class TestInitAuthProbe:
         import getpass
 
         from cli.main import app
-        from core.host_config import DockerExecutionMode
+        from core.host_config import DockerExecutionMode, HostConfig
         from core.hydration import InstanceConfig
 
         project_dir = "/home/user/oprl"
@@ -4266,12 +4041,17 @@ class TestInitAuthProbe:
             }
         )
         operator = getpass.getuser()
+        op_rootless_marker = HostConfig.model_validate(
+            {
+                "host": {
+                    "docker_unprivileged_user": None,
+                    "docker_execution_mode": DockerExecutionMode.OPERATOR_ROOTLESS.value,
+                }
+            }
+        )
 
         with (
-            patch(
-                "cli.main.resolve_execution_mode",
-                return_value=DockerExecutionMode.OPERATOR_ROOTLESS,
-            ),
+            patch("cli.main.HostConfig.from_marker", return_value=op_rootless_marker),
             patch("cli.main.dispatch.probe", return_value=self._ok()) as mock_probe,
             patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]) as mock_subset,

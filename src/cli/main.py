@@ -2179,41 +2179,6 @@ def _require_per_user_state_initialized() -> None:
         raise typer.Exit(code=1)
 
 
-def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
-    """Seed ``<user_home>/config/sandbox-ai.toml`` when missing.
-
-    TTY mode prompts for ``docker_unprivileged_user`` (required, non-empty).
-    Non-TTY mode exits with explicit guidance. Existing files are never
-    overwritten. Dry-run skips seeding entirely.
-    """
-    config_path = user_home / "config" / "sandbox-ai.toml"
-    if config_path.exists() or dry_run:
-        return
-
-    if not _stdin_is_tty():
-        console.print(
-            f"Cannot prompt for docker_unprivileged_user in non-interactive mode. "
-            f"Create {config_path} with a [host] section containing docker_unprivileged_user "
-            f"before running sandbox init.",
-            style="red",
-            markup=False,
-        )
-        raise typer.Exit(code=1)
-
-    while True:
-        docker_user = typer.prompt("docker_unprivileged_user (e.g., sandbox)").strip()
-        if docker_user:
-            break
-        console.print("docker_unprivileged_user must not be empty.", style="yellow")
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        "# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)\n"
-        "[host]\n"
-        f'docker_unprivileged_user = "{docker_user}"\n'
-    )
-
-
 _COPY_FLAG = typer.Option([], "--copy", help="Workspace from a copied tree: NAME=PATH (repeatable)")
 _EMPTY_FLAG = typer.Option([], "--empty", help="Empty workspace: NAME (repeatable)")
 _SECRETS_FROM_ENV_FLAG = typer.Option(
@@ -2972,6 +2937,20 @@ def init(
                 markup=False,
             )
 
+    # Setup-first guard (D-E): init is unconditionally setup-first, fail loud.
+    # Resolve the host config from the root-owned setup marker BEFORE creating any
+    # per-user state — a marker-absent host must be left with NO ``<home>/`` tree
+    # (no half-init). init no longer guesses a mode.
+    try:
+        host_config = HostConfig.from_marker(getpass.getuser())
+    except ModeMarkerMissing:
+        console.print(
+            "This host isn't set up yet. Run `sudo sandbox setup` first, then `sandbox init`.",
+            style="red",
+            markup=False,
+        )
+        raise typer.Exit(code=1) from None
+
     # Per-user tree creation (idempotent, mode 0700)
     user_home = sandbox_ai_home()
     ensure_per_user_state(user_home)
@@ -2987,51 +2966,11 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    # Seed canonical host config (TTY prompt or non-TTY fail) when absent
-    _seed_host_config_if_absent(user_home, dry_run=dry_run)
-
-    # Resolution: docker_unprivileged_user — canonical host config is authoritative
-    project_config: HostConfig | None = None
-    try:
-        project_config = HostConfig.from_toml()
-    except FileNotFoundError:
-        pass
-    except ValueError as exc:
-        # A malformed managed toml — pydantic ValidationError / tomllib
-        # TOMLDecodeError / the D11 removed-field rejection (all ValueError) —
-        # is a real error to fix, not "absent" (FileNotFoundError); surface it
-        # cleanly instead of an uncaught traceback.
-        console.print(str(exc), style="red", markup=False)
-        raise typer.Exit(code=1) from None
-
-    resolved_user: str
-    if project_config is not None:
-        # LITERAL toml-field read (init is allowlisted): project_config is a
-        # ``from_toml`` config whose carrier ``docker_execution_mode`` is the moot
-        # op-rootless default, so the actual owner resolution happens downstream via
-        # ``resolve_daemon_owner(minimal_host_config(resolved_user, probe_mode))``
-        # with the marker-resolved mode — NOT here. A user-less toml fails
-        # ``from_toml`` validation ("field required"), so the field is non-None;
-        # narrow fail-closed for the type.
-        toml_user = project_config.host.docker_unprivileged_user
-        if toml_user is None:
-            console.print(
-                "sandbox-ai.toml is missing [host].docker_unprivileged_user.",
-                style="red",
-                markup=False,
-            )
-            raise typer.Exit(code=1)
-        resolved_user = toml_user
-    elif dry_run:
-        resolved_user = "<dry-run>"
-    else:
-        # Should not happen post-seed in interactive mode; non-TTY already exited above.
-        console.print(
-            f"No host config at {user_home / 'config' / 'sandbox-ai.toml'}. "
-            "Run sandbox init in an interactive shell or create the file manually.",
-            style="red",
-        )
-        raise typer.Exit(code=1)
+    # Resolution: the daemon owner is the marker-sourced host config's
+    # ``resolve_daemon_owner`` (op-rootless → the invoking operator; separate-user
+    # → the marker's recorded daemon user). The hoisted setup-first guard above
+    # already exited on a marker-absent host, so ``host_config`` is authoritative.
+    resolved_user = resolve_daemon_owner(host_config)
 
     # Init-time auth mode probe (D5). This is a *probe* callsite: it must
     # branch (reachable → continue; unreachable/timeout → guidance + exit 1),
@@ -3045,26 +2984,18 @@ def init(
     # wraps both), so ``message`` naturally distinguishes them in the
     # operator-facing detail.
     if not dry_run:
-        # Resolve the active execution mode from the root-owned setup marker
-        # (the single runtime authority, C-004), mirroring ``doctor``. An
-        # un-setup host has no marker entry → fall back to
-        # ``DEFAULT_PROVISIONING_MODE`` (operator-rootless — the single
-        # system-wide default, F-051). The marker is the authority once setup
-        # writes it; on a fresh host the provisioning default lets the
-        # auth-probe resolve the invoking operator as the daemon owner. In
+        # The active execution mode is the marker-sourced host config's mode (the
+        # hoisted setup-first guard guarantees the marker is present). In
         # operator-rootless the daemon runs as the *operator's* own user, so the
         # boundary-crossing owner is ``resolve_daemon_owner`` of the resolved
-        # config — NOT the stale ``docker_unprivileged_user``, which would cross
-        # machinectl into a nonexistent dedicated user. Threading ``mode`` into
-        # ``minimal_host_config`` makes ``dispatch.probe`` take the local
-        # (no-machinectl) path in op-rootless. Resolved once and reused across
-        # the init pre-flight crossing (the single ``preflight`` op) and the
-        # local doctor subset.
-        try:
-            probe_mode = resolve_execution_mode(getpass.getuser())
-        except ModeMarkerMissing:
-            probe_mode = DEFAULT_PROVISIONING_MODE
-        probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, probe_mode))
+        # config (== ``resolved_user``) — NOT the stale ``docker_unprivileged_user``,
+        # which would cross machinectl into a nonexistent dedicated user. Threading
+        # ``mode`` into ``minimal_host_config`` makes ``dispatch.probe`` take the
+        # local (no-machinectl) path in op-rootless. Resolved once and reused across
+        # the init pre-flight crossing (the single ``preflight`` op) and the local
+        # doctor subset.
+        probe_mode = host_config.host.docker_execution_mode
+        probe_owner = resolved_user
         probe_host_config = minimal_host_config(probe_owner, probe_mode)
 
         # One ``preflight`` crossing replaces the separate explicit ``auth-probe``
