@@ -1292,12 +1292,22 @@ def test_invalid_mode_flag_refused(runner: CliRunner) -> None:
     plan_mock.assert_not_called()
 
 
+def test_workspace_bridge_group_flag_removed(runner: CliRunner) -> None:
+    """--workspace-bridge-group is no longer a setup option (name is setup-derived)."""
+    with patch("cli.main.run_plan_pass") as plan_mock:
+        result = runner.invoke(
+            app, ["setup", "--workspace-bridge-group", "custom"]
+        )
+    assert result.exit_code != 0
+    assert "No such option" in result.output
+    plan_mock.assert_not_called()
+
+
 def _build_and_guard(
     operator_flag: str | None = None,
     *,
     mode_flag: str | None = None,
     docker_unprivileged_user: str = "sandbox",
-    workspace_bridge_group: str = "sb-ws",
 ) -> SetupContext:
     """Mirror ``setup()``'s build→flag-guard sequence (finding 8.7 reorder).
 
@@ -1309,7 +1319,6 @@ def _build_and_guard(
         operator_flag,
         mode_flag=mode_flag,
         docker_unprivileged_user=docker_unprivileged_user,
-        workspace_bridge_group=workspace_bridge_group,
     )
     _guard_setup_flags(
         ctx.host_config,
@@ -1321,7 +1330,7 @@ def _build_and_guard(
 
 
 def test_flags_threaded_into_host_config() -> None:
-    """--docker-unprivileged-user and --workspace-bridge-group thread into host_config."""
+    """--docker-unprivileged-user threads into host_config (bridge group is setup-derived)."""
     with (
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.read_mode", return_value=None),
@@ -1330,10 +1339,10 @@ def test_flags_threaded_into_host_config() -> None:
             None,
             mode_flag="separate-user",
             docker_unprivileged_user="customsvc",
-            workspace_bridge_group="custom-ws",
         )
     assert ctx.host_config.host.docker_unprivileged_user == "customsvc"
-    assert ctx.host_config.host.workspace_bridge_group == "custom-ws"
+    # Bridge group name is helper-derived, not a flag: separate-user → shared "sb-ws".
+    assert ctx.host_config.host.workspace_bridge_group == "sb-ws"
     assert (
         ctx.host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
     )

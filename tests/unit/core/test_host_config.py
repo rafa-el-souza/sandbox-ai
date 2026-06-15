@@ -721,7 +721,3 @@ class TestHostSettingsBridgeGroup:
     def test_default(self) -> None:
         h = HostSettings(docker_unprivileged_user="claude-sandbox")
         assert h.workspace_bridge_group == "sb-ws"
-
-    def test_override(self) -> None:
-        h = HostSettings(docker_unprivileged_user="claude-sandbox", workspace_bridge_group="bridge")
-        assert h.workspace_bridge_group == "bridge"

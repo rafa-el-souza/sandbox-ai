@@ -574,7 +574,7 @@ def workspace_bridge_gid(host: HostSettings) -> int:
     except KeyError as exc:
         raise WorkspaceBridgeGroupMissingError(
             f"group {host.workspace_bridge_group!r} does not exist on this host; "
-            f"run `sandbox doctor` for setup commands or override [host].workspace_bridge_group"
+            f"run `sandbox doctor` for setup commands"
         ) from exc
     in_container_gid_for_host_gid(gid, resolve_daemon_owner_settings(host))
     return gid

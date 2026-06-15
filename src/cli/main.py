@@ -67,6 +67,7 @@ from core.host_config import (
     sandbox_ai_home,
     state_lock_path,
     workspace_bridge_gid,
+    workspace_bridge_group_for,
 )
 from core.hydration import (
     InstanceConfig,
@@ -2327,11 +2328,6 @@ def setup(
         "--docker-unprivileged-user",
         help="Dedicated daemon user (separate-user only; refused in operator-rootless)",
     ),
-    workspace_bridge_group: str = typer.Option(
-        "sb-ws",
-        "--workspace-bridge-group",
-        help="Workspace shared bridge group name",
-    ),
 ) -> None:
     """Provision the host: mode-conditional plan/apply two-pass ceremony.
 
@@ -2346,7 +2342,6 @@ def setup(
             operator,
             mode_flag=docker_execution_mode,
             docker_unprivileged_user=docker_unprivileged_user,
-            workspace_bridge_group=workspace_bridge_group,
         )
     except OperatorResolutionError as exc:
         console.print(str(exc), style="red", markup=False)
@@ -2557,7 +2552,6 @@ def _build_setup_context_with_operator(
     *,
     mode_flag: str | None = None,
     docker_unprivileged_user: str = "sandbox",
-    workspace_bridge_group: str = "sb-ws",
 ) -> SetupContext:
     """Build the per-run :class:`SetupContext` for ``sandbox setup``.
 
@@ -2566,8 +2560,10 @@ def _build_setup_context_with_operator(
     sandbox-ai.toml`` (``HostConfig.from_toml``). This is the core G1 fix — a
     toml read here resolved to root's ``/root/.sandbox-ai`` (setup runs as root
     in separate-user mode), so an operator's real toml override never reached
-    setup. The daemon user, execution mode, and bridge group are all
-    **explicit inputs** via flags (with documented defaults). The execution mode
+    setup. The daemon user and execution mode are **explicit inputs** via flags
+    (with documented defaults); the workspace bridge group name is setup-derived
+    via :func:`workspace_bridge_group_for` (per-operator op-rootless, shared
+    ``sb-ws`` separate-user), not a flag. The execution mode
     is decided
     against the per-operator marker by :func:`resolve_effective_mode` (the marker
     WRITE is §8). Operator is resolved once via :func:`_resolve_setup_operator`
@@ -2590,7 +2586,7 @@ def _build_setup_context_with_operator(
         host=HostSettings(
             docker_unprivileged_user=docker_unprivileged_user,
             docker_execution_mode=mode,
-            workspace_bridge_group=workspace_bridge_group,
+            workspace_bridge_group=workspace_bridge_group_for(operator, mode),
         )
     )
     # NOTE: the marker WRITE (persisting `mode` for `operator`) is §8 — this
