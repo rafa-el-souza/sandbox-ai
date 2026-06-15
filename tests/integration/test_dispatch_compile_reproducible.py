@@ -34,11 +34,12 @@ transport, no PTY), these precondition probes ALSO cross via ``pipe_cmd``
 — it propagates the inner exit, so ``subprocess.run(...).returncode`` is
 the REAL exit and the image-absent / unreachable cases skip correctly
 instead of failing OPEN behind the masked ``machinectl`` returncode. The
-``HostConfig`` it needs is built from the real-toml-resolved
+``HostConfig`` it needs is built directly from the resolved
 ``daemon_user`` via :func:`core.host_config.minimal_host_config`
-(``compile_dispatcher`` reads only the daemon-user boundary field) — NOT via
-``HostConfig.from_toml``, which the integration harness's
-``SANDBOX_AI_HOME``→tmp redirect makes permanently unresolvable.
+(``compile_dispatcher`` reads only the daemon-user boundary field) — the
+harness never reads a host config file (host facts are setup-marker-sourced),
+which the integration harness's ``SANDBOX_AI_HOME``→tmp redirect would make
+permanently unresolvable anyway.
 """
 
 from __future__ import annotations
@@ -170,12 +171,13 @@ def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     # ``_check_preconditions`` resolved ``daemon_user`` from the REAL
     # per-host ``~/.sandbox-ai/config/sandbox-ai.toml`` via
     # ``_resolve_test_environment`` (the sibling idiom in
-    # ``test_helper_container_userns.py`` — read the real path directly, do
-    # NOT call ``HostConfig.from_toml()``, which the integration harness's
-    # ``SANDBOX_AI_HOME``→tmp redirect makes permanently unresolvable to an
-    # empty dir → permanent skip). ``compile_dispatcher`` reads only the two
-    # boundary fields, so build the minimal HostConfig from the resolved
-    # pair — the same construction ``minimal_host_config`` exists for.
+    # ``test_helper_container_userns.py`` — resolve the daemon user directly,
+    # never reading a host config file: host facts are setup-marker-sourced,
+    # and the integration harness's ``SANDBOX_AI_HOME``→tmp redirect would make
+    # any such read permanently unresolvable to an empty dir → permanent skip).
+    # ``compile_dispatcher`` reads only the daemon-user boundary field, so build
+    # the minimal HostConfig from the resolved user — the same construction
+    # ``minimal_host_config`` exists for.
     host_config = minimal_host_config(daemon_user)
 
     # No build dirs: ``compile_dispatcher`` embeds the source in the crossed

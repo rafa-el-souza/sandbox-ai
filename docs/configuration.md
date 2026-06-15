@@ -1,20 +1,22 @@
 # Two configuration scopes
 
-**Per-host**
+**Per-host** — not user-editable; setup-determined.
 
-- **Path**: `<sandbox_ai_home()>/config/sandbox-ai.toml`, default `~/.sandbox-ai/config/sandbox-ai.toml`.
-- **Parsed by**: `core.host_config.HostConfig`.
-- **Keys** (`[host]` table):
+Host provisioning facts are **not** a user-editable file. They are determined by `sudo sandbox setup` and recorded in a root-owned per-operator marker (`/usr/local/libexec/sandbox-ai/setup-state.json`); the runtime reads them back via `core.host_config.HostConfig.from_marker(operator)`. There is no per-host `sandbox-ai.toml` — it was retired (its only section was `[host]`, and every field is now setup-determined). A leftover `sandbox-ai.toml` from an older install is obsolete; `sandbox doctor` flags it as such and directs the operator to delete it and re-run `sudo sandbox setup`.
 
-  | Key | Meaning | Default |
+- **Built by**: `core.host_config.HostConfig.from_marker(operator)` — built-in defaults overlaid with the per-operator marker entry.
+- **Marker facts** (per-operator, mode-conditional):
+
+  | Fact | Meaning | Notes |
   | --- | --- | --- |
-  | `docker_unprivileged_user` | | |
-  | `machinectl_authentication` | | `sudo` |
-  | `workspace_bridge_group` | the group used by the workspace shared-group recipe | `sb-ws` |
+  | `mode` | `operator-rootless` (default) or `separate-user` | always present |
+  | `docker_unprivileged_user` | the dedicated daemon-owner account | **separate-user only**; absent in operator-rootless, where the daemon runs as the invoking operator's own user |
+  | `workspace_bridge_group` | the group used by the workspace shared-group recipe | setup-derived: `sb-ws-<operator>` (operator-rootless, per-operator) / `sb-ws` (separate-user, shared) |
+  | `workspace_bridge_gid` | the gid of that group | per-operator, allocated in the operator's own subgid range (operator-rootless) / the single shared range (separate-user) |
 
-- **Behavior**: seeded by `sandbox init` (TTY prompt or non-TTY fail).
+- **Behavior**: written by `sudo sandbox setup`, never hand-edited. The "init has run" gate is `instances.json`.
 
-> **Note**: The `SANDBOX_AI_HOME` env var redirects this path for test isolation only. It is an environment override, not a config key.
+> **Note**: The `SANDBOX_AI_HOME` env var redirects the per-instance state path for test isolation only. It is an environment override, not a config key.
 
 **Per-instance**
 

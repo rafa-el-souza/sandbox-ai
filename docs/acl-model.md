@@ -19,12 +19,7 @@ The orchestrator-volumes capability uses an orthogonal taxonomy: lifecycle (when
 
 > **Note / history.** The literal-0 gid pattern (under `consumer-uid-0-chown`) was removed because it was incompatible with the host-absolute helper API and provided no protection that `cap_dac_override` doesn't already grant.
 
-**Bridge group setup.** The bridge group is resolved via `[host].workspace_bridge_group` (default `sb-ws`); the orchestrator never invokes `sudo`, so operators set up the group manually (then re-login). `sandbox doctor` autodetects a recommended gid and prints copy-pasteable commands when the group is missing.
-
-```bash
-groupadd -g <gid-in-subgid-range> sb-ws
-usermod -aG sb-ws $USER
-```
+**Bridge group setup.** The bridge group name is a setup-determined fact read from `HostSettings.workspace_bridge_group` (marker-sourced via `HostConfig.from_marker`), not a user-editable config key. It is setup-derived: `sb-ws-<operator>` in operator-rootless (per-operator, with its gid allocated in that operator's own subgid range) and the shared `sb-ws` in separate-user. `sudo sandbox setup` creates the group at the in-range gid and adds the operator to it; the operator re-logins to pick up the new group membership. `sandbox doctor` verifies the group/gid and the operator's membership.
 
 When touching filesystem permissions, identify which (lifecycle, mechanism) pair applies before changing anything.
 

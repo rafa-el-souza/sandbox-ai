@@ -375,8 +375,8 @@ def check_setup_invariants(
         operator = l0.resolve_operator()
     except l0.OperatorResolutionError:
         # Under a plain `sandbox doctor` (run by the operator AS THEMSELVES, not
-        # via sudo), resolve_operator()'s setup precedence ($SUDO_USER →
-        # $PKEXEC_UID → --operator → refuse) has no context and raises — which
+        # via sudo), resolve_operator()'s setup precedence (--operator →
+        # $SUDO_USER → refuse) has no context and raises — which
         # used to short-circuit the whole audit, so it never ran in doctor's
         # normal invocation. The current real user IS the operator here, so fall
         # back to it. resolve_operator() itself stays STRICT for setup (which

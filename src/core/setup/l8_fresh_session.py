@@ -11,7 +11,7 @@ verification mutates nothing, so there is nothing to undo.
 Two checks, each with the operator-drop primitive matched to its command:
 
 1. ``pipe_cmd(<operator>) → id -G`` — the operator's group set MUST include the
-   ``[host].workspace_bridge_group`` gid (the post-``usermod -aG sb-ws`` group
+   marker-sourced ``workspace_bridge_group`` gid (the post-``usermod -aG sb-ws`` group
    is visible in a fresh ``--uid`` transient unit, whose ``initgroups`` reflects
    the post-``usermod`` set even though the operator's login session predates
    the ``usermod`` — empirically validated V0/V3, the whole reason this re-probe
@@ -73,7 +73,7 @@ class FreshSessionError(SandboxExecutionError):
 
 
 def _bridge_gid(host_config: HostConfig) -> int:
-    """Resolve the ``[host].workspace_bridge_group`` gid (raw ``grp`` lookup).
+    """Resolve the marker-sourced ``workspace_bridge_group`` gid (raw ``grp`` lookup).
 
     L8 only needs the gid to check membership in ``id -G`` output; the subgid-
     range validation lives in the phases that *use* the gid as a

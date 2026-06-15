@@ -338,8 +338,8 @@ def pipe_cmd(user: str) -> list[str]:
 
     Auth-mode independence: unlike :func:`machinectl_cmd`, no ``auth`` argument
     is accepted. ``systemd-run``'s ``manage-units`` polkit action is the only
-    authorization layer; the per-host ``machinectl_authentication`` setting
-    does not apply.
+    authorization layer; the crossing is unconditional (there is no per-host
+    auth-mode field gating it).
 
     PAM-skip trade-off: ``systemd-run`` does NOT invoke PAM, so policies on
     ``pam_limits.conf`` and similar do not apply to processes started this way.
@@ -365,8 +365,8 @@ def sudo_pipe_cmd(user: str) -> list[str]:
     ``test_no_raw_systemd_run_outside_pipe_cmd`` needs no extension.
 
     Takes only ``user`` — there is NO ``auth`` argument: the per-op sudoers rule
-    is the sole authorization layer (the per-host ``machinectl_authentication``
-    setting does not apply, exactly as for ``pipe_cmd``).
+    is the sole authorization layer (the crossing is unconditional, with no
+    per-host auth-mode field gating it, exactly as for ``pipe_cmd``).
 
     It MUST never append ``--unit``/``--description``: the rendered argv has to
     stay byte-identical to the per-op sudoers ``Cmnd_Spec`` derived from this same

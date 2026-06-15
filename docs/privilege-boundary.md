@@ -29,8 +29,8 @@ is the default. The isolation rests on two layers:
 ## The two execution modes
 
 There are exactly two execution modes, selected at `sudo sandbox setup` time (the
-mode is **not** a user-editable `sandbox-ai.toml` field; it is setup-determined
-and recorded in a per-operator marker):
+mode is **not** a user-editable config field; it is setup-determined
+and recorded in a root-owned per-operator marker):
 
 - **`operator-rootless` — the default.** Rootless Docker runs as the **invoking
   operator's own user**. Orchestrator→daemon operations run as **local

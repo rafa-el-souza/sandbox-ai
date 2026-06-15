@@ -9,7 +9,7 @@ exists on disk by the time the rule is written.
 
 Content-aware probe (design D10): the *expected* rule body is rendered from the
 current ``core.dispatch.Op`` enum + the resolved operator + the host's
-``hostname`` + ``[host].docker_unprivileged_user`` + the L0-resolved
+``hostname`` + the marker-sourced ``docker_unprivileged_user`` + the L0-resolved
 ``SYSTEMD_RUN_PATH`` (re-resolved here via
 :func:`core.setup.l0_identity.resolve_systemd_run_path` — orchestrator decision
 1; the phase-runner has no context bus, so re-resolution at render time IS the

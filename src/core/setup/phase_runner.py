@@ -465,8 +465,8 @@ class SandboxUserNotYetCreated(KeyError):
 def resolve_sandbox_pw(host_config: HostConfig) -> pwd.struct_passwd:
     """Resolve the sandbox user's passwd entry, raising the typed guard.
 
-    Wraps :func:`pwd.getpwnam` for the configured
-    ``[host].docker_unprivileged_user`` and re-raises a bare ``KeyError`` as
+    Wraps :func:`pwd.getpwnam` for the marker-sourced
+    ``docker_unprivileged_user`` and re-raises a bare ``KeyError`` as
     :class:`SandboxUserNotYetCreated` so probe call-sites can branch on the
     not-yet-created case via :func:`probe_sandbox_pw_or_missing`.
     """
