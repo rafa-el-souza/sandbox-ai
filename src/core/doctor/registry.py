@@ -31,6 +31,7 @@ from core.doctor.checks.per_user_tree import (
     check_legacy_registry_shape,
     check_legacy_sandboxes_dir_detected,
     check_legacy_workspace_in_user_project_root,
+    check_obsolete_host_toml,
     check_per_user_tree_exists,
     check_per_user_tree_mode,
 )
@@ -287,6 +288,14 @@ def build_check_registry(
             category="Per-User Tree",
             depends_on=[],
             run=check_legacy_cwd_files,
+            remediation="",
+        ),
+        Check(
+            id="obsolete_host_toml",
+            name="obsolete host toml",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_obsolete_host_toml,
             remediation="",
         ),
         # Chain 6: workspace bridge group + helper-recipe prereqs

@@ -80,12 +80,20 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
     del user, distro
     cwd = os.getcwd()
     home = sandbox_ai_home()
-    legacy: list[str] = []
-    if os.path.exists(os.path.join(cwd, "sandbox-ai.toml")):
-        legacy.append(os.path.join(cwd, "sandbox-ai.toml"))
-    if os.path.isdir(os.path.join(cwd, ".state")):
-        legacy.append(os.path.join(cwd, ".state"))
-    if not legacy:
+    messages: list[str] = []
+    legacy_toml = os.path.join(cwd, "sandbox-ai.toml")
+    legacy_state = os.path.join(cwd, ".state")
+    if os.path.exists(legacy_toml):
+        messages.append(
+            f"Found legacy {legacy_toml}. Per-host config is now setup-determined — "
+            "run `sudo sandbox setup`. Delete the legacy file."
+        )
+    if os.path.isdir(legacy_state):
+        messages.append(
+            f"Found legacy {legacy_state}. Orchestrator state now lives at "
+            f"{home / 'state'}. Migrate manually or delete the legacy directory."
+        )
+    if not messages:
         return CheckResult(
             status="pass",
             name="legacy CWD files",
@@ -94,11 +102,34 @@ def check_legacy_cwd_files(user: str, distro: str | None) -> CheckResult:
     return CheckResult(
         status="warn",
         name="legacy CWD files",
-        detail=f"Legacy files detected: {', '.join(legacy)}",
-        remediation=(
-            f"Per-host config now lives at {home / 'config' / 'sandbox-ai.toml'} and orchestrator state at "
-            f"{home / 'state'}. Migrate manually or delete the legacy files."
-        ),
+        detail=" ".join(messages),
+    )
+
+
+def check_obsolete_host_toml(user: str, distro: str | None) -> CheckResult:
+    """Warn when a leftover canonical ``<home>/config/sandbox-ai.toml`` exists.
+
+    ``sandbox-ai.toml`` is retired (the ``host-config`` capability): host facts
+    are now setup-determined and recorded by ``sudo sandbox setup``. A leftover
+    file at the canonical path is obsolete and should be deleted.
+    """
+    del user, distro
+    obsolete = sandbox_ai_home() / "config" / "sandbox-ai.toml"
+    if obsolete.exists():
+        return CheckResult(
+            status="warn",
+            name="obsolete host toml",
+            detail=(
+                f"Found an obsolete {obsolete}. Host config is now setup-determined — "
+                "delete this file and run `sudo sandbox setup`."
+            ),
+            category="Per-User Tree",
+        )
+    return CheckResult(
+        status="pass",
+        name="obsolete host toml",
+        detail="No obsolete canonical host config file detected",
+        category="Per-User Tree",
     )
 
 
@@ -183,6 +214,7 @@ __all__ = [
     "check_legacy_registry_shape",
     "check_legacy_sandboxes_dir_detected",
     "check_legacy_workspace_in_user_project_root",
+    "check_obsolete_host_toml",
     "check_per_user_tree_exists",
     "check_per_user_tree_mode",
 ]
