@@ -87,7 +87,6 @@ def test_resolve_operator_sudo_user_consistent(
 ) -> None:
     monkeypatch.setenv("SUDO_USER", "alice")
     monkeypatch.setenv("SUDO_UID", "1000")
-    monkeypatch.delenv("PKEXEC_UID", raising=False)
     monkeypatch.setattr("pwd.getpwnam", lambda n: _Pw(n, 1000))
     assert resolve_operator() == "alice"
 
@@ -116,26 +115,14 @@ def test_resolve_operator_sudo_uid_inconsistent(
         resolve_operator()
 
 
-def test_resolve_operator_pkexec(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_operator_pkexec_no_longer_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """$PKEXEC_UID is no longer a resolution source (C-012 retired polkit)."""
     monkeypatch.delenv("SUDO_USER", raising=False)
     monkeypatch.delenv("SUDO_UID", raising=False)
     monkeypatch.setenv("PKEXEC_UID", "1001")
-    monkeypatch.setattr("pwd.getpwuid", lambda u: _Pw("carol", u))
-    assert resolve_operator() == "carol"
-
-
-def test_resolve_operator_pkexec_unknown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("SUDO_USER", raising=False)
-    monkeypatch.delenv("SUDO_UID", raising=False)
-    monkeypatch.setenv("PKEXEC_UID", "4242")
-
-    def _boom(_u: int) -> _Pw:
-        raise KeyError(_u)
-
-    monkeypatch.setattr("pwd.getpwuid", _boom)
-    with pytest.raises(OperatorResolutionError, match="PKEXEC_UID"):
+    with pytest.raises(OperatorResolutionError, match="cannot resolve operator"):
         resolve_operator()
 
 
@@ -144,7 +131,6 @@ def test_resolve_operator_no_fallback(
 ) -> None:
     monkeypatch.delenv("SUDO_USER", raising=False)
     monkeypatch.delenv("SUDO_UID", raising=False)
-    monkeypatch.delenv("PKEXEC_UID", raising=False)
     with pytest.raises(OperatorResolutionError, match="cannot resolve operator"):
         resolve_operator()
 

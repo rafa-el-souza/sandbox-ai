@@ -1407,6 +1407,57 @@ def test_guard_refuses_operator_other_than_invoker_in_operator_rootless() -> Non
     assert "does not match the invoking user" in str(exc.value)
 
 
+def test_guard_refuses_sudo_user_invoker_mismatch_in_operator_rootless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sudo -u other` footgun: op-rootless $SUDO_USER ≠ invoking user is refused."""
+    monkeypatch.setenv("SUDO_USER", "someone-else")
+    with (
+        patch("cli.main.resolve_operator", return_value="someone-else"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_and_guard(
+            None,
+            mode_flag="operator-rootless",
+        )
+    assert "resolved the operator from $SUDO_USER='someone-else'" in str(exc.value)
+
+
+def test_guard_allows_matching_operator_flag_in_operator_rootless() -> None:
+    """op-rootless --operator == invoker passes both cross-checks (skips the
+    $SUDO_USER footgun branch, which is operator_flag-None-only)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+    ):
+        ctx = _build_and_guard(
+            "dev",
+            mode_flag="operator-rootless",
+        )
+    assert ctx.operator == "dev"
+
+
+def test_guard_allows_operator_other_than_invoker_in_separate_user() -> None:
+    """separate-user --operator <other> is the admin path; the op-rootless-only
+    cross-check must NOT fire (admin provisions for another)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="someone-else"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+    ):
+        ctx = _build_and_guard(
+            "someone-else",
+            mode_flag="separate-user",
+        )
+    assert ctx.operator == "someone-else"
+
+
 def test_guard_refuses_root_daemon_owner_separate_user() -> None:
     """A resolved daemon owner of root (uid 0) is refused (dangerous value)."""
     with (

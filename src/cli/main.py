@@ -2255,7 +2255,7 @@ def _run_setup_update_runsc(ctx: SetupContext) -> int:
 @app.command()
 def setup(
     operator: str | None = typer.Option(
-        None, "--operator", help="Operator user (precedence: this flag → $SUDO_USER → $PKEXEC_UID)"
+        None, "--operator", help="Operator user (precedence: this flag → $SUDO_USER)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Run only the plan pass; apply nothing"),
     yes: bool = typer.Option(
@@ -2475,7 +2475,7 @@ def _resolve_setup_operator(operator_flag: str | None) -> str:
     """Resolve the operator for ``sandbox setup``, euid-aware (D5/D7; §8-D).
 
     The canonical :func:`resolve_operator` precedence (``--operator`` →
-    ``$SUDO_USER`` → ``$PKEXEC_UID`` → refuse; no TTY heuristics) is specified
+    ``$SUDO_USER`` → refuse; no TTY heuristics) is specified
     **"when running as root"** — that is the separate-user path, used unchanged
     here. operator-rootless setup runs **non-root as the operator themselves**
     (D5): the invoking user IS the operator, and the spec's "Operator-Run
@@ -2580,6 +2580,20 @@ def _guard_setup_flags(
                 f"--operator '{operator_flag}' does not match the invoking user "
                 f"'{getpass.getuser()}'; operator-rootless setup provisions only for the invoker."
             )
+        # `sudo -u other sandbox setup` footgun: op-rootless resolves the operator
+        # from $SUDO_USER (the real sudo-invoker), but the daemon runs as
+        # getpass.getuser() (the euid user). A mismatch means the marker/operator
+        # and the actual daemon owner diverge — refuse rather than provision a
+        # split identity. (op-rootless-only; separate-user's --operator <other> is
+        # the legitimate admin-provisions-for-another path.)
+        if operator_flag is None:
+            sudo_user = os.environ.get("SUDO_USER")
+            if sudo_user is not None and sudo_user != getpass.getuser():
+                raise _SetupFlagRefused(
+                    f"operator-rootless setup resolved the operator from $SUDO_USER='{sudo_user}', "
+                    f"but the daemon would run as the invoking user '{getpass.getuser()}'. "
+                    "Run `sandbox setup` directly as the operator (no `sudo -u`)."
+                )
 
     owner = resolve_daemon_owner(host_config)
     if owner == "root" or _is_root_user(owner):
