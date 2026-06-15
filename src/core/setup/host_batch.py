@@ -59,7 +59,7 @@ from core.host_config import (
 from core.setup import l1_kernel, l2a_delegate
 from core.setup.l2_host_prereqs import gid_in_subgid_range
 from core.setup.subid import pick_free_subid_block
-from core.setup_state import read_mode, write_mode_root_owned
+from core.setup_state import read_entry, write_mode_root_owned
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -353,7 +353,12 @@ def _apply_marker(params: BatchParams) -> None:
     the root-owned marker write shared with separate-user setup): atomic content
     write + mode ``0644`` + ``chown root:root``.
     """
-    write_mode_root_owned(params.operator, params.mode)
+    write_mode_root_owned(
+        params.operator,
+        params.mode,
+        workspace_bridge_group=params.bridge_group,
+        workspace_bridge_gid=params.bridge_gid,
+    )
 
 
 # ``install_pinned`` reads no host-specific field (the reserved path is
@@ -454,7 +459,7 @@ def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], B
     Inspects the host and returns the **unsatisfied** batch items plus the
     computed :class:`BatchParams`. Reuses each phase's read-only probe logic
     (l1's sysctl compare, l2's subuid/group checks, l6a's runsc sha check,
-    ``setup_state.read_mode`` for the marker, the cgroup delegation read).
+    ``setup_state.read_entry`` for the marker, the cgroup delegation read).
     """
     operator = ctx.operator
     operator_uid = pwd.getpwnam(operator).pw_uid
@@ -487,7 +492,8 @@ def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], B
         unsatisfied.add(BatchItem.LINGER)
     if not _runsc_satisfied():
         unsatisfied.add(BatchItem.RUNSC)
-    if read_mode(operator) != mode:
+    entry = read_entry(operator)
+    if entry is None or entry.mode != mode:
         unsatisfied.add(BatchItem.MARKER)
 
     return frozenset(unsatisfied), params

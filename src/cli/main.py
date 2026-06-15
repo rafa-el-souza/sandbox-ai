@@ -2655,7 +2655,14 @@ def _record_separate_user_mode(ctx: SetupContext) -> None:
     is safe to call on both the apply-success and the nothing-to-apply paths
     (the latter also heals a host provisioned before the marker existed).
     """
-    write_mode_root_owned(ctx.operator, DockerExecutionMode.SEPARATE_USER)
+    host = ctx.host_config.host
+    write_mode_root_owned(
+        ctx.operator,
+        DockerExecutionMode.SEPARATE_USER,
+        workspace_bridge_group=host.workspace_bridge_group,
+        workspace_bridge_gid=workspace_bridge_gid(host),
+        docker_unprivileged_user=host.docker_unprivileged_user,
+    )
 
 
 def _setup_body(

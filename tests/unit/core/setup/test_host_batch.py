@@ -26,7 +26,7 @@ from core.setup.host_batch import (
     render_remediation_block,
 )
 from core.setup.phase_runner import SetupContext
-from core.setup_state import read_mode
+from core.setup_state import MarkerEntry, read_mode
 
 
 def _params(
@@ -100,7 +100,9 @@ def test_mid_batch_failure_never_writes_marker(monkeypatch: pytest.MonkeyPatch, 
 
     write_calls: list[tuple[str, DockerExecutionMode]] = []
 
-    def _spy_write_mode(operator: str, mode: DockerExecutionMode) -> None:
+    def _spy_write_mode(
+        operator: str, mode: DockerExecutionMode, **_facts: object
+    ) -> None:
         write_calls.append((operator, mode))
 
     # Spy the root-owned marker write that the real ``_apply_marker`` delegates to.
@@ -450,7 +452,16 @@ def _all_satisfied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_batch, "_delegation_present", lambda _u: True)
     monkeypatch.setattr(host_batch, "_linger_satisfied", lambda _o: True)
     monkeypatch.setattr(host_batch, "_runsc_satisfied", lambda: True)
-    monkeypatch.setattr(host_batch, "read_mode", lambda _o: DockerExecutionMode.OPERATOR_ROOTLESS)
+    monkeypatch.setattr(
+        host_batch,
+        "read_entry",
+        lambda op: MarkerEntry(
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            workspace_bridge_group=f"sb-ws-{op}",
+            workspace_bridge_gid=100500,
+            docker_unprivileged_user=None,
+        ),
+    )
     monkeypatch.setattr(
         host_batch, "autodetect_workspace_bridge_gid_recommendation", lambda _o: 100500
     )
@@ -507,7 +518,7 @@ def test_classifier_derives_per_operator_bridge_name_at_distinct_gids(
         ("_delegation_present", lambda _u: False, BatchItem.DELEGATE),
         ("_linger_satisfied", lambda _o: False, BatchItem.LINGER),
         ("_runsc_satisfied", lambda: False, BatchItem.RUNSC),
-        ("read_mode", lambda _o: None, BatchItem.MARKER),
+        ("read_entry", lambda _o: None, BatchItem.MARKER),
     ],
 )
 def test_classifier_includes_unsatisfied_item(
@@ -531,11 +542,43 @@ def test_classifier_delegation_present_excludes_delegate(monkeypatch: pytest.Mon
 
 def test_classifier_marker_mismatch_included(monkeypatch: pytest.MonkeyPatch) -> None:
     _all_satisfied(monkeypatch)
-    monkeypatch.setattr(host_batch, "read_mode", lambda _o: DockerExecutionMode.SEPARATE_USER)
+    monkeypatch.setattr(
+        host_batch,
+        "read_entry",
+        lambda op: MarkerEntry(
+            mode=DockerExecutionMode.SEPARATE_USER,
+            workspace_bridge_group=f"sb-ws-{op}",
+            workspace_bridge_gid=100500,
+            docker_unprivileged_user=None,
+        ),
+    )
 
     items, _ = classify_host_root_batch(_ctx())
 
     assert BatchItem.MARKER in items
+
+
+def test_classifier_legacy_mode_only_marker_re_provisions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A legacy mode-only entry (``read_entry`` → ``None``) → MARKER re-provisioned.
+
+    Even when the recorded mode matches, a C-004-era entry lacking the host facts
+    reads as not-yet-provisioned so ``_apply_marker`` rewrites the full entry.
+    """
+    _all_satisfied(monkeypatch)
+    monkeypatch.setattr(host_batch, "read_entry", lambda _o: None)
+
+    items, _ = classify_host_root_batch(_ctx())
+
+    assert BatchItem.MARKER in items
+
+
+def test_classifier_full_matching_entry_excludes_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full entry whose mode matches → MARKER satisfied (not re-provisioned)."""
+    _all_satisfied(monkeypatch)
+
+    items, _ = classify_host_root_batch(_ctx())
+
+    assert BatchItem.MARKER not in items
 
 
 def test_classifier_empty_distro_family(monkeypatch: pytest.MonkeyPatch) -> None:

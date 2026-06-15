@@ -856,7 +856,13 @@ def test_separate_user_apply_success_records_marker(
             app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
         )
     assert result.exit_code == 0
-    stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
+    stub_marker_write.assert_called_once_with(
+        "dev",
+        DockerExecutionMode.SEPARATE_USER,
+        workspace_bridge_group="sb-ws",
+        workspace_bridge_gid=100000,
+        docker_unprivileged_user="sandbox",
+    )
 
 
 def test_separate_user_failed_apply_does_not_record_marker(
@@ -899,7 +905,13 @@ def test_separate_user_nothing_to_apply_records_marker(
         )
     assert result.exit_code == 0
     apply_mock.assert_not_called()
-    stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
+    stub_marker_write.assert_called_once_with(
+        "dev",
+        DockerExecutionMode.SEPARATE_USER,
+        workspace_bridge_group="sb-ws",
+        workspace_bridge_gid=100000,
+        docker_unprivileged_user="sandbox",
+    )
 
 
 def test_yes_passes_assume_yes_to_distro_gate(runner: CliRunner) -> None:

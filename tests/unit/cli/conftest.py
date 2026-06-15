@@ -184,9 +184,13 @@ def stub_marker_write() -> object:
     ``cli.main._record_separate_user_mode`` calls ``write_mode_root_owned``, which
     ``chown``s the root-owned ``/usr/local/libexec/sandbox-ai/setup-state.json`` —
     not writable in a unit test. Patched to a no-op Mock; yielded so the tests
-    that assert the marker was recorded can inspect ``.call_args``.
+    that assert the marker was recorded can inspect ``.call_args``. The bridge-gid
+    resolver (``grp.getgrnam`` on the not-present ``sb-ws`` group) is also stubbed.
     """
-    with patch("cli.main.write_mode_root_owned") as mock:
+    with (
+        patch("cli.main.write_mode_root_owned") as mock,
+        patch("cli.main.workspace_bridge_gid", return_value=100000),
+    ):
         yield mock
 
 

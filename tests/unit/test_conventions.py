@@ -766,6 +766,8 @@ _DOCKER_USER_READ_ALLOWLIST: dict[str, frozenset[str]] = {
             "_build_attach_argv",  # separate-user ProxyCommand pipe_cmd crossing only
             "init",                # seeds + auth-probes the separate-user dedicated user
             "doctor",              # separate-user boundary validation (mode-awareness → C-005)
+            # separate-user marker's docker_unprivileged_user (D-A) — not owner-resolution
+            "_record_separate_user_mode",
         }
     ),
     "src/core/hydration.py": frozenset(),  # owner via resolve_daemon_owner_settings only
