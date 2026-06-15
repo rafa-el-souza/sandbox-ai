@@ -24,6 +24,8 @@ import pytest
 from core.exceptions import SandboxExecutionError
 from core.host_config import (
     DockerExecutionMode,
+    HostConfig,
+    HostSettings,
     machinectl_cmd,
     minimal_host_config,
     pipe_cmd,
@@ -1063,6 +1065,45 @@ def test_daemon_owner_user_operator_rootless_is_operator() -> None:
         operator="alice",
     )
     assert daemon_owner_user(ctx) == "alice"
+
+
+def _separate_user_none_ctx(operator: str = "op") -> SetupContext:
+    """A defensively-impossible separate-user ctx with a None daemon user.
+
+    Built via ``model_construct`` (bypasses the model-validator that forbids
+    separate-user + None) to exercise the fail-closed None-narrowing branches.
+    """
+    host = HostSettings.model_construct(
+        docker_unprivileged_user=None,
+        docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+    )
+    return SetupContext(
+        host_config=HostConfig.model_construct(host=host), operator=operator
+    )
+
+
+def test_daemon_owner_user_separate_user_none_raises() -> None:
+    """Fail-closed type-narrowing: separate-user + None daemon user → ValueError."""
+    with pytest.raises(ValueError, match="missing docker_unprivileged_user"):
+        daemon_owner_user(_separate_user_none_ctx())
+
+
+def test_route_sandbox_none_user_raises() -> None:
+    """Identity.SANDBOX with a None dedicated user → fail-closed ValueError."""
+    with pytest.raises(ValueError, match="requires docker_unprivileged_user"):
+        route(Identity.SANDBOX, _separate_user_none_ctx())
+
+
+def test_daemon_owner_crossing_separate_user_none_raises() -> None:
+    """separate-user crossing with a None dedicated user → fail-closed ValueError."""
+    with pytest.raises(ValueError, match="requires docker_unprivileged_user"):
+        daemon_owner_crossing(_separate_user_none_ctx())
+
+
+def test_resolve_sandbox_pw_none_user_raises() -> None:
+    """resolve_sandbox_pw with a None dedicated user → SandboxUserNotYetCreated."""
+    with pytest.raises(SandboxUserNotYetCreated, match="missing docker_unprivileged_user"):
+        resolve_sandbox_pw(_separate_user_none_ctx().host_config)
 
 
 def test_daemon_owner_crossing_separate_user_is_machinectl_cmd() -> None:

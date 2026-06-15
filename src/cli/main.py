@@ -3019,7 +3019,22 @@ def init(
 
     resolved_user: str
     if project_config is not None:
-        resolved_user = project_config.host.docker_unprivileged_user
+        # LITERAL toml-field read (init is allowlisted): project_config is a
+        # ``from_toml`` config whose carrier ``docker_execution_mode`` is the moot
+        # op-rootless default, so the actual owner resolution happens downstream via
+        # ``resolve_daemon_owner(minimal_host_config(resolved_user, probe_mode))``
+        # with the marker-resolved mode — NOT here. A user-less toml fails
+        # ``from_toml`` validation ("field required"), so the field is non-None;
+        # narrow fail-closed for the type.
+        toml_user = project_config.host.docker_unprivileged_user
+        if toml_user is None:
+            console.print(
+                "sandbox-ai.toml is missing [host].docker_unprivileged_user.",
+                style="red",
+                markup=False,
+            )
+            raise typer.Exit(code=1)
+        resolved_user = toml_user
     elif dry_run:
         resolved_user = "<dry-run>"
     else:
@@ -3843,8 +3858,23 @@ def doctor(
         resolved_user = getpass.getuser()
     elif project_config is not None:
         # Separate-user with a toml present: the dedicated daemon user (doctor is
-        # allowlisted for this separate-user read).
-        resolved_user = project_config.host.docker_unprivileged_user
+        # allowlisted for this separate-user read). This is a LITERAL toml-field
+        # read, NOT owner-resolution: project_config is a ``from_toml`` config whose
+        # in-memory ``docker_execution_mode`` is the moot carrier default
+        # (op-rootless), so routing through ``resolve_daemon_owner_settings`` would
+        # wrongly return ``getpass.getuser()`` — the dedicated toml user is what we
+        # want here. A user-less toml fails ``from_toml`` validation upstream
+        # ("field required"), so the field is non-None here; narrow fail-closed.
+        toml_user = project_config.host.docker_unprivileged_user
+        if toml_user is None:
+            console.print(
+                "sandbox-ai.toml is missing [host].docker_unprivileged_user "
+                "(required in separate-user mode). Pass --user or fix the file.",
+                style="red",
+                markup=False,
+            )
+            raise typer.Exit(code=1)
+        resolved_user = toml_user
     else:
         console.print(
             "No user specified (separate-user mode). Pass --user or create "

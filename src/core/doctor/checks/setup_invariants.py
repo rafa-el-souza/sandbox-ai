@@ -141,6 +141,14 @@ def _audit_daemon_user_no_admin(host_config: HostConfig, violations: list[str]) 
     from core.setup import l2_host_prereqs as l2
 
     daemon_user = host_config.host.docker_unprivileged_user
+    if daemon_user is None:
+        # Separate-user-only sub-audit (the caller runs it only after the
+        # op-rootless early-return); a separate-user config always carries the
+        # dedicated user. Narrow fail-closed for the Optional type — this is a
+        # literal dedicated-account read, NOT owner-resolution (do not route
+        # through resolve_daemon_owner_settings: that returns getuser() and would
+        # mis-audit when the carrier config defaults to op-rootless).
+        return
     admin_groups = l2.user_admin_groups(daemon_user)
     # The owner here is a *different* user (the dedicated daemon account), so the
     # policy query is ``sudo -n -l -U <daemon_user>`` — which needs root.
@@ -258,6 +266,11 @@ def _audit_rule_body(
     from core.setup import l3_sudoers as l3
 
     sandbox_user = host_config.host.docker_unprivileged_user
+    if sandbox_user is None:
+        # Separate-user-only sub-audit (reached only after the op-rootless
+        # early-return); narrow fail-closed for the Optional type. Literal
+        # dedicated-account read for the sudoers-rule body, NOT owner-resolution.
+        return
     try:
         systemd_run_path = l0.resolve_systemd_run_path(host_config)
     except l0.SystemdRunResolutionError:

@@ -57,6 +57,7 @@ from core.helper_container import hardened_docker_run
 from core.host_config import (
     is_operator_rootless,
     pipe_cmd,
+    resolve_daemon_owner_settings,
     sudo_pipe_cmd,
 )
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
@@ -1222,7 +1223,7 @@ def build_invocation(
     if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
     inner = dispatch_payload(op_value, wire_args)
-    user = host_config.host.docker_unprivileged_user
+    user = resolve_daemon_owner_settings(host_config.host)
     # SUDO crossings ride the privileged byte-pipe (design D2).
     crossing = sudo_pipe_cmd(user)
     return [
@@ -1278,7 +1279,7 @@ def proxy_argv(
     if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
     inner = dispatch_payload(resolved.value, wire_args)
-    user = host_config.host.docker_unprivileged_user
+    user = resolve_daemon_owner_settings(host_config.host)
     crossing = sudo_pipe_cmd(user)
     return [
         *crossing,
@@ -1760,7 +1761,7 @@ def compile_dispatcher(
     image = IMAGE_REGISTRY["golang_alpine"].pinned
     payload = _compile_payload(image, _dispatch_source_b64())
     cmd = [
-        *pipe_cmd(host_config.host.docker_unprivileged_user),
+        *pipe_cmd(resolve_daemon_owner_settings(host_config.host)),
         "/bin/bash",
         "-c",
         payload,

@@ -44,6 +44,7 @@ from core.host_config import (
     autodetect_workspace_bridge_gid_recommendation,
     parse_subgid_for_user,
     parse_subuid_for_user,
+    resolve_daemon_owner_settings,
 )
 from core.setup import subid
 from core.setup.phase_runner import Identity, Phase, PhaseResult
@@ -304,7 +305,7 @@ def _machined_active() -> bool:
 def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
     """Content-aware L2 probe (see module docstring)."""
     host_config = ctx.host_config
-    sandbox_user = host_config.host.docker_unprivileged_user
+    sandbox_user = resolve_daemon_owner_settings(host_config.host)
     bridge_group = host_config.host.workspace_bridge_group
     operator = ctx.operator
 
@@ -348,7 +349,7 @@ def _run(argv: list[str]) -> None:
 def _act(ctx: SetupContext) -> str:
     """Converge machined, the sandbox user, subid entries, sb-ws, membership."""
     host_config = ctx.host_config
-    sandbox_user = host_config.host.docker_unprivileged_user
+    sandbox_user = resolve_daemon_owner_settings(host_config.host)
     bridge_group = host_config.host.workspace_bridge_group
     operator = ctx.operator
     actions: list[str] = []
@@ -411,7 +412,7 @@ def _act(ctx: SetupContext) -> str:
 def _reverify(ctx: SetupContext) -> bool:
     """L2 converged iff machined active + user/group/membership/subid present."""
     host_config = ctx.host_config
-    sandbox_user = host_config.host.docker_unprivileged_user
+    sandbox_user = resolve_daemon_owner_settings(host_config.host)
     bridge_group = host_config.host.workspace_bridge_group
     operator = ctx.operator
     if not _machined_active():

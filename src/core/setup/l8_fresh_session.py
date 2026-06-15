@@ -51,7 +51,12 @@ from typing import TYPE_CHECKING
 from core.dispatch import Op, dispatch_payload
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, pipe_cmd, sudo_as_operator
+from core.host_config import (
+    DockerExecutionMode,
+    pipe_cmd,
+    resolve_daemon_owner_settings,
+    sudo_as_operator,
+)
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -131,7 +136,7 @@ def _check_dispatcher_reachable(
     ``sentinel=True`` made the authorized command unmatchable and silently
     failed this check for every SUDO-mode password-operator (F-018).
     """
-    sandbox_user = host_config.host.docker_unprivileged_user
+    sandbox_user = resolve_daemon_owner_settings(host_config.host)
     inner = dispatch_payload(Op.AUTH_PROBE.value, [])
     argv = [
         *sudo_as_operator(operator),

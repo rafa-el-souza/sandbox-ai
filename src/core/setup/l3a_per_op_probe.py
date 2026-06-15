@@ -90,7 +90,12 @@ from typing import TYPE_CHECKING
 from core.dispatch import Op, dispatch_payload
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, pipe_cmd, sudo_as_operator
+from core.host_config import (
+    DockerExecutionMode,
+    pipe_cmd,
+    resolve_daemon_owner_settings,
+    sudo_as_operator,
+)
 from core.setup.l0_identity import resolve_systemd_run_path
 from core.setup.l3_sudoers import drop_in_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
@@ -143,7 +148,7 @@ def _probe_argv(host_config: HostConfig, operator: str, op: Op) -> list[str]:
     transient-unit launcher whose ``--uid`` transient unit execs ``/bin/bash`` →
     dispatch — a NON-setuid binary — so the ``--uid`` unit does not EXIT_EXEC.
     """
-    sandbox_user = host_config.host.docker_unprivileged_user
+    sandbox_user = resolve_daemon_owner_settings(host_config.host)
     inner = dispatch_payload(op.value, ["--check"])
     return [
         *sudo_as_operator(operator),

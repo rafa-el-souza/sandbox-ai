@@ -186,6 +186,96 @@ class TestHostConfigFromToml:
             HostConfig.from_toml()
 
 
+class TestHostConfigFromMarker:
+    """HostConfig.from_marker() — additive marker-sourced builder (D-B)."""
+
+    def test_operator_rootless_entry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An op-rootless entry (no daemon user) maps onto HostSettings with None user."""
+        from core import setup_state
+
+        entry = setup_state.MarkerEntry(
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            workspace_bridge_group="sb-ws-alice",
+            workspace_bridge_gid=200999,
+            docker_unprivileged_user=None,
+        )
+        monkeypatch.setattr("core.setup_state.read_entry", lambda operator: entry)
+        host = HostConfig.from_marker("alice").host
+        assert host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
+        assert host.workspace_bridge_group == "sb-ws-alice"
+        assert host.docker_unprivileged_user is None
+
+    def test_separate_user_entry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A separate-user entry round-trips all three fields, incl. the daemon user."""
+        from core import setup_state
+
+        entry = setup_state.MarkerEntry(
+            mode=DockerExecutionMode.SEPARATE_USER,
+            workspace_bridge_group="sb-ws",
+            workspace_bridge_gid=200500,
+            docker_unprivileged_user="sandbox",
+        )
+        monkeypatch.setattr("core.setup_state.read_entry", lambda operator: entry)
+        host = HostConfig.from_marker("bob").host
+        assert host.docker_execution_mode == DockerExecutionMode.SEPARATE_USER
+        assert host.workspace_bridge_group == "sb-ws"
+        assert host.docker_unprivileged_user == "sandbox"
+
+    def test_absent_entry_raises_mode_marker_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An absent / no-entry / legacy marker (read_entry → None) fails closed."""
+        from core.setup_state import ModeMarkerMissing
+
+        monkeypatch.setattr("core.setup_state.read_entry", lambda operator: None)
+        with pytest.raises(ModeMarkerMissing, match="Run `sudo sandbox setup`"):
+            HostConfig.from_marker("carol")
+
+
+class TestDockerUnprivilegedUserOptional:
+    """The Optional docker_unprivileged_user field + mode-conditional model-validator."""
+
+    def test_separate_user_with_none_raises(self) -> None:
+        """separate-user REQUIRES a daemon user; None → ValidationError."""
+        with pytest.raises(ValidationError, match="required in separate-user mode"):
+            HostSettings(
+                docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+                docker_unprivileged_user=None,
+            )
+
+    def test_operator_rootless_with_none_constructs(self) -> None:
+        """operator-rootless tolerates None (the operator is the owner)."""
+        host = HostSettings(
+            docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            docker_unprivileged_user=None,
+        )
+        assert host.docker_unprivileged_user is None
+
+
+class TestResolveDaemonOwnerSettingsNarrowing:
+    """resolve_daemon_owner_settings() type-narrowing fail-closed (Group 7)."""
+
+    def test_separate_user_none_raises(self) -> None:
+        """The defensively-unreachable separate-user+None object raises, not asserts."""
+        from core.host_config import resolve_daemon_owner_settings
+
+        host = HostSettings.model_construct(
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+            docker_unprivileged_user=None,
+        )
+        with pytest.raises(ValueError, match="missing docker_unprivileged_user"):
+            resolve_daemon_owner_settings(host)
+
+    def test_operator_rootless_none_returns_invoking_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """op-rootless + None (via model_construct) returns the invoking user, no raise."""
+        from core.host_config import resolve_daemon_owner_settings
+
+        monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
+        host = HostSettings.model_construct(
+            docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            docker_unprivileged_user=None,
+        )
+        assert resolve_daemon_owner_settings(host) == "alice"
+
+
 class TestHostSettingsModel:
     """HostSettings nested model structure."""
 

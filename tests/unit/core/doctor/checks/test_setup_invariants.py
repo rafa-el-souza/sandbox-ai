@@ -458,6 +458,22 @@ class TestAuditDaemonUserNoAdmin:
         # Separate-user owner is a DIFFERENT user → self_query=False (needs root).
         assert seen_policy == [("dockerd-svc", False)]
 
+    def test_none_daemon_user_returns_no_violation(self) -> None:
+        """Fail-closed type-narrowing: a separate-user config with a None daemon
+        user (built via model_construct, bypassing the validator) returns early
+        with no violation rather than crashing."""
+        from core.doctor.checks import setup_invariants as m
+        from core.host_config import DockerExecutionMode, HostConfig, HostSettings
+
+        host = HostSettings.model_construct(
+            docker_unprivileged_user=None,
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
+        hc = HostConfig.model_construct(host=host)
+        v: list[str] = []
+        m._audit_daemon_user_no_admin(hc, v)
+        assert v == []
+
 
 class TestDaemonUserNoAdminInCheck:
     """The folded audit surfaces through the top-level separate-user verdict."""
@@ -671,6 +687,21 @@ class TestAuditRuleBody:
         body = render_sudoers_rule("/usr/bin/systemd-run", "alice", socket.gethostname(), "sandbox")
         v: list[str] = []
         m._audit_rule_body(self._hc(), "alice", body, v)
+        assert v == []
+
+    def test_none_daemon_user_returns_early(self) -> None:
+        """Fail-closed type-narrowing: a separate-user config with a None daemon
+        user (model_construct, bypassing the validator) returns early, no crash."""
+        from core.doctor.checks import setup_invariants as m
+        from core.host_config import DockerExecutionMode, HostConfig, HostSettings
+
+        host = HostSettings.model_construct(
+            docker_unprivileged_user=None,
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
+        hc = HostConfig.model_construct(host=host)
+        v: list[str] = []
+        m._audit_rule_body(hc, "alice", "irrelevant body", v)
         assert v == []
 
     def test_double_quote_flagged(self, monkeypatch: Any) -> None:

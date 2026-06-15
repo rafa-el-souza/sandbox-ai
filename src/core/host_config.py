@@ -19,7 +19,7 @@ import tomllib
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, model_validator
 
 from core.exceptions import SandboxExecutionError
 
@@ -153,25 +153,35 @@ DEFAULT_PROVISIONING_MODE = DockerExecutionMode.OPERATOR_ROOTLESS
 class HostSettings(BaseModel):
     """[host] section of sandbox-ai.toml."""
 
-    docker_unprivileged_user: str
+    docker_unprivileged_user: str | None
 
-    @field_validator("docker_unprivileged_user")
-    @classmethod
-    def _validate_docker_unprivileged_user(cls, value: str) -> str:
-        """Enforce the POSIX-portable username grammar (M-1).
+    @model_validator(mode="after")
+    def _validate_docker_unprivileged_user(self) -> HostSettings:
+        """Enforce mode-conditional presence + POSIX grammar for the daemon user (M-1).
 
-        The value flows into the ``--uid={user}`` crossing operand and the
-        sudoers ``Cmnd_Spec``; reject empty / spaces / uppercase / shell- or
-        sudoers-metacharacters before it can corrupt a rendered rule.
+        ``docker_unprivileged_user`` is required-but-nullable: separate-user MUST
+        carry a daemon user (the dedicated unprivileged owner), while
+        operator-rootless tolerates ``None`` (the operator IS the owner, resolved
+        at runtime via :func:`getpass.getuser`). When present, the value flows
+        into the ``--uid={user}`` crossing operand and the sudoers ``Cmnd_Spec``,
+        so reject empty / spaces / uppercase / shell- or sudoers-metacharacters
+        before it can corrupt a rendered rule.
         """
-        if USERNAME_RE.match(value) is None:
+        if self.docker_unprivileged_user is None:
+            if self.docker_execution_mode is DockerExecutionMode.SEPARATE_USER:
+                raise ValueError(
+                    "docker_unprivileged_user is required in separate-user mode "
+                    "(the dedicated unprivileged daemon owner)"
+                )
+            return self
+        if USERNAME_RE.match(self.docker_unprivileged_user) is None:
             raise ValueError(
-                f"docker_unprivileged_user {value!r} is not a valid POSIX username "
+                f"docker_unprivileged_user {self.docker_unprivileged_user!r} is not a valid POSIX username "
                 f"(must match {USERNAME_RE.pattern}: lowercase/underscore start, "
                 f"then [a-z0-9_-], max 32 chars — no spaces, uppercase, or "
                 f"shell/sudoers metacharacters)"
             )
-        return value
+        return self
     # In-memory carrier ONLY (D11): the execution mode is NOT a user-editable toml
     # field — it is setup-determined and resolved at runtime from the per-operator
     # marker (``core.setup_state.resolve_execution_mode``). ``from_toml`` rejects a
@@ -215,6 +225,44 @@ class HostConfig(BaseModel):
             )
         return cls.model_validate(raw)
 
+    @classmethod
+    def from_marker(cls, operator: str) -> HostConfig:
+        """Build a HostConfig from the per-operator setup-state marker (D-B).
+
+        ADDITIVE: the structural sibling of :meth:`from_toml` that reads the
+        root-owned setup-state marker instead of toml. The runtime overlay
+        rewires to this in a later group; ``from_toml`` remains the live path
+        until then.
+
+        Maps the marker entry's setup-determined host facts onto
+        :class:`HostSettings`: ``mode → docker_execution_mode``,
+        ``workspace_bridge_group → workspace_bridge_group``, and
+        ``docker_unprivileged_user`` (``None`` for operator-rootless). The
+        marker's ``workspace_bridge_gid`` is NOT consumed here — the bridge gid
+        is re-resolved at runtime via :func:`grp.getgrnam`.
+
+        Raises:
+            ModeMarkerMissing: The marker is absent, has no entry for
+                ``operator``, or carries a legacy mode-only record. Fail-closed
+                so the caller surfaces "run `sudo sandbox setup` first".
+        """
+        # function-local import — one-way dep (setup_state imports host_config),
+        # so a module-level import here would re-create the cycle.
+        from core.setup_state import ModeMarkerMissing, read_entry
+
+        entry = read_entry(operator)
+        if entry is None:
+            raise ModeMarkerMissing(
+                f"no setup-state entry for operator {operator!r}. Run `sudo sandbox setup` first."
+            )
+        return cls(
+            host=HostSettings(
+                docker_unprivileged_user=entry.docker_unprivileged_user,  # None for op-rootless
+                docker_execution_mode=entry.mode,
+                workspace_bridge_group=entry.workspace_bridge_group,
+            )
+        )
+
 
 def minimal_host_config(
     user: str, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
@@ -252,6 +300,8 @@ def resolve_daemon_owner_settings(host: HostSettings) -> str:
     """
     if host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS:
         return getpass.getuser()
+    if host.docker_unprivileged_user is None:
+        raise ValueError("separate-user host config is missing docker_unprivileged_user")
     return host.docker_unprivileged_user
 
 

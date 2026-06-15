@@ -2758,6 +2758,26 @@ class TestDoctorHostConfig:
             mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
             mock_run.assert_called_once_with([], "fromtoml", None, DockerExecutionMode.SEPARATE_USER)
 
+    def test_doctor_none_toml_user_separate_user_errors(self, runner: CliRunner) -> None:
+        """Fail-closed: a separate-user doctor whose toml config carries a None
+        docker_unprivileged_user (model_construct, bypassing the validator) exits 1
+        with a clear message rather than crossing into a None user."""
+        from cli.main import app
+        from core.host_config import DockerExecutionMode, HostConfig, HostSettings
+
+        host = HostSettings.model_construct(
+            docker_unprivileged_user=None,
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
+        mock_pc = HostConfig.model_construct(host=host)
+        with (
+            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
+        ):
+            r = runner.invoke(app, ["doctor"])
+        assert r.exit_code == 1
+        assert "docker_unprivileged_user" in r.output
+
     def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
         from cli.main import app
         from core.doctor import CheckResult
@@ -2991,6 +3011,23 @@ class TestInitHappyPath:
         assert result.exit_code == 1
         assert "docker_execution_mode is no longer" in result.output
         assert not isinstance(result.exception, ValueError)  # surfaced, not propagated
+
+    def test_init_none_toml_user_errors(self, runner: CliRunner) -> None:
+        """Fail-closed: a toml config carrying a None docker_unprivileged_user
+        (model_construct, bypassing the validator) exits 1 with a clear message
+        rather than resolving the daemon user to None."""
+        from cli.main import app
+        from core.host_config import DockerExecutionMode, HostConfig, HostSettings
+
+        host = HostSettings.model_construct(
+            docker_unprivileged_user=None,
+            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+        )
+        mock_pc = HostConfig.model_construct(host=host)
+        with patch("cli.main.HostConfig.from_toml", return_value=mock_pc):
+            result = runner.invoke(app, ["init", "newproject"])
+        assert result.exit_code == 1
+        assert "docker_unprivileged_user" in result.output
 
     def test_init_creates_instance(self, runner: CliRunner) -> None:
         """init scaffolds a new instance successfully."""
