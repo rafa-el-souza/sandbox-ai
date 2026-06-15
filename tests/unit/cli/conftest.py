@@ -16,7 +16,7 @@ Provides:
 - ``_stop_warm_check`` (autouse) — patches ``cli.main._warm_check`` to
   return False; opt-out via ``@pytest.mark.no_warm_mock``.
 - ``_resolve_host_config_default`` (autouse) — patches
-  ``cli.main.HostConfig.from_toml``; opt-out via
+  ``cli.main.HostConfig.from_marker``; opt-out via
   ``@pytest.mark.no_host_config_mock``.
 - ``runner`` — a fresh ``CliRunner`` per test.
 """
@@ -151,7 +151,7 @@ def _pass_check(name: str) -> object:
 
 @pytest.fixture(autouse=True)
 def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
-    """Tests that exercise ``HostConfig.from_toml`` directly mark themselves
+    """Tests that exercise ``HostConfig.from_marker`` directly mark themselves
     with ``@pytest.mark.no_host_config_mock`` to bypass this autouse patch.
     """
     if "no_host_config_mock" in request.keywords:
@@ -159,33 +159,20 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
         return
     from core.host_config import DockerExecutionMode, HostConfig
 
-    cfg = HostConfig.model_validate(
-        {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
-    )
-    # The runtime command path now resolves the host config from the per-operator
-    # setup-state marker (D-B) via ``_resolve_full_host_config`` → ``from_marker``;
-    # the marker-carrying separate-user config stubs that read. ``from_toml`` is
-    # still patched because init/doctor read host config through it until their
-    # own rewires land (Groups 9/10). ``resolve_execution_mode`` is still patched
-    # because init's probe_mode + doctor read the mode through it. The marker lives
-    # at a root-owned ``/usr/local/libexec`` path absent in tests, so the resolver
-    # is stubbed to the default separate-user mode; op-rootless tests override it
-    # (or use ``@pytest.mark.no_host_config_mock``).
-    marker_cfg = cfg.model_copy(
-        update={
-            "host": cfg.host.model_copy(
-                update={"docker_execution_mode": DockerExecutionMode.SEPARATE_USER}
-            )
+    # The runtime/init/doctor command paths resolve the host config from the
+    # per-operator setup-state marker (D-B) via ``HostConfig.from_marker``. The
+    # marker lives at a root-owned ``/usr/local/libexec`` path absent in tests, so
+    # ``from_marker`` is stubbed to a healthy separate-user marker config;
+    # op-rootless tests override it (or use ``@pytest.mark.no_host_config_mock``).
+    marker_cfg = HostConfig.model_validate(
+        {
+            "host": {
+                "docker_unprivileged_user": "sandbox",
+                "docker_execution_mode": DockerExecutionMode.SEPARATE_USER,
+            }
         }
     )
-    with (
-        patch("cli.main.HostConfig.from_toml", return_value=cfg),
-        patch("cli.main.HostConfig.from_marker", return_value=marker_cfg),
-        patch(
-            "cli.main.resolve_execution_mode",
-            return_value=DockerExecutionMode.SEPARATE_USER,
-        ),
-    ):
+    with patch("cli.main.HostConfig.from_marker", return_value=marker_cfg):
         yield
 
 

@@ -39,6 +39,7 @@ from core.actions import (
 )
 from core.crypto import generate_credential, generate_ssh_keypair, hash_proxy_password, write_htpasswd
 from core.doctor import (
+    CheckResult,
     build_check_registry,
     detect_distro,
     evaluate_preflight_gate,
@@ -103,7 +104,6 @@ from core.setup.phase_runner import SetupContext, run_apply_pass, run_plan_pass
 from core.setup_state import (
     ModeMarkerMissing,
     read_mode,
-    resolve_execution_mode,
     write_mode_root_owned,
 )
 from core.walker import BoundaryPathError as WalkerBoundaryPathError
@@ -2508,8 +2508,8 @@ def _build_setup_context_with_operator(
     """Build the per-run :class:`SetupContext` for ``sandbox setup``.
 
     Setup is **toml-free** (D8): it builds ``host_config`` purely from flags +
-    documented defaults and never reads ``<sandbox_ai_home()>/config/
-    sandbox-ai.toml`` (``HostConfig.from_toml``). This is the core G1 fix — a
+    documented defaults and never reads any per-user
+    ``<sandbox_ai_home()>/config/sandbox-ai.toml``. This is the core G1 fix — a
     toml read here resolved to root's ``/root/.sandbox-ai`` (setup runs as root
     in separate-user mode), so an operator's real toml override never reached
     setup. The daemon user and execution mode are **explicit inputs** via flags
@@ -3737,74 +3737,38 @@ def doctor(
     user: str | None = typer.Option(None, "--user", help="Unprivileged user to validate"),
 ) -> None:
     """Run host readiness diagnostics."""
-    project_config: HostConfig | None = None
-    try:
-        project_config = HostConfig.from_toml()
-    except FileNotFoundError:
-        pass
-    except ValueError as exc:
-        # A malformed managed toml (ValidationError / TOMLDecodeError / the D11
-        # removed-field rejection — all ValueError) is a real error, not "absent";
-        # surface it cleanly rather than as an uncaught traceback.
-        console.print(str(exc), style="red", markup=False)
-        raise typer.Exit(code=1) from None
+    console.print(f"Per-user home: {sandbox_ai_home()}")
+    distro = detect_distro()
 
-    # Resolve the active execution mode from the root-owned setup marker (the
-    # single runtime authority, C-004) BEFORE the user, so user resolution can be
-    # mode-aware. The marker read is toml-independent — an un-setup host has no
-    # marker entry → fall back to ``DEFAULT_PROVISIONING_MODE`` (operator-rootless,
-    # the single system-wide default — F-051). This is load-bearing for a FRESH
-    # host: under the old separate-user fallback, a host with no marker AND no toml
-    # AND no ``--user`` hard-failed at the "No user specified" guard below, unable
-    # to run even the mode-invariant checks. Operator-rootless resolves the owner
-    # as the invoking operator (toml-free), so doctor RUNS. The marker is the
-    # authority once setup writes it; the fallback only governs the not-yet-setup
-    # window. The operator is the current real user, exactly how the rest of doctor
-    # resolves the invoker.
     try:
-        mode = resolve_execution_mode(getpass.getuser())
+        host_config = HostConfig.from_marker(getpass.getuser())
     except ModeMarkerMissing:
-        mode = DEFAULT_PROVISIONING_MODE
-
-    if user is not None:
-        # Explicit --user wins in both modes.
-        resolved_user = user
-    elif mode is DockerExecutionMode.OPERATOR_ROOTLESS:
-        # Operator-rootless: the daemon owner IS the invoking operator, so no toml
-        # / docker_unprivileged_user is needed (this equals resolve_daemon_owner in
-        # op-rootless). Do NOT read host.docker_unprivileged_user here (D7 guard).
-        resolved_user = getpass.getuser()
-    elif project_config is not None:
-        # Separate-user with a toml present: the dedicated daemon user (doctor is
-        # allowlisted for this separate-user read). This is a LITERAL toml-field
-        # read, NOT owner-resolution: project_config is a ``from_toml`` config whose
-        # in-memory ``docker_execution_mode`` is the moot carrier default
-        # (op-rootless), so routing through ``resolve_daemon_owner_settings`` would
-        # wrongly return ``getpass.getuser()`` — the dedicated toml user is what we
-        # want here. A user-less toml fails ``from_toml`` validation upstream
-        # ("field required"), so the field is non-None here; narrow fail-closed.
-        toml_user = project_config.host.docker_unprivileged_user
-        if toml_user is None:
-            console.print(
-                "sandbox-ai.toml is missing [host].docker_unprivileged_user "
-                "(required in separate-user mode). Pass --user or fix the file.",
-                style="red",
-                markup=False,
-            )
-            raise typer.Exit(code=1)
-        resolved_user = toml_user
-    else:
+        # Unprovisioned host (D-E): the host has not been set up for the invoking
+        # operator. Do NOT guess a mode. Run the mode-INVARIANT checks
+        # (filesystem, repo-integrity, per-user-tree) against a mode-independent
+        # owner and synthesize an explicit "not set up yet" mode-skip for every
+        # mode-SPECIFIC check — no mode-specific check reports PASS or FAIL on an
+        # unprovisioned host. No user-facing string names the marker.
+        resolved_user = user if user is not None else getpass.getuser()
+        results = _run_unprovisioned_doctor(resolved_user, distro)
         console.print(
-            "No user specified (separate-user mode). Pass --user or create "
-            "sandbox-ai.toml with [host].docker_unprivileged_user.",
-            style="red",
+            "Note: this host isn't set up yet — run `sudo sandbox setup`.",
+            style="yellow",
             markup=False,
         )
-        raise typer.Exit(code=1)
+        render_results(results, console=console)
+        if any(r.status == "fail" for r in results):
+            raise typer.Exit(code=1) from None
+        return
 
-    console.print(f"Per-user home: {sandbox_ai_home()}")
+    # Provisioned host: the marker is the authority for the mode AND the daemon
+    # owner. ``--user`` still wins; otherwise resolve the owner from the marker
+    # config (op-rootless → the invoking operator; separate-user → the marker's
+    # recorded daemon user) via ``resolve_daemon_owner`` — never a literal
+    # ``docker_unprivileged_user`` read (D7).
+    mode = host_config.host.docker_execution_mode
+    resolved_user = user if user is not None else resolve_daemon_owner(host_config)
 
-    distro = detect_distro()
     checks = build_check_registry(mode)
     results = run_checks(checks, resolved_user, distro, mode)
     render_results(results, console=console)
@@ -3812,6 +3776,45 @@ def doctor(
     has_failures = any(r.status == "fail" for r in results)
     if has_failures:
         raise typer.Exit(code=1)
+
+
+# The doctor categories that behave identically in BOTH execution modes — they do
+# not depend on the machinectl crossing or the dedicated daemon user. On an
+# unprovisioned host these are the only checks doctor can run without guessing a
+# mode; every OTHER check is a mode-specific "not set up yet" skip.
+_MODE_INVARIANT_DOCTOR_CATEGORIES = ["Filesystem", "Repo Integrity", "Per-User Tree"]
+
+
+def _run_unprovisioned_doctor(resolved_user: str, distro: str | None) -> list[CheckResult]:
+    """Build the doctor results for a host with no setup-state marker (D-E).
+
+    Runs the mode-invariant subset (which CAN fail → exit 1) and synthesizes an
+    explicit "not set up yet" mode-skip for every mode-specific check. The
+    mode-invariant categories are both-mode, so the ``mode`` arg is immaterial;
+    ``DEFAULT_PROVISIONING_MODE`` is passed only to satisfy the runner signature.
+    The per-user-tree chain is self-contained within the subset (its
+    ``depends_on`` edges resolve internally), so no ``exclude_ids`` is needed.
+    """
+    invariant_results = run_check_subset(
+        _MODE_INVARIANT_DOCTOR_CATEGORIES,
+        resolved_user,
+        distro,
+        mode=DEFAULT_PROVISIONING_MODE,
+    )
+    # Enumerate the mode-SPECIFIC checks: the full registry minus the invariant
+    # categories. Each is surfaced as an explicit "not set up yet" skip so no
+    # crossing/docker/dispatcher check reads as a false green under a guessed mode.
+    invariant = set(_MODE_INVARIANT_DOCTOR_CATEGORIES)
+    skips = [
+        CheckResult(
+            status="skip",
+            name=check.name,
+            detail="not set up yet — run `sudo sandbox setup`",
+        )
+        for check in build_check_registry(DEFAULT_PROVISIONING_MODE)
+        if check.category not in invariant
+    ]
+    return [*invariant_results, *skips]
 
 
 def _workspace_state_label(ws_path: str, host_settings: HostSettings) -> str:

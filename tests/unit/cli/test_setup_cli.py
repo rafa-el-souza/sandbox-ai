@@ -1151,12 +1151,12 @@ def test_sigint_handler_callback_raises_setup_aborted(
 @pytest.mark.no_host_config_mock
 def test_setup_is_toml_free(runner: CliRunner) -> None:
     """D8 regression: setup builds host_config from flags + defaults and NEVER
-    reads the operator toml (`HostConfig.from_toml`).
+    reads a per-user toml.
 
-    The pre-fix tree called `HostConfig.from_toml()` on the setup path (resolving
-    to root's `/root/.sandbox-ai`); patching it to fail-on-call demonstrates the
-    read is gone. The config still comes from the documented default
-    (`docker_unprivileged_user="sandbox"`) and the resolved operator.
+    The host toml loader has been retired entirely (`from_toml` deleted); this
+    asserts the surviving behavior — the config comes from the documented default
+    (`docker_unprivileged_user="sandbox"`) and the resolved operator, not any
+    per-user file.
     """
     phases = [_phase("l0")]
     plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
@@ -1168,15 +1168,11 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
         captured.append(ctx)
         return plan
 
-    def _explode() -> object:
-        raise AssertionError("setup must not read the operator toml (D8)")
-
     with (
         patch("cli.main.os.geteuid", return_value=0),
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.emit_distro_gate"),
         patch("cli.main.selected_extras", return_value=[]),
-        patch("cli.main.HostConfig.from_toml", side_effect=_explode),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
         patch("cli.main.run_plan_pass", side_effect=_capture),
         patch("cli.main._stdin_is_tty", return_value=True),

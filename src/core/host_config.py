@@ -1,10 +1,12 @@
 # Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
-"""Project-wide configuration: sandbox-ai.toml schema, loader, and machinectl command builder.
+"""Project-wide configuration: the per-host config schema, loader, and machinectl command builder.
 
-Defines the project-root configuration that holds host-level settings
-(docker unprivileged user, machinectl authentication mode). Consumed by
-CLI commands and the doctor module to determine privilege escalation
-strategy for machinectl invocations.
+Defines the per-host configuration that holds host-level settings (docker
+unprivileged user, execution mode, workspace bridge group). The host facts are
+setup-determined and sourced from the root-owned setup-state marker (written by
+``sudo sandbox setup``) via :meth:`HostConfig.from_marker` — there is no
+user-editable host toml. Consumed by CLI commands and the doctor module to
+determine the privilege-crossing strategy for machinectl invocations.
 
 Also exposes subuid/subgid resolvers and the workspace bridge group helpers
 used by the helper-container ACL/ownership recipes.
@@ -15,7 +17,6 @@ import grp
 import os
 import pwd
 import re
-import tomllib
 from enum import StrEnum
 from pathlib import Path
 
@@ -151,7 +152,7 @@ DEFAULT_PROVISIONING_MODE = DockerExecutionMode.OPERATOR_ROOTLESS
 
 
 class HostSettings(BaseModel):
-    """[host] section of sandbox-ai.toml."""
+    """Per-host settings, sourced from the setup-state marker (not a toml)."""
 
     docker_unprivileged_user: str | None
 
@@ -182,57 +183,27 @@ class HostSettings(BaseModel):
                 f"shell/sudoers metacharacters)"
             )
         return self
-    # In-memory carrier ONLY (D11): the execution mode is NOT a user-editable toml
-    # field — it is setup-determined and resolved at runtime from the per-operator
-    # marker (``core.setup_state.resolve_execution_mode``). ``from_toml`` rejects a
-    # toml that sets it; the field is populated programmatically (by setup, by
-    # ``minimal_host_config``, and by the runtime overlay in ``cli.main``).
+    # Setup-determined (D11): the execution mode is NOT a user-editable field — it
+    # is recorded in the per-operator setup-state marker by ``sudo sandbox setup``
+    # and reaches the runtime via ``HostConfig.from_marker``. The field is
+    # populated programmatically (by setup, by ``minimal_host_config``, and by
+    # ``from_marker``), never from a host toml.
     docker_execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
     workspace_bridge_group: str = "sb-ws"
 
 
 class HostConfig(BaseModel):
-    """Top-level Pydantic model for sandbox-ai.toml."""
+    """Top-level per-host config model, loaded from the setup-state marker."""
 
     host: HostSettings
-
-    @classmethod
-    def from_toml(cls) -> HostConfig:
-        """Parse the canonical per-user ``sandbox-ai.toml``.
-
-        Resolves ``<sandbox_ai_home()>/config/sandbox-ai.toml``.
-
-        Raises:
-            FileNotFoundError: If the canonical file does not exist.
-            tomllib.TOMLDecodeError: If the file contains invalid TOML.
-            pydantic.ValidationError: If the content fails schema validation.
-            ValueError: If the ``[host]`` table sets ``docker_execution_mode`` —
-                that field is setup-determined (the per-operator marker), not a
-                user-editable toml value (D11).
-        """
-        path = sandbox_ai_home() / "config" / "sandbox-ai.toml"
-        try:
-            with open(path, "rb") as f:
-                raw = tomllib.load(f)
-        except FileNotFoundError as exc:
-            raise FileNotFoundError(f"No sandbox-ai.toml found at {path}. Run sandbox init to create one.") from exc
-        host_table = raw.get("host")
-        if isinstance(host_table, dict) and "docker_execution_mode" in host_table:
-            raise ValueError(
-                f"docker_execution_mode is no longer a sandbox-ai.toml field; it is "
-                f"setup-determined (the per-operator setup-state marker). Remove it "
-                f"from {path} and rerun `sudo sandbox setup` to change the mode."
-            )
-        return cls.model_validate(raw)
 
     @classmethod
     def from_marker(cls, operator: str) -> HostConfig:
         """Build a HostConfig from the per-operator setup-state marker (D-B).
 
-        ADDITIVE: the structural sibling of :meth:`from_toml` that reads the
-        root-owned setup-state marker instead of toml. The runtime overlay
-        rewires to this in a later group; ``from_toml`` remains the live path
-        until then.
+        The sole loader for the per-host config: the host facts are
+        setup-determined and recorded in the root-owned setup-state marker (by
+        ``sudo sandbox setup``), never a user-editable toml.
 
         Maps the marker entry's setup-determined host facts onto
         :class:`HostSettings`: ``mode → docker_execution_mode``,

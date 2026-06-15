@@ -130,37 +130,26 @@ def stub_bridge_resolution() -> typing.Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _default_project_config() -> typing.Iterator[None]:
-    """Auto-supply a default sandbox-ai.toml so post-init commands don't exit early.
+    """Auto-supply a default marker host config so post-init commands don't exit early.
 
-    `_resolve_host_config` now requires `sandbox-ai.toml` (no fallback). Tests
-    that are not specifically about the missing-config path get a default
-    `HostConfig` injected here. Tests that need a different value or want to
-    exercise the FileNotFoundError path can re-patch in their own `with patch(...)`
-    block — pytest's mock stacks override this autouse fixture.
+    Runtime/init/doctor commands read host config from the per-operator
+    setup-state marker (``HostConfig.from_marker``), which carries the
+    setup-determined mode. The default runtime mode here is separate-user. Tests
+    that need a different value or want to exercise the ``ModeMarkerMissing`` path
+    re-patch in their own ``with patch(...)`` block — pytest's mock stacks
+    override this autouse fixture.
     """
     from core.host_config import DockerExecutionMode, HostConfig
 
-    default = HostConfig.model_validate(
-        {"host": {"docker_unprivileged_user": HOST_USER, "machinectl_authentication": "sudo"}}
-    )
-    # Runtime commands now read host config from the per-operator marker
-    # (``from_marker``), which carries the setup-determined mode. The default
-    # runtime mode here is separate-user — matching the prior behavior where the
-    # autouse ``resolve_execution_mode`` stub overlaid SEPARATE_USER. init/doctor
-    # still read host config via ``from_toml`` (default op-rootless carrier) until
-    # their own rewires land. Patch both so post-init commands don't exit early;
-    # tests that exercise a specific path re-patch in their own ``with patch(...)``.
-    marker_default = default.model_copy(
-        update={
-            "host": default.host.model_copy(
-                update={"docker_execution_mode": DockerExecutionMode.SEPARATE_USER}
-            )
+    marker_default = HostConfig.model_validate(
+        {
+            "host": {
+                "docker_unprivileged_user": HOST_USER,
+                "docker_execution_mode": DockerExecutionMode.SEPARATE_USER,
+            }
         }
     )
-    with (
-        patch("cli.main.HostConfig.from_toml", return_value=default),
-        patch("cli.main.HostConfig.from_marker", return_value=marker_default),
-    ):
+    with patch("cli.main.HostConfig.from_marker", return_value=marker_default):
         yield
 
 
@@ -1268,7 +1257,6 @@ def _operator_rootless_config() -> HostConfig:
         {
             "host": {
                 "docker_unprivileged_user": HOST_USER,
-                "machinectl_authentication": "sudo",
                 "docker_execution_mode": "operator-rootless",
             }
         }
@@ -1287,7 +1275,6 @@ class TestResolveFullHostConfigReadsMarker:
             {
                 "host": {
                     "docker_unprivileged_user": "sandbox",
-                    "machinectl_authentication": "sudo",
                     "docker_execution_mode": "operator-rootless",
                 }
             }
@@ -1295,17 +1282,13 @@ class TestResolveFullHostConfigReadsMarker:
 
     @pytest.mark.no_host_config_mock
     def test_reads_host_config_from_marker(self) -> None:
-        """The runtime command path resolves host config via ``from_marker``,
-        not ``from_toml`` — the marker carries the mode and bridge name."""
-        with (
-            patch(
-                "cli.main.HostConfig.from_marker", return_value=self._marker_cfg()
-            ) as from_marker,
-            patch("cli.main.HostConfig.from_toml") as from_toml,
-        ):
+        """The runtime command path resolves host config via ``from_marker`` —
+        the marker carries the mode and bridge name."""
+        with patch(
+            "cli.main.HostConfig.from_marker", return_value=self._marker_cfg()
+        ) as from_marker:
             resolved = _cli_main_module._resolve_full_host_config()
         assert from_marker.called
-        assert not from_toml.called
         assert resolved.host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS
         assert resolved.host.docker_unprivileged_user == "sandbox"
 
@@ -2701,32 +2684,48 @@ class TestDoctorAnyFail:
             assert result.exit_code == 1
 
 
-class TestDoctorMissingUser:
-    """Task 10.1: sandbox doctor without --user errors."""
+def _doctor_separate_user_marker() -> object:
+    """A provisioned separate-user marker config (daemon user ``svcuser``)."""
+    from core.host_config import DockerExecutionMode, HostConfig
 
-    def test_doctor_missing_user_exits_error(self, runner: CliRunner) -> None:
-        from cli.main import app
+    return HostConfig.model_validate(
+        {
+            "host": {
+                "docker_unprivileged_user": "svcuser",
+                "docker_execution_mode": DockerExecutionMode.SEPARATE_USER,
+            }
+        }
+    )
 
-        result = runner.invoke(app, ["doctor"])
-        assert result.exit_code != 0
+
+def _doctor_op_rootless_marker() -> object:
+    """A provisioned operator-rootless marker config (no daemon user)."""
+    from core.host_config import DockerExecutionMode, HostConfig
+
+    return HostConfig.model_validate(
+        {
+            "host": {
+                "docker_unprivileged_user": None,
+                "docker_execution_mode": DockerExecutionMode.OPERATOR_ROOTLESS,
+            }
+        }
+    )
 
 
-class TestDoctorHostConfig:
-    """Section 5 (host-config-machinectl-auth): doctor reads sandbox-ai.toml."""
+class TestDoctorProvisioned:
+    """Provisioned host (D-E): doctor reads the marker, threads its mode + owner."""
 
-    def test_doctor_resolves_user_from_host_config(self, runner: CliRunner) -> None:
+    def test_doctor_separate_user_resolves_marker_daemon_user(self, runner: CliRunner) -> None:
+        """separate-user: the daemon owner comes from the marker (resolve_daemon_owner),
+        and the marker's mode is threaded into the registry + runner."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, HostConfig
+        from core.host_config import DockerExecutionMode
 
-        mock_pc = HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
-        )
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.HostConfig.from_marker", return_value=_doctor_separate_user_marker()),
             patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results"),
@@ -2734,41 +2733,39 @@ class TestDoctorHostConfig:
             r = runner.invoke(app, ["doctor"])
             assert r.exit_code == 0
             mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
-            mock_run.assert_called_once_with([], "fromtoml", None, DockerExecutionMode.SEPARATE_USER)
+            mock_run.assert_called_once_with([], "svcuser", None, DockerExecutionMode.SEPARATE_USER)
 
-    def test_doctor_none_toml_user_separate_user_errors(self, runner: CliRunner) -> None:
-        """Fail-closed: a separate-user doctor whose toml config carries a None
-        docker_unprivileged_user (model_construct, bypassing the validator) exits 1
-        with a clear message rather than crossing into a None user."""
-        from cli.main import app
-        from core.host_config import DockerExecutionMode, HostConfig, HostSettings
-
-        host = HostSettings.model_construct(
-            docker_unprivileged_user=None,
-            docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
-        )
-        mock_pc = HostConfig.model_construct(host=host)
-        with (
-            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
-        ):
-            r = runner.invoke(app, ["doctor"])
-        assert r.exit_code == 1
-        assert "docker_unprivileged_user" in r.output
-
-    def test_doctor_user_flag_overrides_project_config(self, runner: CliRunner) -> None:
+    def test_doctor_op_rootless_resolves_invoking_operator(self, runner: CliRunner) -> None:
+        """operator-rootless: the daemon owner IS the invoking operator (resolve_daemon_owner),
+        never a literal docker_unprivileged_user read; the op-rootless mode is threaded."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode, HostConfig
+        from core.host_config import DockerExecutionMode
 
-        mock_pc = HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": "fromtoml", "machinectl_authentication": "sudo"}}
-        )
         results = [CheckResult(status="pass", name="ok", detail="")]
         with (
-            patch("cli.main.HostConfig.from_toml", return_value=mock_pc),
+            patch("cli.main.HostConfig.from_marker", return_value=_doctor_op_rootless_marker()),
             patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
+            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor"])
+            assert r.exit_code == 0
+            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
+            mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+
+    def test_doctor_user_flag_overrides_marker(self, runner: CliRunner) -> None:
+        """--user wins in BOTH modes (explicit override)."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.host_config import DockerExecutionMode
+
+        results = [CheckResult(status="pass", name="ok", detail="")]
+        with (
+            patch("cli.main.HostConfig.from_marker", return_value=_doctor_separate_user_marker()),
+            patch("cli.main.detect_distro", return_value=None),
             patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results"),
@@ -2778,171 +2775,129 @@ class TestDoctorHostConfig:
             mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
             mock_run.assert_called_once_with([], "cliuser", None, DockerExecutionMode.SEPARATE_USER)
 
-    def test_doctor_no_config_no_flag_errors(self, runner: CliRunner) -> None:
-        from cli.main import app
-        from core.host_config import DockerExecutionMode
 
-        with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
-        ):
-            r = runner.invoke(app, ["doctor"])
-        assert r.exit_code == 1
-        assert "no user specified" in r.output.lower()
-        assert "separate-user mode" in r.output.lower()
+class TestDoctorUnprovisioned:
+    """Unprovisioned host (D-E): graceful-skip, never guess a mode."""
 
-    def test_doctor_rejects_malformed_toml(self, runner: CliRunner) -> None:
-        """A malformed managed toml (any ValueError — ValidationError /
-        TOMLDecodeError / the D11 removed-field rejection) surfaces cleanly as
-        exit 1, not an uncaught traceback (finding 9)."""
-        from cli.main import app
-
-        with patch(
-            "cli.main.HostConfig.from_toml",
-            side_effect=ValueError("docker_execution_mode is no longer a sandbox-ai.toml field"),
-        ):
-            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
-        assert r.exit_code == 1
-        assert "docker_execution_mode is no longer" in r.output
-        assert not isinstance(r.exception, ValueError)  # surfaced, not propagated
-
-    def test_doctor_defaults_auth_to_sudo_when_no_config(self, runner: CliRunner) -> None:
+    def test_doctor_unprovisioned_runs_invariant_subset_and_synthesizes_skips(
+        self, runner: CliRunner
+    ) -> None:
+        """``ModeMarkerMissing`` → run the mode-invariant subset (filesystem,
+        repo-integrity, per-user-tree) and synthesize a 'not set up yet' skip for
+        every mode-specific check. The not-set-up notice is printed; the output
+        names neither the marker nor setup-state.json."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode
-
-        results = [CheckResult(status="pass", name="ok", detail="")]
-        with (
-            patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results),
-            patch("cli.main.render_results"),
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
-        ):
-            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
-            assert r.exit_code == 0
-            mock_reg.assert_called_once_with(DockerExecutionMode.SEPARATE_USER)
-
-    def test_doctor_threads_marker_resolved_operator_rootless_mode(self, runner: CliRunner) -> None:
-        """C-005 1.4: marker present → the resolved mode is threaded into the
-        registry + runner."""
-        from cli.main import app
-        from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode
-
-        results = [CheckResult(status="pass", name="ok", detail="")]
-        with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
-            patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results) as mock_run,
-            patch("cli.main.render_results"),
-        ):
-            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
-            assert r.exit_code == 0
-            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
-            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
-
-    def test_doctor_falls_back_to_operator_rootless_when_marker_missing(self, runner: CliRunner) -> None:
-        """F-051 (C-006 Group 9): ``ModeMarkerMissing`` (un-setup host) → diagnose
-        as operator-rootless (DEFAULT_PROVISIONING_MODE — the single system-wide
-        default), no crash. The marker is the authority once setup writes it; a
-        fresh host falls back to the provisioning default so doctor can run."""
-        from cli.main import app
-        from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode
+        from core.host_config import DEFAULT_PROVISIONING_MODE
         from core.setup_state import ModeMarkerMissing
 
-        results = [CheckResult(status="pass", name="ok", detail="")]
+        invariant = [CheckResult(status="pass", name="filesystem-perms", detail="ok")]
         with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_marker", side_effect=ModeMarkerMissing("no marker")),
             patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", side_effect=ModeMarkerMissing("no marker")),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results) as mock_run,
-            patch("cli.main.render_results"),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.run_check_subset", return_value=invariant) as mock_subset,
+            patch("cli.main.render_results") as mock_render,
         ):
-            r = runner.invoke(app, ["doctor", "--user", "sandbox"])
-            assert r.exit_code == 0
-            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
-            mock_run.assert_called_once_with([], "sandbox", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+            r = runner.invoke(app, ["doctor"])
+        assert r.exit_code == 0
+        # the mode-invariant subset RAN with the mode-independent owner
+        mock_subset.assert_called_once_with(
+            ["Filesystem", "Repo Integrity", "Per-User Tree"],
+            "alice",
+            None,
+            mode=DEFAULT_PROVISIONING_MODE,
+        )
+        # render received the invariant results plus the synthesized skips
+        rendered = mock_render.call_args.args[0]
+        assert invariant[0] in rendered
+        synthesized = [res for res in rendered if res not in invariant]
+        # every synthesized result is an explicit "not set up yet" skip — no pass/fail
+        assert synthesized, "expected synthesized mode-specific skips"
+        assert all(res.status == "skip" for res in synthesized)
+        assert all("not set up yet" in res.detail for res in synthesized)
+        # a representative few mode-specific checks are present as skips
+        skip_names = {res.name for res in synthesized}
+        assert any("docker" in n.lower() for n in skip_names)
+        # the friendly notice is printed; no marker / setup-state.json leak
+        assert "isn't set up yet" in r.output
+        assert "sudo sandbox setup" in r.output
+        assert "marker" not in r.output.lower()
+        assert "setup-state" not in r.output.lower()
 
-    def test_doctor_fresh_host_no_marker_no_toml_no_flag_runs(self, runner: CliRunner) -> None:
-        """F-051 (C-006 Group 9) bug fix: a TRULY fresh host — no setup marker,
-        no sandbox-ai.toml, no ``--user`` — must NOT hard-fail "No user specified".
-        Pre-flip, the marker-less fallback was separate-user, so with no toml and
-        no flag doctor early-exited at the "No user specified (separate-user mode)"
-        guard, unable to run even the mode-invariant checks. Now the fallback is
-        operator-rootless, so doctor resolves the invoking operator as the daemon
-        owner and RUNS the operator-rootless check set."""
+    def test_doctor_unprovisioned_user_flag_honored(self, runner: CliRunner) -> None:
+        """``--user`` is honored on an unprovisioned host (mode-independent owner)."""
         from cli.main import app
         from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode
+        from core.host_config import DEFAULT_PROVISIONING_MODE
         from core.setup_state import ModeMarkerMissing
 
-        results = [CheckResult(status="pass", name="ok", detail="")]
+        invariant = [CheckResult(status="pass", name="filesystem-perms", detail="ok")]
         with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
+            patch("cli.main.HostConfig.from_marker", side_effect=ModeMarkerMissing("no marker")),
             patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", side_effect=ModeMarkerMissing("no marker")),
-            patch("cli.main.getpass.getuser", return_value="alice"),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results) as mock_run,
-            patch("cli.main.render_results"),
-        ):
-            r = runner.invoke(app, ["doctor"])
-            assert r.exit_code == 0
-            assert "no user specified" not in r.output.lower()
-            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
-            mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
-
-    def test_doctor_op_rootless_no_toml_no_flag_resolves_operator(self, runner: CliRunner) -> None:
-        """C-005 gap: operator-rootless host that's been ``setup`` but not ``init``'d
-        (so no toml, no --user) must NOT early-exit "No user specified". Doctor
-        resolves the invoking operator as the daemon owner and threads op-rootless
-        mode into the registry + runner — so the op-rootless-only checks run."""
-        from cli.main import app
-        from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode
-
-        results = [CheckResult(status="pass", name="ok", detail="")]
-        with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
-            patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS),
-            patch("cli.main.getpass.getuser", return_value="alice"),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results) as mock_run,
-            patch("cli.main.render_results"),
-        ):
-            r = runner.invoke(app, ["doctor"])
-            assert r.exit_code == 0
-            assert "no user specified" not in r.output.lower()
-            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
-            mock_run.assert_called_once_with([], "alice", None, DockerExecutionMode.OPERATOR_ROOTLESS)
-
-    def test_doctor_op_rootless_user_flag_overrides(self, runner: CliRunner) -> None:
-        """--user wins even in operator-rootless mode (explicit override)."""
-        from cli.main import app
-        from core.doctor import CheckResult
-        from core.host_config import DockerExecutionMode
-
-        results = [CheckResult(status="pass", name="ok", detail="")]
-        with (
-            patch("cli.main.HostConfig.from_toml", side_effect=FileNotFoundError),
-            patch("cli.main.detect_distro", return_value=None),
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.OPERATOR_ROOTLESS),
-            patch("cli.main.getpass.getuser", return_value="alice"),
-            patch("cli.main.build_check_registry", return_value=[]) as mock_reg,
-            patch("cli.main.run_checks", return_value=results) as mock_run,
+            patch("cli.main.run_check_subset", return_value=invariant) as mock_subset,
             patch("cli.main.render_results"),
         ):
             r = runner.invoke(app, ["doctor", "--user", "cliuser"])
-            assert r.exit_code == 0
-            mock_reg.assert_called_once_with(DockerExecutionMode.OPERATOR_ROOTLESS)
-            mock_run.assert_called_once_with([], "cliuser", None, DockerExecutionMode.OPERATOR_ROOTLESS)
+        assert r.exit_code == 0
+        mock_subset.assert_called_once_with(
+            ["Filesystem", "Repo Integrity", "Per-User Tree"],
+            "cliuser",
+            None,
+            mode=DEFAULT_PROVISIONING_MODE,
+        )
+
+    def test_doctor_unprovisioned_invariant_failure_exits_1(self, runner: CliRunner) -> None:
+        """The mode-invariant checks CAN fail → exit 1 (the synthesized skips do not)."""
+        from cli.main import app
+        from core.doctor import CheckResult
+        from core.setup_state import ModeMarkerMissing
+
+        invariant = [CheckResult(status="fail", name="filesystem-perms", detail="bad", remediation="fix")]
+        with (
+            patch("cli.main.HostConfig.from_marker", side_effect=ModeMarkerMissing("no marker")),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.run_check_subset", return_value=invariant),
+            patch("cli.main.render_results"),
+        ):
+            r = runner.invoke(app, ["doctor"])
+        assert r.exit_code == 1
+
+    def test_doctor_unprovisioned_real_registry_enumerates_mode_specific_skips(
+        self, runner: CliRunner
+    ) -> None:
+        """End-to-end against the real registry: every mode-specific check (NOT in
+        the invariant categories) is surfaced as an explicit skip — no false green
+        for the crossing/docker/dispatcher checks under a guessed mode."""
+        from cli.main import app
+        from core.doctor import CheckResult, build_check_registry
+        from core.host_config import DEFAULT_PROVISIONING_MODE
+        from core.setup_state import ModeMarkerMissing
+
+        invariant = [CheckResult(status="pass", name="filesystem-perms", detail="ok")]
+        captured: list[CheckResult] = []
+        with (
+            patch("cli.main.HostConfig.from_marker", side_effect=ModeMarkerMissing("no marker")),
+            patch("cli.main.detect_distro", return_value=None),
+            patch("cli.main.getpass.getuser", return_value="alice"),
+            patch("cli.main.run_check_subset", return_value=invariant),
+            patch("cli.main.render_results", side_effect=lambda res, console=None: captured.extend(res)),
+        ):
+            r = runner.invoke(app, ["doctor"])
+        assert r.exit_code == 0
+        invariant_cats = {"Filesystem", "Repo Integrity", "Per-User Tree"}
+        expected_skip_names = {
+            c.name
+            for c in build_check_registry(DEFAULT_PROVISIONING_MODE)
+            if c.category not in invariant_cats
+        }
+        skip_names = {res.name for res in captured if res.status == "skip"}
+        assert expected_skip_names <= skip_names
+        # none of those mode-specific checks reported pass/fail
+        non_skip_names = {res.name for res in captured if res.status != "skip"}
+        assert not (expected_skip_names & non_skip_names)
 
 
 class TestDoctorRunnerInvoked:
@@ -2956,7 +2911,7 @@ class TestDoctorRunnerInvoked:
         results = [CheckResult(status="pass", name="a", detail="ok")]
         with (
             patch("cli.main.detect_distro", return_value="fedora") as mock_distro,
-            patch("cli.main.resolve_execution_mode", return_value=DockerExecutionMode.SEPARATE_USER),
+            patch("cli.main.HostConfig.from_marker", return_value=_doctor_separate_user_marker()),
             patch("cli.main.build_check_registry", return_value=["check_obj"]) as mock_reg,
             patch("cli.main.run_checks", return_value=results) as mock_run,
             patch("cli.main.render_results") as mock_render,

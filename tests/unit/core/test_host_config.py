@@ -96,42 +96,11 @@ class TestEnsurePerUserState:
         assert stat.S_IMODE((home / "config").stat().st_mode) == 0o755
 
 
-# ─── Task 1.2: HostConfig.from_toml() ─────────────────────────────────────
-
-VALID_PROJECT_TOML = """\
-[host]
-docker_unprivileged_user = "sandbox"
-machinectl_authentication = "sudo"
-"""
-
-def _seed_host_config(home: Path, body: str) -> Path:
-    """Write `body` to ``<home>/config/sandbox-ai.toml`` and return the file path."""
-    config_dir = home / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / "sandbox-ai.toml"
-    path.write_text(body)
-    return path
+# ─── M-1: docker_unprivileged_user POSIX validator ───────────────────────
 
 
-class TestHostConfigFromToml:
-    """HostConfig.from_toml() parsing and validation."""
-
-    def test_valid_config_parsed(self, isolated_sandbox_ai_home: Path) -> None:
-        """Valid sandbox-ai.toml parses into HostConfig without errors."""
-        _seed_host_config(isolated_sandbox_ai_home, VALID_PROJECT_TOML)
-        config = HostConfig.from_toml()
-        assert config.host.docker_unprivileged_user == "sandbox"
-
-    def test_missing_file_raises_file_not_found(self, isolated_sandbox_ai_home: Path) -> None:
-        """Missing sandbox-ai.toml raises FileNotFoundError with canonical path."""
-        with pytest.raises(FileNotFoundError, match="Run sandbox init"):
-            HostConfig.from_toml()
-
-    def test_missing_required_field_raises_validation_error(self, isolated_sandbox_ai_home: Path) -> None:
-        """Missing docker_unprivileged_user raises ValidationError."""
-        _seed_host_config(isolated_sandbox_ai_home, '[host]\nmachinectl_authentication = "sudo"\n')
-        with pytest.raises(ValidationError):
-            HostConfig.from_toml()
+class TestDockerUnprivilegedUserValidator:
+    """HostSettings POSIX-grammar validation for the daemon user (M-1)."""
 
     @pytest.mark.parametrize(
         "good_user",
@@ -154,36 +123,6 @@ class TestHostConfigFromToml:
         """
         with pytest.raises(ValidationError, match="valid POSIX username"):
             HostSettings(docker_unprivileged_user=bad_user)
-
-    def test_docker_execution_mode_in_toml_rejected(self, isolated_sandbox_ai_home: Path) -> None:
-        """docker_execution_mode is setup-determined (the marker), not a toml field (D11).
-
-        ``from_toml`` rejects a ``[host]`` table that sets it — a manual edit only
-        desyncs from the authoritative marker, so it fails loudly rather than being
-        silently overridden by the runtime overlay.
-        """
-        bad_toml = (
-            '[host]\n'
-            'docker_unprivileged_user = "sandbox"\n'
-            'docker_execution_mode = "operator-rootless"\n'
-        )
-        _seed_host_config(isolated_sandbox_ai_home, bad_toml)
-        with pytest.raises(ValueError, match="setup-determined"):
-            HostConfig.from_toml()
-
-    def test_loader_honors_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Loader reads from SANDBOX_AI_HOME-resolved path."""
-        custom_home = tmp_path / "custom"
-        monkeypatch.setenv("SANDBOX_AI_HOME", str(custom_home))
-        _seed_host_config(custom_home, VALID_PROJECT_TOML)
-        config = HostConfig.from_toml()
-        assert config.host.docker_unprivileged_user == "sandbox"
-
-    def test_malformed_toml_raises(self, isolated_sandbox_ai_home: Path) -> None:
-        """Malformed TOML syntax raises before any state changes."""
-        _seed_host_config(isolated_sandbox_ai_home, "[host\ninvalid toml")
-        with pytest.raises(Exception):  # tomllib.TOMLDecodeError
-            HostConfig.from_toml()
 
 
 class TestHostConfigFromMarker:
