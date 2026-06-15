@@ -54,8 +54,10 @@ from core.host_config import (
     autodetect_workspace_bridge_gid_recommendation,
     parse_subgid_for_user,
     parse_subuid_for_user,
+    workspace_bridge_group_for,
 )
 from core.setup import l1_kernel, l2a_delegate
+from core.setup.l2_host_prereqs import gid_in_subgid_range
 from core.setup.subid import pick_free_subid_block
 from core.setup_state import read_mode, write_mode_root_owned
 
@@ -227,12 +229,24 @@ def _apply_groupadd(params: BatchParams) -> None:
     """``groupadd -g <bridge_gid> <bridge_group>`` + ``usermod -aG`` (l2's logic).
 
     Idempotent: the group is created only when absent; the operator is added to
-    it only when not already a member.
+    it only when not already a member. When the group already exists, a loud
+    guard (mirroring l2's separate-user check) refuses a group whose gid sits
+    outside the OPERATOR's /etc/subgid range — a stale marker or hand-made
+    foreign-range group must fail loud rather than be silently accepted, and the
+    raise happens before any mutation (no half-provisioning).
     """
     try:
-        grp.getgrnam(params.bridge_group)
+        existing = grp.getgrnam(params.bridge_group)
     except KeyError:
         _run(["groupadd", "-g", str(params.bridge_gid), params.bridge_group])
+    else:
+        if not gid_in_subgid_range(existing.gr_gid, parse_subgid_for_user(params.operator)):
+            raise RuntimeError(
+                f"group {params.bridge_group!r} exists at gid {existing.gr_gid} "
+                f"outside {params.operator!r}'s /etc/subgid range; setup will not "
+                f"move an operator-created group. Recreate it with a gid inside "
+                f"the subgid range and re-run setup."
+            )
     if not _operator_in_group(params.operator, params.bridge_group):
         _run(["usermod", "-aG", params.bridge_group, params.operator])
 
@@ -444,10 +458,10 @@ def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], B
     """
     operator = ctx.operator
     operator_uid = pwd.getpwnam(operator).pw_uid
-    bridge_group = ctx.host_config.host.workspace_bridge_group
+    mode = ctx.host_config.host.docker_execution_mode
+    bridge_group = workspace_bridge_group_for(operator, mode)
     bridge_gid = autodetect_workspace_bridge_gid_recommendation(operator)
     family = detect_distro() or ""
-    mode = ctx.host_config.host.docker_execution_mode
 
     params = BatchParams(
         operator=operator,

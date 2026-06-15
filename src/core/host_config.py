@@ -56,6 +56,7 @@ __all__ = [
     "sudo_as_operator",
     "sudo_pipe_cmd",
     "workspace_bridge_gid",
+    "workspace_bridge_group_for",
 ]
 
 # POSIX-portable username grammar (M-1). ``docker_unprivileged_user`` reaches the
@@ -252,6 +253,24 @@ def resolve_daemon_owner_settings(host: HostSettings) -> str:
     if host.docker_execution_mode is DockerExecutionMode.OPERATOR_ROOTLESS:
         return getpass.getuser()
     return host.docker_unprivileged_user
+
+
+def workspace_bridge_group_for(operator: str, mode: DockerExecutionMode) -> str:
+    """Derive the workspace bridge group NAME for ``operator`` under ``mode`` (D-F).
+
+    ``operator-rootless`` → a per-operator name ``f"sb-ws-{operator}"`` (each
+    operator is their own single-tenant daemon owner with their own subgid range,
+    so the gid is per-operator and a group name maps to exactly one gid in
+    ``/etc/group`` — the name must be per-operator too).
+    ``separate-user`` → the shared ``"sb-ws"`` (one tenant, one range, one gid).
+
+    This is THE single setup-side derivation of the per-operator bridge name.
+    Runtime consumers do NOT call this — they read the name from the
+    ``HostSettings.workspace_bridge_group`` FIELD (marker-sourced, Group 7).
+    """
+    if mode is DockerExecutionMode.OPERATOR_ROOTLESS:
+        return f"sb-ws-{operator}"
+    return "sb-ws"
 
 
 def resolve_daemon_owner(host_config: HostConfig) -> str:

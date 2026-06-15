@@ -209,7 +209,13 @@ def test_subid_applier_is_append_only_safe(monkeypatch: pytest.MonkeyPatch) -> N
     assert runs == []
 
 
+def _grp_entry(gid: int) -> grp.struct_group:
+    return grp.struct_group(("sb-ws-carol", "x", gid, []))
+
+
 def test_groupadd_applier_creates_group_and_adds_operator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bridge group ABSENT → groupadd at the in-range gid, then membership add."""
+
     def _no_group(_name: str) -> object:
         raise KeyError(_name)
 
@@ -218,22 +224,60 @@ def test_groupadd_applier_creates_group_and_adds_operator(monkeypatch: pytest.Mo
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
-    host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws", bridge_gid=100500))
+    host_batch._apply_groupadd(
+        _params(operator="carol", bridge_group="sb-ws-carol", bridge_gid=100500)
+    )
 
     assert runs == [
-        ["groupadd", "-g", "100500", "sb-ws"],
-        ["usermod", "-aG", "sb-ws", "carol"],
+        ["groupadd", "-g", "100500", "sb-ws-carol"],
+        ["usermod", "-aG", "sb-ws-carol", "carol"],
     ]
 
 
-def test_groupadd_applier_idempotent_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(grp, "getgrnam", lambda _n: object())
+def test_groupadd_applier_idempotent_when_present_in_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge group EXISTS at an in-range gid → no raise, no groupadd; member already."""
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(100500))
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [(100000, 65536)])
     monkeypatch.setattr(host_batch, "_operator_in_group", lambda _o, _g: True)
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
-    host_batch._apply_groupadd(_params())
+    host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws-carol"))
 
+    assert runs == []
+
+
+def test_groupadd_applier_adds_membership_when_present_in_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge group EXISTS at an in-range gid but operator not a member → membership add."""
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(100500))
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [(100000, 65536)])
+    monkeypatch.setattr(host_batch, "_operator_in_group", lambda _o, _g: False)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws-carol"))
+
+    assert runs == [["usermod", "-aG", "sb-ws-carol", "carol"]]
+
+
+def test_groupadd_applier_raises_when_present_out_of_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge group EXISTS at an OUT-OF-RANGE gid → RuntimeError, no mutation runs."""
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(50000))
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [(100000, 65536)])
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    with pytest.raises(RuntimeError) as exc:
+        host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws-carol"))
+
+    assert "outside 'carol'" in str(exc.value)
+    assert "/etc/subgid range" in str(exc.value)
     assert runs == []
 
 
@@ -426,10 +470,31 @@ def test_classifier_all_satisfied_excludes_everything(monkeypatch: pytest.Monkey
     assert items == frozenset()
     assert params.operator == "alice"
     assert params.operator_uid == 1000
-    assert params.bridge_group == "sb-ws"
+    assert params.bridge_group == "sb-ws-alice"
     assert params.bridge_gid == 100500
     assert params.distro_family == "debian"
     assert params.mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+
+def test_classifier_derives_per_operator_bridge_name_at_distinct_gids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two op-rootless operators → per-operator names at distinct in-range gids (D-F)."""
+    _all_satisfied(monkeypatch)
+    gids = {"alice": 100500, "bob": 200500}
+    monkeypatch.setattr(
+        host_batch,
+        "autodetect_workspace_bridge_gid_recommendation",
+        lambda op: gids[op],
+    )
+
+    _, params_alice = classify_host_root_batch(_ctx(operator="alice"))
+    _, params_bob = classify_host_root_batch(_ctx(operator="bob"))
+
+    assert params_alice.bridge_group == "sb-ws-alice"
+    assert params_alice.bridge_gid == 100500
+    assert params_bob.bridge_group == "sb-ws-bob"
+    assert params_bob.bridge_gid == 200500
 
 
 @pytest.mark.parametrize(

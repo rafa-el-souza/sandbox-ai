@@ -319,6 +319,28 @@ class TestResolveDaemonOwnerSettings:
         assert resolve_daemon_owner_settings(host) == "sandbox"
 
 
+class TestWorkspaceBridgeGroupFor:
+    """workspace_bridge_group_for() — the single setup-side bridge-name derivation (D-F)."""
+
+    def test_operator_rootless_is_per_operator(self) -> None:
+        from core.host_config import workspace_bridge_group_for
+
+        assert (
+            workspace_bridge_group_for("alice", DockerExecutionMode.OPERATOR_ROOTLESS)
+            == "sb-ws-alice"
+        )
+
+    def test_separate_user_is_shared_name_regardless_of_operator(self) -> None:
+        from core.host_config import workspace_bridge_group_for
+
+        assert (
+            workspace_bridge_group_for("alice", DockerExecutionMode.SEPARATE_USER) == "sb-ws"
+        )
+        assert (
+            workspace_bridge_group_for("bob", DockerExecutionMode.SEPARATE_USER) == "sb-ws"
+        )
+
+
 # ─── Task 1.3: machinectl_cmd() ──────────────────────────────────────────────
 
 
