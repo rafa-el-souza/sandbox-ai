@@ -1232,24 +1232,21 @@ class TestStreamingOpRejectedByInvokeProbe:
 class _FakeHostSettings:
     docker_unprivileged_user = "sandbox"
 
-    def __init__(self, auth: object, mode: object) -> None:
-        self.machinectl_authentication = auth
+    def __init__(self, mode: object) -> None:
         self.docker_execution_mode = mode
 
 
 class _FakeHostConfig:
-    def __init__(self, auth: object, mode: object | None = None) -> None:
+    def __init__(self, mode: object | None = None) -> None:
         from core.host_config import DockerExecutionMode
 
         resolved_mode = DockerExecutionMode.SEPARATE_USER if mode is None else mode
-        self.host = _FakeHostSettings(auth, resolved_mode)
+        self.host = _FakeHostSettings(resolved_mode)
 
 
 class TestInvoke:
     def _fake_hc(self) -> HostConfig:
-        from core.host_config import MachinectlAuth
-
-        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+        return cast("HostConfig", _FakeHostConfig())
 
     def test_deterministic_op_crosses_boundary_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1378,9 +1375,7 @@ class TestInvoke:
 
 class TestBuildInvocation:
     def _fake_hc(self) -> HostConfig:
-        from core.host_config import MachinectlAuth
-
-        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+        return cast("HostConfig", _FakeHostConfig())
 
     def test_builds_crossed_argv_without_executing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1497,9 +1492,7 @@ class TestSsotCrossingPrimitives:
 
 
 def _sudo_hc() -> HostConfig:
-    from core.host_config import MachinectlAuth
-
-    return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+    return cast("HostConfig", _FakeHostConfig())
 
 
 # Representative valid typed args for the eleven framed ops.
@@ -1687,9 +1680,7 @@ class TestProbeOutcome:
 
 class TestProbe:
     def _fake_hc(self) -> HostConfig:
-        from core.host_config import MachinectlAuth
-
-        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+        return cast("HostConfig", _FakeHostConfig())
 
     def test_success_returns_ok_with_stdout(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1756,11 +1747,11 @@ class TestProbe:
 
 
 def _rootless_hc() -> HostConfig:
-    from core.host_config import DockerExecutionMode, MachinectlAuth
+    from core.host_config import DockerExecutionMode
 
     return cast(
         "HostConfig",
-        _FakeHostConfig(MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS),
+        _FakeHostConfig(DockerExecutionMode.OPERATOR_ROOTLESS),
     )
 
 
@@ -2282,9 +2273,7 @@ class TestCompileDispatcher:
     """
 
     def _fake_hc(self) -> HostConfig:
-        from core.host_config import MachinectlAuth
-
-        return cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+        return cast("HostConfig", _FakeHostConfig())
 
     def _capture_cmd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2342,8 +2331,6 @@ class TestCompileDispatcher:
     ) -> None:
         import subprocess
 
-        from core.host_config import MachinectlAuth
-
         # compile_dispatcher crosses via the unprivileged ``pipe_cmd`` byte-pipe
         # (the multi-MB binary frame demands it) — the systemd-run prefix with
         # no sudo and no machinectl.
@@ -2356,7 +2343,7 @@ class TestCompileDispatcher:
             return subprocess.CompletedProcess(cmd, 0, _fake_binary_b64(), "")
 
         monkeypatch.setattr("core.dispatch.Executor.run", fake_run)
-        hc = cast("HostConfig", _FakeHostConfig(MachinectlAuth.SUDO))
+        hc = cast("HostConfig", _FakeHostConfig())
         compile_dispatcher(str(tmp_path / "out"), hc)
         cmd = cast("list[str]", captured["cmd"])
         assert cmd[:4] == ["systemd-run", "-q", "--pipe", "--uid=sandbox"]

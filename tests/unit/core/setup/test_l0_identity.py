@@ -11,7 +11,7 @@ content-aware-probe contract via the conftest fixture.
 from __future__ import annotations
 
 import pytest
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, minimal_host_config
 from core.setup import l0_identity
 from core.setup.l0_identity import (
     PHASE,
@@ -33,7 +33,7 @@ from core.setup.phase_runner import Identity, PhaseResult, SetupContext
 def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
-            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+            "sandboxuser", DockerExecutionMode.SEPARATE_USER
         ),
         operator=operator,
     )
@@ -42,7 +42,7 @@ def _ctx(operator: str = "alice") -> SetupContext:
 def _oprootless_ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
-            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+            "sandboxuser", DockerExecutionMode.OPERATOR_ROOTLESS
         ),
         operator=operator,
     )

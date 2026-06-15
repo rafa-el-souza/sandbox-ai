@@ -21,7 +21,7 @@ from core.binary_install import (
     install_pinned,
     verify_only,
 )
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import minimal_host_config
 from core.hydration import BINARY_REGISTRY
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ _NAME = "runsc"
 
 @pytest.fixture
 def hc() -> HostConfig:
-    return minimal_host_config("alice", MachinectlAuth.SUDO)
+    return minimal_host_config("alice")
 
 
 @pytest.fixture

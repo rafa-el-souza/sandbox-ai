@@ -14,7 +14,7 @@ import pytest
 from core.actions.base import Action
 from core.actions.context import ActionContext
 from core.executor import Executor
-from core.host_config import MachinectlAuth, minimal_host_config
+from core.host_config import minimal_host_config
 
 
 def _instantiate(cls: type) -> object:
@@ -59,7 +59,6 @@ def test_complete_subclass_can_be_instantiated() -> None:
     assert inst.describe() == "ok"
     ctx = ActionContext(
         host_user="claude-sandbox",
-        auth=MachinectlAuth.SUDO,
         executor=Executor(),
         instance_dir=Path("/inst"),
     )
@@ -79,8 +78,8 @@ def test_render_command_base_default_delegates_to_describe_ignoring_host_config(
             return None
 
     inst = _Complete()
-    hc_alice = minimal_host_config("alice", MachinectlAuth.SUDO)
-    hc_bob = minimal_host_config("bob", MachinectlAuth.SUDO)
+    hc_alice = minimal_host_config("alice")
+    hc_bob = minimal_host_config("bob")
     assert inst.render_command(hc_alice) == "identity-line"
     assert inst.render_command(hc_bob) == "identity-line"
     assert inst.render_command(hc_alice) == inst.describe()

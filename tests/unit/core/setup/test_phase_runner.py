@@ -24,7 +24,6 @@ import pytest
 from core.exceptions import SandboxExecutionError
 from core.host_config import (
     DockerExecutionMode,
-    MachinectlAuth,
     machinectl_cmd,
     minimal_host_config,
     pipe_cmd,
@@ -67,12 +66,11 @@ if TYPE_CHECKING:
 
 def _ctx(
     user: str = "sandboxuser",
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
     operator: str = "op",
 ) -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config(user, auth, mode), operator=operator
+        host_config=minimal_host_config(user, mode), operator=operator
     )
 
 
@@ -334,7 +332,7 @@ def test_route_root_is_empty_prefix() -> None:
 
 def test_route_operator_is_pipe_cmd() -> None:
     ctx = SetupContext(
-        host_config=minimal_host_config("sb", MachinectlAuth.SUDO),
+        host_config=minimal_host_config("sb"),
         operator="alice",
     )
     assert route(Identity.OPERATOR, ctx) == pipe_cmd("alice")
@@ -342,7 +340,7 @@ def test_route_operator_is_pipe_cmd() -> None:
 
 def test_route_sandbox_is_machinectl_cmd_sudo() -> None:
     ctx = SetupContext(
-        host_config=minimal_host_config("sbuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config("sbuser"),
         operator="alice",
     )
     assert route(Identity.SANDBOX, ctx) == machinectl_cmd("sbuser")
@@ -1069,7 +1067,7 @@ def test_daemon_owner_user_operator_rootless_is_operator() -> None:
 
 def test_daemon_owner_crossing_separate_user_is_machinectl_cmd() -> None:
     """separate-user crossing equals machinectl_cmd(...) byte-for-byte."""
-    ctx = _ctx(user="sbuser", auth=MachinectlAuth.SUDO)
+    ctx = _ctx(user="sbuser")
     assert daemon_owner_crossing(ctx) == machinectl_cmd("sbuser")
 
 

@@ -174,7 +174,7 @@ def _sha512(path: Path) -> str:
 
 def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     """Two compiles of identical source + pinned image are sha512-identical."""
-    daemon_user, auth = _check_preconditions()
+    daemon_user, _ = _check_preconditions()
     # ``_check_preconditions`` resolved ``(daemon_user, auth)`` from the REAL
     # per-host ``~/.sandbox-ai/config/sandbox-ai.toml`` via
     # ``_resolve_test_environment`` (the sibling idiom in
@@ -184,7 +184,7 @@ def test_compile_dispatcher_is_byte_reproducible(tmp_path: Path) -> None:
     # empty dir → permanent skip). ``compile_dispatcher`` reads only the two
     # boundary fields, so build the minimal HostConfig from the resolved
     # pair — the same construction ``minimal_host_config`` exists for.
-    host_config = minimal_host_config(daemon_user, auth)
+    host_config = minimal_host_config(daemon_user)
 
     # No build dirs: ``compile_dispatcher`` embeds the source in the crossed
     # payload and the binary returns over captured stdout. The actual build

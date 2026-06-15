@@ -590,7 +590,6 @@ class TestAuthModeThreadedToDispatch:
 
     def test_machinectl_reachable_threads_user_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_machinectl_reachable
-        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -609,7 +608,6 @@ class TestAuthModeThreadedToDispatch:
         assert captured["op"] == "auth-probe"
         assert captured["timeout"] == 10
         assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_sudo_timeout_remediation_mentions_sudoers(self, monkeypatch: Any) -> None:
         from core.doctor import check_machinectl_reachable
@@ -625,7 +623,6 @@ class TestAuthModeThreadedToDispatch:
 
     def test_docker_available_threads_user_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_docker_available
-        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -638,7 +635,7 @@ class TestAuthModeThreadedToDispatch:
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         check_docker_available("sandbox", None)
 
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
+        assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
 
 
 class TestCheckComposeProjectNameCollision:

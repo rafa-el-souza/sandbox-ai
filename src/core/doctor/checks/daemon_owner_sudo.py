@@ -22,7 +22,6 @@ from core.doctor.types import CheckResult
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
     resolve_daemon_owner,
 )
@@ -48,7 +47,7 @@ def check_daemon_owner_sudo(
     from core.setup import l2_host_prereqs as l2
 
     del distro
-    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
+    host_config = minimal_host_config(user, mode)
     owner = resolve_daemon_owner(host_config)
     admin_groups = l2.user_admin_groups(owner)
     # The owner IS the invoking operator (the current process user) in

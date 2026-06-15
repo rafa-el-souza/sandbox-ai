@@ -9,19 +9,17 @@ from typing import TYPE_CHECKING
 from core.actions.context import ActionContext
 from core.actions.helper_mkdir import HelperMkdirChownAction
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 
 if TYPE_CHECKING:
     import pytest
 
 
 def _ctx(
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
-        auth=auth,
         executor=Executor(),
         instance_dir=Path("/inst"),
         docker_execution_mode=mode,
@@ -65,10 +63,9 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
         leaves: Iterable[str],
         uid: int,
         gid: int,
-        auth: object,
         execution_mode: object = DockerExecutionMode.SEPARATE_USER,
     ) -> None:
-        invocations.append((host_user, parent, tuple(leaves), uid, gid, auth, execution_mode))
+        invocations.append((host_user, parent, tuple(leaves), uid, gid, execution_mode))
 
     # Replace via module-string per project convention so static analysis is happy.
     monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake)
@@ -78,7 +75,7 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
         owner_uid=166535,
         owner_gid=166535,
     )
-    action.execute(_ctx(MachinectlAuth.SUDO))
+    action.execute(_ctx())
     assert invocations == [
         (
             "claude-sandbox",
@@ -86,7 +83,6 @@ def test_execute_delegates_to_helper_mkdir_chown_dirs(monkeypatch: pytest.Monkey
             ("core", "admin"),
             166535,
             166535,
-            MachinectlAuth.SUDO,
             DockerExecutionMode.SEPARATE_USER,
         )
     ]
@@ -103,7 +99,6 @@ def test_execute_forwards_operator_rootless_execution_mode(monkeypatch: pytest.M
         leaves: Iterable[str],
         uid: int,
         gid: int,
-        auth: object,
         execution_mode: object = DockerExecutionMode.SEPARATE_USER,
     ) -> None:
         captured["execution_mode"] = execution_mode

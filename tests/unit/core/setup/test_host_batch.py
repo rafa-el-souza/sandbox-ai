@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from core.host_config import (
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
 )
 from core.setup import host_batch, l1_kernel, l2a_delegate
@@ -53,7 +52,6 @@ def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
             "sandboxuser",
-            MachinectlAuth.SUDO,
             DockerExecutionMode.OPERATOR_ROOTLESS,
         ),
         operator=operator,

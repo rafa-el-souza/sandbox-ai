@@ -218,7 +218,7 @@ def test_post_helper_leaves_consumer_owned(
     grant_parent_access: Callable[[Path], None],
 ) -> None:
     """``helper_mkdir_chown_dirs`` creates each cache leaf and chowns to the consumer subuid."""
-    daemon_user, auth = _check_preconditions()
+    daemon_user, _ = _check_preconditions()
     instance_dir = cross_boundary_tmpdir / "instances" / "regression-target"
     create_instance_dirs(str(instance_dir))
 
@@ -234,7 +234,6 @@ def test_post_helper_leaves_consumer_owned(
             [leaf_name],
             owner_uid=target_uid,
             owner_gid=target_gid,
-            machinectl_auth=auth,
         )
 
         leaf = parent / leaf_name

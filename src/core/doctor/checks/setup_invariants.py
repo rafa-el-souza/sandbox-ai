@@ -44,7 +44,6 @@ from core.doctor.types import CheckResult
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
     parse_subgid_for_user,
 )
@@ -355,7 +354,7 @@ def check_setup_invariants(
     from core.setup import l3_sudoers as l3
 
     del distro
-    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
+    host_config = minimal_host_config(user, mode)
     bridge_group = host_config.host.workspace_bridge_group
     violations: list[str] = []
 

@@ -11,13 +11,11 @@ from core.actions.acl import NamedAclGrantAction, NamedAclRevokeAction
 from core.actions.context import ActionContext
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import MachinectlAuth
 
 
 def _ctx() -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
-        auth=MachinectlAuth.SUDO,
         executor=Executor(),
         instance_dir=Path("/inst"),
     )

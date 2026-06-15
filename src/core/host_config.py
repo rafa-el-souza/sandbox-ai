@@ -231,17 +231,16 @@ class HostConfig(BaseModel):
 
 
 def minimal_host_config(
-    user: str, auth: MachinectlAuth, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
+    user: str, mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE
 ) -> HostConfig:
     """Build a HostConfig carrying only the fields the dispatch boundary reads.
 
-    The fields are ``docker_unprivileged_user``, ``machinectl_authentication``,
-    and ``docker_execution_mode`` (defaulting to ``DEFAULT_PROVISIONING_MODE``).
+    The fields are ``docker_unprivileged_user`` and ``docker_execution_mode``
+    (defaulting to ``DEFAULT_PROVISIONING_MODE``).
     """
     return HostConfig(
         host=HostSettings(
             docker_unprivileged_user=user,
-            machinectl_authentication=auth,
             docker_execution_mode=mode,
         )
     )

@@ -43,6 +43,5 @@ class HelperMkdirChownAction(Action):
             self.leaves,
             self.owner_uid,
             self.owner_gid,
-            ctx.auth,
             execution_mode=ctx.docker_execution_mode,
         )

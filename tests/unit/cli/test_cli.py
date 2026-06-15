@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, call, patch
 import cli.main as _cli_main_module
 import pytest
 import typer
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
@@ -1422,7 +1422,6 @@ class TestLifecycleThreadsExecutionMode:
         _register_instance(inst)
 
         from cli.main import _phase_helper_cp_chown_ro_files, _phase_helper_mkdir_chown_cache_log
-        from core.host_config import MachinectlAuth
 
         cp_ctx: list[ActionContext] = []
         mkdir_ctx: list[ActionContext] = []
@@ -1443,7 +1442,7 @@ class TestLifecycleThreadsExecutionMode:
 
         with patch("cli.main._helper_cp_chown_plan", return_value=[_RecordCp()]):
             _phase_helper_cp_chown_ro_files(
-                "/inst", HOST_USER, MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+                "/inst", HOST_USER, DockerExecutionMode.OPERATOR_ROOTLESS
             )
         assert cp_ctx[0].docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
@@ -1452,7 +1451,7 @@ class TestLifecycleThreadsExecutionMode:
             patch("cli.main.subprocess.run"),
         ):
             _phase_helper_mkdir_chown_cache_log(
-                "/inst", HOST_USER, MachinectlAuth.SUDO, None, DockerExecutionMode.OPERATOR_ROOTLESS
+                "/inst", HOST_USER, None, DockerExecutionMode.OPERATOR_ROOTLESS
             )
         assert mkdir_ctx[0].docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
@@ -2081,7 +2080,6 @@ class TestHelperCpChownRoFiles:
 
     def test_phase_invokes_helper_per_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files
-        from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
@@ -2094,13 +2092,12 @@ class TestHelperCpChownRoFiles:
             uid: int,
             gid: int,
             mode: int,
-            auth: object,
             **kw: object,
         ) -> None:
             invocations.append((parent, *files))
 
         monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
-        _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox", MachinectlAuth.SUDO)
+        _phase_helper_cp_chown_ro_files("/inst", "claude-sandbox")
         # One invocation per (RO_FILE_RECIPES + EXEC_FILE_RECIPES + RW_FILE_RECIPES)
         # entry. Per admin-reframe (Fix B'), the RO table now has 5 entries
         # (coredns, dnsdist, proxy, core, secrets) — the legacy
@@ -2112,7 +2109,6 @@ class TestHelperCpChownRoFiles:
     def test_phase_propagates_helper_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_cp_chown_ro_files
         from core.exceptions import SandboxExecutionError
-        from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100000 + n)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200000 + n)
@@ -2122,7 +2118,7 @@ class TestHelperCpChownRoFiles:
 
         monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _raise)
         with pytest.raises(SandboxExecutionError, match="helper failed"):
-            _phase_helper_cp_chown_ro_files("/inst", "u", MachinectlAuth.SUDO)
+            _phase_helper_cp_chown_ro_files("/inst", "u")
 
 
 class TestPhaseHydrateDirect:
@@ -2186,7 +2182,7 @@ class TestPhaseComposeUpDirect:
         from typing import cast
 
         from cli.main import _phase_compose_up
-        from core.host_config import DockerExecutionMode, MachinectlAuth
+        from core.host_config import DockerExecutionMode
 
         inst_dir = isolated_sandbox_ai_home / "instances" / "t"
         (inst_dir / "docker").mkdir(parents=True, exist_ok=True)
@@ -2206,7 +2202,6 @@ class TestPhaseComposeUpDirect:
 
         class _FakeHostSettings:
             docker_unprivileged_user = "sandbox"
-            machinectl_authentication = MachinectlAuth.SUDO
             docker_execution_mode = DockerExecutionMode.SEPARATE_USER
 
         class _FakeHostConfig:
@@ -2242,7 +2237,6 @@ class TestBuildAttachArgv:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
-        auth: MachinectlAuth = MachinectlAuth.SUDO,
     ) -> list[str]:
         from cli.main import _build_attach_argv
         from core.host_config import HostConfig, HostSettings
@@ -2263,7 +2257,6 @@ class TestBuildAttachArgv:
             host=HostSettings(
                 docker_unprivileged_user="sandbox",
                 docker_execution_mode=mode,
-                machinectl_authentication=auth,
             )
         )
         return _build_attach_argv("myproj", "main", cfg)
@@ -2297,7 +2290,7 @@ class TestBuildAttachArgv:
         # ``sudo_pipe_cmd`` (headless-capable byte-pipe), carrying the bare
         # ``dispatch fwd <wire>`` payload (the docker-exec argv is derived
         # dispatcher-side, never hand-built in cli.main).
-        argv = self._invoke(monkeypatch, tmp_path, auth=MachinectlAuth.SUDO)
+        argv = self._invoke(monkeypatch, tmp_path)
         proxy = next(a for a in argv if a.startswith("ProxyCommand="))
         assert proxy.startswith("ProxyCommand=sudo systemd-run -q --pipe --uid=sandbox ")
         assert "/usr/local/libexec/sandbox-ai/dispatch fwd myproj --project " in proxy
@@ -2388,7 +2381,6 @@ class TestComposeDownDirect:
 
     def test_compose_down_plain(self) -> None:
         from cli.main import _compose_down
-        from core.host_config import MachinectlAuth
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
             _compose_down("sandbox", self._config(), volumes=False)
@@ -2397,18 +2389,16 @@ class TestComposeDownDirect:
             assert args == ["t"]
             assert "--volumes" not in args
             assert host_config.host.docker_unprivileged_user == "sandbox"
-            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_compose_down_volumes(self) -> None:
         from cli.main import _compose_down
-        from core.host_config import MachinectlAuth
 
         with patch("cli.main.dispatch.invoke") as mock_invoke:
-            _compose_down("sandbox", self._config(), volumes=True, auth=MachinectlAuth.SUDO)
+            _compose_down("sandbox", self._config(), volumes=True)
             (op, args, host_config), _ = mock_invoke.call_args
             assert op == "compose-down"
             assert args == ["t", "--volumes"]
-            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
+            assert host_config.host.docker_unprivileged_user == "sandbox"
 
     def test_compose_down_raises_on_failure(self) -> None:
         """`invoke()` (not `probe()`) — a non-zero exit propagates as
@@ -3926,7 +3916,7 @@ class TestInitHostConfigResolution:
                 wraps=_REAL_SEED_HOST_CONFIG,
             ),
             patch("cli.main._stdin_is_tty", return_value=True),
-            patch("cli.main.typer.prompt", side_effect=["sandbox-user", "sudo"]),
+            patch("cli.main.typer.prompt", side_effect=["sandbox-user"]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -3947,7 +3937,7 @@ class TestInitHostConfigResolution:
         assert body.startswith("# sandbox-ai managed —")
         assert "do not edit (rerun setup to change)" in body.splitlines()[0]
         assert 'docker_unprivileged_user = "sandbox-user"' in body
-        assert 'machinectl_authentication = "sudo"' in body
+        assert "machinectl_authentication" not in body
         assert "docker_execution_mode" not in body
         assert result.exit_code == 0, result.output
 
@@ -3975,8 +3965,8 @@ class TestInitHostConfigResolution:
                 wraps=_REAL_SEED_HOST_CONFIG,
             ),
             patch("cli.main._stdin_is_tty", return_value=True),
-            # First prompt returns empty → re-prompt; second is non-empty user; third is auth.
-            patch("cli.main.typer.prompt", side_effect=["", "sandbox", "sudo"]),
+            # First prompt returns empty → re-prompt; second is the non-empty user.
+            patch("cli.main.typer.prompt", side_effect=["", "sandbox"]),
             patch("cli.main.subprocess.run", return_value=_crossed_ok()),
             patch("cli.main.detect_git_config", return_value=("", "")),
             patch("cli.main.run_check_subset", return_value=[]),
@@ -3992,27 +3982,6 @@ class TestInitHostConfigResolution:
         assert result.exit_code == 0, result.output
         seeded = isolated_sandbox_ai_home / "config" / "sandbox-ai.toml"
         assert 'docker_unprivileged_user = "sandbox"' in seeded.read_text()
-
-    def test_init_tty_rejects_invalid_auth_value(
-        self,
-        runner: CliRunner,
-        mock_sandbox_ai_home: Path,
-        isolated_sandbox_ai_home: Path,
-    ) -> None:
-        """Invalid machinectl_authentication value is rejected."""
-        from cli.main import app
-
-        with (
-            patch(
-                "cli.main._seed_host_config_if_absent",
-                wraps=_REAL_SEED_HOST_CONFIG,
-            ),
-            patch("cli.main._stdin_is_tty", return_value=True),
-            patch("cli.main.typer.prompt", side_effect=["sandbox", "weird"]),
-        ):
-            result = runner.invoke(app, ["init", "empty"])
-        assert result.exit_code == 1
-        assert "invalid machinectl_authentication" in result.output.lower()
 
     def test_init_existing_host_config_not_overwritten(
         self,
@@ -4098,10 +4067,9 @@ class TestInitAuthProbe:
         return CheckResult(status="pass", name="compose project name collision", detail="ok")
 
     def test_probe_success_sudo(self, runner: CliRunner) -> None:
-        """Probe succeeds with sudo mode — init proceeds; the probe's
-        host_config carries the resolved sudo auth + user."""
+        """Probe succeeds — init proceeds; the probe's host_config carries
+        the resolved daemon user."""
         from cli.main import app
-        from core.host_config import MachinectlAuth
         from core.hydration import InstanceConfig
 
         project_dir = "/home/user/probeproject"
@@ -4133,7 +4101,7 @@ class TestInitAuthProbe:
             assert op == "preflight"
             assert args == []
             assert kwargs["timeout"] == 15
-            assert host_config.host.machinectl_authentication == MachinectlAuth.SUDO
+            assert host_config.host.docker_unprivileged_user is not None
 
     def test_probe_failure_exits_with_remediation(self, runner: CliRunner) -> None:
         """Probe failure (not-ok, not-timeout) exits with error + remediation.
@@ -6009,7 +5977,6 @@ class TestHelperMkdirChownPlan:
 
     def test_phase_sets_default_acl_then_invokes_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
-        from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 100999)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 200999)
@@ -6026,7 +5993,7 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("cli.main.subprocess.run", _fake_run)
         monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake_helper)
 
-        _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", MachinectlAuth.SUDO, "dev")
+        _phase_helper_mkdir_chown_cache_log("/inst", "claude-sandbox", "dev")
 
         # admin-reframe 3.G.2: two parents (cache/core, log) — two setfacl
         # + two helper invocations, alternating (cache/admin dropped).
@@ -6039,7 +6006,6 @@ class TestHelperMkdirChownPlan:
 
     def test_phase_idempotent_re_invocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
-        from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2)
@@ -6056,14 +6022,13 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", _fake_helper)
 
         for _ in range(2):
-            _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
+            _phase_helper_mkdir_chown_cache_log("/inst", "u", "dev")
         # admin-reframe 3.G.2: two parents x two invocations = 4 each.
         assert calls == {"setfacl": 4, "helper": 4}
 
     def test_phase_setfacl_failure_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _phase_helper_mkdir_chown_cache_log
         from core.exceptions import SandboxExecutionError
-        from core.host_config import MachinectlAuth
 
         monkeypatch.setattr("cli.main.host_id_for_in_container", lambda n, u: 1)
         monkeypatch.setattr("cli.main.host_gid_for_in_container", lambda n, u: 2)
@@ -6075,7 +6040,7 @@ class TestHelperMkdirChownPlan:
         monkeypatch.setattr("core.actions.helper_mkdir.helper_mkdir_chown_dirs", lambda *a, **k: None)
 
         with pytest.raises(SandboxExecutionError, match="permission denied"):
-            _phase_helper_mkdir_chown_cache_log("/inst", "u", MachinectlAuth.SUDO, "dev")
+            _phase_helper_mkdir_chown_cache_log("/inst", "u", "dev")
 
 
 class TestPhaseACLGrantErrorWrapping:
@@ -6847,7 +6812,6 @@ class TestCluster3TeardownSymmetry:
         call sequence (not just presence).
         """
         from cli.main import _phase_stop_teardown
-        from core.host_config import MachinectlAuth
 
         calls: list[str] = []
         config = MagicMock()
@@ -6869,7 +6833,7 @@ class TestCluster3TeardownSymmetry:
             patch("cli.main._revoke_acls", side_effect=_track_revoke),
         ):
             _phase_stop_teardown(
-                "/inst", "sandbox", config, ["/ws"], volumes=False, auth=MachinectlAuth.SUDO
+                "/inst", "sandbox", config, ["/ws"], volumes=False
             )
         assert calls == ["compose_down", "unlink", "revoke"]
 

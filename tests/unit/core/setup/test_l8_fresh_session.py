@@ -18,7 +18,6 @@ from core.exceptions import SandboxExecutionError
 from core.host_config import (
     DockerExecutionMode,
     HostConfig,
-    MachinectlAuth,
     minimal_host_config,
 )
 from core.setup import l8_fresh_session as l8
@@ -38,7 +37,7 @@ def _bridge_group(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _hc() -> HostConfig:
-    return minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+    return minimal_host_config("sandbox", DockerExecutionMode.SEPARATE_USER)
 
 
 def _ctx() -> SetupContext:

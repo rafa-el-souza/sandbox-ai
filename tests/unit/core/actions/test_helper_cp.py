@@ -10,19 +10,17 @@ from typing import TYPE_CHECKING
 from core.actions.context import ActionContext
 from core.actions.helper_cp import HelperCpChownAction
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 
 if TYPE_CHECKING:
     import pytest
 
 
 def _ctx(
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
 ) -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
-        auth=auth,
         executor=Executor(),
         instance_dir=Path("/inst"),
         docker_execution_mode=mode,
@@ -93,10 +91,9 @@ def test_execute_delegates_to_helper_chown_files(monkeypatch: pytest.MonkeyPatch
         uid: int,
         gid: int,
         mode: int,
-        auth: object,
         execution_mode: object = DockerExecutionMode.SEPARATE_USER,
     ) -> None:
-        invocations.append((host_user, parent, tuple(files), uid, gid, mode, auth, execution_mode))
+        invocations.append((host_user, parent, tuple(files), uid, gid, mode, execution_mode))
 
     monkeypatch.setattr("core.actions.helper_cp.helper_chown_files", _fake)
     action = HelperCpChownAction(
@@ -106,7 +103,7 @@ def test_execute_delegates_to_helper_chown_files(monkeypatch: pytest.MonkeyPatch
         owner_gid=166535,
         mode=0o600,
     )
-    action.execute(_ctx(MachinectlAuth.SUDO))
+    action.execute(_ctx())
     assert invocations == [
         (
             "claude-sandbox",
@@ -115,7 +112,6 @@ def test_execute_delegates_to_helper_chown_files(monkeypatch: pytest.MonkeyPatch
             166535,
             166535,
             0o600,
-            MachinectlAuth.SUDO,
             DockerExecutionMode.SEPARATE_USER,
         )
     ]
@@ -131,7 +127,6 @@ def test_execute_forwards_operator_rootless_execution_mode(monkeypatch: pytest.M
         uid: int,
         gid: int,
         mode: int,
-        auth: object,
         execution_mode: object = DockerExecutionMode.SEPARATE_USER,
     ) -> None:
         captured["execution_mode"] = execution_mode

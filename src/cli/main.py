@@ -56,7 +56,6 @@ from core.host_config import (
     DockerExecutionMode,
     HostConfig,
     HostSettings,
-    MachinectlAuth,
     WorkspaceBridgeGroupMissingError,
     ensure_per_user_state,
     host_gid_for_in_container,
@@ -321,7 +320,6 @@ def _container_status(
     instance_dir: str,
     host_user: str,
     config: InstanceConfig,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[ContainerInfo]:
     """Query container statuses via `docker compose ps --format json`.
@@ -345,7 +343,7 @@ def _container_status(
     # ``--compose-file`` / ``--env-file`` operands are resolved internally by
     # ``invoke``'s single operator-side resolver (``_resolve_compose_state``),
     # so they are no longer constructed here.
-    host_config = minimal_host_config(host_user, auth, mode)
+    host_config = minimal_host_config(host_user, mode)
     outcome = dispatch.probe("compose-ps", [config.instance.name], host_config)
     if not outcome.ok:
         return []
@@ -396,7 +394,6 @@ def _container_status(
 def _warm_check(
     instance_dir: str,
     host_user: str,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> bool:
     """Check if containers are already running. Returns True if warm.
@@ -408,7 +405,7 @@ def _warm_check(
         return False
 
     config = _load_config(instance_dir)
-    return bool(_container_status(instance_dir, host_user, config, auth, mode))
+    return bool(_container_status(instance_dir, host_user, config, mode))
 
 
 # ─── Locking ─────────────────────────────────────────────────────────────────
@@ -1448,7 +1445,6 @@ def _phase_workspace_shared_group(
     workspace_path: str,
     host: HostSettings,
     dev_user: str | None = None,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5e: chgrp + chmod 2770 + setfacl on a single workspace tree.
 
@@ -1479,7 +1475,6 @@ def _phase_workspace_shared_group(
     # consumes, executed here via .execute(ctx).
     ctx = ActionContext(
         host_user=host_user,
-        auth=auth,
         executor=Executor(),
         instance_dir=Path(workspace_path),
     )
@@ -1499,7 +1494,6 @@ def _phase_workspace_shared_group(
 def _phase_helper_cp_chown_ro_files(
     instance_dir: str,
     host_user: str,
-    auth: MachinectlAuth,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Phase 5d: helper-cp + chown for ro single-file mounts.
@@ -1515,7 +1509,6 @@ def _phase_helper_cp_chown_ro_files(
     """
     ctx = ActionContext(
         host_user=host_user,
-        auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
         docker_execution_mode=mode,
@@ -1552,7 +1545,6 @@ def _phase_stop_unlink_consumer_files(instance_dir: str, host_user: str) -> list
 def _phase_helper_mkdir_chown_cache_log(
     instance_dir: str,
     host_user: str,
-    auth: MachinectlAuth,
     dev_user: str | None = None,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
@@ -1569,7 +1561,6 @@ def _phase_helper_mkdir_chown_cache_log(
 
     ctx = ActionContext(
         host_user=host_user,
-        auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
         docker_execution_mode=mode,
@@ -1594,7 +1585,6 @@ def _phase_acl_grant(
     host_user: str,
     workspace_paths: list[str] | None = None,
     dev_user: str | None = None,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> None:
     """Phase 5: Grant sandbox user ACLs via _acl_grant_plan() (Pattern A).
 
@@ -1606,7 +1596,6 @@ def _phase_acl_grant(
     """
     ctx = ActionContext(
         host_user=host_user,
-        auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
     )
@@ -1662,7 +1651,6 @@ def _phase_compose_up(
     # non-uniformity the render_command contract removed).
     ctx = ActionContext(
         host_user=resolve_daemon_owner(host_config),
-        auth=host_config.host.machinectl_authentication,
         executor=Executor(),
         instance_dir=Path(instance_dir),
         host_config=host_config,
@@ -1798,7 +1786,6 @@ def _compose_down(
     config: InstanceConfig,
     *,
     volumes: bool = False,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
     """Run docker compose down via the typed ``compose-down`` dispatcher op.
@@ -1814,7 +1801,7 @@ def _compose_down(
     ``--compose-file`` expansion are all internal to the single
     ``core.dispatch`` seam — not constructed here.
     """
-    host_config = minimal_host_config(host_user, auth, mode)
+    host_config = minimal_host_config(host_user, mode)
     args = [config.instance.name, "--volumes"] if volumes else [config.instance.name]
     dispatch.invoke("compose-down", args, host_config)
 
@@ -1823,7 +1810,6 @@ def _revoke_acls(
     instance_dir: str,
     host_user: str,
     workspace_paths: list[str] | None = None,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
 ) -> list[str]:
     """Revoke sandbox user's ACL entries — fault-isolated, best-effort (D5).
 
@@ -1836,7 +1822,6 @@ def _revoke_acls(
     warnings: list[str] = []
     ctx = ActionContext(
         host_user=host_user,
-        auth=auth,
         executor=Executor(),
         instance_dir=Path(instance_dir),
     )
@@ -1855,7 +1840,6 @@ def _phase_stop_teardown(
     workspace_paths: list[str] | None,
     *,
     volumes: bool,
-    auth: MachinectlAuth,
     mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> list[str]:
     """Shared teardown sequence for `stop` and `destroy` (cluster 3 — Teardown
@@ -1874,9 +1858,9 @@ def _phase_stop_teardown(
     compose-down (stop propagates, destroy demotes to a warning).
     """
     warnings: list[str] = []
-    _compose_down(host_user, config, volumes=volumes, auth=auth, mode=mode)
+    _compose_down(host_user, config, volumes=volumes, mode=mode)
     warnings.extend(_phase_stop_unlink_consumer_files(instance_dir, host_user))
-    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths, auth))
+    warnings.extend(_revoke_acls(instance_dir, host_user, workspace_paths))
     return warnings
 
 
@@ -2210,10 +2194,9 @@ def _require_per_user_state_initialized() -> None:
 def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
     """Seed ``<user_home>/config/sandbox-ai.toml`` when missing.
 
-    TTY mode prompts for ``docker_unprivileged_user`` (required, non-empty)
-    and ``machinectl_authentication`` (default ``sudo``). Non-TTY mode exits
-    with explicit guidance. Existing files are never overwritten. Dry-run
-    skips seeding entirely.
+    TTY mode prompts for ``docker_unprivileged_user`` (required, non-empty).
+    Non-TTY mode exits with explicit guidance. Existing files are never
+    overwritten. Dry-run skips seeding entirely.
     """
     config_path = user_home / "config" / "sandbox-ai.toml"
     if config_path.exists() or dry_run:
@@ -2235,29 +2218,11 @@ def _seed_host_config_if_absent(user_home: Path, *, dry_run: bool) -> None:
             break
         console.print("docker_unprivileged_user must not be empty.", style="yellow")
 
-    auth_input = (
-        typer.prompt(
-            "machinectl_authentication [sudo, default sudo]",
-            default="sudo",
-            show_default=False,
-        ).strip()
-        or "sudo"
-    )
-    try:
-        resolved_auth_for_seed = MachinectlAuth(auth_input)
-    except ValueError as exc:
-        console.print(
-            f"Invalid machinectl_authentication value: '{auth_input}'. Must be 'sudo'.",
-            style="red",
-        )
-        raise typer.Exit(code=1) from exc
-
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         "# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)\n"
         "[host]\n"
         f'docker_unprivileged_user = "{docker_user}"\n'
-        f'machinectl_authentication = "{resolved_auth_for_seed.value}"\n'
     )
 
 
@@ -2513,16 +2478,6 @@ def bootstrap_host(
         raise typer.Exit(code=1) from None
 
 
-def _resolve_setup_auth() -> MachinectlAuth:
-    """Resolve setup's effective auth mode (D8 — toml-free).
-
-    The only supported auth mode is SUDO, so setup unconditionally provisions
-    :data:`MachinectlAuth.SUDO`. Setup is toml-free (D8) — it never reads the
-    operator toml — so there is no toml channel for the auth mode either.
-    """
-    return MachinectlAuth.SUDO
-
-
 def resolve_effective_mode(
     operator: str, mode_flag: DockerExecutionMode | None
 ) -> DockerExecutionMode:
@@ -2611,9 +2566,9 @@ def _build_setup_context_with_operator(
     sandbox-ai.toml`` (``HostConfig.from_toml``). This is the core G1 fix — a
     toml read here resolved to root's ``/root/.sandbox-ai`` (setup runs as root
     in separate-user mode), so an operator's real toml override never reached
-    setup. The daemon user, auth mode, execution mode, and bridge group are all
-    **explicit inputs** via flags (with documented defaults). The auth mode is
-    resolved (sudo-only) by :func:`_resolve_setup_auth`; the execution mode is decided
+    setup. The daemon user, execution mode, and bridge group are all
+    **explicit inputs** via flags (with documented defaults). The execution mode
+    is decided
     against the per-operator marker by :func:`resolve_effective_mode` (the marker
     WRITE is §8). Operator is resolved once via :func:`_resolve_setup_operator`
     (euid-aware: the canonical root-scoped precedence, with a non-root current-user
@@ -2629,13 +2584,11 @@ def _build_setup_context_with_operator(
     operator-rootless surfaces the actionable "must NOT be run as root" message
     rather than the generic owner-root refusal (finding 8.7).
     """
-    auth = _resolve_setup_auth()
     operator = _resolve_setup_operator(operator_flag)
     mode = resolve_effective_mode(operator, _parse_mode_flag(mode_flag))
     host_config = HostConfig(
         host=HostSettings(
             docker_unprivileged_user=docker_unprivileged_user,
-            machinectl_authentication=auth,
             docker_execution_mode=mode,
             workspace_bridge_group=workspace_bridge_group,
         )
@@ -3075,13 +3028,6 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    # Resolution: machinectl_authentication (host config → default sudo)
-    resolved_auth = (
-        project_config.host.machinectl_authentication
-        if project_config is not None
-        else MachinectlAuth.SUDO
-    )
-
     # Init-time auth mode probe (D5). This is a *probe* callsite: it must
     # branch (reachable → continue; unreachable/timeout → guidance + exit 1),
     # not crash. Per Q8 the probe-style entry point is ``core.dispatch.probe``,
@@ -3113,8 +3059,8 @@ def init(
             probe_mode = resolve_execution_mode(getpass.getuser())
         except ModeMarkerMissing:
             probe_mode = DEFAULT_PROVISIONING_MODE
-        probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, resolved_auth, probe_mode))
-        probe_host_config = minimal_host_config(probe_owner, resolved_auth, probe_mode)
+        probe_owner = resolve_daemon_owner(minimal_host_config(resolved_user, probe_mode))
+        probe_host_config = minimal_host_config(probe_owner, probe_mode)
 
         # One ``preflight`` crossing replaces the separate explicit ``auth-probe``
         # probe (the crossing succeeding IS the reachability signal — C-009 D6,
@@ -3288,7 +3234,6 @@ def start(
     host_config = _resolve_full_host_config()
     host_settings = host_config.host
     host_user = resolve_daemon_owner(host_config)
-    auth = host_settings.machinectl_authentication
 
     # Operator-edited TOML guard: ``instance.name`` should match the registry
     # key (the typer arg). Divergence is harmless for compose-project-name
@@ -3324,7 +3269,7 @@ def start(
     # the set of checks is unchanged and only the crossing count drops. The
     # ``compose-ps`` warm-check below stays its own (instance-stateful) crossing
     # → start's read-only preflight is two crossings, not eight.
-    preflight_host_config = minimal_host_config(host_user, auth, host_settings.docker_execution_mode)
+    preflight_host_config = minimal_host_config(host_user, host_settings.docker_execution_mode)
     preflight_outcome = dispatch.probe("preflight", [], preflight_host_config, timeout=15)
 
     # Crossing-as-reachability gate (D6): the preflight crossing itself failing
@@ -3357,7 +3302,7 @@ def start(
         raise typer.Exit(code=1)
 
     # Pre-lock warm check (D-52)
-    if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
+    if _warm_check(instance_dir, host_user, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is already running. Use 'sandbox attach {inst} [<ws>]' to reconnect.")
         return
 
@@ -3394,7 +3339,7 @@ def start(
         # requirement; closes the bug class fixed by temp commit 6f1831e).
         try:
             for ws_path in ws_paths:
-                _phase_workspace_shared_group(ws_path, host_settings, dev_user, auth)
+                _phase_workspace_shared_group(ws_path, host_settings, dev_user)
         except WorkspaceBridgeGroupMissingError as exc:
             console.print(
                 f"[FATAL] {exc}\nRun `sandbox doctor` for setup commands.",
@@ -3413,7 +3358,7 @@ def start(
         # Daemon-Readable Default ACL" requirement, closing finding 8.D
         # alternative #1).
         acl_granted = True  # set BEFORE grant — handles partial grants (D7)
-        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user, auth)
+        _phase_acl_grant(instance_dir, host_user, ws_paths, dev_user)
         console.print("✓ ACL — filesystem permissions granted")
 
         # Phase 4: Credentials.
@@ -3445,12 +3390,12 @@ def start(
 
         # Phase 6a: helper-mkdir+chown for cache/log leaves
         _phase_helper_mkdir_chown_cache_log(
-            instance_dir, host_user, auth, dev_user, host_settings.docker_execution_mode
+            instance_dir, host_user, dev_user, host_settings.docker_execution_mode
         )
         console.print("✓ Cache/log — leaves chowned to consumer subuid")
 
         # Phase 6b: helper-cp+chown for ro single-file mounts (replaces credential-ownership)
-        _phase_helper_cp_chown_ro_files(instance_dir, host_user, auth, host_settings.docker_execution_mode)
+        _phase_helper_cp_chown_ro_files(instance_dir, host_user, host_settings.docker_execution_mode)
         console.print("✓ Ownership — ro config files converged")
 
         # Phase 6: Compose up (D-5 — spinner for long-running phase).
@@ -3468,7 +3413,7 @@ def start(
         # ACL on the workspace) are NOT reverted — they're persistent state
         # that survives intermediate stop/start cycles by design.
         if acl_granted:
-            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths, auth)
+            acl_warnings = _revoke_acls(instance_dir, host_user, ws_paths)
             for w in acl_warnings:
                 console.print(f"⚠ {w}", style="yellow")
         _release_lock(lock_fd)
@@ -3517,10 +3462,9 @@ def stop(
     host_config = _resolve_full_host_config()
     host_settings = host_config.host
     host_user = resolve_daemon_owner(host_config)
-    auth = host_settings.machinectl_authentication
 
     # Warm check
-    if not _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
+    if not _warm_check(instance_dir, host_user, host_settings.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Nothing to stop.")
         return
 
@@ -3553,7 +3497,6 @@ def stop(
         config,
         ws_paths,
         volumes=clean,
-        auth=auth,
         mode=host_settings.docker_execution_mode,
     ):
         console.print(f"⚠ {w}", style="yellow")
@@ -3588,7 +3531,6 @@ def attach(
     config = _load_config(instance_dir)
     host_config = _resolve_full_host_config()
     host_user = resolve_daemon_owner(host_config)
-    auth = host_config.host.machinectl_authentication
 
     # Workspace selection per cli-attach spec.
     workspace_names = sorted(config.workspaces.keys())
@@ -3610,7 +3552,7 @@ def attach(
         raise typer.Exit(code=1)
 
     # Warm check — reject if cold
-    if not _warm_check(instance_dir, host_user, auth, host_config.host.docker_execution_mode):
+    if not _warm_check(instance_dir, host_user, host_config.host.docker_execution_mode):
         console.print(f"Sandbox '{inst}' is not running. Use 'sandbox start {inst}' to launch.")
         raise typer.Exit(code=1)
 
@@ -3704,7 +3646,6 @@ def destroy(
     config = _load_config(instance_dir)
     host_config = _resolve_full_host_config()
     host_user = resolve_daemon_owner(host_config)
-    auth = host_config.host.machinectl_authentication
     mode = host_config.host.docker_execution_mode
     available = set(config.workspaces.keys())
 
@@ -3757,7 +3698,7 @@ def destroy(
 
         # D3: compose down (REVERSIBLE).
         try:
-            _compose_down(host_user, config, volumes=False, auth=auth, mode=mode)
+            _compose_down(host_user, config, volumes=False, mode=mode)
         except SandboxExecutionError as e:
             console.print(f"⚠ Compose down warning: {e}", style="yellow")
 
@@ -3807,7 +3748,6 @@ def destroy(
                     config,
                     ws_paths,
                     volumes=True,
-                    auth=auth,
                     mode=mode,
                 )
             except SandboxExecutionError as e:
@@ -3816,7 +3756,7 @@ def destroy(
                 # (rmtree is irreversible by design). Run the post-compose
                 # phases separately so warnings still surface.
                 teardown_warnings = _phase_stop_unlink_consumer_files(instance_dir, host_user)
-                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths, auth))
+                teardown_warnings.extend(_revoke_acls(instance_dir, host_user, ws_paths))
             for w in teardown_warnings:
                 console.print(f"⚠ {w}", style="yellow")
 
@@ -4006,11 +3946,10 @@ def _render_status_detailed(inst: str, *, detailed: bool) -> None:
     host_config = _resolve_full_host_config()
     host_settings = host_config.host
     host_user = resolve_daemon_owner(host_config)
-    auth = host_settings.machinectl_authentication
 
     # Container status
     containers = _container_status(
-        instance_dir, host_user, config, auth, host_settings.docker_execution_mode
+        instance_dir, host_user, config, host_settings.docker_execution_mode
     )
     is_running = len(containers) > 0
     has_unhealthy = any(c.health is not None and c.health.lower() in ("unhealthy", "starting") for c in containers)
@@ -4162,8 +4101,7 @@ def _require_instance_stopped(inst: str, instance_dir: str) -> None:
     host_config = _resolve_full_host_config()
     host_settings = host_config.host
     host_user = resolve_daemon_owner(host_config)
-    auth = host_settings.machinectl_authentication
-    if _warm_check(instance_dir, host_user, auth, host_settings.docker_execution_mode):
+    if _warm_check(instance_dir, host_user, host_settings.docker_execution_mode):
         console.print(
             f"Instance {inst!r} must be stopped. Run `sandbox stop {inst}` first.",
             style="red",

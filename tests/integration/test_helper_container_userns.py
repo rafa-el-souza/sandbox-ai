@@ -171,7 +171,7 @@ def test_helper_mkdir_chown_dirs_lands_host_absolute_ownership(
     cross_boundary_tmpdir: Path,
     grant_parent_access: Callable[[Path], None],
 ) -> None:
-    daemon_user, auth = _check_preconditions()
+    daemon_user, _ = _check_preconditions()
     tmp_path = cross_boundary_tmpdir
     grant_parent_access(tmp_path)
 
@@ -184,7 +184,6 @@ def test_helper_mkdir_chown_dirs_lands_host_absolute_ownership(
         ["leaf"],
         owner_uid=target_uid,
         owner_gid=target_gid,
-        machinectl_auth=auth,
     )
 
     leaf = tmp_path / "leaf"
@@ -201,7 +200,7 @@ def test_helper_chown_files_lands_host_absolute_ownership_and_mode(
     cross_boundary_tmpdir: Path,
     grant_parent_access: Callable[[Path], None],
 ) -> None:
-    daemon_user, auth = _check_preconditions()
+    daemon_user, _ = _check_preconditions()
     tmp_path = cross_boundary_tmpdir
     grant_parent_access(tmp_path)
 
@@ -219,7 +218,6 @@ def test_helper_chown_files_lands_host_absolute_ownership_and_mode(
         owner_uid=target_uid,
         owner_gid=target_gid,
         mode=target_mode,
-        machinectl_auth=auth,
     )
 
     st = os.stat(src)

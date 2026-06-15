@@ -82,11 +82,11 @@ def test_helper_container_hardening_flags() -> None:
     sys.path.insert(0, str(REPO_ROOT / "src"))
     try:
         from core.dispatch import build_target_argv
-        from core.host_config import MachinectlAuth, minimal_host_config
+        from core.host_config import minimal_host_config
     finally:
         sys.path.pop(0)
 
-    host_config = minimal_host_config("claude-sandbox", MachinectlAuth.SUDO)
+    host_config = minimal_host_config("claude-sandbox")
 
     chown_argv = build_target_argv(
         "helper-chown-files",

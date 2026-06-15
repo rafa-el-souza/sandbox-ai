@@ -51,7 +51,6 @@ from core.host_config import (
     DockerExecutionMode,
     HostConfig,
     HostSettings,
-    MachinectlAuth,
     autodetect_workspace_bridge_gid_recommendation,
     parse_subgid_for_user,
     parse_subuid_for_user,
@@ -339,7 +338,6 @@ def _apply_marker(params: BatchParams) -> None:
 _RESERVED_HOST_CONFIG = HostConfig(
     host=HostSettings(
         docker_unprivileged_user="root",
-        machinectl_authentication=MachinectlAuth.SUDO,
         docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
     )
 )

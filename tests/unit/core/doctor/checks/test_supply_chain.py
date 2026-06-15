@@ -155,7 +155,6 @@ class TestCheckImageDigests:
 
     def test_user_threaded_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_image_digests
-        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -167,4 +166,3 @@ class TestCheckImageDigests:
         check_image_digests("sandbox", None)
 
         assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO

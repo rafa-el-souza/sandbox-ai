@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
-    MachinectlAuth,
     in_container_gid_for_host_gid,
     in_container_uid_for_host_uid,
     minimal_host_config,
@@ -79,7 +78,6 @@ def helper_chown_files(
     owner_uid: int,
     owner_gid: int,
     mode: int,
-    machinectl_auth: MachinectlAuth,
     timeout: float = DEFAULT_HELPER_TIMEOUT_S,
     execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
@@ -115,7 +113,7 @@ def helper_chown_files(
             str(in_container_gid),
             *file_list,
         ],
-        minimal_host_config(host_user, machinectl_auth, execution_mode),
+        minimal_host_config(host_user, execution_mode),
         timeout=timeout,
     )
 
@@ -126,7 +124,6 @@ def helper_mkdir_chown_dirs(
     leaves: Iterable[str],
     owner_uid: int,
     owner_gid: int,
-    machinectl_auth: MachinectlAuth,
     timeout: float = DEFAULT_HELPER_TIMEOUT_S,
     execution_mode: DockerExecutionMode = DEFAULT_PROVISIONING_MODE,
 ) -> None:
@@ -155,6 +152,6 @@ def helper_mkdir_chown_dirs(
             str(in_container_gid),
             *leaf_list,
         ],
-        minimal_host_config(host_user, machinectl_auth, execution_mode),
+        minimal_host_config(host_user, execution_mode),
         timeout=timeout,
     )

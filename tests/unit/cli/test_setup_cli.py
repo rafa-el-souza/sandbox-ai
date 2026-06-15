@@ -34,7 +34,7 @@ from cli.main import (
     app,
     resolve_effective_mode,
 )
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, minimal_host_config
 from core.setup.host_batch import BatchItem, BatchParams
 from core.setup.l0_identity import OperatorResolutionError
 from core.setup.phase_runner import (
@@ -168,7 +168,7 @@ def test_setup_flag_guard_refusal_surfaces_through_command(runner: CliRunner) ->
 
 def _identity_ctx(mode: DockerExecutionMode) -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandbox", MachinectlAuth.SUDO, mode),
+        host_config=minimal_host_config("sandbox", mode),
         operator="dev",
     )
 
@@ -254,7 +254,7 @@ def _bp() -> BatchParams:
 def _oprl_ctx() -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
-            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+            "sandbox", DockerExecutionMode.OPERATOR_ROOTLESS
         ),
         operator="dev",
     )
@@ -461,7 +461,7 @@ def test_update_runsc_in_separate_user_runs_l6a_subset() -> None:
     """separate-user ``--update-runsc`` still routes to the L6a-only subset path."""
     sep_ctx = SetupContext(
         host_config=minimal_host_config(
-            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+            "sandbox", DockerExecutionMode.SEPARATE_USER
         ),
         operator="dev",
     )
@@ -1178,43 +1178,6 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
     # (the same value `sandbox init` later seeds); operator from the resolver.
     assert ctx.host_config.host.docker_unprivileged_user == "sandbox"
     assert ctx.operator == "dev"
-
-
-# ── auth-mode resolution (sudo-only) ─────────────────────────────────────────
-
-
-@pytest.mark.no_host_config_mock
-def test_setup_resolves_sudo_auth_unconditionally(runner: CliRunner) -> None:
-    """Setup always provisions SUDO auth (the only supported mode)."""
-    from core.host_config import MachinectlAuth
-
-    phases = [_phase("l0")]
-    plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
-    captured: list[SetupContext] = []
-
-    def _capture(_phs: object, ctx: SetupContext) -> list[PhasePlanOutcome]:
-        captured.append(ctx)
-        return plan
-
-    with (
-        patch("cli.main.os.geteuid", return_value=0),
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.emit_distro_gate"),
-        patch("cli.main.selected_extras", return_value=[]),
-        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
-        patch("cli.main.run_plan_pass", side_effect=_capture),
-        patch("cli.main._stdin_is_tty", return_value=True),
-    ):
-        result = runner.invoke(
-            app,
-            [
-                "setup",
-                "--docker-execution-mode",
-                "separate-user",
-            ],
-        )
-    assert result.exit_code == 0
-    assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
 
 # ── sticky-opt-in extras inclusion is wired into the phase list ──────────────

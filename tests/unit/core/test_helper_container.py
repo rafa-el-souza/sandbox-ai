@@ -29,7 +29,7 @@ from core import dispatch
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
 from core.helper_container import helper_chown_files, helper_mkdir_chown_dirs
-from core.host_config import DockerExecutionMode, MachinectlAuth, SubuidOutOfRangeError
+from core.host_config import DockerExecutionMode, SubuidOutOfRangeError
 
 # Standard fixture matching the change's spec scenarios:
 # /etc/subuid and /etc/subgid both have ``claude-sandbox:165536:65536``.
@@ -94,7 +94,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o600,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert len(captured_invoke) == 1
         call = captured_invoke[0]
@@ -112,7 +111,6 @@ class TestHelperChownFiles:
         assert str(_HOST_UID) not in call["args"]
         hc = call["host_config"]
         assert hc.host.docker_unprivileged_user == _HOST_USER
-        assert hc.host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_default_execution_mode_is_operator_rootless(
         self, subid_fixture: None, captured_invoke: list[dict[str, Any]]
@@ -124,7 +122,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         hc = captured_invoke[0]["host_config"]
         assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
@@ -139,7 +136,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
             execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
         )
         hc = captured_invoke[0]["host_config"]
@@ -157,7 +153,6 @@ class TestHelperChownFiles:
             owner_uid=99999999,
             owner_gid=99999999,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert captured_invoke == []
 
@@ -171,7 +166,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert len(captured_invoke) == 1
         assert captured_invoke[0]["args"][4:] == ["a", "b", "c", "d"]
@@ -187,7 +181,6 @@ class TestHelperChownFiles:
                 owner_uid=_HOST_UID,
                 owner_gid=_HOST_GID,
                 mode=0o640,
-                machinectl_auth=MachinectlAuth.SUDO,
             )
         assert len(captured_invoke) == 3
 
@@ -201,7 +194,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o755,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         # mode arg is the 4-digit octal string the op validator expects.
         assert captured_invoke[0]["args"][1] == "0755"
@@ -217,7 +209,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         args = captured_invoke[0]["args"]
         assert args[2] == str(_IN_CONTAINER_UID)
@@ -235,7 +226,6 @@ class TestHelperChownFiles:
                     owner_uid=10,  # below the 165536..231071 range
                     owner_gid=_HOST_GID,
                     mode=0o640,
-                    machinectl_auth=MachinectlAuth.SUDO,
                 )
             invoke_mock.assert_not_called()
 
@@ -263,7 +253,6 @@ class TestHelperChownFiles:
                 owner_uid=_HOST_UID,
                 owner_gid=_HOST_GID,
                 mode=0o640,
-                machinectl_auth=MachinectlAuth.SUDO,
             )
 
     def test_default_timeout_passes_through(
@@ -276,7 +265,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert captured_invoke[0]["timeout"] == 30
 
@@ -290,7 +278,6 @@ class TestHelperChownFiles:
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
             mode=0o640,
-            machinectl_auth=MachinectlAuth.SUDO,
             timeout=5,
         )
         assert captured_invoke[0]["timeout"] == 5
@@ -309,7 +296,6 @@ class TestHelperMkdirChownDirs:
             [".claude"],
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert len(captured_invoke) == 1
         call = captured_invoke[0]
@@ -332,7 +318,6 @@ class TestHelperMkdirChownDirs:
             [],
             owner_uid=99999999,
             owner_gid=99999999,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert captured_invoke == []
 
@@ -345,7 +330,6 @@ class TestHelperMkdirChownDirs:
             [".claude", "tmux_resurrect"],
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         assert len(captured_invoke) == 1
         assert captured_invoke[0]["args"][3:] == [".claude", "tmux_resurrect"]
@@ -359,7 +343,6 @@ class TestHelperMkdirChownDirs:
             ["x"],
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         hc = captured_invoke[0]["host_config"]
         assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
@@ -373,7 +356,6 @@ class TestHelperMkdirChownDirs:
             ["x"],
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.SUDO,
             execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
         )
         hc = captured_invoke[0]["host_config"]
@@ -389,7 +371,6 @@ class TestHelperMkdirChownDirs:
             ["d"],
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.SUDO,
         )
         args = captured_invoke[0]["args"]
         assert args[1] == str(_IN_CONTAINER_UID)
@@ -411,7 +392,6 @@ class TestHelperMkdirChownDirs:
                 ["x"],
                 owner_uid=_HOST_UID,
                 owner_gid=_HOST_GID,
-                machinectl_auth=MachinectlAuth.SUDO,
             )
 
     def test_custom_timeout_passes_through(
@@ -423,7 +403,6 @@ class TestHelperMkdirChownDirs:
             ["x"],
             owner_uid=_HOST_UID,
             owner_gid=_HOST_GID,
-            machinectl_auth=MachinectlAuth.SUDO,
             timeout=5,
         )
         assert captured_invoke[0]["timeout"] == 5
@@ -439,7 +418,6 @@ class TestHelperMkdirChownDirs:
                     ["x"],
                     owner_uid=10,
                     owner_gid=_HOST_GID,
-                    machinectl_auth=MachinectlAuth.SUDO,
                 )
             invoke_mock.assert_not_called()
 

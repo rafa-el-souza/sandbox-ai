@@ -18,7 +18,6 @@ import socket
 from typing import Any
 
 from core.dispatch import DISPATCH_BINARY, Op
-from core.host_config import MachinectlAuth
 from core.setup.l3_sudoers import render_sudoers_rule
 
 _MOD = "core.doctor.checks.setup_invariants"
@@ -307,7 +306,7 @@ class TestAuditDaemonUserNoAdmin:
     def _hc(self) -> Any:
         from core.host_config import minimal_host_config
 
-        return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        return minimal_host_config("sandbox")
 
     _grant = staticmethod(_grant)
 
@@ -453,7 +452,7 @@ class TestAuditDaemonUserNoAdmin:
         monkeypatch.setattr(
             "core.setup.l2_host_prereqs.user_sudoers_grant", _record_policy
         )
-        hc = minimal_host_config("dockerd-svc", MachinectlAuth.SUDO)
+        hc = minimal_host_config("dockerd-svc")
         m._audit_daemon_user_no_admin(hc, [])
         assert seen == ["dockerd-svc"]
         # Separate-user owner is a DIFFERENT user → self_query=False (needs root).
@@ -547,7 +546,7 @@ class TestAuditMachinectlStability:
     def _hc(self) -> Any:
         from core.host_config import minimal_host_config
 
-        return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        return minimal_host_config("sandbox")
 
     def test_resolution_error(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
@@ -611,7 +610,7 @@ class TestAuditSystemdRunStability:
     def _hc(self) -> Any:
         from core.host_config import minimal_host_config
 
-        return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        return minimal_host_config("sandbox")
 
     def test_resolution_error(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m
@@ -661,7 +660,7 @@ class TestAuditRuleBody:
     def _hc(self) -> Any:
         from core.host_config import minimal_host_config
 
-        return minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        return minimal_host_config("sandbox")
 
     def test_canonical_body_no_violation(self, monkeypatch: Any) -> None:
         from core.doctor.checks import setup_invariants as m

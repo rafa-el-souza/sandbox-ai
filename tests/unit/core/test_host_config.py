@@ -285,12 +285,12 @@ class TestMinimalHostConfigMode:
     def test_default_mode_is_operator_rootless(self) -> None:
         """Omitting the mode parameter yields DEFAULT_PROVISIONING_MODE
         (OPERATOR_ROOTLESS — the single system-wide default, F-051)."""
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO)
+        hc = minimal_host_config("sandbox")
         assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
     def test_explicit_operator_rootless_mode(self) -> None:
         """Passing mode=OPERATOR_ROOTLESS sets the field."""
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        hc = minimal_host_config("sandbox", DockerExecutionMode.OPERATOR_ROOTLESS)
         assert hc.host.docker_execution_mode == DockerExecutionMode.OPERATOR_ROOTLESS
 
 
@@ -299,12 +299,12 @@ class TestIsOperatorRootless:
 
     def test_true_for_operator_rootless(self) -> None:
         """Returns True when the host_config carries OPERATOR_ROOTLESS."""
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        hc = minimal_host_config("sandbox", DockerExecutionMode.OPERATOR_ROOTLESS)
         assert is_operator_rootless(hc) is True
 
     def test_false_for_separate_user(self) -> None:
         """Returns False for an explicit SEPARATE_USER mode."""
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+        hc = minimal_host_config("sandbox", DockerExecutionMode.SEPARATE_USER)
         assert is_operator_rootless(hc) is False
 
 
@@ -314,7 +314,7 @@ class TestResolveDaemonOwner:
     def test_operator_rootless_returns_invoking_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """In operator-rootless mode the owner is the current (invoking) user."""
         monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS)
+        hc = minimal_host_config("sandbox", DockerExecutionMode.OPERATOR_ROOTLESS)
         assert resolve_daemon_owner(hc) == "alice"
 
     def test_operator_rootless_never_reads_docker_unprivileged_user(
@@ -323,7 +323,7 @@ class TestResolveDaemonOwner:
         """The op-rootless branch must NOT consult docker_unprivileged_user."""
         monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
         hc = minimal_host_config(
-            "the-stale-default", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+            "the-stale-default", DockerExecutionMode.OPERATOR_ROOTLESS
         )
         owner = resolve_daemon_owner(hc)
         assert owner == "alice"
@@ -334,7 +334,7 @@ class TestResolveDaemonOwner:
     ) -> None:
         """In separate-user mode the owner is the configured dedicated user."""
         monkeypatch.setattr("core.host_config.getpass.getuser", lambda: "alice")
-        hc = minimal_host_config("sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER)
+        hc = minimal_host_config("sandbox", DockerExecutionMode.SEPARATE_USER)
         assert resolve_daemon_owner(hc) == "sandbox"
 
 

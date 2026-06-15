@@ -16,7 +16,6 @@ import pytest
 from core.exceptions import SandboxExecutionError
 from core.host_config import (
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
 )
 from core.setup import l7_helper_image as l7
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
 def ctx() -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
-            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+            "sandboxuser", DockerExecutionMode.SEPARATE_USER
         ),
         operator="op",
     )
@@ -192,7 +191,6 @@ def test_act_operator_rootless_local_pull(monkeypatch: pytest.MonkeyPatch) -> No
     ctx = SetupContext(
         host_config=minimal_host_config(
             "sandboxuser",
-            MachinectlAuth.SUDO,
             mode=DockerExecutionMode.OPERATOR_ROOTLESS,
         ),
         operator="alice",

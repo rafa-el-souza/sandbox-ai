@@ -21,7 +21,6 @@ from core.doctor.types import CheckResult
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
 )
 
@@ -38,7 +37,7 @@ def check_runsc_pinned_match(
     is threaded only for caller uniformity.
     """
     del distro
-    host_config = minimal_host_config(user, MachinectlAuth.SUDO, mode)
+    host_config = minimal_host_config(user, mode)
     result = binary_install.verify_only("runsc", host_config)
 
     if result.status == "match":
