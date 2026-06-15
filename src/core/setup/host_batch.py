@@ -56,6 +56,7 @@ from core.host_config import (
     parse_subuid_for_user,
 )
 from core.setup import l1_kernel, l2a_delegate
+from core.setup.subid import pick_free_subid_block
 from core.setup_state import read_mode, write_mode_root_owned
 
 if TYPE_CHECKING:
@@ -122,8 +123,16 @@ _MANAGED_HEADER = "# sandbox-ai managed — do not edit; rerun 'sudo sandbox set
 
 _MODULES_LOAD_DROPIN = Path("/etc/modules-load.d/sandbox-ai.conf")
 
-# The minimal subid range size, mirroring l2's host-prereq contract.
-_MIN_SUBID_RANGE = 65536
+
+def _subid_range_arg() -> str:
+    """Render the ``<start>-<end>`` usermod range for the next free block.
+
+    Derived from :func:`core.setup.subid.pick_free_subid_block` — the SINGLE
+    seam shared by the real append and the remediation preview (no second
+    hand-typed literal).
+    """
+    start, size = pick_free_subid_block()
+    return f"{start}-{start + size - 1}"
 
 
 def _nftables_modules(distro_family: str) -> tuple[str, ...]:
@@ -207,10 +216,11 @@ def _apply_subid(params: BatchParams) -> None:
     is left untouched (idempotent skip).
     """
     operator = params.operator
+    range_arg = _subid_range_arg()
     if not parse_subuid_for_user(operator):
-        _run(["usermod", "--add-subuids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", operator])
+        _run(["usermod", "--add-subuids", range_arg, operator])
     if not parse_subgid_for_user(operator):
-        _run(["usermod", "--add-subgids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", operator])
+        _run(["usermod", "--add-subgids", range_arg, operator])
 
 
 def _apply_groupadd(params: BatchParams) -> None:
@@ -529,9 +539,10 @@ def render_remediation_block(items: frozenset[BatchItem], params: BatchParams) -
 
 
 def _remediation_subid(params: BatchParams) -> str:
+    range_arg = _subid_range_arg()
     return (
-        f"sudo usermod --add-subuids 100000-{100000 + _MIN_SUBID_RANGE - 1} "
-        f"--add-subgids 100000-{100000 + _MIN_SUBID_RANGE - 1} {params.operator}"
+        f"sudo usermod --add-subuids {range_arg} "
+        f"--add-subgids {range_arg} {params.operator}"
     )
 
 

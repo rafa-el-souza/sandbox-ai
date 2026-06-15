@@ -45,15 +45,11 @@ from core.host_config import (
     parse_subgid_for_user,
     parse_subuid_for_user,
 )
+from core.setup import subid
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
     from core.setup.phase_runner import SetupContext
-
-# The standard rootless subuid/subgid range size shadow-mapped by Docker
-# (``useradd`` default = 65536). An existing entry must be at least this large
-# or L2 refuses to shrink it (spec "/etc/subuid refuses to shrink").
-_MIN_SUBID_RANGE = 65536
 
 
 def _user_exists(name: str) -> bool:
@@ -226,15 +222,50 @@ def user_sudoers_grant(user: str, *, self_query: bool) -> SudoersGrant:
 
 def _adequate_range(ranges: list[tuple[int, int]]) -> bool:
     """``True`` iff the user's total allocated subid count meets the minimum."""
-    return sum(count for _, count in ranges) >= _MIN_SUBID_RANGE
+    return sum(count for _, count in ranges) >= subid.MIN_SUBID_RANGE
+
+
+def _cross_user_overlap(user: str) -> str | None:
+    """Detail string iff ``user``'s own ranges overlap a DIFFERENT user's range.
+
+    Scans the union of all users' ``/etc/subuid`` + ``/etc/subgid`` entries
+    (via the whole-file reader) and compares each of ``user``'s own ranges
+    against every foreign range. Returns ``None`` when there is no cross-user
+    overlap. Cross-user overlap is a corruption signal — two users sharing a
+    subid block breaks the per-operator isolation boundary (F-071).
+    """
+    own = [(s, c, "subuid") for s, c in parse_subuid_for_user(user)]
+    own += [(s, c, "subgid") for s, c in parse_subgid_for_user(user)]
+    if not own:
+        return None
+    # Filter foreign ranges by USER identity, not value — a different user that
+    # holds an IDENTICAL (start, count) range (the pre-F-071 footgun: every
+    # operator got 100000:65536) is a genuine cross-user overlap and MUST stay
+    # in ``foreign``. A value-only dedup would silently drop it.
+    foreign = [
+        (s, c)
+        for u, s, c in subid.read_all_subid_ranges_by_user()
+        if u != user
+    ]
+    for o_start, o_size, label in own:
+        for f_start, f_size in foreign:
+            if subid.ranges_overlap(o_start, o_size, f_start, f_size):
+                return (
+                    f"/etc/{label} range {o_start}:{o_size} for {user} overlaps "
+                    f"another user's range {f_start}:{f_size}; subid ranges must "
+                    f"be disjoint per user. Manually correct the overlap and "
+                    f"re-run setup."
+                )
+    return None
 
 
 def subid_status(user: str) -> tuple[str, str]:
     """Classify the subuid+subgid state for ``user``.
 
     Returns ``(status, detail)`` where status ∈
-    ``{"adequate", "absent", "inadequate"}``. ``inadequate`` is the
-    refuse-to-shrink case (spec).
+    ``{"adequate", "absent", "inadequate", "overlapping"}``. ``inadequate`` is
+    the refuse-to-shrink case (spec); ``overlapping`` is the cross-user-overlap
+    corruption case (F-071).
     """
     uid_ranges = parse_subuid_for_user(user)
     gid_ranges = parse_subgid_for_user(user)
@@ -246,9 +277,12 @@ def subid_status(user: str) -> tuple[str, str]:
             return (
                 "inadequate",
                 f"existing /etc/{label} entry for {user} has range {total}; "
-                f"minimum required is {_MIN_SUBID_RANGE}. Refusing to shrink "
+                f"minimum required is {subid.MIN_SUBID_RANGE}. Refusing to shrink "
                 f"existing range. Manually update /etc/{label} and re-run setup.",
             )
+    overlap_detail = _cross_user_overlap(user)
+    if overlap_detail is not None:
+        return "overlapping", overlap_detail
     if not uid_ranges or not gid_ranges:
         return "absent", "one of /etc/subuid or /etc/subgid entry is absent"
     return "adequate", "subuid/subgid ranges adequate"
@@ -278,7 +312,7 @@ def _probe(ctx: SetupContext) -> tuple[PhaseResult, str]:
         return PhaseResult.MISSING, f"sandbox user {sandbox_user!r} absent"
 
     status, detail = subid_status(sandbox_user)
-    if status == "inadequate":
+    if status in ("inadequate", "overlapping"):
         return PhaseResult.CONFLICT, detail
     if status == "absent":
         return PhaseResult.MISSING, f"subid entries for {sandbox_user!r}: {detail}"
@@ -337,15 +371,18 @@ def _act(ctx: SetupContext) -> str:
         actions.append(f"created user {sandbox_user}")
 
     status, detail = subid_status(sandbox_user)
-    if status == "inadequate":
-        # Defensive: the runner never calls act on CONFLICT, but never shrink.
+    if status in ("inadequate", "overlapping"):
+        # Defensive: the runner never calls act on CONFLICT, but never shrink
+        # an existing range nor provision atop a corrupt overlapping state.
         raise RuntimeError(detail)
     if status == "absent":
+        start, size = subid.pick_free_subid_block()
+        range_arg = f"{start}-{start + size - 1}"
         if not parse_subuid_for_user(sandbox_user):
-            _run(["usermod", "--add-subuids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", sandbox_user])
+            _run(["usermod", "--add-subuids", range_arg, sandbox_user])
             actions.append("appended /etc/subuid entry")
         if not parse_subgid_for_user(sandbox_user):
-            _run(["usermod", "--add-subgids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", sandbox_user])
+            _run(["usermod", "--add-subgids", range_arg, sandbox_user])
             actions.append("appended /etc/subgid entry")
 
     if not group_exists(bridge_group):

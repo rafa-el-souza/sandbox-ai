@@ -15,7 +15,7 @@ from core.host_config import (
     DockerExecutionMode,
     minimal_host_config,
 )
-from core.setup import host_batch, l1_kernel, l2a_delegate
+from core.setup import host_batch, l1_kernel, l2a_delegate, subid
 from core.setup.host_batch import (
     HOST_ROOT_BATCH,
     BatchItem,
@@ -166,6 +166,10 @@ def test_apply_runs_only_requested_items_in_order(monkeypatch: pytest.MonkeyPatc
 def test_subid_applier_appends_operator_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_batch, "parse_subuid_for_user", lambda _u: [])
     monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [])
+    # Stub the whole-file reader to EMPTY so the free-block picker is
+    # deterministic (picks the base block) regardless of the real CI host's
+    # /etc/subuid — the per-user stubs above do not cover cross-user occupancy.
+    monkeypatch.setattr(subid, "read_all_subid_ranges", list)
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
@@ -174,6 +178,23 @@ def test_subid_applier_appends_operator_ranges(monkeypatch: pytest.MonkeyPatch) 
     assert runs == [
         ["usermod", "--add-subuids", "100000-165535", "bob"],
         ["usermod", "--add-subgids", "100000-165535", "bob"],
+    ]
+
+
+def test_subid_applier_shifts_past_occupied_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host_batch, "parse_subuid_for_user", lambda _u: [])
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [])
+    # Another user already holds the base block → the operator's append must
+    # land in the next free block, single-sourced through the picker.
+    monkeypatch.setattr(subid, "read_all_subid_ranges", lambda: [(100000, 65536)])
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    host_batch._apply_subid(_params(operator="bob"))
+
+    assert runs == [
+        ["usermod", "--add-subuids", "165536-231071", "bob"],
+        ["usermod", "--add-subgids", "165536-231071", "bob"],
     ]
 
 

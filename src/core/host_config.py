@@ -578,7 +578,10 @@ def autodetect_workspace_bridge_gid_recommendation(host_user: str, in_container_
     """
     ranges = parse_subgid_for_user(host_user)
     if not ranges:
-        raise NoSubgidRangeError(f"User {host_user!r} has no /etc/subgid entry; cannot recommend a bridge gid")
+        raise NoSubgidRangeError(
+            f"operator {host_user!r} has no /etc/subgid range for the workspace "
+            f"bridge group; run 'sudo sandbox setup' to allocate one."
+        )
     used_gids = {g.gr_gid for g in grp.getgrall()}
     accumulated = 0
     for first, count in ranges:
