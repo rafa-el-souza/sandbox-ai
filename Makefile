@@ -2,9 +2,11 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
-# NOTE: `format` applies ruff's SAFE lint autofixes (`ruff check --fix`) only —
-# it does NOT run `ruff format`, which has a code-mangling bug (it reflowed 89
-# files + broke `()`-spacing; the old combined target was removed in main 85a3b4e).
+# NOTE: `format` applies ONLY ruff's import-sort autofix (`ruff check --fix
+# --select I`). It deliberately does NOT run `ruff format` (reflows the manual
+# line-break style) nor the broad `ruff check --fix` (its `UP`/`RUF`/`B` fixes
+# mangled 89 files + stripped `()` from exception calls). Import-sort is the one
+# autofix that is provably non-destructive to this project's manual style.
 #
 # `lint` and `typecheck` echo a "✓ … (exit 0)" line on success so a clean run is
 # visibly a pass rather than empty output (mypy is otherwise silent on success).
@@ -24,8 +26,8 @@ test-integration:
 lint:
 	@uv run --quiet ruff check -q --output-format concise . && echo "✓ lint clean (exit 0)"
 
-format:  # apply ruff's SAFE autofixes only (NOT `ruff format`, which is bugged)
-	@uv run --quiet ruff check --fix .
+format:  # apply ONLY the import-sort autofix (safe; never reflows or rewrites code)
+	@uv run --quiet ruff check --fix --select I .
 
 typecheck:
 	@uv run --quiet mypy --no-error-summary . && echo "✓ types clean (exit 0)"
