@@ -177,8 +177,11 @@ the gitignored exploration tree — they carry host IPs / full transcripts).
 - **op-rootless** & **separate-user · sudo** — green on every command × distro (separate-user green as of
   C-009 `sudo systemd-run --pipe` + C-010 headless `attach`).
 - **multi-operator** (C-013) — F-070 (`op2-bridge-gid-assert`) + F-071 (`op3f-loud-assert`,
-  `mixed-subid-overlap-and-guard`) green; these validate the *allocation mechanisms*. A genuine
-  multi-operator **runtime** gap on a specific distro (an Nth operator's rootless dockerd failing to come
-  up — F-074 family) is tracked as a separate follow-up, not a C-013 deliverable.
+  `mixed-subid-overlap-and-guard`) green; these validate the *allocation mechanisms*. The multi-operator
+  **runtime** is a known, tracked failure (**F-074**, `⊘` in the matrix): a second operator's core container
+  exits 126 (bind-mounted entrypoint exec-denied, subuid-base-dependent) on **all 4 distros** and **both**
+  multi-operator bundles. The `op2-start` probe gates only on F-070 and records the exit-126 observationally
+  (vmlease has no `xfail` verdict, F-073) — so **a green `op2-start` cell does NOT mean op2's core runs.**
+  Simultaneous multi-operator runtime is a separate follow-up, not a C-013 deliverable.
 
 See `baseline-matrix.md` for the per-cell snapshot + source runs.
