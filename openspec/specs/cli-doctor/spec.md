@@ -117,9 +117,9 @@ The system SHALL verify that the gVisor runtime is registered in Docker **under 
 
 The system SHALL verify that the reserved `sandbox-ai-runsc` runtime's `runtimeArgs` contain **exactly the args setup's L6 phase configures, single-sourced from `core.setup.l6_daemon_json.EXPECTED_RUNTIME["runtimeArgs"]`** — NOT a hardcoded list. This makes the doctor expectation and the setup configuration one source so they cannot drift: whatever L6 configures is exactly what doctor expects (the F-024 pattern, extended from the reserved-key to the runtimeArgs). The check SHALL use `warn` severity — it is a defense-in-depth advisory.
 
-The current `EXPECTED_RUNTIME["runtimeArgs"]` is `["--oci-seccomp"]`. `--debug-log` is NOT in the default expectation — gVisor syscall-level debug logging is a deferred **opt-in** (poor always-on default: perf overhead + unbounded disk), so doctor MUST NOT WARN about its absence by default. If a future opt-in adds `--debug-log=<path>` to `EXPECTED_RUNTIME`, this check follows automatically with no further change. (The `--host-uds=all` prohibition is a separate check, unchanged.)
+The current `EXPECTED_RUNTIME["runtimeArgs"]` is illustratively `["--oci-seccomp", "--ignore-cgroups"]` — but the single source of truth is the code constant, not this list, so this spec does not need editing when the arg set changes. `--ignore-cgroups` is present because runsc cannot create its per-container systemd cgroup scope under a rootless daemon (it reaches the system D-Bus and is auth-denied), so it is told to skip cgroup setup; its consequence — gVisor OCI cpu/memory limits are render-time-only (not runtime-enforced) — is a documented, upstream-gated limitation (see `SECURITY.md`), surfaced operationally by the separate instance memory over-commit advisory. `--debug-log` is NOT in the default expectation — gVisor syscall-level debug logging is a deferred **opt-in** (poor always-on default: perf overhead + unbounded disk), so doctor MUST NOT WARN about its absence by default. If a future opt-in adds `--debug-log=<path>` to `EXPECTED_RUNTIME`, this check follows automatically with no further change. (The `--host-uds=all` prohibition is a separate check, unchanged.)
 
-A value-bearing expected arg (e.g. a future `--debug-log=<path>`) is matched on its flag token, so any configured value satisfies it; a flag-only arg (`--oci-seccomp`) matches exactly.
+A value-bearing expected arg (e.g. a future `--debug-log=<path>`) is matched on its flag token, so any configured value satisfies it; a flag-only arg (`--oci-seccomp`, `--ignore-cgroups`) matches exactly.
 
 **Dependencies:** gVisor Runtime Registration (`runsc` check)
 
@@ -127,12 +127,12 @@ A value-bearing expected arg (e.g. a future `--debug-log=<path>`) is matched on 
 - **WHEN** the `sandbox-ai-runsc` runtime's `runtimeArgs` contains every arg in `EXPECTED_RUNTIME["runtimeArgs"]` (extra args, e.g. an operator-added `--debug-log`, are permitted)
 - **THEN** the check reports PASS listing the configured expected args
 
-#### Scenario: --oci-seccomp only — passes (no false --debug-log WARN)
-- **WHEN** the `runtimeArgs` is exactly `["--oci-seccomp"]` (the default L6 configuration)
+#### Scenario: default runtimeArgs pass (no false --debug-log WARN)
+- **WHEN** the `runtimeArgs` is exactly the default `EXPECTED_RUNTIME["runtimeArgs"]` (illustratively `["--oci-seccomp", "--ignore-cgroups"]`)
 - **THEN** the check reports PASS — `--debug-log` is a deferred opt-in, NOT expected by default
 
 #### Scenario: A required arg is missing
-- **WHEN** the `runtimeArgs` does not contain an arg in `EXPECTED_RUNTIME["runtimeArgs"]` (e.g. `--oci-seccomp` absent)
+- **WHEN** the `runtimeArgs` does not contain an arg in `EXPECTED_RUNTIME["runtimeArgs"]` (e.g. `--oci-seccomp` or `--ignore-cgroups` absent)
 - **THEN** the check reports WARN naming the missing arg(s) with remediation referencing `~<user>/.config/docker/daemon.json`
 
 ### Requirement: Host UDS Runtime Validation
