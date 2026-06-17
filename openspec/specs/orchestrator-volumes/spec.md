@@ -960,7 +960,7 @@ If a future bind mount adds a new dev-created RW single-file mount, `RW_FILE_REC
 
 ### Requirement: Plan Items Are Typed Action Objects
 
-Each `_*_plan` function (`_acl_grant_plan`, `_acl_revoke_plan`, `_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan`, `_compose_up_cmd_plan`) SHALL return a list of typed `Action` objects (subclasses of `core.actions.base.Action`) rather than raw tuples or strings. Each `Action` SHALL expose `describe(self) -> str` (the line rendered by the dry-run preview) and `execute(self, ctx: ActionContext) -> None` (the live execution path). The dry-run preview and the live phases SHALL consume the same `Action` instances — the dry-run path calls `.describe()`, the live path calls `.execute(ctx)`. No code path is permitted to bypass an `Action` by reconstructing the underlying argv from the plan's input data; the `Action` is the single carrier of both semantics.
+Each `_*_plan` function (`_acl_grant_plan`, `_acl_revoke_plan`, `_helper_mkdir_chown_plan`, `_helper_cp_chown_plan`, `_workspace_shared_group_plan`, `_compose_up_cmd_plan`) SHALL return a list of typed `Action` objects (subclasses of `core.actions.base.Action`) rather than raw tuples or strings. Each `Action` SHALL expose `describe(self) -> str` (the line rendered by the dry-run preview) and `execute(self, ctx: ActionContext) -> None` (the live execution path). The dry-run preview and the live phases SHALL consume the same `Action` instances — the dry-run path calls `.describe()`, the live path calls `.execute(ctx)`. No code path is permitted to bypass an `Action` by reconstructing the underlying argv from the plan's input data; the `Action` is the single carrier of both semantics. `ActionContext` carries no auth mode (the `MachinectlAuth` enum and `ActionContext.auth` are retired — see the `host-config` capability); the crossing primitive is selected by execution mode, not an auth field.
 
 This requirement makes the Command pattern (anti-hack rule 7: "Plan and execute share data") structural rather than conventional. Every spec elsewhere in this capability that constrains the *content* of a plan (command strings, descriptions, target paths, owner uid/gid, mode) continues to apply unchanged — those constraints are now satisfied via the `Action`'s `.command` / `.description` / `.target` / typed fields rather than positional tuple indexing.
 
@@ -972,7 +972,7 @@ This requirement is ADDED rather than MODIFIED on an existing requirement (such 
 - **WHEN** `_acl_grant_plan(instance_dir, host_user)` is called
 - **THEN** every item in the returned list is an instance of `core.actions.acl.NamedAclGrantAction`
 - **AND** each item exposes `.describe()` returning the same human-readable line the pre-refactor code would have printed for the equivalent tuple
-- **AND** each item exposes `.execute(ctx)` which, when called with a valid `ActionContext`, issues the corresponding `setfacl` invocation via `ctx.executor` using the auth mode from `ctx.auth`
+- **AND** each item exposes `.execute(ctx)` which, when called with a valid `ActionContext`, issues the corresponding `setfacl` invocation via `ctx.executor`
 - **AND** no item in the returned list is a `tuple` or any other non-`Action` type
 
 #### Scenario: helper-cp plan returns typed helper-cp Actions

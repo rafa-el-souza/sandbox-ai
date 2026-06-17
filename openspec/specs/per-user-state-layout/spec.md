@@ -71,7 +71,7 @@ The system SHALL resolve the per-user orchestrator home root via a single helper
 
 ### Requirement: Per-User Subtree Layout
 
-The per-user home SHALL contain four subdirectories: `config/` (for `sandbox-ai.toml` and other host config files), `state/` (for `instances.json`, `ipam.json`, `state.lock`, `ipam.json.lock`, `instances.json.lock`, and per-instance backup locks `<inst>.backup.lock`), `instances/` (per-instance dirs), and `workspaces/` (per-instance workspace parents plus `_backups/`). All four SHALL have mode `0700`. The home root itself SHALL have mode `0700`.
+The per-user home SHALL contain four subdirectories: `config/` (reserved for host config files; host provisioning facts are setup-determined and no longer written here), `state/` (for `instances.json`, `ipam.json`, `state.lock`, `ipam.json.lock`, `instances.json.lock`, and per-instance backup locks `<inst>.backup.lock`), `instances/` (per-instance dirs), and `workspaces/` (per-instance workspace parents plus `_backups/`). All four SHALL have mode `0700`. The home root itself SHALL have mode `0700`.
 
 The `ipam.json.lock` file is owned by the IPAM ledger (per `orchestrator-networking`'s "IPAM Ledger Lock File" requirement) and is distinct from the per-user `state.lock`. The `instances.json.lock` file is owned by the instance registry (per `instance-registry`'s "Registry Lock Safety" requirement) and is also distinct from `state.lock`. Both resource locks are siblings of each other; the lock-acquisition ordering rule (state outer, resource locks inner and never nesting with each other) is normative and documented in `instance-registry`'s "Registry Lock Safety" requirement.
 
@@ -83,7 +83,7 @@ The `ipam.json.lock` file is owned by the IPAM ledger (per `orchestrator-network
 #### Scenario: Subdirectory contents
 
 - **WHEN** the per-user tree is populated after `sandbox init <inst>`
-- **THEN** `<home>/config/sandbox-ai.toml` exists; `<home>/state/instances.json` exists; `<home>/instances/<inst>/` exists with the scaffolded instance contents; `<home>/workspaces/<inst>/<ws>/` exists for each workspace. `<home>/state/ipam.json`, `<home>/state/ipam.json.lock`, `<home>/state/instances.json.lock`, `<home>/state/state.lock`, `<home>/state/<inst>.backup.lock` (lazy), and `<home>/workspaces/_backups/` (lazy) are created on first need.
+- **THEN** `<home>/state/instances.json` exists; `<home>/instances/<inst>/` exists with the scaffolded instance contents; `<home>/workspaces/<inst>/<ws>/` exists for each workspace. `<home>/state/ipam.json`, `<home>/state/ipam.json.lock`, `<home>/state/instances.json.lock`, `<home>/state/state.lock`, `<home>/state/<inst>.backup.lock` (lazy), and `<home>/workspaces/_backups/` (lazy) are created on first need.
 
 #### Scenario: ipam.json.lock created lazily on first IPAM acquisition
 

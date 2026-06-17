@@ -1,66 +1,27 @@
 ## Purpose
 
-This specification defines the `sandbox-ai.toml` per-host orchestrator configuration file — schema, location, Pydantic model, loader interface, and the centralized machinectl command prefix builder that consumes it.
+This specification defines the per-host orchestrator configuration model — the `HostConfig`/`HostSettings` Pydantic model sourced from the root-owned per-operator setup marker (`HostConfig.from_marker(operator)`), and the centralized machinectl command prefix builder that consumes it. There is no `sandbox-ai.toml` file or loader — host provisioning facts are authored by `sudo sandbox setup` into the marker and read back at runtime/doctor.
 ## Requirements
-### Requirement: Host Config File Location and Format
-The system SHALL read per-host orchestrator configuration from a file at the canonical path `<sandbox_ai_user_home()>/config/sandbox-ai.toml` (resolved via the `per-user-state-layout` capability). The file SHALL use TOML format with a `[host]` section. There is no CLI override for the path; testing uses the `SANDBOX_AI_USER_HOME` env var.
-
-#### Scenario: Valid host config parsed
-- **WHEN** `<home>/config/sandbox-ai.toml` exists with a valid `[host]` section
-- **THEN** the system parses it into a `HostConfig` Pydantic model without errors
-
-#### Scenario: Host config not found
-- **WHEN** `<home>/config/sandbox-ai.toml` does not exist
-- **THEN** the loader raises `FileNotFoundError` which callers translate to a user-facing error: "No sandbox-ai.toml found at `<resolved-path>`. Run `sandbox init` to create one."
-
-#### Scenario: Invalid TOML rejected
-- **WHEN** `<home>/config/sandbox-ai.toml` contains malformed TOML syntax
-- **THEN** the loader raises a parse error before any state changes occur
-
-#### Scenario: CWD-local sandbox-ai.toml is silently ignored
-- **WHEN** the loader runs and `<cwd>/sandbox-ai.toml` exists but `<home>/config/sandbox-ai.toml` does not
-- **THEN** the loader ignores the CWD-local file and raises `FileNotFoundError` for the canonical path. The doctor (separately) detects the legacy file and warns the operator to migrate.
-
-### Requirement: Host Config Schema
-The `[host]` section SHALL contain `docker_unprivileged_user` (required string) and `machinectl_authentication` (string enum, default `"sudo"`). The `machinectl_authentication` field SHALL accept only the value `"sudo"` (the field is retained as a single-value seam pending its full removal; POLKIT mode is retired).
-
-#### Scenario: Both fields present
-- **WHEN** `sandbox-ai.toml` contains `[host]` with `docker_unprivileged_user = "sandbox"` and `machinectl_authentication = "sudo"`
-- **THEN** the model validates successfully with `docker_unprivileged_user == "sandbox"` and `machinectl_authentication == MachinectlAuth.SUDO`
-
-#### Scenario: Authentication defaults to sudo
-- **WHEN** `sandbox-ai.toml` contains `[host]` with `docker_unprivileged_user` but omits `machinectl_authentication`
-- **THEN** the model applies default `machinectl_authentication = "sudo"`
-
-#### Scenario: Invalid authentication value rejected
-- **WHEN** `sandbox-ai.toml` contains `machinectl_authentication = "pkexec"`
-- **THEN** the Pydantic model raises a `ValidationError` identifying the invalid enum value
-
-#### Scenario: Missing docker_unprivileged_user rejected
-- **WHEN** `sandbox-ai.toml` contains `[host]` without `docker_unprivileged_user`
-- **THEN** the Pydantic model raises a `ValidationError` identifying the missing required field
-
-### Requirement: Path-Parameterized Loader
-The `HostConfig.from_toml()` class method SHALL take no arguments and SHALL resolve the canonical path internally via `sandbox_ai_user_home()`. The previous `project_dir: str` parameter is removed.
-
-#### Scenario: Loader uses canonical path
-- **WHEN** `HostConfig.from_toml()` is called
-- **THEN** the loader reads `<sandbox_ai_user_home()>/config/sandbox-ai.toml` regardless of the process CWD
-
-#### Scenario: Loader honors SANDBOX_AI_USER_HOME for testing
-- **WHEN** `HostConfig.from_toml()` is called with `SANDBOX_AI_USER_HOME=/tmp/t/.sandbox-ai` set
-- **THEN** the loader reads `/tmp/t/.sandbox-ai/config/sandbox-ai.toml`
-
 ### Requirement: Pydantic Model Structure
-The host config model SHALL use a `MachinectlAuth` StrEnum for the authentication field and a nested `HostSettings` model for the `[host]` section.
 
-#### Scenario: MachinectlAuth enum members
-- **WHEN** the `MachinectlAuth` enum is inspected
-- **THEN** it contains exactly one member: `SUDO = "sudo"`
+The host config model SHALL use a nested `HostSettings` model for the per-operator host facts. `HostSettings` SHALL carry `docker_unprivileged_user` (`str | None` — `None` in `operator-rootless`, a valid POSIX username in `separate-user`), `docker_execution_mode` (`DockerExecutionMode`), `workspace_bridge_group` (string), and `workspace_bridge_gid` (int). There is no authentication field and no `MachinectlAuth` enum.
 
-#### Scenario: HostSettings nested model
-- **WHEN** a `HostConfig` is loaded
-- **THEN** `host_config.host` is a `HostSettings` instance with `docker_unprivileged_user` and `machinectl_authentication` attributes
+Because `docker_unprivileged_user` becomes optional, the model SHALL enforce its presence **conditionally**: a model-level validator SHALL require a valid `docker_unprivileged_user` when `docker_execution_mode == separate-user`, and SHALL permit `None` when `operator-rootless` (the existing POSIX-username grammar still applies when a value is present). The single owner-resolver `resolve_daemon_owner_settings` SHALL keep its `-> str` contract: its `separate-user` branch SHALL narrow the now-optional field and raise a clear error if a `separate-user` config somehow lacks the daemon user, rather than returning `None` (preserving mypy/pyright-strict).
+
+#### Scenario: HostSettings carries the marker-sourced facts
+
+- **WHEN** a `HostConfig` is built via `from_marker`
+- **THEN** `host_config.host` is a `HostSettings` instance exposing `docker_unprivileged_user`, `docker_execution_mode`, `workspace_bridge_group`, and `workspace_bridge_gid`, with no `machinectl_authentication` attribute
+
+#### Scenario: docker_unprivileged_user required only in separate-user
+
+- **WHEN** a `HostSettings` is constructed with `docker_execution_mode == separate-user` and `docker_unprivileged_user is None`
+- **THEN** the model validator raises a `ValidationError` requiring the daemon user in separate-user mode; the same construction with `docker_execution_mode == operator-rootless` validates with `docker_unprivileged_user is None`
+
+#### Scenario: MachinectlAuth enum no longer exists
+
+- **WHEN** `core.host_config` is inspected
+- **THEN** there is no `MachinectlAuth` symbol — the single-value authentication enum is retired
 
 ### Requirement: Centralized machinectl Command Prefix Builder
 The system SHALL provide a `machinectl_cmd(user)` function that returns the complete machinectl shell prefix as a `list[str]`. All machinectl invocations across the CLI and doctor modules SHALL use this function.
@@ -71,19 +32,12 @@ The system SHALL provide a `machinectl_cmd(user)` function that returns the comp
 
 ### Requirement: Module Location
 
-The `HostConfig` model, `MachinectlAuth` enum, `HostSettings` model, `machinectl_cmd` function, `pipe_cmd` function, `sudo_pipe_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. The legacy `_resolve_sandbox_ai_home()` helper is removed.
+The `HostConfig` model, `HostSettings` model, `from_marker` builder, `machinectl_cmd` function, `pipe_cmd` function, `sudo_pipe_cmd` function, the subuid/subgid range parsers, the forward and inverse userns mappers, the `workspace_bridge_gid` helper, and the `autodetect_workspace_bridge_gid_recommendation` helper SHALL reside in `core/host_config.py`. There is no `MachinectlAuth` enum and no `from_toml` loader.
 
-#### Scenario: Import path
-- **WHEN** other modules need host config, machinectl prefix building, pipe-cmd prefix building, subuid resolution, or bridge-group resolution
-- **THEN** they import from `core.host_config`
+#### Scenario: Symbols reside in host_config
 
-#### Scenario: Legacy resolver absent
-- **WHEN** `core.host_config` is inspected
-- **THEN** there is NO `_resolve_sandbox_ai_home()` symbol; callers use `sandbox_ai_home()` from the `per-user-state-layout` capability
-
-#### Scenario: Public symbols enumerated
-- **WHEN** the public surface of `core.host_config` is inspected
-- **THEN** it includes `HostConfig`, `MachinectlAuth`, `HostSettings`, `machinectl_cmd`, `pipe_cmd`, `sudo_pipe_cmd`, the subuid/subgid parsers, the forward/inverse userns mappers, `workspace_bridge_gid`, and `autodetect_workspace_bridge_gid_recommendation`
+- **WHEN** `core.host_config` is imported
+- **THEN** it exposes `HostConfig`, `HostSettings`, `from_marker`, `machinectl_cmd`, `pipe_cmd`, `sudo_pipe_cmd`, and the userns/subgid helpers, and exposes neither `MachinectlAuth` nor `HostConfig.from_toml`
 
 ### Requirement: Pipe Command Helper
 
@@ -201,17 +155,20 @@ The uid resolver SHALL deliberately NOT special-case `host_uid == pwd.getpwnam(h
 
 ### Requirement: Workspace Bridge Group Configuration
 
-`HostSettings` SHALL gain an optional field `workspace_bridge_group: str = "sb-ws"`. The orchestrator SHALL resolve this name to a host gid via `grp.getgrnam` whenever it needs the workspace bridge gid; the orchestrator SHALL NOT use the name for any access-control purpose (Linux access checks operate on numeric gids).
+`HostSettings` SHALL carry `workspace_bridge_group` (string) populated from the per-operator marker entry, **mode-scoped** per the Marker-Sourced Host Config Builder requirement (`sb-ws-<operator>` in `operator-rootless`, shared `sb-ws` in `separate-user`). There is **no operator-facing override** — the name is a setup-determined fact, not a user preference. The orchestrator SHALL resolve this name to a host gid via `grp.getgrnam` whenever it needs the workspace bridge gid; it SHALL NOT use the name for any access-control purpose (Linux access checks operate on numeric gids).
 
-#### Scenario: Default value is sb-ws
-- **WHEN** `sandbox-ai.toml` does not specify `[host].workspace_bridge_group`
-- **THEN** `host_config.host.workspace_bridge_group == "sb-ws"`
+#### Scenario: operator-rootless name is per-operator
 
-#### Scenario: Operator overrides the name
-- **WHEN** `sandbox-ai.toml` contains `[host] workspace_bridge_group = "my-bridge"`
-- **THEN** `host_config.host.workspace_bridge_group == "my-bridge"`
+- **WHEN** the marker records operator `alice` as `operator-rootless`
+- **THEN** `from_marker("alice").host.workspace_bridge_group == "sb-ws-alice"` and its gid lies in `alice`'s subgid range
+
+#### Scenario: separate-user name is the shared default
+
+- **WHEN** the marker records operator `bob` as `separate-user`
+- **THEN** `from_marker("bob").host.workspace_bridge_group == "sb-ws"`
 
 #### Scenario: Resolved gid drives all operations
+
 - **WHEN** any orchestrator code path needs the workspace bridge group's gid
 - **THEN** it calls `workspace_bridge_gid(host_config.host)` rather than referencing the name string
 
@@ -289,9 +246,9 @@ The repository's `CLAUDE.md` "Privilege boundary" section SHALL document that th
 
 ### Requirement: Docker Execution Mode Selector
 
-The execution mode is a **setup-determined fact**, not a user-editable config field. `HostSettings` SHALL retain `docker_execution_mode` only as an **in-memory carrier** (the `DockerExecutionMode` StrEnum `SEPARATE_USER = "separate-user"` / `OPERATOR_ROOTLESS = "operator-rootless"`, populated programmatically by setup, by the runtime overlay, and by `minimal_host_config`); it SHALL NOT be sourced from the toml. `HostConfig.from_toml` SHALL **reject** a `[host]` table that sets `docker_execution_mode` (a fail-fast error directing the operator to setup, not a silent override) — its authoritative **source** is the setup-written execution-mode marker (`/usr/local/libexec/sandbox-ai/setup-state.json`, per the `sandbox-setup` capability's "Execution-Mode Marker" requirement), resolved per operator.
+The execution mode is a **setup-determined fact**, not a user-editable config field. `HostSettings` SHALL carry `docker_execution_mode` (the `DockerExecutionMode` StrEnum `SEPARATE_USER = "separate-user"` / `OPERATOR_ROOTLESS = "operator-rootless"`), populated from the marker by `from_marker`, by setup, and by `minimal_host_config`. Its authoritative **source** is the setup-written marker (`/usr/local/libexec/sandbox-ai/setup-state.json`, per the `sandbox-setup` capability's marker requirement), resolved per operator.
 
-The system SHALL provide `resolve_execution_mode(operator: str) -> DockerExecutionMode` in `core.setup_state` (the single module that owns the marker path + parsing; `core.host_config` would create an import cycle since `setup_state` imports `DockerExecutionMode` from it), reading the marker entry for `operator`. When the marker is absent or has no entry for the operator, the resolver SHALL fail closed by raising `ModeMarkerMissing` with a "run `sudo sandbox setup` first" message (parallel to the missing-`instances.json` "run sandbox init first" behavior) rather than silently defaulting; the runtime resolves the mode for the current user and overlays it onto the `HostConfig` built from the toml. `"separate-user"` selects the existing behavior (Docker as the dedicated `docker_unprivileged_user`, reached across the `machinectl` boundary); `"operator-rootless"` selects rootless Docker as the operator's own user with no boundary crossing. In `"operator-rootless"` mode the `machinectl_authentication` field is inert.
+The system SHALL provide `resolve_execution_mode(operator: str) -> DockerExecutionMode` in `core.setup_state` (the single module that owns the marker path + parsing; `core.host_config` would create an import cycle since `setup_state` imports `DockerExecutionMode` from it), reading the marker entry for `operator`. When the marker is absent or has no entry for the operator, the resolver SHALL fail closed by raising `ModeMarkerMissing` with a "run `sudo sandbox setup` first" message (parallel to the missing-`instances.json` "run sandbox init first" behavior) rather than silently defaulting. `"separate-user"` selects Docker as the dedicated `docker_unprivileged_user`, reached across the `machinectl` boundary; `"operator-rootless"` selects rootless Docker as the operator's own user with no boundary crossing.
 
 #### Scenario: execution mode resolved from the marker
 
@@ -303,15 +260,10 @@ The system SHALL provide `resolve_execution_mode(operator: str) -> DockerExecuti
 - **WHEN** `resolve_execution_mode(operator)` is called and the marker is absent or has no entry for the operator
 - **THEN** it raises a "run `sandbox setup` first" error rather than defaulting to a mode
 
-#### Scenario: execution mode overlaid from the marker at runtime
+#### Scenario: execution mode resolved from the marker at runtime
 
-- **WHEN** a runtime command builds its `HostConfig` from the toml and the marker records the current operator as `operator-rootless`
-- **THEN** the resolved `HostConfig.host.docker_execution_mode` is `OPERATOR_ROOTLESS` (overlaid from the marker), regardless of the toml (which carries no mode), while the toml-sourced fields are preserved
-
-#### Scenario: docker_execution_mode in the toml is rejected
-
-- **WHEN** `sandbox-ai.toml` `[host]` contains a `docker_execution_mode` key
-- **THEN** `HostConfig.from_toml` raises a fail-fast error stating the mode is setup-determined (the marker) and is not a toml field — it is NOT silently ignored
+- **WHEN** a runtime command builds its `HostConfig` via `from_marker(operator)` and the marker records the current operator as `operator-rootless`
+- **THEN** the resolved `HostConfig.host.docker_execution_mode` is `OPERATOR_ROOTLESS`, sourced entirely from the marker (no toml is consulted)
 
 ### Requirement: Daemon Owner Resolution
 
@@ -387,4 +339,36 @@ This is enforced STRUCTURALLY (mirroring the "Dispatcher-Only `machinectl_cmd` C
 #### Scenario: Deliberate-violation regression proves the detector bites
 - **WHEN** the deliberate-violation regression test drives the shared detector against a written rogue file that contains a bare `DockerExecutionMode` member as BOTH a function-parameter default and an `AnnAssign` field default, plus the bare member in a `frozenset({…})` membership set, an `is` comparison, and a call argument
 - **THEN** the detector reports exactly the two default-slot lines (the param default and the field default) and does NOT report the membership-set, comparison, or call-argument lines — proving the gate catches the regression class while preserving the structural carve-outs
+
+### Requirement: Marker-Sourced Host Config Builder
+
+`HostConfig` SHALL be constructed from the root-owned setup marker, not from a toml file. The system SHALL provide `HostConfig.from_marker(operator: str) -> HostConfig` which overlays the per-operator marker entry onto built-in defaults and returns a fully-resolved `HostConfig`. The marker (`/usr/local/libexec/sandbox-ai/setup-state.json`, owned by the `sandbox-setup` capability) is **per-operator keyed and mode-conditional**; each operator entry SHALL carry:
+
+- `mode` — always present (`DockerExecutionMode`).
+- `workspace_bridge_group` + `workspace_bridge_gid` — always present, **mode-scoped**: in `operator-rootless` the group name is per-operator (`sb-ws-<operator>`) with a gid in that operator's subgid range; in `separate-user` the name is the shared `sb-ws` with a gid in the single shared range. The group **name** is the load-bearing key — a group name maps to exactly one gid in `/etc/group`, so a per-operator gid requires a per-operator name.
+- `docker_unprivileged_user` — present **only** in `separate-user` entries (in `operator-rootless` the daemon owner is the invoking operator, resolved intrinsically; the field is `None`).
+
+`HostSettings` remains the in-memory carrier. There SHALL be no `sandbox-ai.toml` file and no toml loader; the marker is the single source of truth.
+
+#### Scenario: Host config built from the marker entry
+
+- **WHEN** `HostConfig.from_marker("alice")` is called and the marker records `alice` as `operator-rootless` with `workspace_bridge_group = "sb-ws-alice"`, `workspace_bridge_gid = 524288`
+- **THEN** the returned `HostConfig.host` carries `docker_execution_mode == OPERATOR_ROOTLESS`, `workspace_bridge_group == "sb-ws-alice"`, and `docker_unprivileged_user is None`
+
+#### Scenario: separate-user entry carries the daemon user
+
+- **WHEN** `HostConfig.from_marker("bob")` is called and the marker records `bob` as `separate-user` with `docker_unprivileged_user = "sandbox"`, `workspace_bridge_group = "sb-ws"`
+- **THEN** the returned `HostConfig.host` carries `docker_execution_mode == SEPARATE_USER`, `docker_unprivileged_user == "sandbox"`, and the shared `workspace_bridge_group == "sb-ws"`
+
+A marker entry that lacks the mode-conditional host facts this requirement defines (e.g. a legacy C-004-era entry carrying only `mode`, written before the schema was generalized) SHALL be treated as **not fully provisioned**: `from_marker` SHALL raise the same not-set-up signal as a missing entry (directing the operator to re-run `sudo sandbox setup`, which rewrites the full entry), rather than defaulting the absent fields. This is consistent with the hard re-setup migration (there are no in-place-upgraded hosts to preserve).
+
+#### Scenario: missing marker entry fails closed
+
+- **WHEN** `HostConfig.from_marker(operator)` is called and the marker is absent or has no entry for `operator`
+- **THEN** it raises `ModeMarkerMissing` with a "run `sudo sandbox setup` first" message rather than defaulting
+
+#### Scenario: legacy mode-only marker entry treated as unprovisioned
+
+- **WHEN** `HostConfig.from_marker(operator)` is called and the operator's marker entry carries only `mode` (no `workspace_bridge_group`/`workspace_bridge_gid`, and no `docker_unprivileged_user` for a separate-user entry)
+- **THEN** it raises the same not-set-up signal as a missing entry, directing the operator to re-run `sudo sandbox setup` — it does NOT default the absent host facts
 

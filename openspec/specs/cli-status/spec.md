@@ -62,8 +62,8 @@ The system SHALL query per-container health by running the dispatcher `compose-p
 - **WHEN** one or more containers report "unhealthy" or are not running
 - **THEN** the Panel header includes "⚠ degraded" and the Panel border is yellow, and unhealthy containers are highlighted with `✗` in the Table
 
-#### Scenario: Container health query via the compose-ps op (sudo mode) (separate-user mode)
-- **WHEN** the status command queries container state and `machinectl_authentication` is `"sudo"`
+#### Scenario: Container health query via the compose-ps op (separate-user mode)
+- **WHEN** the status command queries container state in separate-user mode
 - **THEN** it invokes `core.dispatch.invoke("compose-ps", [<inst>], host_config)`, which crosses via `sudo_pipe_cmd(<user>)` — `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "/usr/local/libexec/sandbox-ai/dispatch compose-ps <inst> …"]` (the dispatcher's op-hardcoded verb is `ps --format json`)
 
 ### Requirement: IPAM Display

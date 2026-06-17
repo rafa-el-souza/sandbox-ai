@@ -7,7 +7,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 
 #### Scenario: Tooling Plane Bootstrapping
 - **WHEN** the orchestrator initiates execution on a fresh host machine
-- **THEN** the operator runs `sandbox init <inst>`, which seeds `<sandbox_ai_home()>/config/sandbox-ai.toml` (TTY prompt or non-TTY fail), creates the per-user state tree at `<sandbox_ai_home()>/{config,state,instances,workspaces}/`, scaffolds the per-instance directory tree under `<sandbox_ai_home()>/instances/<inst>/`, scaffolds at least one workspace tree under `<sandbox_ai_home()>/workspaces/<inst>/<ws>/`, and writes the `.initialized` sentinel
+- **THEN** the operator runs `sandbox init <inst>` (on a host already provisioned by `sudo sandbox setup` — init is setup-first and fails loud otherwise), which creates the per-user state tree at `<sandbox_ai_home()>/{config,state,instances,workspaces}/`, scaffolds the per-instance directory tree under `<sandbox_ai_home()>/instances/<inst>/`, scaffolds at least one workspace tree under `<sandbox_ai_home()>/workspaces/<inst>/<ws>/`, and writes the `.initialized` sentinel
 
 #### Scenario: Agent Startup Sequence
 - **WHEN** the human operator executes `sandbox start <inst>`
@@ -40,7 +40,7 @@ The system SHALL execute utilizing a strict Python `typer` interface to determin
 ### Requirement: Sub-Process Privilege Bounding
 The system SHALL isolate all Docker command execution across the `dev`/`sandbox` privilege boundary using `machinectl shell <docker_unprivileged_user>@.host` for PTY-needing paths and the byte-pipe primitives `pipe_cmd` (`systemd-run -q --pipe --uid=<docker_unprivileged_user>`) / `sudo_pipe_cmd` (`sudo systemd-run -q --pipe --uid=<docker_unprivileged_user>`) for byte-pipe paths. Non-interactive dispatcher op crossings cross via `sudo_pipe_cmd` (the privileged, per-op-sudoers-authorized byte-pipe; C-009 design D2). The centralized `machinectl_cmd()` builder from `core.host_config` SHALL be called only by the three documented allowlist categories defined in the `host-config` capability: `src/core/host_config.py` (self), `src/core/dispatch.py` (the typed dispatcher's orchestration module), and `src/core/setup/*.py` (the setup-phase package — sister change `sandbox-setup`; setup runs as root and crosses the boundary before the dispatcher is installed, so it cannot route through `core.dispatch`). Every other module crossing the boundary SHALL route through `core.dispatch.invoke(op, args, host_config)` (framed ops) or `core.dispatch`'s streaming entrypoint (the streaming op — the operator-handover `ProxyCommand`, per `runtime-dispatcher`'s "Streaming ProxyCommand Entrypoint"). The operator-handover `ProxyCommand` crosses as the bare `dispatch fwd <wire>` payload via `sudo_pipe_cmd()` (sudoers-authorized, headless-capable — the F-060 fix).
 
-The orchestrator's non-interactive Docker invocations SHALL take the shape `[*sudo_pipe_cmd(user), "/bin/bash", "-c", f"/usr/local/libexec/sandbox-ai/dispatch {op} {shlex.join(args)}"]` under separate-user rather than embedding inline bash. The outer `/bin/bash -c` wrapper is retained permanently: it is what bridges the orchestrator's argv (composed on the operator's host) into a bash environment inside the `docker_unprivileged_user` session, where the dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is reachable. The swap from `machinectl shell` to `sudo systemd-run --pipe` is the C-009 fix for the Debian-family stdout-delivery failure (F-063): `machinectl shell` PTY crossings do not reliably deliver stdout on apt hosts, while `sudo systemd-run --pipe` is immune everywhere; the crossed payload stays the bare `dispatch <op> <wire>` so the sister capability's per-op sudoers `Cmnd_Spec` (the pipe-spec form, also rendered from `sudo_pipe_cmd`) still matches argv-by-argv, and the inner exit is recovered from the dispatcher frame (`framed=True`), not the native `--pipe` exit (unreliable — F-064). The sister capability writes the per-op `Cmnd_Spec`s inlined directly into the operator user-spec (no shared `Cmnd_Alias` — F-020), each carrying the full `systemd-run --pipe` invocation prefix and backslash-escaped whitespace, validated empirically by V9 (`openspec/explorations/ongoing/sandbox-setup/validation.md`) and grounded in finding F-004 (sudoers-cmnd-spec-quoting-not-shell-quoting). The dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is `root:root` mode `0755` on disk (with `chattr +i`), but EXECUTES at runtime as `[host].docker_unprivileged_user` — the `sudo systemd-run --uid=<user>` crossing drops to that uid before bash execs the dispatcher.
+The orchestrator's non-interactive Docker invocations SHALL take the shape `[*sudo_pipe_cmd(user), "/bin/bash", "-c", f"/usr/local/libexec/sandbox-ai/dispatch {op} {shlex.join(args)}"]` under separate-user rather than embedding inline bash. The outer `/bin/bash -c` wrapper is retained permanently: it is what bridges the orchestrator's argv (composed on the operator's host) into a bash environment inside the `docker_unprivileged_user` session, where the dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is reachable. The swap from `machinectl shell` to `sudo systemd-run --pipe` is the C-009 fix for the Debian-family stdout-delivery failure (F-063): `machinectl shell` PTY crossings do not reliably deliver stdout on apt hosts, while `sudo systemd-run --pipe` is immune everywhere; the crossed payload stays the bare `dispatch <op> <wire>` so the sister capability's per-op sudoers `Cmnd_Spec` (the pipe-spec form, also rendered from `sudo_pipe_cmd`) still matches argv-by-argv, and the inner exit is recovered from the dispatcher frame (`framed=True`), not the native `--pipe` exit (unreliable — F-064). The sister capability writes the per-op `Cmnd_Spec`s inlined directly into the operator user-spec (no shared `Cmnd_Alias` — F-020), each carrying the full `systemd-run --pipe` invocation prefix and backslash-escaped whitespace, validated empirically by V9 (`openspec/explorations/ongoing/sandbox-setup/validation.md`) and grounded in finding F-004 (sudoers-cmnd-spec-quoting-not-shell-quoting). The dispatcher binary at `/usr/local/libexec/sandbox-ai/dispatch` is `root:root` mode `0755` on disk (with `chattr +i`), but EXECUTES at runtime as the `docker_unprivileged_user` — the `sudo systemd-run --uid=<user>` crossing drops to that uid before bash execs the dispatcher.
 
 `machinectl_cmd()` and `sudo_pipe_cmd()` deliberately emit the **relative** command names `machinectl` / `systemd-run` (not absolute paths) — this is intentional and unchanged by this capability. `sudo` resolves the relative `systemd-run` against the sudoers `secure_path` and matches the *resolved absolute path* against the rule's pipe `Cmnd_Spec`. Making the orchestrator's relative emission and the sister rule's absolute Cmnd_Spec coincide is owned entirely by `sandbox-setup` (it resolves `systemd-run` on the same secure_path basis at L0, pins that path in the rule, verifies the bridge per-host with a relative-form L3a pipe probe, and re-checks it via `setup_invariants`). This capability asserts only that the runtime invocation uses relative `systemd-run`; it does NOT pin an absolute path. See `sandbox-setup` design B-3/D2 and validation track V9e.
 
@@ -57,15 +57,15 @@ The orchestrator's non-interactive Docker invocations SHALL take the shape `[*su
 - **THEN** it MUST call `core.dispatch.invoke(op, args, host_config)` (or an equivalent dispatch helper) rather than constructing the argv list with `machinectl_cmd(...)` directly; the convention meta-test in `tests/unit/test_conventions.py` enforces this at gate time
 
 ### Requirement: Host Config Loading in CLI Commands
-All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`, all `workspace ...` subcommands) SHALL load per-host config from `<sandbox_ai_home()>/config/sandbox-ai.toml` via `HostConfig.from_toml()` and read `docker_unprivileged_user`, `machinectl_authentication`, and `workspace_bridge_group` from it. The canonical path is resolved internally; CWD is no longer consulted.
+All post-init CLI commands (`start`, `stop`, `attach`, `destroy`, `status`, all `workspace ...` subcommands) SHALL load per-host config from the setup marker via `HostConfig.from_marker(operator)` and read `docker_unprivileged_user` and `workspace_bridge_group` from the resolved `HostSettings`. There is no `machinectl_authentication` field and no `sandbox-ai.toml` file (see the `host-config` capability). The marker path is resolved internally; CWD is no longer consulted.
 
-#### Scenario: Post-init command reads host config
-- **WHEN** any post-init command runs and the canonical `sandbox-ai.toml` exists
-- **THEN** `docker_unprivileged_user`, `machinectl_authentication`, and `workspace_bridge_group` are sourced from the `[host]` section
+#### Scenario: Post-init command reads host config from the marker
+- **WHEN** any post-init command runs on a host that has been set up for the invoking operator
+- **THEN** `docker_unprivileged_user` (separate-user only) and `workspace_bridge_group` are sourced from the operator's marker entry via `HostConfig.from_marker(operator)`, with no toml read
 
-#### Scenario: Post-init command fails without host config
-- **WHEN** any post-init command runs and the canonical `sandbox-ai.toml` is absent
-- **THEN** the CLI exits with an error directing the user to run `sandbox init`
+#### Scenario: Post-init command on an unprovisioned host directs to setup
+- **WHEN** any post-init command runs on a host that has not been set up for the invoking operator (no marker entry)
+- **THEN** the CLI exits non-zero with a friendly message directing the user to run `sudo sandbox setup`, naming neither the marker nor `setup-state.json`
 
 ### Requirement: Automated AI Handover
 The system SHALL deliver an interactive shell session on **core** (as `agent`) to the operator after containers are confirmed healthy. The handover uses the canonical `cli-attach` invocation (`tlog-rec → ssh → ProxyCommand → /fwd`), landing the operator in `/workspaces/<ws>` via the ssh remote command suffix.
@@ -109,7 +109,7 @@ The full flag surface:
 
 | Flag | Behavior |
 |---|---|
-| `--operator <name>` | escape hatch for non-`sudo` privilege escalation paths; takes precedence over `$SUDO_USER` / `$PKEXEC_UID` |
+| `--operator <name>` | escape hatch for non-`sudo` privilege escalation paths; takes precedence over `$SUDO_USER` |
 | `--dry-run` | run plan pass only; no mutations; exit code 0 regardless of plan content |
 | `--yes` / `-y` | non-interactive apply (skip the TTY confirm prompt) |
 | `--update-runsc` | run ONLY L6a phase against the current pinned registry, ignoring "already installed" skip |
@@ -118,25 +118,13 @@ The full flag surface:
 
 The subcommand SHALL emit doctor-style output to stdout (plan pass + apply pass + finalization summary), per the `sandbox-setup` capability's plan/apply UX requirements. The subcommand SHALL exit 0 on full success; non-zero on any phase failure or rollback.
 
-#### Scenario: Setup subcommand exists in CLI
-- **WHEN** the operator runs `sandbox --help`
-- **THEN** the output enumerates `setup` as an available subcommand alongside `init`, `start`, `stop`, `attach`, `destroy`, `status`, `doctor`, `workspace`
+#### Scenario: setup subcommand requires root
+- **WHEN** `sandbox setup` is invoked without root (`os.geteuid() != 0`)
+- **THEN** the CLI exits non-zero with `sandbox setup must be run as root. Re-invoke as: sudo sandbox setup`
 
-#### Scenario: Setup requires sudo
-- **WHEN** a non-root user runs `sandbox setup`
-- **THEN** the command exits non-zero with the message naming `sudo sandbox setup` as the canonical invocation
-
-#### Scenario: --dry-run produces plan output without mutation
-- **WHEN** the operator runs `sudo sandbox setup --dry-run` on a host requiring mutations
-- **THEN** stdout contains the doctor-style plan output showing every phase's probe verdict; no files are written; no operator/sandbox state changes; exit code 0
-
-#### Scenario: --update-runsc runs only L6a
-- **WHEN** the operator runs `sudo sandbox setup --update-runsc` on a host where every other phase is `already correct` and only L6a shows drift
-- **THEN** stdout shows L6a apply (download + verify + install) and finalization summary; phases L0..L8 other than L6a show `skip (already correct)` or `skip (only L6a in this mode)`; exit 0
-
-#### Scenario: --enable-fapolicyd-integration adds to base setup flow
-- **WHEN** the operator runs `sudo sandbox setup --enable-fapolicyd-integration` on a fresh host
-- **THEN** the base setup phases L0..L8 execute as normal, AND a subsequent fapolicyd-integration phase installs fapolicyd (via apt/dnf/pacman recommendation; verify-only if package not present) and registers `/usr/local/libexec/sandbox-ai/dispatch`, `/usr/local/libexec/sandbox-ai/runsc`, plus the operator's distro binaries the dispatcher invokes in fapolicyd's trust DB
+#### Scenario: --operator precedence no longer consults PKEXEC_UID
+- **WHEN** `sudo sandbox setup --operator bob` runs
+- **THEN** `bob` takes precedence over `$SUDO_USER`; `$PKEXEC_UID` is not consulted in the operator precedence (the vestigial polkit tier is retired)
 
 ### Requirement: Setup Bypasses Runtime Sudoers Rule
 

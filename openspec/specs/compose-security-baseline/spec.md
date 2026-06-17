@@ -163,7 +163,7 @@ The `compose.yml` template SHALL render workspace bind mounts via a Jinja2 loop 
 
 ### Requirement: Workspace Bridge Group Membership for core
 
-The rendered `compose.yml` SHALL include a `group_add` (or compose-equivalent) entry on the `core` service that adds the in-container gid corresponding to the host workspace bridge group. The value is computed at hydration time via `in_container_gid_for_host_gid(workspace_bridge_gid(host), host.docker_unprivileged_user)`. The bridge gid is per-host (not per-workspace); a single `group_add` entry serves all bind-mounted workspaces because they share the same bridge group on the host. Admin does NOT receive a `group_add` entry — admin has no workspace mounts post-reframe.
+The rendered `compose.yml` SHALL include a `group_add` (or compose-equivalent) entry on the `core` service that adds the in-container gid corresponding to the host workspace bridge group. The value is computed at hydration time via `in_container_gid_for_host_gid(workspace_bridge_gid(host), host.docker_unprivileged_user)`. The bridge gid is per-operator in operator-rootless mode (recorded in the per-operator setup marker, at a gid in that operator's subgid range) and shared across operators in separate-user mode (one tenant, one range, one gid); it is never per-workspace. A single `group_add` entry serves all bind-mounted workspaces because they share the same bridge group on the host. Admin does NOT receive a `group_add` entry — admin has no workspace mounts post-reframe.
 
 #### Scenario: core service has group_add for bridge gid
 - **WHEN** `compose.yml` is rendered with a configured workspace bridge group
@@ -175,7 +175,7 @@ The rendered `compose.yml` SHALL include a `group_add` (or compose-equivalent) e
 
 #### Scenario: One group_add entry serves all workspaces
 - **WHEN** the instance has multiple workspaces
-- **THEN** core has exactly one `group_add` entry (NOT one per workspace); the bridge group is per-host, not per-workspace
+- **THEN** core has exactly one `group_add` entry (NOT one per workspace); the bridge group is per-operator (op-rootless) or shared (separate-user), never per-workspace
 
 #### Scenario: Numeric group_add only — no in-image group required
 - **WHEN** the core image is inspected
