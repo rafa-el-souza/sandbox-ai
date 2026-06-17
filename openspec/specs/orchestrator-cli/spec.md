@@ -76,7 +76,7 @@ The system SHALL deliver an interactive shell session on **core** (as `agent`) t
 
 ### Requirement: Rich Markup Safety in Console Output
 
-The CLI SHALL NOT pass user-supplied or config-derived content (paths, workspace names, instance names, section names like `[host]` / `[workspaces]`, environment values, error message fragments sourced from external libraries) through Rich's markup parser unescaped. Any `console.print(...)` call whose message contains literal `[<token>]` or `[/<token>]` characters where `<token>` is not a Rich style token (color name, style keyword, or composition thereof) SHALL either:
+The CLI SHALL NOT pass user-supplied or config-derived content (paths, workspace names, instance names, section names like `[workspaces]` / `[components]`, environment values, error message fragments sourced from external libraries) through Rich's markup parser unescaped. Any `console.print(...)` call whose message contains literal `[<token>]` or `[/<token>]` characters where `<token>` is not a Rich style token (color name, style keyword, or composition thereof) SHALL either:
 
 - pass `markup=False` as a keyword argument to suppress markup parsing for that call entirely; OR
 - wrap the user/config-derived fragment in `rich.markup.escape(...)` before interpolation.
@@ -86,8 +86,8 @@ This requirement applies to all `console.print` invocations across `src/cli/` an
 The codebase SHALL include a regression test (e.g., `tests/unit/cli/test_markup_safety.py`) that walks `src/cli/` and `src/core/` Python source via the `ast` module, identifies every `console.print` call, extracts string-literal arguments (including `Constant` strings and `JoinedStr`/f-string component literals), greps each for `\[([a-zA-Z_][\w]*( [a-zA-Z_][\w]*)*|/[a-zA-Z_]*)\]` matches, and asserts each match is either (a) a token in an enumerated allowlist of Rich style tokens, or (b) accompanied by a `markup=False` keyword argument on the same `console.print` call. The allowlist SHALL be defined in the test file as a module-level frozenset and SHALL initially contain at least: standard Rich color names (`red`, `green`, `yellow`, `blue`, `cyan`, `magenta`, `white`, `black`, `bright_red`, `bright_green`, `bright_yellow`); style keywords (`bold`, `dim`, `italic`, `underline`, `reverse`, `blink`); observed combinations (`red bold`, `green bold`, `yellow bold`); and closing forms (`/`, `/red`, `/green`, `/yellow`, `/bold`, `/dim`). The allowlist MAY be extended as new styles enter the codebase (one-line additions reviewed in the same PR that introduces the style).
 
 #### Scenario: Literal section name in error message uses markup=False
-- **WHEN** a `console.print` call emits a message containing the literal `[host]` (e.g., diagnostic text referencing the `[host]` section of `sandbox-ai.toml`)
-- **THEN** the call passes `markup=False`, OR the bracketed fragment is wrapped via `rich.markup.escape("[host]")`; the user sees the literal `[host]` rendered, not a missing token
+- **WHEN** a `console.print` call emits a message containing the literal `[workspaces]` (e.g., diagnostic text referencing the `[workspaces]` section of `sandbox.toml`)
+- **THEN** the call passes `markup=False`, OR the bracketed fragment is wrapped via `rich.markup.escape("[workspaces]")`; the user sees the literal `[workspaces]` rendered, not a missing token
 
 #### Scenario: User-supplied workspace name interpolation uses escape
 - **WHEN** a `console.print` f-string interpolates a workspace name that may contain characters Rich treats as style tokens (e.g., `f"Workspace [{ws.name}]: ..."`)
