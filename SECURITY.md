@@ -87,9 +87,21 @@ the current design; where there is a realistic path to closing it, a
   (e.g. cosign), and reproducible builds are **not yet** in place — the release
   pipeline is a separate trust surface from the runtime. *Revisit when:* the
   release-engineering workstream lands (see Roadmap).
-- **Cost / abuse amplification.** Resource exhaustion or abuse beyond the
-  configured per-instance limits (and, for the project's own CI, mass-spawn
-  amplification) is bounded by configuration, not eliminated.
+- **Unenforced gVisor resource limits under the rootless daemon.** A sandbox's
+  configured `cpus` / `mem_limit` are **render-time-only for gVisor containers, not
+  runtime-enforced**: under both `operator-rootless` and `separate-user` the Docker
+  daemon runs rootless, and gVisor's `runsc` cannot create its per-container cgroup
+  scope rootless (it reaches the *system* systemd bus and is auth-denied), so it is
+  run with `--ignore-cgroups`. A container can therefore exceed its configured
+  CPU/memory and apply resource pressure on its (single-tenant) host — a local DoS /
+  noisy-neighbour effect, **not** a sandbox escape or a cross-tenant issue.
+  `sandbox doctor` surfaces this with an advisory over-commit WARN when an instance's
+  summed `mem_limit` exceeds host RAM. *Revisit when:* gVisor gains rootless
+  systemd-cgroup support (a `runsc` release where rootless scope creation succeeds) —
+  see Roadmap.
+- **Cost / abuse amplification.** Beyond the per-instance gVisor limit above,
+  general resource exhaustion or abuse — and, for the project's own CI, mass-spawn
+  amplification — is bounded by configuration and host sizing, not eliminated.
 - **Telemetry side-channels.** The project avoids third-party coverage/telemetry
   services to keep the trust surface small; this is a posture choice, not a
   defended boundary.
@@ -111,6 +123,9 @@ The following are known and intended, but not yet shipped:
   dependencies pulled into the sandbox or the build.
 - **Hardware-isolation backend** — an optional microVM isolation primitive for
   threat models that include a hostile kernel.
+- **Enforced gVisor resource limits under rootless** — runtime enforcement of
+  per-instance CPU/memory caps for gVisor containers (currently render-time-only;
+  see Known limitations), gated on upstream gVisor rootless systemd-cgroup support.
 
 Items here are tracked as deferred work and will be moved into scope as the
 project matures.

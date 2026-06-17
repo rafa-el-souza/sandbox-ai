@@ -519,7 +519,13 @@ ACLs), not by environment isolation.**
   sequences**, the **tlog-replay hazard**, and **typed-secret visibility** are
   accepted, documented residuals (§3.1).
 - **Dependency / supply-chain** compromise of what the agent or build pulls in.
-- Resource exhaustion / **abuse amplification** beyond configured limits.
+- Resource exhaustion / **abuse amplification**. A sandbox's configured `cpus` /
+  `mem_limit` are **render-time-only for gVisor containers under the rootless daemon**
+  — not cgroup-enforced (`runsc` runs `--ignore-cgroups` because it cannot create its
+  cgroup scope rootless), so a container can exceed them rather than being bounded *at*
+  the configured limit. `sandbox doctor` surfaces over-commit as an advisory WARN; this
+  is single-tenant resource pressure, not an escape. See
+  [SECURITY.md](../SECURITY.md) for the full known-limitation.
 
 See [SECURITY.md](../SECURITY.md) for the full known-limitations + roadmap and
 the vulnerability-reporting process.
