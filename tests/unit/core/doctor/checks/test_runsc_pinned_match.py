@@ -86,7 +86,6 @@ class TestCheckRunscPinnedMatch:
 
     def test_user_threaded_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor.checks.runsc_pinned_match import check_runsc_pinned_match
-        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -97,4 +96,3 @@ class TestCheckRunscPinnedMatch:
         monkeypatch.setattr("core.binary_install.verify_only", capture)
         check_runsc_pinned_match("sandbox", None)
         assert captured["hc"].host.docker_unprivileged_user == "sandbox"
-        assert captured["hc"].host.machinectl_authentication == MachinectlAuth.SUDO

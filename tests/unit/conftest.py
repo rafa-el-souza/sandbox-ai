@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class HostConfigFactory(Protocol):
-    def __call__(self, *, user: str = ..., auth: str = ...) -> HostConfig: ...
+    def __call__(self, *, user: str = ...) -> HostConfig: ...
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -41,18 +41,18 @@ class CapturedConsole(NamedTuple):
 
 @pytest.fixture()
 def project_config_factory() -> HostConfigFactory:
-    """Build ``HostConfig`` instances for the host-config-machinectl-auth flow.
+    """Build ``HostConfig`` instances for the host-config flow.
 
     Usage::
 
         def test_x(project_config_factory: HostConfigFactory) -> None:
-            pc = project_config_factory(user="sandbox", auth="sudo")
+            pc = project_config_factory(user="sandbox")
     """
     from core.host_config import HostConfig
 
-    def _make(*, user: str = "sandbox", auth: str = "sudo") -> HostConfig:
+    def _make(*, user: str = "sandbox") -> HostConfig:
         return HostConfig.model_validate(
-            {"host": {"docker_unprivileged_user": user, "machinectl_authentication": auth}}
+            {"host": {"docker_unprivileged_user": user}}
         )
 
     return _make

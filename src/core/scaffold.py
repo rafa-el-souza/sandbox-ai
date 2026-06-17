@@ -226,7 +226,7 @@ def mutate_workspaces(instance_dir: str, workspaces: list[WorkspaceSpec]) -> Non
     """Replace the ``[workspaces.*]`` table set in ``<instance_dir>/sandbox.toml``.
 
     Uses ``tomlkit`` so comments and unrelated sections (``[instance]``,
-    ``[core]``, ``[host]``, ``[components.*]``, top-level operator
+    ``[core]``, ``[runtimes]``, ``[components.*]``, top-level operator
     comments, etc.) round-trip across mutations. Non-contiguous workspace
     placement is handled by the library; we don't detect or normalize it.
 

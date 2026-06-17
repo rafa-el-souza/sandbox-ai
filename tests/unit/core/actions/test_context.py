@@ -9,24 +9,28 @@ from pathlib import Path
 import pytest
 from core.actions.context import ActionContext
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 
 
-def _make_ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> ActionContext:
+def _make_ctx() -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
-        auth=auth,
         executor=Executor(),
         instance_dir=Path("/inst"),
     )
 
 
-def test_context_carries_all_four_fields() -> None:
+def test_context_carries_all_fields() -> None:
     ctx = _make_ctx()
     assert ctx.host_user == "claude-sandbox"
-    assert ctx.auth == MachinectlAuth.SUDO
     assert isinstance(ctx.executor, Executor)
     assert ctx.instance_dir == Path("/inst")
+
+
+def test_action_context_has_no_auth_attribute() -> None:
+    """ActionContext carries no auth mode (MachinectlAuth retired)."""
+    ctx = _make_ctx()
+    assert not hasattr(ctx, "auth")
 
 
 def test_context_is_frozen() -> None:
@@ -47,7 +51,6 @@ def test_docker_execution_mode_defaults_to_operator_rootless() -> None:
 def test_docker_execution_mode_round_trips() -> None:
     ctx = ActionContext(
         host_user="claude-sandbox",
-        auth=MachinectlAuth.SUDO,
         executor=Executor(),
         instance_dir=Path("/inst"),
         docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,

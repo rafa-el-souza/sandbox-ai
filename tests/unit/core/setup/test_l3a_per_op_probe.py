@@ -30,7 +30,6 @@ from core.exceptions import SandboxExecutionError
 from core.host_config import (
     DockerExecutionMode,
     HostConfig,
-    MachinectlAuth,
     minimal_host_config,
 )
 from core.setup import l3a_per_op_probe as l3a
@@ -51,12 +50,12 @@ def _stable_systemd_run(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _hc(auth: MachinectlAuth = MachinectlAuth.SUDO) -> HostConfig:
-    return minimal_host_config("sandbox", auth, DockerExecutionMode.SEPARATE_USER)
+def _hc() -> HostConfig:
+    return minimal_host_config("sandbox", DockerExecutionMode.SEPARATE_USER)
 
 
-def _ctx(auth: MachinectlAuth = MachinectlAuth.SUDO) -> SetupContext:
-    return SetupContext(host_config=_hc(auth), operator="alice")
+def _ctx() -> SetupContext:
+    return SetupContext(host_config=_hc(), operator="alice")
 
 
 class _FakeExecutor:

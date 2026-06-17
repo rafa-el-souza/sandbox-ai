@@ -31,6 +31,7 @@ from core.doctor.checks.per_user_tree import (
     check_legacy_registry_shape,
     check_legacy_sandboxes_dir_detected,
     check_legacy_workspace_in_user_project_root,
+    check_obsolete_host_toml,
     check_per_user_tree_exists,
     check_per_user_tree_mode,
 )
@@ -142,7 +143,7 @@ def build_check_registry(
         ),
         Check(
             id="machinectl_reachable",
-            name="machinectl reachable",
+            name="boundary reachable",
             category="Privilege Boundary",
             depends_on=machinectl_reachable_deps,
             run=functools.partial(check_machinectl_reachable, mode=mode),
@@ -289,13 +290,21 @@ def build_check_registry(
             run=check_legacy_cwd_files,
             remediation="",
         ),
+        Check(
+            id="obsolete_host_toml",
+            name="obsolete host toml",
+            category="Per-User Tree",
+            depends_on=[],
+            run=check_obsolete_host_toml,
+            remediation="",
+        ),
         # Chain 6: workspace bridge group + helper-recipe prereqs
         Check(
             id="workspace_bridge_group_exists",
             name="workspace bridge group",
             category="Workspace Bridge",
             depends_on=[],
-            run=functools.partial(check_workspace_bridge_group_exists, mode=mode),
+            run=check_workspace_bridge_group_exists,
             remediation="",
         ),
         Check(
@@ -303,7 +312,7 @@ def build_check_registry(
             name="operator in workspace bridge group",
             category="Workspace Bridge",
             depends_on=["workspace_bridge_group_exists"],
-            run=functools.partial(check_dev_in_workspace_bridge_group, mode=mode),
+            run=check_dev_in_workspace_bridge_group,
             remediation="",
         ),
         Check(

@@ -9,9 +9,9 @@ The system SHALL provide a `sandbox doctor [--user <name>]` command that validat
 - **WHEN** the operator runs `sandbox doctor --user sandbox`
 - **THEN** the system executes the mode-applicable diagnostic checks and reports results grouped by category
 
-#### Scenario: separate-user doctor without `--user` and no toml errors
-- **WHEN** the operator runs `sandbox doctor` without `--user` in `separate-user` mode with no toml present
-- **THEN** the CLI exits with an error indicating that `--user` is required (or a toml with `[host].docker_unprivileged_user`)
+#### Scenario: separate-user doctor without `--user` errors
+- **WHEN** the operator runs `sandbox doctor` without `--user` in `separate-user` mode
+- **THEN** the CLI exits with an error indicating that `--user` is required
 
 #### Scenario: operator-rootless doctor without `--user` resolves the operator toml-free
 - **WHEN** the operator runs `sandbox doctor` without `--user` on an `operator-rootless` host (no toml present)
@@ -57,13 +57,13 @@ The system SHALL verify that the `systemd-machined` service is active.
 - **THEN** the check reports FAIL with `sudo systemctl enable --now systemd-machined` as the remediation command
 
 ### Requirement: machinectl Shell Reachability
-The system SHALL verify that the operator can cross the privilege boundary into the unprivileged user by running the `auth-probe` dispatcher op via `core.dispatch.probe("auth-probe", …)` — the same seam `sandbox start`'s preflight reuses. The crossing primitive is selected per the "Doctor Cross-Boundary Invocation Routing" requirement (separate-user → `sudo_pipe_cmd`, operator-rootless → local), NOT a hardcoded `sudo machinectl shell`. The probe SHALL use a 10-second timeout to detect a sudoers misconfiguration (password prompt hang). (The check retains its historical name "machinectl reachable" in code.)
+The system SHALL verify that the operator can cross the privilege boundary into the unprivileged user by running the `auth-probe` dispatcher op via `core.dispatch.probe("auth-probe", …)` — the same seam `sandbox start`'s preflight reuses. The crossing primitive is selected per the "Doctor Cross-Boundary Invocation Routing" requirement (separate-user → `sudo_pipe_cmd`, operator-rootless → local), NOT a hardcoded `sudo machinectl shell`. The probe SHALL use a 10-second timeout to detect a sudoers misconfiguration (password prompt hang). The check's registry **id** remains `machinectl_reachable` (a stable key with `depends_on` edges); its operator-facing **display name** is `boundary reachable` — it crosses the boundary via the dispatcher byte-pipe in separate-user or runs locally in operator-rootless, never a `machinectl` shell, so the display name and the function docstring SHALL NOT describe it as "machinectl".
 
 **Dependencies:** sudo binary; the `systemd-run` byte-pipe crossing launcher; Unprivileged User Existence; systemd-machined Service
 
 #### Scenario: Crossing reachable
 - **WHEN** `core.dispatch.probe("auth-probe", [], …)` completes successfully (`ok=True`) within 10 seconds — the cross-boundary argv being `[*sudo_pipe_cmd(<user>), "/bin/bash", "-c", "<dispatch> auth-probe"]`
-- **THEN** the check reports PASS
+- **THEN** the check (display name `boundary reachable`, id `machinectl_reachable`) reports PASS
 
 #### Scenario: Crossing unreachable due to timeout
 - **WHEN** the `auth-probe` crossing does not complete within 10 seconds (`timed_out=True`)
@@ -277,11 +277,11 @@ The system SHALL verify that the per-user state directory `<sandbox_ai_user_home
 - **THEN** the check reports FAIL with guidance on directory permissions (`chmod 0700 <home>/state/`)
 
 ### Requirement: Cascading Skip Logic
-The system SHALL skip checks whose dependencies have failed, displaying skipped checks explicitly in the output.
+The system SHALL skip checks whose dependencies have failed, displaying skipped checks explicitly in the output. The skip annotation SHALL name the failed dependency by its registry **id** (`f"skipped (requires: {dep_id})"`), not its display name.
 
 #### Scenario: Dependent check skipped after failure
-- **WHEN** machinectl Shell Reachability fails
-- **THEN** Docker Availability, Docker Rootless Verification, and gVisor Runtime Registration are displayed as skipped with the annotation "requires: machinectl reachable"
+- **WHEN** the boundary-reachability check (id `machinectl_reachable`) fails
+- **THEN** Docker Availability, Docker Rootless Verification, and gVisor Runtime Registration are displayed as skipped with the annotation "requires: machinectl_reachable"
 
 #### Scenario: Independent chains unaffected
 - **WHEN** machinectl binary check fails in Chain 1
@@ -397,7 +397,7 @@ The `sandbox doctor` command SHALL detect legacy `<cwd>/sandbox-ai.toml` and `<c
 
 #### Scenario: Legacy host config detected
 - **WHEN** `sandbox doctor` runs and `<cwd>/sandbox-ai.toml` exists
-- **THEN** the doctor emits a warning: "Found legacy `<cwd>/sandbox-ai.toml`. Per-host config now lives at `<resolved-home>/config/sandbox-ai.toml`. Migrate manually or delete the legacy file."
+- **THEN** the doctor emits a warning: "Found legacy `<cwd>/sandbox-ai.toml`. Per-host config is now setup-determined — run `sudo sandbox setup`. Delete the legacy file."
 
 #### Scenario: Legacy state directory detected
 - **WHEN** `sandbox doctor` runs and `<cwd>/.state/` exists
@@ -417,7 +417,7 @@ The doctor SHALL include a check `workspace_bridge_group_exists` that verifies t
 
 #### Scenario: Group exists but gid out of range
 - **WHEN** the doctor runs and the configured bridge group exists at a gid OUTSIDE the daemon user's subgid range
-- **THEN** the check fails with: `"FAIL: group '<name>' exists at gid <actual-gid>, which is outside <docker_unprivileged_user>'s subgid range. Either delete and re-create the group at a gid in range, or override [host].workspace_bridge_group to point at a different group."`
+- **THEN** the check fails with: `"FAIL: group '<name>' exists at gid <actual-gid>, which is outside <docker_unprivileged_user>'s subgid range. Delete and re-create the group at a gid in range (the bridge group is setup-derived — re-run \`sudo sandbox setup\`)."`
 
 #### Scenario: Recommendation falls back if autodetect itself fails
 - **WHEN** the doctor's failure path tries to compute a recommendation but `autodetect_workspace_bridge_gid_recommendation` raises (e.g., `NoSubgidRangeError` because the daemon user is not in `/etc/subgid`)
@@ -740,7 +740,7 @@ The doctor SHALL include a check `setup_invariants` that performs a read-only au
 
 The check SHALL report PASS if all invariants hold. For any missing/wrong invariant, the check SHALL report WARN (not FAIL — drift may be operator-intentional) with detail naming the specific invariant violated and remediation `run 'sudo sandbox setup' to restore canonical setup state`.
 
-**Operator resolution under `sandbox doctor`.** The audit needs the operator identity to locate the per-operator drop-in and check `sb-ws` membership. It first tries setup's strict `resolve_operator()` (precedence `$SUDO_USER` → `$PKEXEC_UID` → `--operator` → refuse). Under a **plain `sandbox doctor`** — run by the operator AS THEMSELVES, not via `sudo` — that precedence has no context and raises; the check MUST then fall back to the **current real user** (`pwd.getpwuid(os.getuid())`), which IS the operator in that invocation, and run the full audit. It MUST NOT short-circuit with an "operator unresolvable" WARN (that left the audit dead in doctor's normal, non-sudo invocation). `resolve_operator()` itself stays strict for `setup` (which MUST refuse without explicit context — no current-user heuristic).
+**Operator resolution under `sandbox doctor`.** The audit needs the operator identity to locate the per-operator drop-in and check `sb-ws` membership. It first tries setup's strict `resolve_operator()` (precedence `--operator` → `$SUDO_USER` → refuse). Under a **plain `sandbox doctor`** — run by the operator AS THEMSELVES, not via `sudo` — that precedence has no context and raises; the check MUST then fall back to the **current real user** (`pwd.getpwuid(os.getuid())`), which IS the operator in that invocation, and run the full audit. It MUST NOT short-circuit with an "operator unresolvable" WARN (that left the audit dead in doctor's normal, non-sudo invocation). `resolve_operator()` itself stays strict for `setup` (which MUST refuse without explicit context — no current-user heuristic).
 
 **Root-only drop-in under a non-root invocation.** The per-operator sudoers drop-in is `0440 root:root` inside a `0750` `/etc/sudoers.d/`, so a plain `sandbox doctor` (running as the operator) cannot read it. Reading it MUST raise no uncaught exception (a `PermissionError` MUST NOT crash the doctor run): the check treats an unreadable-but-present drop-in as **NOT missing** (no "missing" violation) and **skips** the rule-body + systemd-run-stability audits that need its content, returning the operator-readable invariants' verdict with a note that the rule is validated at install time by setup's L3a per-op probe. (The machinectl-path-stability sub-check still runs — it is resolve/shadow-only and needs no drop-in content. `sudo sandbox doctor` is NOT a fuller path — post round-9/F-021 it resolves root's home, not the operator's, and exits without a config.) The operator-readable invariants (reserved-dir mode/ownership, subuid/subgid ranges, `sb-ws` group membership, sudo-version floor, machinectl-path resolution) are still audited.
 
@@ -788,24 +788,24 @@ The check SHALL report PASS if all invariants hold. For any missing/wrong invari
 
 ### Requirement: Execution-Mode-Aware Doctor Checks
 
-`sandbox doctor` SHALL honor the active execution mode, which is the **marker-resolved** value (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector" requirement) overlaid onto `host_config.host.docker_execution_mode` — it is NOT a toml field, and the doctor runner's callers (including `sandbox init`'s and `sandbox start`'s pre-flight `run_check_subset`) SHALL thread the resolved mode and the `resolve_daemon_owner` owner so the checks evaluate against the real mode rather than a defaulted/mode-less config. In `operator-rootless` mode `sandbox doctor` itself SHALL resolve the daemon owner as the invoking operator (`resolve_daemon_owner`) **toml-free** — reading neither the toml nor `docker_unprivileged_user` (the D7 owner-read discipline) — so a missing toml is not an error in operator-rootless. In `operator-rootless` mode it SHALL skip the checks that only make sense for the `machinectl` crossing — machinectl Shell Reachability, systemd-machined Service Check, Unprivileged User Existence (the dedicated daemon user), and the dispatcher-integrity checks (dispatcher-sha drift / the setup-invariants machinectl-stability + sudoers-rule-body audit) — and SHALL run the docker/runsc/supply-chain/compose-collision checks **locally** (these route through `core.dispatch.probe`, which takes the local path in `operator-rootless`). In `separate-user` mode every check SHALL behave exactly as before. A check that does not apply in the active mode SHALL report an explicit mode-skip status; it SHALL NOT report PASS (no false green).
+`sandbox doctor` SHALL honor the active execution mode, which is the **marker-resolved** value (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector" requirement) overlaid onto `host_config.host.docker_execution_mode`; the doctor runner's callers (including `sandbox start`'s pre-flight `run_check_subset`) SHALL thread the resolved mode and the `resolve_daemon_owner` owner so the checks evaluate against the real mode rather than a defaulted/mode-less config. In `operator-rootless` mode `sandbox doctor` SHALL resolve the daemon owner as the invoking operator (`resolve_daemon_owner`) — reading neither a toml nor `docker_unprivileged_user` (the D7 owner-read discipline). In `operator-rootless` mode it SHALL skip the checks that only make sense for the `machinectl` crossing — boundary reachability (`machinectl_reachable`), systemd-machined Service Check, Unprivileged User Existence (the dedicated daemon user), and the dispatcher-integrity checks (dispatcher-sha drift / the setup-invariants machinectl-stability + sudoers-rule-body audit) — and SHALL run the docker/runsc/supply-chain/compose-collision checks **locally**. In `separate-user` mode every check SHALL behave exactly as before. A check that does not apply in the active mode SHALL report an explicit mode-skip status; it SHALL NOT report PASS (no false green).
 
-On a host with **no marker entry** for the invoking operator (`resolve_execution_mode` raises `ModeMarkerMissing` — a not-yet-`setup` host), `sandbox doctor` SHALL fall back to the provisioning default `DEFAULT_PROVISIONING_MODE` (`operator-rootless`, the single system-wide execution-mode default per the `host-config` capability's "Single-Sourced Execution-Mode Default" requirement) rather than to `separate-user`. Under this operator-rootless fallback doctor resolves the daemon owner as the invoking operator **toml-free** and runs the operator-rootless check set, so a truly fresh host (no marker, no `sandbox-ai.toml`, no `--user`) can still run doctor instead of hard-failing on a missing toml / "No user specified". The marker is the authority once `setup` writes it; the fallback governs only the not-yet-provisioned window. (An explicit `--user`, or a marker that resolves to a concrete mode, takes precedence over the fallback exactly as before.)
+On a host that has **not been set up** for the invoking operator (`resolve_execution_mode` raises `ModeMarkerMissing`), `sandbox doctor` SHALL NOT guess an execution mode. It SHALL run the mode-INVARIANT checks (filesystem, repo-integrity, per-user-tree) and resolve the daemon owner mode-independently, and SHALL report an explicit **"not set up yet"** mode-skip for every mode-SPECIFIC check (boundary reachability, systemd-machined, dedicated-user existence, dispatcher integrity, docker/runsc/supply-chain/compose-collision), with a friendly notice "this host isn't set up yet — run `sudo sandbox setup`". The notice SHALL NOT name the internal marker or `setup-state.json`. No mode-specific check SHALL report PASS or FAIL on an unprovisioned host — the unprovisioned state is surfaced as an explicit skip, not as a defaulted-mode probe.
 
 #### Scenario: crossing checks skipped in operator-rootless
 
 - **WHEN** `sandbox doctor` runs with `docker_execution_mode == operator-rootless`
-- **THEN** the machinectl-reachability, systemd-machined, dedicated-user-existence, and dispatcher-integrity checks report a mode-skip status (not PASS), and the docker/runsc/supply-chain checks run as local `docker …` queries with no `machinectl` crossing
+- **THEN** the boundary-reachability, systemd-machined, dedicated-user-existence, and dispatcher-integrity checks report a mode-skip status (not PASS), and the docker/runsc/supply-chain checks run as local `docker …` queries with no `machinectl` crossing
 
 #### Scenario: all checks unchanged in separate-user
 
 - **WHEN** `sandbox doctor` runs with `docker_execution_mode == separate-user`
 - **THEN** every check behaves exactly as before this change (including the crossing and dispatcher-integrity checks)
 
-#### Scenario: marker-absent fresh host falls back to operator-rootless and runs
+#### Scenario: unprovisioned host reports an explicit not-set-up skip
 
-- **WHEN** `sandbox doctor` runs on a host with no setup marker entry (`resolve_execution_mode` raises `ModeMarkerMissing`), no `sandbox-ai.toml`, and no `--user` flag
-- **THEN** doctor falls back to `operator-rootless` (the provisioning default), resolves the daemon owner as the invoking operator toml-free, runs the operator-rootless check set (threading `operator-rootless` into `build_check_registry` and `run_checks`), and does NOT hard-fail with "No user specified" — rather than falling back to `separate-user` and erroring on the missing toml
+- **WHEN** `sandbox doctor` runs on a host that has not been set up for the invoking operator (`resolve_execution_mode` raises `ModeMarkerMissing`)
+- **THEN** doctor runs the mode-invariant checks (filesystem, repo-integrity, per-user-tree) and reports every mode-specific check as an explicit "not set up yet — run `sudo sandbox setup`" mode-skip — it does NOT guess `operator-rootless`, does NOT run the crossing/docker checks under a defaulted mode, and names neither the marker nor `setup-state.json`
 
 ### Requirement: Daemon User Privilege Invariant (separate-user)
 
@@ -908,4 +908,15 @@ This is the SUDO-mode steady-state counterpart of L3a's setup-time relative-form
 #### Scenario: drop-in content unavailable under a plain doctor
 - **WHEN** the SUDO drop-in is present but unreadable (`0440 root:root`, plain operator `sandbox doctor`)
 - **THEN** the sub-check still resolves `systemd-run` (resolve/shadow signal) but skips the drop-in `Cmnd_Spec` match without contributing a "missing" violation
+
+### Requirement: Retired Host Config File Detection
+`sandbox doctor` SHALL detect a leftover canonical host config file at `<sandbox_ai_home()>/config/sandbox-ai.toml` and WARN that it is obsolete. `sandbox-ai.toml` is retired (the `host-config` capability); host facts are now setup-determined and recorded by `sudo sandbox setup`. The warning SHALL direct the operator to delete the file and re-run setup, and SHALL NOT reference the internal marker.
+
+#### Scenario: Retired canonical host config detected
+- **WHEN** `sandbox doctor` runs and `<sandbox_ai_home()>/config/sandbox-ai.toml` exists
+- **THEN** the doctor emits a WARN: "Found an obsolete `<resolved-home>/config/sandbox-ai.toml`. Host config is now setup-determined — delete this file and run `sudo sandbox setup`." and names neither the marker nor `setup-state.json`
+
+#### Scenario: No warning when the retired file is absent
+- **WHEN** `sandbox doctor` runs and no `<sandbox_ai_home()>/config/sandbox-ai.toml` exists
+- **THEN** the doctor emits no retired-host-config warning
 

@@ -56,8 +56,8 @@ The in-container working directory SHALL be selected via the ssh remote command 
 - **WHEN** `sandbox attach <inst>` completes its warm state check successfully
 - **THEN** no Jinja2 templates are rendered, no `.htpasswd` is regenerated, and no IPAM ledger is mutated (the `fwd` wire expansion performs only the read-only IPAM peek)
 
-#### Scenario: Terminal handed to core via ssh-through-admin (separate-user, SUDO mode)
-- **WHEN** containers are confirmed running, `state.lock` is released, workspace `<ws>` is resolved, and `machinectl_authentication` is `"sudo"`
+#### Scenario: Terminal handed to core via ssh-through-admin (separate-user)
+- **WHEN** containers are confirmed running, `state.lock` is released, workspace `<ws>` is resolved, and the execution mode is separate-user
 - **THEN** the system invokes `tlog-rec --writer=file --file-path=<host-side log path> -- ssh -F /dev/null -i <inst_dir>/secrets/ipc_ssh_key -o UserKnownHostsFile=<inst_dir>/secrets/ipc_known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no -o ProxyCommand="sudo systemd-run -q --pipe --uid=<docker_unprivileged_user> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'` (the admin container `<project_name>-admin-1` is derived dispatcher-side from `--project`)
 
 ### Requirement: Per-User State Initialization Required
@@ -128,19 +128,18 @@ These options are the **non-escalation guarantee** of the attach session: what a
 - **WHEN** the attach ssh argv is inspected
 - **THEN** it contains `-o UserKnownHostsFile=<inst_dir>/secrets/ipc_known_hosts` and `-o StrictHostKeyChecking=yes`, and the only identity source is `-i <inst_dir>/secrets/ipc_ssh_key`
 
-### Requirement: Headless Separate-User Attach (SUDO mode)
-
-In separate-user mode with `machinectl_authentication == "sudo"`, `sandbox attach` SHALL succeed on a host with **no polkit agent and no interactive TTY available to the crossing** (a headless host): the ProxyCommand's `sudo systemd-run` crossing is authorized non-interactively by the NOPASSWD per-op sudoers `Cmnd_Spec` (`sudo -n` semantics — no password prompt path). This closes F-060, whose root cause was the unprivileged `pipe_cmd` crossing's dependence on an interactive polkit `manage-units` authorization.
+### Requirement: Headless Separate-User Attach
+In separate-user mode, `sandbox attach` SHALL succeed on a host with **no polkit agent and no interactive TTY available to the crossing** (a headless host): the ProxyCommand's `sudo systemd-run` crossing is authorized non-interactively by the NOPASSWD per-op sudoers `Cmnd_Spec` (`sudo -n` semantics — no password prompt path). This closes F-060, whose root cause was the unprivileged `pipe_cmd` crossing's dependence on an interactive polkit `manage-units` authorization.
 
 Operator-rootless attach is unaffected (no crossing).
 
 If the `fwd` crossing is denied by sudo (typical cause: a host provisioned before this op existed — the sudoers drop-in lacks the `fwd` `Cmnd_Spec`), the attach failure surfaces as the ssh client's connection-closed; the `setup_invariants` doctor check flags the op-enum drift and the remedy is `sudo sandbox setup` (re-renders the rule from the current op enum).
 
-#### Scenario: Headless SUDO attach succeeds
-- **WHEN** `sandbox attach <inst> <ws>` runs over a non-interactive SSH session on a headless separate-user SUDO host whose sudoers drop-in includes the `fwd` `Cmnd_Spec`, and the instance is running
+#### Scenario: Headless attach succeeds
+- **WHEN** `sandbox attach <inst> <ws>` runs over a non-interactive SSH session on a headless separate-user host whose sudoers drop-in includes the `fwd` `Cmnd_Spec`, and the instance is running
 - **THEN** the ProxyCommand crossing is authorized without any polkit agent or password prompt, the SSH session reaches core's sshd, and the operator lands in `/workspaces/<ws>`
 
 #### Scenario: Stale sudoers rule surfaces as doctor drift
-- **WHEN** attach fails on a SUDO-mode host whose drop-in predates the `fwd` op
+- **WHEN** attach fails on a separate-user host whose drop-in predates the `fwd` op
 - **THEN** `sandbox doctor`'s `setup_invariants` reports the sudoers op-enum drift (the installed rule does not match the current `core.dispatch.Op` enum) with the `sudo sandbox setup` remedy
 

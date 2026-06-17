@@ -41,7 +41,7 @@ The orchestrator's defining property is that everything Docker-related crosses f
   - `INSTANCE_SUBDIRS` excludes helper-recipe-owned leaves (the cache/log leaves enumerated in `orchestrator-volumes`'s "Cache/Log Leaf Inventory" requirement); those are created by the helper recipe on first start.
   - The "Scaffold-vs-Helper Boundary" rule prevents the userns-EPERM bug class.
 - `crypto.py` — bcrypt htpasswd, SSH keypair, credential generation for the proxy sidecar.
-- `host_config.py` — `sandbox-ai.toml` loader + `machinectl_cmd()` builder + subuid/subgid resolvers (`host_id_for_in_container`, `in_container_uid_for_host_uid`, `in_container_gid_for_host_gid`, `workspace_bridge_gid`, `autodetect_workspace_bridge_gid_recommendation`).
+- `host_config.py` — marker-sourced `HostConfig.from_marker(operator)` builder (host provisioning facts come from the root-owned per-operator setup-state marker, not a toml) + `machinectl_cmd()` builder + subuid/subgid resolvers (`host_id_for_in_container`, `in_container_uid_for_host_uid`, `in_container_gid_for_host_gid`, `workspace_bridge_gid`, `autodetect_workspace_bridge_gid_recommendation`).
 - `dispatch.py` — the canonical orchestrator→sandbox crossing (see [privilege-boundary.md](privilege-boundary.md)).
   - `Op` enum + per-op validators + per-op target-argv builders.
   - `invoke(op, args, host_config, *, timeout=None)` — raise-on-failure (rejects the streaming `fwd` op).

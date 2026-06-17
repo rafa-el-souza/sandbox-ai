@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import pytest
 from core.host_config import (
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
 )
 from core.setup.l2a_delegate import PHASE, render_delegate_dropin
@@ -36,7 +35,7 @@ if TYPE_CHECKING:
 def _ctx() -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
-            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+            "sandboxuser", DockerExecutionMode.SEPARATE_USER
         ),
         operator="op",
     )

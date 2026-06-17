@@ -18,7 +18,7 @@ The system SHALL accept a `--dry-run` flag on `sandbox start <inst>` that simula
 - **THEN** the process exits with code 1 with the failure reason displayed
 
 ### Requirement: Instance Resolution in Dry-Run
-The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init <inst>`. The `docker_unprivileged_user` SHALL be sourced from host config (`sandbox-ai.toml`), not from instance config. Resolution is by explicit `<inst>` argument; CWD-based discovery is removed.
+The system SHALL resolve the instance from the registry in dry-run mode using the same read-only lookup as normal start. Dry-run SHALL require a prior `sandbox init <inst>`. The `docker_unprivileged_user` SHALL be sourced from host config (the per-operator setup marker), not from instance config. Resolution is by explicit `<inst>` argument; CWD-based discovery is removed.
 
 #### Scenario: Existing instance resolved
 - **WHEN** dry-run is invoked and `<inst>` has a registered entry in `~/.sandbox-ai/state/instances.json`
@@ -96,8 +96,8 @@ The handover command displayed by the preview SHALL likewise be obtained from th
 - **WHEN** dry-run runs against an instance whose hydration emits one or more helper-cp groups (e.g., `ipc_known_hosts`, `ipc_ssh_key`, `.claude.json`)
 - **THEN** the rendered compose up command contains `docker compose -f <instance_dir>/docker/compose.yml [...]` and does NOT contain helper-cp filenames joined by `, ` in place of compose file flags
 
-#### Scenario: Handover command displayed (sudo mode)
-- **WHEN** dry-run completes validation and `machinectl_authentication` is `"sudo"`
+#### Scenario: Handover command displayed (separate-user mode)
+- **WHEN** dry-run completes validation in separate-user mode
 - **THEN** the preview shows `tlog-rec --writer=file --file-path=<path> -- ssh -F /dev/null -i <secrets>/ipc_ssh_key -o UserKnownHostsFile=<secrets>/ipc_known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no -o ProxyCommand="sudo systemd-run -q --pipe --uid=<sbuser> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'" -p 9999 -t agent@<core_ipc_ip> 'cd /workspaces/<ws> && exec bash -l'`
 
 #### Scenario: Named-ACL grant commands displayed (per-workspace)

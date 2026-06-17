@@ -24,8 +24,9 @@ The operator is resolved by explicit precedence (no TTY heuristics):
 
 1. `--operator <name>` — explicit override.
 2. `$SUDO_USER`+`$SUDO_UID` consistency.
-3. `$PKEXEC_UID`.
-4. refuse.
+3. refuse.
+
+In operator-rootless, a `$SUDO_USER`-resolved operator (no explicit `--operator`) must equal the euid user — `sudo -u other sandbox setup` is refused so it cannot silently provision for the invoker. separate-user's `euid==0` gate already covers impersonation, and its legitimate admin `--operator <other>` path is preserved.
 
 ## Plan/apply two-pass UX
 
@@ -47,7 +48,7 @@ Phases are **named, not counted** — never re-introduce a brittle "N-phase" int
 |---|---|
 | **L0** | identity/env (root + operator resolution; distro tier; required-binary check; `MACHINECTL_PATH` uniqueness assertion on the sudoers `secure_path` basis — inode-deduped so usrmerge symlink-aliases are one, genuinely-distinct binaries still refused). |
 | **L1** | sysctl drop-in + ACL-FS/cgroup-v2 verify (L1 resolves no OS user). |
-| **L2** | systemd-machined + sandbox useradd + `/etc/subuid`/`/etc/subgid` append-only + `sb-ws` groupadd + operator `usermod` (L2 does **not** install runsc). |
+| **L2** | systemd-machined + sandbox useradd + `/etc/subuid`/`/etc/subgid` free-block allocation (disjoint per-operator ranges, cross-user overlap detection) + workspace-bridge groupadd (`sb-ws-<operator>` op-rootless / shared `sb-ws` separate-user) at an in-range gid + operator `usermod` (L2 does **not** install runsc). |
 | **L2a** | `Delegate=yes` drop-in (split out of L1: its `user-<sandbox-uid>.service.d/` path is uid-scoped to the sandbox user L2 creates, so `depends_on=("l2",)`, ordered before L5). |
 | **L5** | linger + rootless dockerd. |
 | **L6** | `daemon.json` reserved-key merge + StartLimit-safe restart (`systemctl --user reset-failed docker.service` then `restart --no-block`, then a **runtime-aware** readiness poll until `docker info` lists the reserved runtime; the probe/reverify confirm the daemon's *loaded* runtime, not just the `daemon.json` file — do NOT "fix" a flaky restart with a blind retry: rapid restarts trip systemd's start-rate-limit and leave docker down). |
@@ -59,11 +60,11 @@ Phases are **named, not counted** — never re-introduce a brittle "N-phase" int
 
 **L3 is the last base-ceremony mutation phase and the only one that touches the privilege-boundary rule** — there is no permissive bootstrap rule before it, so a crash anywhere in L0..L7 leaves zero sudoers grant on disk, and an L3 crash is handled by L3a's rollback. Setup-as-root invokes `machinectl` directly; no permissive bootstrap rule is ever installed. L8 is verification, not mutation. The optional fapolicyd/AIDE integration phases run **after L8** with sticky opt-in (see [Production integrity posture](#production-integrity-posture)) and mutate only their own `/etc/fapolicyd/trust.d/` and `/etc/aide/aide.conf.d/` namespaces — they never touch the L3 rule, so the no-permissive-window property is scoped to the base ceremony's privilege-boundary rule.
 
-> **Removed-phase history — the old L4 "operator state" phase.** An earlier L4 "operator state" phase was **removed**: setup runs as root, where `sandbox_ai_home()` resolves to `/root/.sandbox-ai` — invisible to the operator — so the per-operator `{config,state,instances,workspaces}` tree + `sandbox-ai.toml` are created **by `sandbox init` as the operator**, never by setup. Setup's only operator-readable artifact, the dispatcher manifest, therefore lives on the host plane alongside the binary, not under `sandbox_ai_home()`.
+> **Removed-phase history — the old L4 "operator state" phase.** An earlier L4 "operator state" phase was **removed**: setup runs as root, where `sandbox_ai_home()` resolves to `/root/.sandbox-ai` — invisible to the operator — so the per-operator `{config,state,instances,workspaces}` tree is created **by `sandbox init` as the operator**, never by setup. (Host provisioning facts are not written to the operator's home at all — they live in the root-owned per-operator setup-state marker, written by setup.) Setup's only operator-readable artifact, the dispatcher manifest, therefore lives on the host plane alongside the binary, not under `sandbox_ai_home()`.
 
 ## Content-aware probes
 
-Every phase whose mutation can drift across wheel upgrades renders expected state from current sources (the `core.dispatch.Op` enum, `BINARY_REGISTRY`/`IMAGE_REGISTRY` pins, the dispatcher source bundle derived from `core.dispatch.DISPATCH_SOURCE_ENTRIES`, the toml/daemon.json contents) and compares it to observed on-disk state; the act is skipped only on an exact match. This is why an idempotent re-run on a converged host completes in <5s with every phase `already correct`.
+Every phase whose mutation can drift across wheel upgrades renders expected state from current sources (the `core.dispatch.Op` enum, `BINARY_REGISTRY`/`IMAGE_REGISTRY` pins, the dispatcher source bundle derived from `core.dispatch.DISPATCH_SOURCE_ENTRIES`, the daemon.json contents) and compares it to observed on-disk state; the act is skipped only on an exact match. This is why an idempotent re-run on a converged host completes in <5s with every phase `already correct`.
 
 ## Reserved-namespace principle
 
@@ -88,7 +89,7 @@ L6a installs the pinned runsc if absent; on a re-run with a sha mismatch it does
 
 ## Multi-operator by accumulation
 
-Each operator runs `sudo sandbox setup` for themselves. Shared host state (sandbox user, `sb-ws` group, rootless dockerd, runsc, dispatcher binary, `/etc/subuid` entries) is **convergent** across operators — idempotent, written once, the same for everyone. Per-operator state (the `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` drop-in, `<sandbox_ai_home()>/`, `sb-ws` group membership) **accumulates additively**: `alice` running setup installs `…-alice`; `bob` running setup later installs `…-bob` without disturbing alice's drop-in or the shared state. Concurrent invocations under the same operator serialize on that operator's per-user `state.lock`; invocations under different operators do not inter-serialize.
+Each operator runs `sudo sandbox setup` for themselves. Identity-independent host state (runsc, dispatcher binary, sysctl/nftables drop-ins, the reserved dir, the marker file) is **convergent** across operators — idempotent, written once, the same for everyone. In **separate-user** the sandbox user, the shared `sb-ws` group, and its single `/etc/subuid` range are also host-wide shared state. In **operator-rootless** each operator is their own single-tenant daemon owner: their own per-operator workspace-bridge group (`sb-ws-<operator>`), their own disjoint `/etc/subuid`/`/etc/subgid` range, their own linger and `~/.config/docker/daemon.json`. Per-operator state (the `/etc/sudoers.d/sandbox-ai-machinectl-<operator>` drop-in, `<sandbox_ai_home()>/`, the per-operator marker entry, bridge-group membership) **accumulates additively**: `alice` running setup installs `…-alice`; `bob` running setup later installs `…-bob` without disturbing alice's drop-in or the shared state. Concurrent invocations under the same operator serialize on that operator's per-user `state.lock`; invocations under different operators do not inter-serialize.
 
 ## Inline sudoers user-spec vs. Cmnd_Alias
 

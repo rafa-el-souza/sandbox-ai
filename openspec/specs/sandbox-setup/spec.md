@@ -7,7 +7,7 @@ TBD - created by archiving change sandbox-setup. Update Purpose after archive.
 
 The system SHALL provide a `sandbox setup` command invoked as `sudo sandbox setup`. The command SHALL run as root throughout (`os.geteuid() == 0` at entry; refuse with diagnostic otherwise). The command SHALL operate idempotently: re-running on a converged host produces no mutations and reports `already correct` for each phase.
 
-The command builds a `SetupContext` (the `host_config` + the resolved operator) BEFORE any phase runs. On a fresh host the per-operator `<sandbox_ai_home()>/config/sandbox-ai.toml` does not yet exist — and setup does **not** create it: the per-operator state tree + `sandbox-ai.toml` are the artifact of `sandbox init` running **as the operator** (F-021; setup runs as root, where `sandbox_ai_home()` resolves to `/root/.sandbox-ai`, invisible to the operator — so setup MUST NOT seed there). The entry point therefore SHALL bootstrap `host_config` from built-in defaults when the toml is absent: it loads the toml when present, and on its absence falls back to a defaults-only `HostConfig` whose `[host]` values (`docker_unprivileged_user`, `machinectl_authentication`, `workspace_bridge_group`) are the documented defaults (`docker_unprivileged_user="sandbox"`, `workspace_bridge_group="sb-ws"`; the auth mode is supplied explicitly per the "Machinectl Auth Mode Selection" requirement). These same defaults are what `sandbox init` seeds when it later creates the operator toml, so the values setup's phases observe and the values the operator's runtime commands read are consistent. An operator overrides `docker_unprivileged_user` by hand-editing the toml `init` seeds (then re-running setup is unnecessary for that value — it is read at runtime by the operator commands).
+The command builds a `SetupContext` (the `host_config` + the resolved operator) BEFORE any phase runs. Setup is **toml-free**: it builds `host_config` exclusively from command-line flags and documented defaults — there is no `sandbox-ai.toml` to read (it is retired; see the `host-config` capability), and there is no `machinectl_authentication` field. The per-operator state tree (`<sandbox_ai_home()>/{config,state,instances,workspaces}` + `instances.json`) is the artifact of `sandbox init` running **as the operator** (F-021; setup runs as root, where `sandbox_ai_home()` resolves to `/root/.sandbox-ai`, invisible to the operator — so setup MUST NOT seed there). The host facts setup provisions (`docker_unprivileged_user` for separate-user, the derived workspace bridge group, the execution mode) are recorded in the per-operator setup marker for the operator's runtime commands to read.
 
 #### Scenario: Setup invoked without sudo
 - **WHEN** the operator runs `sandbox setup` without `sudo` (i.e., effective uid != 0)
@@ -17,19 +17,9 @@ The command builds a `SetupContext` (the `host_config` + the resolved operator) 
 - **WHEN** an operator runs `sudo sandbox setup` on a host where every phase's probe would return "already correct"
 - **THEN** the apply pass completes in under 5 seconds, the finalization summary shows every phase as `skip (already correct)`, and the operator's `sandbox doctor` continues to return green
 
-#### Scenario: Fresh-host host_config bootstrap (sandbox-ai.toml absent)
-- **WHEN** `sudo sandbox setup` runs on a fresh host where `<sandbox_ai_home()>/config/sandbox-ai.toml` does not exist, and the entry point must construct the `SetupContext.host_config` before any phase runs
-- **THEN** the entry point builds `host_config` from defaults equivalent to `minimal_host_config` with `docker_unprivileged_user="sandbox"` and the explicitly-selected auth mode, proceeds with the ceremony, and does NOT create the per-operator tree or seed `sandbox-ai.toml` (that is `sandbox init`'s job, run as the operator); on any subsequent run an operator-seeded toml, if present, is loaded instead of the defaults
-
-### Requirement: Machinectl Auth Mode Selection
-
-SUDO is the only supported auth mode. `sandbox setup` SHALL NOT accept a `--machinectl-auth` flag; it unconditionally resolves the SUDO auth mode without reading any config file (it is toml-free on a fresh host). There is no auth-mode input to validate or refuse.
-
-The constructed `host_config` carries the resolved SUDO auth mode, so L3 renders the sudoers rule the verification phases (L3a/L8) can check.
-
-#### Scenario: setup unconditionally provisions sudo
-- **WHEN** `sudo sandbox setup` runs (toml absent or present)
-- **THEN** setup resolves SUDO, builds a `host_config` whose `machinectl_authentication` is `sudo`, and proceeds with the ceremony
+#### Scenario: host_config built toml-free from flags and defaults
+- **WHEN** `sudo sandbox setup` runs and the entry point must construct the `SetupContext.host_config` before any phase runs
+- **THEN** the entry point builds `host_config` from flags + documented defaults (equivalent to `minimal_host_config` with `docker_unprivileged_user="sandbox"` in separate-user), reads no `sandbox-ai.toml`, and does NOT create the per-operator tree (that is `sandbox init`'s job, run as the operator)
 
 ### Requirement: Operator Resolution Precedence
 
@@ -37,10 +27,13 @@ When running as root, the system SHALL resolve the operator user via the followi
 
 1. The `--operator <name>` flag value (if provided); MUST match an existing user via `pwd.getpwnam(<name>)`.
 2. `$SUDO_USER` from the environment; MUST be consistent with `$SUDO_UID` via `pwd.getpwnam($SUDO_USER).pw_uid == int($SUDO_UID)`.
-3. `$PKEXEC_UID` from the environment; resolved via `pwd.getpwuid(int($PKEXEC_UID))`.
-4. **No fallback.** Refuse with: `cannot resolve operator user. Re-invoke as: sudo sandbox setup, or pass --operator <name>.`
+3. **No fallback.** Refuse with: `cannot resolve operator user. Re-invoke as: sudo sandbox setup, or pass --operator <name>.`
 
-The system SHALL NOT use TTY-based heuristics (e.g., owner of `/dev/tty`, `os.getlogin()`, `who -m`) to infer the operator user.
+The vestigial `$PKEXEC_UID` tier is **retired** (dead since polkit support was removed) and SHALL NOT be consulted.
+
+**Operator-rootless invoker cross-check (F-072b).** In `operator-rootless` mode setup runs **non-root as the operator themselves**, so the operator MUST be the invoking euid user. When the operator is resolved from `$SUDO_USER` (no explicit `--operator`), setup SHALL assert `$SUDO_USER == getpass.getuser()` (the euid user) and refuse a mismatch — closing the narrow gap where `sudo -u other sandbox setup` would silently provision for the `$SUDO_USER` invoker while running as `other`. The existing `--operator ≠ invoker` guard (refusing an explicit `--operator` that names someone other than the invoker) remains **operator-rootless-only**.
+
+This cross-check SHALL NOT be extended to `separate-user`: there, setup REQUIRES `euid == 0` (so any non-root impersonation like `sudo -u other` is already refused by the root gate), and an explicit `--operator <other>` is the **legitimate admin-provisions-for-another** path (the admin runs as root and names the target operator) — it SHALL NOT be refused. The system SHALL NOT use TTY-based heuristics (e.g., owner of `/dev/tty`, `os.getlogin()`, `who -m`) to infer the operator user.
 
 #### Scenario: Operator resolved via $SUDO_USER
 - **WHEN** the operator runs `sudo sandbox setup` from a normal user shell and `$SUDO_USER=alice`, `$SUDO_UID=1000`, `pwd.getpwnam("alice").pw_uid == 1000`
@@ -50,13 +43,21 @@ The system SHALL NOT use TTY-based heuristics (e.g., owner of `/dev/tty`, `os.ge
 - **WHEN** the operator runs `sudo sandbox setup --operator bob` and `$SUDO_USER=alice`
 - **THEN** setup resolves the operator as `bob` (the flag takes precedence)
 
+#### Scenario: PKEXEC_UID is no longer consulted
+- **WHEN** `sandbox setup` runs with `$PKEXEC_UID` set but `$SUDO_USER` unset and no `--operator` flag
+- **THEN** setup refuses with `cannot resolve operator user. Re-invoke as: sudo sandbox setup, or pass --operator <name>.` — the retired `$PKEXEC_UID` tier does NOT resolve an operator
+
 #### Scenario: Refuse when no operator identifiable
-- **WHEN** the operator runs `sandbox setup` as a direct root login (no `sudo` from a user shell; `$SUDO_USER`, `$PKEXEC_UID` both unset; no `--operator` flag)
+- **WHEN** the operator runs `sandbox setup` as a direct root login (no `sudo` from a user shell; `$SUDO_USER` unset; no `--operator` flag)
 - **THEN** setup exits non-zero with `cannot resolve operator user. Re-invoke as: sudo sandbox setup, or pass --operator <name>.`
 
 #### Scenario: Refuse on SUDO_USER/SUDO_UID inconsistency
 - **WHEN** `$SUDO_USER=alice` but `$SUDO_UID=999` and `pwd.getpwnam("alice").pw_uid == 1000`
 - **THEN** setup refuses with a diagnostic naming the inconsistency
+
+#### Scenario: Refuse silent wrong-operator provisioning
+- **WHEN** `sandbox setup` is invoked such that the `$SUDO_USER`-resolved operator differs from the genuine invoking session identity (e.g. `sudo -u other sandbox setup`) and no explicit `--operator` names that target
+- **THEN** setup refuses with a diagnostic rather than silently provisioning the wrong operator
 
 ### Requirement: Plan/Apply Two-Pass UX
 
@@ -168,7 +169,7 @@ The system SHALL write only to namespaces it owns. The complete enumerable list 
 - `/etc/aide/aide.conf.d/sandbox-ai.conf` (mode 0644, root:root) — AIDE config drop-in, OPTIONAL (present only when AIDE integration is enabled; see "Optional AIDE Integration Phase" requirement)
 - `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` (mode 0644, root:root) — dispatcher install manifest containing the compiled binary's sha512 + source-bundle sha512 + compile timestamp; see "Dispatcher Manifest Schema" requirement
 
-The per-operator state tree `<sandbox_ai_home()>/{config,state,instances,workspaces}` and the `sandbox-ai.toml` seed are **NOT** in this list: they are created and owned by `sandbox init` running **as the operator** (`ensure_per_user_state` + `_seed_host_config_if_absent`), not by setup. Setup runs as root, where `sandbox_ai_home()` resolves to `/root/.sandbox-ai` (an artifact invisible to the operator), so setup MUST NOT create the per-user tree (F-021); it is the operator-plane artifact of `init`. The dispatcher manifest, by contrast, is shared host state (the binary is convergent across operators) and therefore lives on the host plane alongside the binary, root-owned and world-readable so every operator's `sandbox doctor` can read it.
+The per-operator state tree `<sandbox_ai_home()>/{config,state,instances,workspaces}` is **NOT** in this list: it is created and owned by `sandbox init` running **as the operator** (`ensure_per_user_state`), not by setup (init no longer seeds any `sandbox-ai.toml` — host facts are setup-determined in the marker). Setup runs as root, where `sandbox_ai_home()` resolves to `/root/.sandbox-ai` (an artifact invisible to the operator), so setup MUST NOT create the per-user tree (F-021); it is the operator-plane artifact of `init`. The dispatcher manifest, by contrast, is shared host state (the binary is convergent across operators) and therefore lives on the host plane alongside the binary, root-owned and world-readable so every operator's `sandbox doctor` can read it.
 
 Setup SHALL NOT edit, append to, or overwrite any file or key outside this enumerated list during normal operation. Each drop-in file SHALL carry a leading `# sandbox-ai managed — do not edit; rerun 'sudo sandbox setup'` comment (for sudoers `#` is the comment syntax).
 
@@ -234,7 +235,7 @@ Six properties of this shape are load-bearing:
 
 6. **Cmnd specs are INLINED into the operator's user-spec — no shared `Cmnd_Alias`.** `Cmnd_Alias` (like all sudoers alias kinds) shares a single GLOBAL namespace across every file sudo loads from `/etc/sudoers.d/`. A per-operator drop-in that declared `Cmnd_Alias SANDBOX_OPS = …` therefore COLLIDED with every other operator's drop-in once two coexisted (the multi-operator-by-accumulation case) — sudo reports `duplicate Cmnd_Alias "SANDBOX_OPS"` on every parse, polluting each operator's `sudo` stderr and (were two operators ever to resolve different sandbox users / systemd-run paths) silently letting one inherit the other's specs. The fix inlines the Cmnd list directly into the operator's user-spec (`<operator> <HOSTNAME>=(root) NOPASSWD: NOSETENV: <spec1>, \ <spec2>, …`), so each drop-in is wholly independent and two coexisting drop-ins parse cleanly under `visudo -c`. (`Defaults fast_glob` repeated across drop-ins is harmless — duplicate `Defaults` is not an error, unlike duplicate `Cmnd_Alias`.) Round-6's 12.4 multi-op test missed this because only one per-operator rule existed at a time then; round-7 exposed it once the password-operator's rule (F-018) finally installed alongside another operator's. (F-020.)
 
-The rule SHALL bind to the resolved `<HOSTNAME>` (output of `hostname` at setup time), not `ALL`. The rule SHALL include the `NOSETENV:` tag. The rule SHALL NOT contain a `Digest_Spec` (`sha512:<hash>` prefix). The dispatcher op enumeration SHALL be rendered from `core.dispatch.Op` enum values at template-write time (single source of truth). The `<sandbox-user>` placeholder SHALL be resolved from `[host].docker_unprivileged_user`. Setup SHALL refuse to render any rule body containing `"` (double-quote) characters inside a `Cmnd_Spec` — the renderer's golden-file unit test asserts the rendered bytes are quote-free.
+The rule SHALL bind to the resolved `<HOSTNAME>` (output of `hostname` at setup time), not `ALL`. The rule SHALL include the `NOSETENV:` tag. The rule SHALL NOT contain a `Digest_Spec` (`sha512:<hash>` prefix). The dispatcher op enumeration SHALL be rendered from `core.dispatch.Op` enum values at template-write time (single source of truth). The `<sandbox-user>` placeholder SHALL be resolved from the `docker_unprivileged_user` host fact. Setup SHALL refuse to render any rule body containing `"` (double-quote) characters inside a `Cmnd_Spec` — the renderer's golden-file unit test asserts the rendered bytes are quote-free.
 
 Setup SHALL validate the staged rule via `visudo -cf <staged-path>` before installing to the final path; a syntax error from visudo SHALL refuse the install with the visudo output. visudo's acceptance is a NECESSARY but NOT SUFFICIENT correctness signal per F-004 — the L3a post-install per-op probe (below) is the sufficient signal.
 
@@ -605,14 +606,19 @@ Setup's finalization SHALL instruct the operator to re-login before `sandbox sta
 
 ### Requirement: Execution-Mode Marker
 
-`sandbox setup` SHALL persist the provisioned execution mode in a root-owned host-plane marker `/usr/local/libexec/sandbox-ai/setup-state.json` (owner `root:root`, mode `0644`, world-readable), keyed per operator (`{"operators": {"<name>": {"mode": "<mode>"}}}`). The marker SHALL NOT live under `sandbox_ai_home()`. The marker is the single authority for the execution mode: the runtime SHALL resolve its mode by reading this marker for the current operator (no execution-mode field in the user toml — see the `host-config` delta), and setup SHALL consult it to enforce single-mode-per-operator. The marker SHALL be listed in the reserved-namespace / manual-uninstall enumeration.
+`sandbox setup` SHALL persist the provisioned host facts in a root-owned host-plane marker `/usr/local/libexec/sandbox-ai/setup-state.json` (owner `root:root`, mode `0644`, world-readable), keyed **per operator**. Each operator entry SHALL carry the **mode-conditional** provisioning record: `mode` (always), `workspace_bridge_group` + `workspace_bridge_gid` (always; mode-scoped per the `host-config` capability — `sb-ws-<operator>` in operator-rootless, shared `sb-ws` in separate-user), and `docker_unprivileged_user` (separate-user entries only). The marker SHALL NOT live under `sandbox_ai_home()`. The marker is the single authority for these facts: the runtime SHALL resolve them by reading this marker for the current operator (there is no user toml — see the `host-config` delta), and setup SHALL consult it to enforce single-mode-per-operator. The marker SHALL be listed in the reserved-namespace / manual-uninstall enumeration.
 
-On `sandbox setup`: when the marker has no entry for the operator, setup SHALL provision the requested (`--docker-execution-mode`) or default mode and write the entry; when an entry exists and no mode flag is given, setup SHALL use the recorded mode; when an entry exists and a conflicting `--docker-execution-mode` is given, setup SHALL refuse with a message that switching modes requires teardown first (preventing a catastrophic mixed-mode host for one operator).
+On `sandbox setup`: when the marker has no entry for the operator, setup SHALL provision the requested (`--docker-execution-mode`) or default mode and write the full entry; when an entry exists and no mode flag is given, setup SHALL use the recorded mode; when an entry exists and a conflicting `--docker-execution-mode` is given, setup SHALL refuse with a message that switching modes requires teardown first (preventing a catastrophic mixed-mode host for one operator).
 
-#### Scenario: first provision writes the marker
+#### Scenario: first provision writes the full marker entry
 
-- **WHEN** `sandbox setup --docker-execution-mode operator-rootless` runs and the marker has no entry for the operator
-- **THEN** setup provisions operator-rootless and writes `{"operators": {"<operator>": {"mode": "operator-rootless"}}}` to the marker (as the last host-root batch action)
+- **WHEN** `sandbox setup --docker-execution-mode operator-rootless` runs for operator `alice` and the marker has no entry for her
+- **THEN** setup provisions operator-rootless and writes an entry `{"operators": {"alice": {"mode": "operator-rootless", "workspace_bridge_group": "sb-ws-alice", "workspace_bridge_gid": <gid-in-alice-range>}}}` (as the last host-root batch action), with no `docker_unprivileged_user` key
+
+#### Scenario: separate-user entry records the daemon user
+
+- **WHEN** `sandbox setup --docker-execution-mode separate-user` runs for operator `bob`
+- **THEN** the written entry carries `"mode": "separate-user"`, `"docker_unprivileged_user": "sandbox"`, and the shared `"workspace_bridge_group": "sb-ws"` with its gid
 
 #### Scenario: idempotent re-run uses the recorded mode
 
@@ -626,16 +632,14 @@ On `sandbox setup`: when the marker has no entry for the operator, setup SHALL p
 
 ### Requirement: Toml-Free Setup Identity and Setup Flags
 
-`sandbox setup` SHALL build its `host_config` exclusively from command-line flags and documented defaults, and SHALL NOT read `<sandbox_ai_home()>/config/sandbox-ai.toml` (`HostConfig.from_toml`) on the setup path — so setup never reads or depends on `/root/.sandbox-ai`. The operator is resolved by the existing precedence (`--operator` → `$SUDO_USER` → `$PKEXEC_UID`), never from a toml.
+`sandbox setup` SHALL build its `host_config` exclusively from command-line flags and documented defaults, and SHALL NOT read any `sandbox-ai.toml` (the file is retired) — so setup never reads or depends on `/root/.sandbox-ai`. The operator is resolved by the precedence in "Operator Resolution Precedence" (`--operator` → `$SUDO_USER`), never from a toml.
 
-Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}`, which **defaults to `operator-rootless`** when the flag is absent and the marker has no entry for the operator — operator-rootless is the default execution mode for a fresh host, and `separate-user` is the opt-in hardened posture (multi-tenant / adversarial-agent hosts). Setup SHALL also accept `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only), and `--workspace-bridge-group <name>` (default `sb-ws`). A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
+Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}`, which **defaults to `operator-rootless`** when the flag is absent and the marker has no entry for the operator — operator-rootless is the default execution mode for a fresh host, and `separate-user` is the opt-in hardened posture (multi-tenant / adversarial-agent hosts). Setup SHALL also accept `--docker-unprivileged-user <name>` (default `sandbox`; separate-user only). There is **no** `--workspace-bridge-group` flag: the bridge group name is a setup-determined fact (`sb-ws` in separate-user, `sb-ws-<operator>` in operator-rootless), not an operator preference. A flag that does not apply in the active mode (e.g. `--docker-unprivileged-user` in `operator-rootless`) SHALL be **refused** with a clear message — never silently ignored.
 
-> Note (delta sequencing): the `--docker-execution-mode` flag + the execution-mode marker are introduced by change `operator-rootless-setup` (C-004) with the setup-time default `separate-user`; the present change (C-005) flips that default to `operator-rootless`. This is the single default-bearing edit. The default applies **only at setup time** when neither the flag nor a marker entry is present — the runtime still resolves the mode from the marker and **fails closed** (`ModeMarkerMissing`) when it is absent, per the `host-config` capability's "Docker Execution Mode Selector" requirement; there is no runtime default, and the mode is never a toml field.
+#### Scenario: setup reads no toml
 
-#### Scenario: setup does not read the operator toml
-
-- **WHEN** `sandbox setup` runs on a host with an operator `sandbox-ai.toml` present
-- **THEN** setup builds its configuration from flags + defaults only and does not read the toml (its mode comes from the flag/marker, not the file)
+- **WHEN** `sandbox setup` runs on a host with a leftover `sandbox-ai.toml` present
+- **THEN** setup builds its configuration from flags + defaults only and does not read the file (its mode comes from the flag/marker; the leftover file is surfaced separately by `sandbox doctor`'s retired-host-config detection)
 
 #### Scenario: default mode is operator-rootless when no flag and no marker entry
 
@@ -646,6 +650,11 @@ Setup SHALL accept `--docker-execution-mode {separate-user|operator-rootless}`, 
 
 - **WHEN** `sandbox setup --docker-execution-mode operator-rootless --docker-unprivileged-user foo` is invoked
 - **THEN** setup refuses, stating that `--docker-unprivileged-user` does not apply in operator-rootless mode; no mutation occurs
+
+#### Scenario: workspace-bridge-group flag does not exist
+
+- **WHEN** `sandbox setup --workspace-bridge-group custom` is invoked
+- **THEN** the CLI exits with an "unknown option" error — the bridge group name is setup-derived, not operator-selectable
 
 ### Requirement: L3 renders ONLY the per-op pipe `Cmnd_Spec` under SUDO (single source of truth)
 
@@ -722,4 +731,37 @@ rule. Exit recovery stays `framed=True` (the dispatcher frame rides the byte pip
 #### Scenario: root setup crossings unchanged
 - **WHEN** L5/L6/L7 cross into the sandbox user during setup (as root)
 - **THEN** they still use `machinectl_cmd` + the `sentinel` exit-recovery wrap (untouched by this change)
+
+### Requirement: Per-Operator Workspace Bridge Group (operator-rootless)
+
+In `operator-rootless` mode, setup SHALL provision a **per-operator** workspace bridge group named `sb-ws-<operator>` whose gid lies within the invoking operator's `/etc/subgid` range, and SHALL record both the name and gid in the operator's marker entry. Setup SHALL NOT reuse another operator's bridge group or accept a `sb-ws-<operator>` group whose gid falls outside that operator's subgid range — it SHALL **fail loud** (mirroring the separate-user `l2` in-range guard): setup **refuses with a non-zero exit and no half-provisioning**. The steady-state doctor surface reports a foreign-range bridge gid as a `setup_invariants` violation, consistent with that check's existing WARN policy (setup enforces hard; doctor flags). In `separate-user` mode the single shared `sb-ws` group is provisioned as before (one tenant, one range, one gid). This closes F-070: two operator-rootless operators on one host receive distinct groups at distinct in-range gids, so neither silently inherits the other's gid.
+
+#### Scenario: two operator-rootless operators get distinct bridge groups
+
+- **WHEN** operator `alice` then operator `bob` each run `sudo sandbox setup --docker-execution-mode operator-rootless` on the same host, with disjoint subgid ranges
+- **THEN** setup provisions `sb-ws-alice` (gid in alice's range) and `sb-ws-bob` (gid in bob's range) as distinct groups, each recorded in its operator's marker entry; neither setup silently accepts the other's gid
+
+#### Scenario: foreign-range bridge gid fails loud
+
+- **WHEN** setup is asked to provision an operator-rootless bridge group `sb-ws-<operator>` but a same-named group already exists at a gid outside that operator's subgid range
+- **THEN** setup refuses with a diagnostic naming the out-of-range gid and the operator's expected subgid range, and performs no half-provisioning
+
+### Requirement: Subuid/Subgid Free-Block Allocation and Overlap Detection
+
+When setup must append a `/etc/subuid` or `/etc/subgid` range for a user that has none, it SHALL allocate a **non-overlapping free block** rather than a hardcoded literal range — the base and range size SHALL be single-sourced (one named constant, not duplicated literals across the host-batch and `l2` append sites). The free-block search SHALL start at the single-sourced base and scan upward in range-size increments, selecting the lowest block that overlaps no existing `/etc/subuid`/`/etc/subgid` entry of any user. Setup SHALL detect **inter-user overlap**: before appending (and as a doctor-classifiable invariant), it SHALL refuse to write a range that overlaps any existing user's range — refusing with a non-zero exit (the doctor steady-state surface reports an overlap as a `setup_invariants` violation per that check's WARN policy). This closes F-071: two entry-less operators no longer receive identical hardcoded ranges, and an overlapping append (reachable on the separate-user/mixed-mode path) is refused rather than silently written. The op-rootless entry-less `NoSubgidRangeError` message SHALL be operator-actionable — `operator '<operator>' has no /etc/subgid range for the workspace bridge group; run 'sudo sandbox setup' to allocate one.` — replacing the mis-worded "cannot recommend a bridge gid".
+
+#### Scenario: free-block allocation avoids an occupied range
+
+- **WHEN** setup must append a subgid range for a user with no existing entry, and the single-sourced default base range is already occupied by another user
+- **THEN** setup allocates the next non-overlapping free block (not the occupied literal) and records it
+
+#### Scenario: overlapping append refused
+
+- **WHEN** setup would append a `/etc/subuid` or `/etc/subgid` range that overlaps an existing user's range
+- **THEN** setup refuses with a diagnostic naming the overlap rather than silently writing the overlapping range
+
+#### Scenario: single-sourced subid range constant
+
+- **WHEN** the subuid/subgid append base + range size is referenced by both the host-root batch and the `l2` append path
+- **THEN** both derive from one shared constant — there is no duplicated hardcoded `100000`/`165535` literal across the two sites
 

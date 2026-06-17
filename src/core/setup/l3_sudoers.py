@@ -9,7 +9,7 @@ exists on disk by the time the rule is written.
 
 Content-aware probe (design D10): the *expected* rule body is rendered from the
 current ``core.dispatch.Op`` enum + the resolved operator + the host's
-``hostname`` + ``[host].docker_unprivileged_user`` + the L0-resolved
+``hostname`` + the marker-sourced ``docker_unprivileged_user`` + the L0-resolved
 ``SYSTEMD_RUN_PATH`` (re-resolved here via
 :func:`core.setup.l0_identity.resolve_systemd_run_path` — orchestrator decision
 1; the phase-runner has no context bus, so re-resolution at render time IS the
@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING
 # :func:`core.dispatch.dispatch_payload` — never hand-retyped here. ``Op`` is the
 # single source of truth for the enumerated ops.
 from core.dispatch import Op, dispatch_payload, sudo_pipe_crossing_argv
-from core.host_config import USERNAME_RE, DockerExecutionMode
+from core.host_config import USERNAME_RE, DockerExecutionMode, resolve_daemon_owner_settings
 from core.setup.l0_identity import resolve_systemd_run_path
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
@@ -248,7 +248,7 @@ def _expected_body(host_config: HostConfig, operator: str) -> str:
         resolve_systemd_run_path(host_config),
         operator,
         _hostname(),
-        host_config.host.docker_unprivileged_user,
+        resolve_daemon_owner_settings(host_config.host),
     )
 
 

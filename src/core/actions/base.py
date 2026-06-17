@@ -17,8 +17,8 @@ Three methods make up the contract:
   is HostConfig-dependent (e.g. the compose-up wire form) override it so the
   hierarchy stays uniform and the dry-run loop never special-cases a type.
 - :meth:`execute` — runs the live operation, given an :class:`ActionContext`
-  bundling per-invocation plumbing (host user, machinectl auth mode,
-  executor, instance directory).
+  bundling per-invocation plumbing (host user, executor, instance
+  directory).
 
 These methods share the underlying state stored on the dataclass, so
 the dry-run preview and the live phase are guaranteed to operate on the

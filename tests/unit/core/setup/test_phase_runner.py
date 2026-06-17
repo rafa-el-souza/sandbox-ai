@@ -24,7 +24,8 @@ import pytest
 from core.exceptions import SandboxExecutionError
 from core.host_config import (
     DockerExecutionMode,
-    MachinectlAuth,
+    HostConfig,
+    HostSettings,
     machinectl_cmd,
     minimal_host_config,
     pipe_cmd,
@@ -67,12 +68,11 @@ if TYPE_CHECKING:
 
 def _ctx(
     user: str = "sandboxuser",
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     mode: DockerExecutionMode = DockerExecutionMode.SEPARATE_USER,
     operator: str = "op",
 ) -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config(user, auth, mode), operator=operator
+        host_config=minimal_host_config(user, mode), operator=operator
     )
 
 
@@ -334,7 +334,7 @@ def test_route_root_is_empty_prefix() -> None:
 
 def test_route_operator_is_pipe_cmd() -> None:
     ctx = SetupContext(
-        host_config=minimal_host_config("sb", MachinectlAuth.SUDO),
+        host_config=minimal_host_config("sb"),
         operator="alice",
     )
     assert route(Identity.OPERATOR, ctx) == pipe_cmd("alice")
@@ -342,7 +342,7 @@ def test_route_operator_is_pipe_cmd() -> None:
 
 def test_route_sandbox_is_machinectl_cmd_sudo() -> None:
     ctx = SetupContext(
-        host_config=minimal_host_config("sbuser", MachinectlAuth.SUDO),
+        host_config=minimal_host_config("sbuser"),
         operator="alice",
     )
     assert route(Identity.SANDBOX, ctx) == machinectl_cmd("sbuser")
@@ -1067,9 +1067,48 @@ def test_daemon_owner_user_operator_rootless_is_operator() -> None:
     assert daemon_owner_user(ctx) == "alice"
 
 
+def _separate_user_none_ctx(operator: str = "op") -> SetupContext:
+    """A defensively-impossible separate-user ctx with a None daemon user.
+
+    Built via ``model_construct`` (bypasses the model-validator that forbids
+    separate-user + None) to exercise the fail-closed None-narrowing branches.
+    """
+    host = HostSettings.model_construct(
+        docker_unprivileged_user=None,
+        docker_execution_mode=DockerExecutionMode.SEPARATE_USER,
+    )
+    return SetupContext(
+        host_config=HostConfig.model_construct(host=host), operator=operator
+    )
+
+
+def test_daemon_owner_user_separate_user_none_raises() -> None:
+    """Fail-closed type-narrowing: separate-user + None daemon user → ValueError."""
+    with pytest.raises(ValueError, match="missing docker_unprivileged_user"):
+        daemon_owner_user(_separate_user_none_ctx())
+
+
+def test_route_sandbox_none_user_raises() -> None:
+    """Identity.SANDBOX with a None dedicated user → fail-closed ValueError."""
+    with pytest.raises(ValueError, match="requires docker_unprivileged_user"):
+        route(Identity.SANDBOX, _separate_user_none_ctx())
+
+
+def test_daemon_owner_crossing_separate_user_none_raises() -> None:
+    """separate-user crossing with a None dedicated user → fail-closed ValueError."""
+    with pytest.raises(ValueError, match="requires docker_unprivileged_user"):
+        daemon_owner_crossing(_separate_user_none_ctx())
+
+
+def test_resolve_sandbox_pw_none_user_raises() -> None:
+    """resolve_sandbox_pw with a None dedicated user → SandboxUserNotYetCreated."""
+    with pytest.raises(SandboxUserNotYetCreated, match="missing docker_unprivileged_user"):
+        resolve_sandbox_pw(_separate_user_none_ctx().host_config)
+
+
 def test_daemon_owner_crossing_separate_user_is_machinectl_cmd() -> None:
     """separate-user crossing equals machinectl_cmd(...) byte-for-byte."""
-    ctx = _ctx(user="sbuser", auth=MachinectlAuth.SUDO)
+    ctx = _ctx(user="sbuser")
     assert daemon_owner_crossing(ctx) == machinectl_cmd("sbuser")
 
 

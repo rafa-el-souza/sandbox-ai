@@ -8,97 +8,36 @@ name = "baseline-separate-user-sudo"
 # reference baseline (refreshed in place at the C-010 durable milestone); edit it
 # directly for a future change — there is no derive-a-copy builder.
 
-[[probe]]
-id = "PREP"
-title = "install uv + source (uv sync) + tlog-rec per-distro + ensure script/pkttyagent + pre-seed sandbox-ai.toml (separate-user, sudo auth)"
-tag = "mutating:operator-space"
-timeout = 1800
-classifies = "PRE-REQ: the `sandbox` CLI via `uv sync` from the uploaded source tarball, tlog-rec per-distro (L0 hard prereq + attach session recorder), script(1)/pkttyagent present, and a per-operator separate-user sandbox-ai.toml ([host].docker_unprivileged_user = sandbox, machinectl_authentication = sudo)."
-run = '''
-echo '== install uv =='
-curl -LsSf https://astral.sh/uv/install.sh | sh
-. "$HOME/.local/bin/env" 2>/dev/null || . "$HOME/.cargo/env" 2>/dev/null || true
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-uv --version || { echo PREP_UV_FAIL; exit 1; }
+requires = ["docker"]
 
-echo '== uploaded source tarball present? =='
-TARBALL=$(ls "$HOME"/sandbox-ai-src*.tar.gz 2>/dev/null | head -1)
-[ -n "$TARBALL" ] || { echo PREP_TARBALL_MISSING; exit 1; }
+[prep.packages]
+apt = ["bsdutils", "util-linux"]
+dnf = ["util-linux"]
+pacman = ["util-linux"]
 
-echo '== extract + uv sync =='
-rm -rf "$HOME/sandbox-ai"
-mkdir -p "$HOME/sandbox-ai"
-tar -xzf "$TARBALL" -C "$HOME/sandbox-ai"
-uv sync --directory "$HOME/sandbox-ai" 2>&1 | tail -6
-"$HOME/sandbox-ai/.venv/bin/sandbox" --help >/dev/null 2>&1 && echo PREP_SANDBOX_INSTALLED_OK || { echo PREP_SANDBOX_INSTALL_FAIL; exit 1; }
+[[prep.setup]]
+id = "uv-install"
+title = "install uv (operator HOME)"
+required = true
+script = "prep/uv-install.sh"
 
-echo '== install tlog-rec per-distro (best-effort; failure -> L0 refuses, which is a separate finding) =='
-. /etc/os-release
-if command -v tlog-rec >/dev/null 2>&1; then
-  echo 'tlog-rec already present'
-else
-  ( case "${ID:-}" in
-      ubuntu)
-        sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tlog
-        ;;
-      debian)
-        maj=$(echo "${VERSION_ID:-0}" | cut -d. -f1)
-        if [ "${maj:-0}" -le 12 ] 2>/dev/null; then
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tlog
-        else
-          echo "debian ${VERSION_ID}: source-building tlog"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential autoconf automake libtool m4 pkg-config git libjson-c-dev libsystemd-dev libcurl4-openssl-dev libutempter-dev
-          T=$(mktemp -d)
-          git clone --depth=1 https://github.com/Scribery/tlog "$T/tlog"
-          cd "$T/tlog" && autoreconf -i -f && ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var && make -j"$(nproc)" && sudo make install && sudo ldconfig
-        fi
-        ;;
-      fedora)
-        sudo dnf -y install tlog
-        ;;
-      arch|manjaro)
-        if command -v paru >/dev/null 2>&1; then
-          paru -S --noconfirm tlog
-        elif command -v yay >/dev/null 2>&1; then
-          yay -S --noconfirm tlog
-        else
-          sudo pacman -Sy --needed --noconfirm base-devel git
-          T=$(mktemp -d)
-          git clone --depth=1 https://aur.archlinux.org/yay.git "$T/yay"
-          cd "$T/yay" && makepkg -si --noconfirm && yay -S --noconfirm tlog
-        fi
-        ;;
-    esac ) || echo 'tlog install step returned non-zero'
-fi
-command -v tlog-rec >/dev/null 2>&1 && echo PREP_TLOG_OK || echo PREP_TLOG_MISSING_review
+[[prep.setup]]
+id = "uv-sync"
+title = "extract uploaded source tarball + uv sync -> sandbox CLI"
+required = true
+script = "prep/uv-sync.sh"
 
-echo '== ensure script(1) + pkttyagent present =='
-command -v script >/dev/null 2>&1 && echo PREP_SCRIPT_OK || {
-  echo 'installing util-linux/script'
-  ( case "${ID:-}" in
-      ubuntu|debian) sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bsdutils util-linux ;;
-      fedora) sudo dnf -y install util-linux ;;
-      arch|manjaro) sudo pacman -Sy --needed --noconfirm util-linux ;;
-    esac ) >/dev/null 2>&1
-  command -v script >/dev/null 2>&1 && echo PREP_SCRIPT_OK || echo PREP_SCRIPT_MISSING_review
-}
-command -v pkttyagent >/dev/null 2>&1 && echo PREP_PKTTYAGENT_OK || echo PREP_PKTTYAGENT_MISSING_review
+[[prep.setup]]
+id = "install-helpers"
+title = "install the shared probe-helper library to /tmp/sbai-helpers.sh (bridge-group resolver + forensic dump + teardown sentinel)"
+required = true
+script = "prep/install-helpers.sh"
 
-echo '== pre-seed per-operator sandbox-ai.toml: separate-user daemon owner = sandbox, sudo auth =='
-mkdir -p "$HOME/.sandbox-ai/config"
-printf '[host]\ndocker_unprivileged_user = "sandbox"\nmachinectl_authentication = "sudo"\n' > "$HOME/.sandbox-ai/config/sandbox-ai.toml"
-cat "$HOME/.sandbox-ai/config/sandbox-ai.toml"
-
-echo '== provenance =='
-"$HOME/sandbox-ai/.venv/bin/sandbox" --version 2>/dev/null || echo 'sandbox --version: n/a'
-uname -r
-systemctl --version | head -1
-. /etc/os-release
-echo "DISTRO=${ID:-?} VERSION_ID=${VERSION_ID:-?}"
-echo PREP_PROVENANCE_review
-echo PREP_TOML_SEEDED_OK
-'''
+[[prep.setup]]
+id = "tlog"
+title = "install tlog-rec per-distro (best-effort; L0 refusal is a separate finding)"
+required = false
+script = "prep/tlog.sh"
 
 [[probe]]
 id = "setup"
@@ -124,8 +63,22 @@ if sudo test -f /usr/local/libexec/sandbox-ai/setup-state.json; then echo SETUP_
 echo '== dedicated sandbox daemon user exists =='
 id sandbox >/dev/null 2>&1 && echo SETUP_SANDBOX_USER_OK || { echo SETUP_NO_SANDBOX_USER_FAIL; rc=1; }
 
-echo '== sentinel guard: "Exit sentinel not found" must be ABSENT (EXPECTED to fire on the apt/debian-13 separate-user case; gated to record reality) =='
-if grep -qiE "Exit sentinel not found" /tmp/setup.out; then echo SETUP_SENTINEL_PRESENT_FAIL; rc=1; else echo SETUP_NO_SENTINEL_OK; fi
+echo '== sentinel guard: "Exit sentinel not found" — documented apt/debian-13 empty-crossing (F-055) is EXPECTED and reclassified _review, not a substantive FAIL (#6) =='
+# The comment previously contradicted the code: it called the debian-13 empty-crossing
+# EXPECTED yet hard-failed rc=1 on it. Branch on distro so an EXPECTED event is _review and
+# only an UNEXPECTED sentinel (a distro where it should not occur) gates as a real regression.
+DISTRO_ID=$(. /etc/os-release 2>/dev/null; echo "${ID:-unknown}")
+if grep -qiE "Exit sentinel not found" /tmp/setup.out; then
+  if [ "$DISTRO_ID" = debian ]; then
+    echo "Exit sentinel fired on debian (documented F-055 empty-crossing) -- expected, not a regression"
+    echo SETUP_SENTINEL_EXPECTED_EMPTY_CROSSING_review
+  else
+    echo "Exit sentinel fired on '$DISTRO_ID' where it is NOT expected"
+    echo SETUP_SENTINEL_PRESENT_FAIL; rc=1
+  fi
+else
+  echo SETUP_NO_SENTINEL_OK
+fi
 exit $rc
 '''
 
@@ -164,12 +117,19 @@ tag = "mutating:host-root"
 classifies = "`sandbox doctor --user sandbox` -> exit 0 (every readiness check green) on the separate-user host."
 run = '''
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+. /tmp/sbai-helpers.sh
 rc=0
 sandbox doctor --user sandbox > /tmp/doctor.out 2>&1
 DRC=$?
-echo "doctor exit: $DRC (0 expected)"
+echo "doctor exit: $DRC"
 cat /tmp/doctor.out
-[ "$DRC" -eq 0 ] && echo DOCTOR_EXIT0_OK || { echo DOCTOR_EXIT_NONZERO_FAIL; rc=1; }
+echo '== gate on real ✗ readiness rows only; whole-doctor exit + env/network rows are observational (#3) =='
+# A single env-capability (ACL support) or network (registry/image-digest) ✗ would otherwise
+# flip the whole-doctor exit-0 gate to a false regression. Gate on hard ✗ rows excluding those.
+HARD=$(sbai_doctor_hard_violations /tmp/doctor.out)
+if [ -n "$HARD" ]; then echo "hard violations:"; printf '%s\n' "$HARD"; echo DOCTOR_HARD_VIOLATION_FAIL; rc=1; else echo DOCTOR_NO_HARD_VIOLATION_OK; fi
+[ "$DRC" -eq 0 ] && echo DOCTOR_EXIT0_review || echo DOCTOR_EXIT_NONZERO_review
+grep '✗' /tmp/doctor.out 2>/dev/null | grep -iE "ACL support|image digest|registry" && echo DOCTOR_ENV_OR_NETWORK_ROWS_review || true
 grep -qE '(✓|✗|⚠).*machinectl' /tmp/doctor.out && echo DOCTOR_ROW_MACHINECTL_PRESENT_review || echo DOCTOR_ROW_MACHINECTL_ABSENT_review
 grep -qiE 'Privilege Boundary' /tmp/doctor.out && echo DOCTOR_PRIV_BOUNDARY_SECTION_review || true
 exit $rc
@@ -253,6 +213,7 @@ timeout = 300
 classifies = "`sandbox start smoke --no-handover` -> exit 0; no crossing error; the `-smoke-core-1` container is running under the `sandbox` daemon (verified by crossing into the sandbox user via machinectl). Leaves the instance running."
 run = '''
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+. /tmp/sbai-helpers.sh
 rc=0
 echo '== start (crosses to the sandbox user via the dispatcher; no interactive handover) =='
 sandbox start smoke --no-handover > /tmp/start.out 2>&1
@@ -265,7 +226,16 @@ echo '== crossing-error guard =='
 if grep -qiE "Interactive authentication required|Exit sentinel not found|systemd error|failed to create task" /tmp/start.out; then echo START_CROSSING_ERROR_PRESENT_FAIL; rc=1; else echo START_NO_CROSSING_ERROR_OK; fi
 
 echo '== core-up via the product OWN --wait verdict (no interactive crossing) =='
-if grep -qiE 'containers healthy' /tmp/start.out; then echo START_COMPOSE_HEALTHY_OK; else echo START_COMPOSE_HEALTHY_FAIL; rc=1; fi
+if grep -qiE 'containers healthy' /tmp/start.out; then
+  echo START_COMPOSE_HEALTHY_OK
+else
+  echo START_COMPOSE_HEALTHY_FAIL; rc=1
+  echo '== forensic capture of the unhealthy core BEFORE later stop/destroy probes run (#1) =='
+  SBUID=$(id -u sandbox 2>/dev/null)
+  CTR=$(sudo -u sandbox env XDG_RUNTIME_DIR="/run/user/$SBUID" DOCKER_HOST="unix:///run/user/$SBUID/docker.sock" docker ps -a --format '{{.Names}}' 2>/dev/null | tr -d '\r' | grep -- '-smoke-core-1' | head -1)
+  CTR=${CTR:--smoke-core-1}
+  sbai_forensic_dump sandbox "$CTR"
+fi
 
 echo '== crossing mechanism (non-gating) =='
 sudo journalctl --since '-120s' --no-pager 2>/dev/null | grep -iE "machinectl|systemd-run|transient" | tail -15
@@ -293,6 +263,7 @@ tag = "mutating:host-root"
 timeout = 120
 classifies = "After `start`, assert `-smoke-core-1` is in `docker ps` read as the sandbox user via a NON-PTY `sudo -u <user> env XDG_RUNTIME_DIR DOCKER_HOST docker ps` crossing (NOT `machinectl shell`, whose PTY crossing returns empty in-session on apt — F-018/F-055/F-097). Short poll for robustness; stderr kept. Gate CORE_RUNNING_OK — the cell that demonstrates the stack is up."
 run = '''
+. /tmp/sbai-helpers.sh
 rc=0
 echo '== authoritative core-running via the non-PTY sudo -u crossing =='
 SBUID=$(id -u sandbox 2>/dev/null)
@@ -304,7 +275,15 @@ for i in $(seq 1 10); do
   sleep 2
 done
 echo "containers: $CT"
-if [ "$FOUND" -eq 1 ]; then echo CORE_RUNNING_OK; else echo CORE_RUNNING_FAIL; rc=1; fi
+if [ "$FOUND" -eq 1 ]; then
+  echo CORE_RUNNING_OK
+else
+  echo CORE_RUNNING_FAIL; rc=1
+  echo '== forensic capture of the non-running core BEFORE later teardown probes (#1) =='
+  CTR=$(sudo -u sandbox env XDG_RUNTIME_DIR="/run/user/$SBUID" DOCKER_HOST="unix:///run/user/$SBUID/docker.sock" docker ps -a --format '{{.Names}}' 2>/dev/null | tr -d '\r' | grep -- '-smoke-core-1' | head -1)
+  CTR=${CTR:--smoke-core-1}
+  sbai_forensic_dump sandbox "$CTR"
+fi
 exit $rc
 '''
 
@@ -372,16 +351,24 @@ timeout = 180
 classifies = "C-010 acceptance (flips the F-060 RED baseline attach FAIL x4 to PASS): obtains the REAL ProxyCommand from the product surface (`core.dispatch.proxy_argv(Op.FWD, ['smoke'], host_config)` — the single sanctioned `dispatch fwd <wire>` producer, NOT a hand-typed mirror — F-019), so the crossing exercises the genuine `sudo systemd-run --pipe … dispatch fwd <wire>` argv against the real per-op sudoers Cmnd_Spec. ssh runs in command mode (`-T`, no PTY, no tlog-rec) with the per-instance key/known_hosts + the hardened client options the product pins, executing a remote `whoami` sentinel instead of the interactive `bash -l`. Gate ATTACH_FWD_HEADLESS_OK: the `__ATTACH_OK_agent_0__` sentinel returns -> sudo authorized the fwd crossing headlessly, the dispatcher streamed, the admin /fwd reached core sshd, auth + exec succeeded."
 run = '''
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+. /tmp/sbai-helpers.sh
 rc=0
 SBROOT="$HOME/sandbox-ai"
 SECRETS="$HOME/.sandbox-ai/instances/smoke/secrets"
 echo '== precondition: core up (read via the reliable non-PTY sudo -u crossing) =='
 SBUID=$(id -u sandbox 2>/dev/null)
 CT=$(sudo -u sandbox env XDG_RUNTIME_DIR=/run/user/$SBUID DOCKER_HOST=unix:///run/user/$SBUID/docker.sock docker ps --format "{{.Names}}" 2>&1 | tr -d '\r')
-echo "$CT" | grep -q -- '-smoke-admin-1' && echo ATTACH_PRECOND_ADMIN_RUNNING_OK || { echo ATTACH_PRECOND_ADMIN_NOT_RUNNING_FAIL; rc=1; }
+if echo "$CT" | grep -q -- '-smoke-admin-1'; then
+  echo ATTACH_PRECOND_ADMIN_RUNNING_OK
+else
+  echo ATTACH_PRECOND_ADMIN_NOT_RUNNING_FAIL; rc=1
+  CTR=$(sudo -u sandbox env XDG_RUNTIME_DIR="/run/user/$SBUID" DOCKER_HOST="unix:///run/user/$SBUID/docker.sock" docker ps -a --format '{{.Names}}' 2>/dev/null | tr -d '\r' | grep -- '-smoke-admin-1' | head -1)
+  CTR=${CTR:--smoke-admin-1}
+  sbai_forensic_dump sandbox "$CTR"
+fi
 
 echo '== obtain the REAL ProxyCommand from the product surface (proxy_argv, NOT hand-typed) =='
-PROXY=$(PYTHONPATH="$SBROOT/src" "$SBROOT/.venv/bin/python3" -c "import shlex; from core.dispatch import proxy_argv, Op; from core.host_config import minimal_host_config, MachinectlAuth, DockerExecutionMode; hc = minimal_host_config('sandbox', MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER); print(shlex.join(proxy_argv(Op.FWD, ['smoke'], hc)))" 2>/tmp/proxy_build.err)
+PROXY=$(PYTHONPATH="$SBROOT/src" "$SBROOT/.venv/bin/python3" -c "import shlex; from core.dispatch import proxy_argv, Op; from core.host_config import minimal_host_config, DockerExecutionMode; hc = minimal_host_config('sandbox', DockerExecutionMode.SEPARATE_USER); print(shlex.join(proxy_argv(Op.FWD, ['smoke'], hc)))" 2>/tmp/proxy_build.err)
 if [ -z "$PROXY" ]; then echo "--- proxy build err ---"; tail -8 /tmp/proxy_build.err; echo ATTACH_PROXY_BUILD_FAIL; rc=1; echo "$rc" >/dev/null; exit $rc; fi
 echo "PROXY=$PROXY"
 echo "$PROXY" | grep -q 'dispatch fwd' && echo ATTACH_PROXY_IS_DISPATCH_FWD_OK || { echo ATTACH_PROXY_NOT_DISPATCH_FWD_FAIL; rc=1; }

@@ -590,7 +590,6 @@ class TestAuthModeThreadedToDispatch:
 
     def test_machinectl_reachable_threads_user_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_machinectl_reachable
-        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -609,7 +608,6 @@ class TestAuthModeThreadedToDispatch:
         assert captured["op"] == "auth-probe"
         assert captured["timeout"] == 10
         assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
 
     def test_sudo_timeout_remediation_mentions_sudoers(self, monkeypatch: Any) -> None:
         from core.doctor import check_machinectl_reachable
@@ -625,7 +623,6 @@ class TestAuthModeThreadedToDispatch:
 
     def test_docker_available_threads_user_into_host_config(self, monkeypatch: Any) -> None:
         from core.doctor import check_docker_available
-        from core.host_config import MachinectlAuth
 
         captured: dict[str, Any] = {}
 
@@ -638,7 +635,7 @@ class TestAuthModeThreadedToDispatch:
         monkeypatch.setattr("core.dispatch._invoke_with_nonce", capture)
         check_docker_available("sandbox", None)
 
-        assert captured["host_config"].host.machinectl_authentication == MachinectlAuth.SUDO
+        assert captured["host_config"].host.docker_unprivileged_user == "sandbox"
 
 
 class TestCheckComposeProjectNameCollision:
@@ -1227,7 +1224,7 @@ class TestInterpretPreflightReachability:
 
         result = interpret_preflight_reachability(_outcome(ok=True), "sandbox")
         assert result.status == "pass"
-        assert result.name == "machinectl reachable"
+        assert result.name == "boundary reachable"
 
     def test_failed_outcome_fails_with_reachability_message(self) -> None:
         from core.doctor import interpret_preflight_reachability
@@ -1344,7 +1341,7 @@ class TestInterpretPreflightBundle:
         results = interpret_preflight_bundle(per_op, "sandbox")
         names = [r.name for r in results]
         assert names == [
-            "machinectl reachable",
+            "boundary reachable",
             "Docker available",
             "Docker rootless",
             "gVisor runsc",
@@ -1392,4 +1389,4 @@ class TestInterpretPreflightBundle:
         assert by_name["Docker available"].status == "fail"
         assert "Docker not reachable" in by_name["Docker available"].detail
         # the reachability segment was fine, so machinectl-reachable still passes
-        assert by_name["machinectl reachable"].status == "pass"
+        assert by_name["boundary reachable"].status == "pass"

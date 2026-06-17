@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-def test_module_exposes_six_check_functions() -> None:
+def test_module_exposes_seven_check_functions() -> None:
     from core.doctor.checks import per_user_tree
 
     expected = {
@@ -21,6 +21,7 @@ def test_module_exposes_six_check_functions() -> None:
         "check_legacy_registry_shape",
         "check_legacy_sandboxes_dir_detected",
         "check_legacy_workspace_in_user_project_root",
+        "check_obsolete_host_toml",
         "check_per_user_tree_exists",
         "check_per_user_tree_mode",
     }
@@ -94,12 +95,43 @@ class TestCheckPerUserTreeMode:
 
 
 class TestCheckLegacyCwdFiles:
+    _STALE = "Per-host config now lives at"
+
     def test_pass_when_no_legacy(self, tmp_path: Path, monkeypatch: Any) -> None:
         from core.doctor import check_legacy_cwd_files
 
         monkeypatch.chdir(tmp_path)
         result = check_legacy_cwd_files("u", None)
         assert result.status == "pass"
+
+    def test_warn_on_legacy_toml_only(self, tmp_path: Path, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_cwd_files
+
+        (tmp_path / "sandbox-ai.toml").write_text("")
+        monkeypatch.chdir(tmp_path)
+        result = check_legacy_cwd_files("u", None)
+        assert result.status == "warn"
+        assert "Found legacy" in result.detail
+        assert "sandbox-ai.toml" in result.detail
+        assert "Per-host config is now setup-determined" in result.detail
+        assert "sudo sandbox setup" in result.detail
+        # State message absent when only the toml exists.
+        assert "Orchestrator state now lives at" not in result.detail
+        # The stale "new toml location" wording must be gone.
+        assert self._STALE not in result.detail
+
+    def test_warn_on_legacy_state_only(self, tmp_path: Path, monkeypatch: Any) -> None:
+        from core.doctor import check_legacy_cwd_files
+
+        (tmp_path / ".state").mkdir()
+        monkeypatch.chdir(tmp_path)
+        result = check_legacy_cwd_files("u", None)
+        assert result.status == "warn"
+        assert ".state" in result.detail
+        assert "Orchestrator state now lives at" in result.detail
+        assert "delete the legacy directory" in result.detail
+        assert "Found legacy" in result.detail
+        assert self._STALE not in result.detail
 
     def test_warn_on_legacy_toml_and_state(self, tmp_path: Path, monkeypatch: Any) -> None:
         from core.doctor import check_legacy_cwd_files
@@ -109,8 +141,37 @@ class TestCheckLegacyCwdFiles:
         monkeypatch.chdir(tmp_path)
         result = check_legacy_cwd_files("u", None)
         assert result.status == "warn"
+        # Both per-file messages present.
         assert "sandbox-ai.toml" in result.detail
         assert ".state" in result.detail
+        assert "Per-host config is now setup-determined" in result.detail
+        assert "Orchestrator state now lives at" in result.detail
+        assert self._STALE not in result.detail
+
+
+class TestCheckObsoleteHostToml:
+    def test_warn_when_present(self, isolated_sandbox_ai_home: Path) -> None:
+        from core.doctor import check_obsolete_host_toml
+
+        config = isolated_sandbox_ai_home / "config"
+        config.mkdir(parents=True)
+        leftover = config / "sandbox-ai.toml"
+        leftover.write_text("")
+        result = check_obsolete_host_toml("u", None)
+        assert result.status == "warn"
+        assert result.detail == (
+            f"Found an obsolete {leftover}. Host config is now setup-determined — "
+            "delete this file and run `sudo sandbox setup`."
+        )
+        # Must not reference the internal marker / setup-state.json.
+        assert "marker" not in result.detail
+        assert "setup-state.json" not in result.detail
+
+    def test_pass_when_absent(self, isolated_sandbox_ai_home: Path) -> None:
+        from core.doctor import check_obsolete_host_toml
+
+        result = check_obsolete_host_toml("u", None)
+        assert result.status == "pass"
 
 
 class TestCheckLegacySandboxesDirDetected:

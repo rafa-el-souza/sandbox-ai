@@ -52,8 +52,8 @@ mode-invariant subsystems in detail (§4–7).
 ## 2. The two execution modes & the trust model
 
 `sandbox-ai` runs in one of two modes, chosen at `sudo sandbox setup` time. The
-mode is **not** a user-editable `sandbox-ai.toml` field — it is setup-determined
-and recorded in a per-operator marker.
+mode is **not** a user-editable config field — it is setup-determined
+and recorded in a root-owned per-operator marker.
 
 - **`operator-rootless` — the default.** Rootless Docker runs as the **invoking
   operator's own user**. Orchestrator→daemon operations run as **local

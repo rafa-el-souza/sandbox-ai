@@ -376,14 +376,19 @@ def route(identity: Identity, ctx: SetupContext) -> list[str]:
       ``initgroups`` so a fresh unit reflects the post-``usermod`` group set).
     - :attr:`Identity.SANDBOX` →
       ``machinectl_cmd(ctx.host_config.host.docker_unprivileged_user)`` — the
-      sandbox user is read from the context's host config; identical to the
-      runtime orchestrator's primitive.
+      dedicated sandbox user is read from the context's host config; identical to
+      the runtime orchestrator's primitive. ``Identity.SANDBOX`` is intrinsically
+      the separate-user dedicated account (op-rootless has no machinectl crossing),
+      so this is a literal-field read of that account, NOT owner-resolution.
     """
     if identity == Identity.ROOT:
         return []
     if identity == Identity.OPERATOR:
         return pipe_cmd(ctx.operator)
-    return machinectl_cmd(ctx.host_config.host.docker_unprivileged_user)
+    user = ctx.host_config.host.docker_unprivileged_user
+    if user is None:
+        raise ValueError("Identity.SANDBOX crossing requires docker_unprivileged_user")
+    return machinectl_cmd(user)
 
 
 def daemon_owner_user(ctx: SetupContext) -> str:
@@ -391,10 +396,20 @@ def daemon_owner_user(ctx: SetupContext) -> str:
 
     separate-user: the dedicated ``host.docker_unprivileged_user``.
     operator-rootless: the operator (the daemon runs as the operator's own user).
+
+    NOTE — this is the SETUP-time owner resolver and intentionally does NOT
+    delegate to ``resolve_daemon_owner_settings``: in op-rootless it returns the
+    setup-resolved ``ctx.operator`` (which setup may derive from ``$SUDO_USER`` /
+    ``--operator`` when run under sudo), NOT ``getpass.getuser()``. The two
+    coincide on the runtime path (the operator runs as themselves) but diverge in
+    setup, so the owner must come from the context, not the process identity.
     """
     if is_operator_rootless(ctx.host_config):
         return ctx.operator
-    return ctx.host_config.host.docker_unprivileged_user
+    user = ctx.host_config.host.docker_unprivileged_user
+    if user is None:
+        raise ValueError("separate-user setup context is missing docker_unprivileged_user")
+    return user
 
 
 def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
@@ -428,7 +443,10 @@ def daemon_owner_crossing(ctx: SetupContext) -> list[str]:
             f"DBUS_SESSION_BUS_ADDRESS=unix:path={run_dir}/bus",
             f"DOCKER_HOST=unix://{run_dir}/docker.sock",
         ]
-    return machinectl_cmd(ctx.host_config.host.docker_unprivileged_user)
+    user = ctx.host_config.host.docker_unprivileged_user
+    if user is None:
+        raise ValueError("separate-user daemon-owner crossing requires docker_unprivileged_user")
+    return machinectl_cmd(user)
 
 
 class SandboxUserNotYetCreated(KeyError):
@@ -447,12 +465,16 @@ class SandboxUserNotYetCreated(KeyError):
 def resolve_sandbox_pw(host_config: HostConfig) -> pwd.struct_passwd:
     """Resolve the sandbox user's passwd entry, raising the typed guard.
 
-    Wraps :func:`pwd.getpwnam` for the configured
-    ``[host].docker_unprivileged_user`` and re-raises a bare ``KeyError`` as
+    Wraps :func:`pwd.getpwnam` for the marker-sourced
+    ``docker_unprivileged_user`` and re-raises a bare ``KeyError`` as
     :class:`SandboxUserNotYetCreated` so probe call-sites can branch on the
     not-yet-created case via :func:`probe_sandbox_pw_or_missing`.
     """
     user = host_config.host.docker_unprivileged_user
+    if user is None:
+        raise SandboxUserNotYetCreated(
+            "separate-user host config is missing docker_unprivileged_user"
+        )
     try:
         return pwd.getpwnam(user)
     except KeyError as exc:

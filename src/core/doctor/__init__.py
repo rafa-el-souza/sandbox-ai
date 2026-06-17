@@ -28,6 +28,7 @@ from core.doctor.checks.per_user_tree import (
 from core.doctor.checks.per_user_tree import (
     check_legacy_workspace_in_user_project_root as check_legacy_workspace_in_user_project_root,
 )
+from core.doctor.checks.per_user_tree import check_obsolete_host_toml as check_obsolete_host_toml
 from core.doctor.checks.per_user_tree import check_per_user_tree_exists as check_per_user_tree_exists
 from core.doctor.checks.per_user_tree import check_per_user_tree_mode as check_per_user_tree_mode
 from core.doctor.checks.privilege_boundary import PreflightGate as PreflightGate
@@ -122,6 +123,7 @@ __all__ = [
     "check_legacy_workspace_in_user_project_root",
     "check_machinectl",
     "check_machinectl_reachable",
+    "check_obsolete_host_toml",
     "check_per_user_tree_exists",
     "check_per_user_tree_mode",
     "check_pre_existing_instance_layout",

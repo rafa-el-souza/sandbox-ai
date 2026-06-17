@@ -76,19 +76,22 @@ For each `--copy NAME=PATH` flag, the system SHALL validate the source path befo
 - **THEN** the CLI exits with a walker-boundary error
 
 ### Requirement: Init Command Interface
-The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...] [--secrets-from-env | --secrets-from-file PATH]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL read `docker_unprivileged_user` from the canonical per-host config file (`<sandbox_ai_home()>/config/sandbox-ai.toml`). If that file does not exist, the command SHALL seed it via interactive prompt in TTY mode or fail with explicit guidance in non-TTY mode (see "Per-User Tree Creation on Init" requirement). The command does not accept a `--machinectl-auth` flag; the `machinectl_authentication` value is read from host config and defaults to `"sudo"` (the only supported value, established by seeding). The previously-supported `--user` flag is removed.
+
+The system SHALL provide a `sandbox init <inst> [--copy NAME=PATH ...] [--empty NAME ...] [--secrets-from-env | --secrets-from-file PATH]` command that scaffolds a new sandbox instance and one or more workspaces. The command SHALL build its host config from the setup marker via `HostConfig.from_marker(operator)` (per the `host-config` capability) — **setup is a prerequisite for init**. On a host where setup has not run for the invoking operator (no marker entry), the command SHALL stop with a friendly, actionable message — *"This host isn't set up yet. Run `sudo sandbox setup` first, then `sandbox init`."* — that does NOT reference the internal marker. The setup-first check SHALL run **before any state mutation** — before the per-user tree is created (`ensure_per_user_state`) and before any instance scaffold — so a marker-absent host is never left half-initialized. The command does not accept a `--machinectl-auth` flag and there is no authentication field. The previously-supported `--user` flag is removed.
 
 The `--secrets-from-env` and `--secrets-from-file` flags are mutually exclusive — supplying both SHALL be rejected before any state mutation. Their secret-seeding behavior is defined in the "Non-Interactive Secret Seeding" requirement.
 
 CWD-based instance discovery is removed: the `<inst>` argument is positional and required.
 
-#### Scenario: Init reads docker user from host config
-- **WHEN** the operator runs `sandbox init foo` and `<home>/config/sandbox-ai.toml` contains `docker_unprivileged_user = "sandbox"`
-- **THEN** the system uses `"sandbox"` as the docker unprivileged user
+#### Scenario: Init builds host config from the marker
 
-#### Scenario: machinectl auth defaults to sudo
-- **WHEN** the operator runs `sandbox init foo` and `<home>/config/sandbox-ai.toml` does not specify `machinectl_authentication`
-- **THEN** the system uses `"sudo"` as the authentication mode
+- **WHEN** the operator runs `sandbox init foo` on a host where setup has provisioned the invoking operator
+- **THEN** the system builds the host config via `HostConfig.from_marker(operator)` and uses the resolved daemon owner (the operator in operator-rootless, the `docker_unprivileged_user` in separate-user)
+
+#### Scenario: Init on an unprovisioned host directs to setup
+
+- **WHEN** the operator runs `sandbox init foo` on a host where setup has not run for them
+- **THEN** the CLI exits non-zero — before creating the per-user tree or any scaffold — with "This host isn't set up yet. Run `sudo sandbox setup` first, then `sandbox init`." and names neither the marker nor `setup-state.json`; no `<home>/` tree is left behind
 
 #### Scenario: --user flag is rejected
 - **WHEN** the operator runs `sandbox init foo --user sandbox`
@@ -103,7 +106,8 @@ CWD-based instance discovery is removed: the `<inst>` argument is positional and
 - **THEN** the CLI exits with a "mutually exclusive" error before any state mutation
 
 ### Requirement: Init-Time Auth Mode Probe
-The system SHALL validate that the privilege boundary is reachable at init time by executing the dispatcher `preflight` op against the resolved daemon owner (via `core.dispatch.probe("preflight", [], host_config, timeout=15)`). The probe is **mode-aware**: in operator-rootless mode it runs as a local subprocess (no boundary crossing); in separate-user mode it crosses via `sudo_pipe_cmd` (the privileged byte-pipe). The resolved `machinectl_authentication` mode is always SUDO (POLKIT is retired). The probe SHALL use a 15-second timeout. The crossing succeeding (its bundled segments parse and the `auth-probe` segment is present) IS the reachability signal — there is no separate standalone `auth-probe` crossing at init; the single `preflight` bundle is the source of truth for boundary reachability at init time, and its bundled `compose-ls` segment additionally feeds the compose-project-name collision pre-flight (so init fires no second `compose-ls` crossing). The probe is NOT deferred by the non-interactive secret-seeding path. The active execution mode the probe uses is resolved from the setup marker (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector"); on a host with **no marker entry** (`ModeMarkerMissing` — a not-yet-`setup` host) the probe mode SHALL fall back to `DEFAULT_PROVISIONING_MODE` (operator-rootless, the single system-wide default per the `host-config` capability's "Single-Sourced Execution-Mode Default"), so a fresh host runs the probe as a local subprocess rather than crossing `machinectl`/`sudo_pipe_cmd` into a dedicated user that does not exist yet. A marker that resolves to a concrete mode takes precedence over the fallback.
+
+The system SHALL validate that the privilege boundary is reachable at init time by executing the dispatcher `preflight` op against the resolved daemon owner (via `core.dispatch.probe("preflight", [], host_config, timeout=15)`). The probe is **mode-aware**: in operator-rootless mode it runs as a local subprocess (no boundary crossing); in separate-user mode it crosses via `sudo_pipe_cmd` (the privileged byte-pipe). The probe SHALL use a 15-second timeout. The crossing succeeding (its bundled segments parse and the `auth-probe` segment is present) IS the reachability signal — there is no separate standalone `auth-probe` crossing at init; the single `preflight` bundle is the source of truth for boundary reachability at init time, and its bundled `compose-ls` segment additionally feeds the compose-project-name collision pre-flight (so init fires no second `compose-ls` crossing). The probe is NOT deferred by the non-interactive secret-seeding path. The active execution mode the probe uses is resolved from the setup marker (`resolve_execution_mode`, per the `host-config` capability's "Docker Execution Mode Selector"); because init is setup-first (see "Init Command Interface"), a concrete mode is always available by the time the probe runs — init never probes under a guessed mode.
 
 #### Scenario: Preflight probe succeeds
 - **WHEN** init resolves the execution mode and `core.dispatch.probe("preflight", [], host_config, timeout=15)` returns a bundle whose reachability gate is satisfied within 15 seconds
@@ -111,15 +115,11 @@ The system SHALL validate that the privilege boundary is reachable at init time 
 
 #### Scenario: Preflight probe fails with timeout
 - **WHEN** the preflight probe times out after 15 seconds (`probe(...)` returns `timed_out=True`)
-- **THEN** init exits non-zero with an error reporting "probe timed out after 15 seconds" and machinectl-reachability remediation guidance
+- **THEN** init exits non-zero with an error reporting "probe timed out after 15 seconds" and mode-appropriate reachability remediation guidance
 
 #### Scenario: Preflight crossing unreachable
 - **WHEN** the preflight crossing returns but the reachability gate is not satisfied (the `auth-probe` segment is absent or failed)
 - **THEN** init exits non-zero with the boundary-unreachable diagnostic derived from the bundle's `auth-probe` segment (or the probe's own failure message), before scaffold begins
-
-#### Scenario: Marker-absent fresh host resolves the probe to operator-rootless
-- **WHEN** init runs on a host with no setup marker entry for the invoking operator (`resolve_execution_mode` raises `ModeMarkerMissing`)
-- **THEN** the probe mode falls back to `DEFAULT_PROVISIONING_MODE` (operator-rootless) and the preflight probe runs as a local subprocess with no boundary crossing into a dedicated user
 
 ### Requirement: Init Doctor Pre-Flight Auth Mode Awareness
 The init command SHALL run a doctor pre-flight covering the `Filesystem` and `Repo Integrity` chains (excluding `ancestor_traverse`, since ACLs are granted during `start`, not `init`). Privilege Boundary verification at init time is delegated to the dedicated init-time preflight probe (see "Init-Time Auth Mode Probe" requirement). The pre-flight SHALL run the `Filesystem` and `Repo Integrity` checks via `run_check_subset()` / `build_check_registry()`; the privilege-boundary checks are not in the pre-flight scope.
@@ -200,59 +200,23 @@ The system SHALL support `sandbox init --dry-run` that previews the scaffold out
 - **THEN** no files exist in the sandboxes directory and instances.json is unmodified
 
 ### Requirement: Per-User Tree Creation on Init
-The system SHALL create the per-user tree (`<home>/`, `<home>/config/`, `<home>/state/`) during `sandbox init` if any of the directories is missing, with mode `0700`. The creation SHALL be idempotent — re-running `sandbox init` against an existing tree SHALL NOT raise an error and SHALL NOT modify existing directory modes. The host config file (`<home>/config/sandbox-ai.toml`) SHALL be created if it does not exist; it SHALL NOT be overwritten if it already exists. After init completes, `<home>/state/instances.json` SHALL exist (created empty if not present) so that subsequent lifecycle commands recognize the host as initialized.
 
-#### Scenario: Init on clean host creates the tree
-- **WHEN** `sandbox init` is invoked and `<home>/` does not exist
-- **THEN** init creates `<home>/`, `<home>/config/`, and `<home>/state/` with mode `0700`, writes a default `<home>/config/sandbox-ai.toml`, and writes an empty `<home>/state/instances.json`
+The system SHALL create the per-user tree (`<home>/`, `<home>/config/`, `<home>/state/`) during `sandbox init` if any of the directories is missing, with mode `0700`. The creation SHALL be idempotent — re-running `sandbox init` against an existing tree SHALL NOT raise an error and SHALL NOT modify existing directory modes. `sandbox init` SHALL NOT create a `sandbox-ai.toml` host config file (host facts now live in the setup marker; see the `host-config` capability). After init completes, `<home>/state/instances.json` SHALL exist (created empty if not present) so that subsequent lifecycle commands recognize the host as initialized — `instances.json` is the sole "init has run" gate.
 
-#### Scenario: Init on partially-initialized host is idempotent
-- **WHEN** `sandbox init` is invoked and `<home>/config/` exists but `<home>/state/` is missing
-- **THEN** init creates `<home>/state/` with mode `0700` and leaves `<home>/config/` (and its contents) untouched
+#### Scenario: Tree and instances.json created, no toml
+- **WHEN** `sandbox init` is invoked on a host with no per-user tree
+- **THEN** init creates `<home>/`, `<home>/config/`, and `<home>/state/` with mode `0700`, and writes an empty `<home>/state/instances.json`, and does NOT write any `<home>/config/sandbox-ai.toml`
 
-#### Scenario: Init does not overwrite existing host config
-- **WHEN** `sandbox init` is invoked and `<home>/config/sandbox-ai.toml` already exists with custom values
-- **THEN** init does not overwrite the file; the operator's customizations are preserved
-
-#### Scenario: Init does not overwrite existing registry
-- **WHEN** `sandbox init` is invoked and `<home>/state/instances.json` already contains entries
-- **THEN** init does not overwrite the file; existing instance registrations are preserved
-
-#### Scenario: SANDBOX_AI_USER_HOME redirects creation
-- **WHEN** `sandbox init` is invoked with `SANDBOX_AI_USER_HOME=/tmp/test-home` set
-- **THEN** the per-user tree is created under `/tmp/test-home/` rather than `~/.sandbox-ai/`
-
-### Requirement: Host Config Seeding (TTY Prompt or Non-TTY Fail)
-When `<home>/config/sandbox-ai.toml` does not exist, `sandbox init` SHALL seed it. In TTY mode, the system SHALL prompt the operator interactively for `docker_unprivileged_user` (required) and `machinectl_authentication` (optional, default `"sudo"`, only accepting `"sudo"`). In non-TTY mode, the system SHALL exit with a clear error directing the operator to create the file manually before retrying.
-
-The seeded file SHALL begin with a leading managed-comment header — `# sandbox-ai managed — values are setup-determined; do not edit (rerun setup to change)` — guarding the setup-determined `[host]` fields (D10 stopgap). The seed SHALL NOT write a `docker_execution_mode` field: the execution mode is no longer a toml field (it is resolved at runtime from the setup-state marker — see the `host-config` capability's "Docker Execution Mode Selector").
-
-#### Scenario: TTY clean install — interactive seed
-- **WHEN** `sandbox init` runs in a TTY and `<home>/config/sandbox-ai.toml` does not exist
-- **THEN** the CLI prompts: "docker_unprivileged_user (e.g., sandbox):" — accepts a non-empty value — then prompts: "machinectl_authentication [sudo, default sudo]:" — accepts `sudo` or empty (defaulting to `sudo`) — then writes the seeded values to `<home>/config/sandbox-ai.toml`, preceded by the managed-comment header and with no `docker_execution_mode` field
-
-#### Scenario: TTY clean install — empty user rejected
-- **WHEN** the operator presses Enter without typing a value at the `docker_unprivileged_user` prompt
-- **THEN** the CLI re-prompts (empty values are not accepted; the field is required)
-
-#### Scenario: Non-TTY clean install — fail with guidance
-- **WHEN** `sandbox init` runs in a non-TTY environment (e.g., CI pipeline) and `<home>/config/sandbox-ai.toml` does not exist
-- **THEN** the CLI exits with: "Cannot prompt for `docker_unprivileged_user` in non-interactive mode. Create `<resolved-home>/config/sandbox-ai.toml` with a `[host]` section containing `docker_unprivileged_user` before running `sandbox init`." and exit code 1
-
-#### Scenario: Existing host config is not re-seeded
-- **WHEN** `sandbox init` runs and `<home>/config/sandbox-ai.toml` already exists with valid content
-- **THEN** the system does NOT prompt and does NOT overwrite; init proceeds using the existing values
-
-#### Scenario: seeded toml carries the managed-comment header
-- **WHEN** `sandbox init` seeds `<home>/config/sandbox-ai.toml`
-- **THEN** the file's first line is the `# sandbox-ai managed — …; do not edit (rerun setup to change)` comment and the file contains no `docker_execution_mode` key
+#### Scenario: Idempotent re-init preserves existing tree
+- **WHEN** `sandbox init` is invoked and the per-user tree already exists
+- **THEN** init does not raise and does not modify existing directory modes
 
 ### Requirement: Init Detects Legacy CWD-Local Files
 During `sandbox init`, the system SHALL inspect the current working directory for legacy `<cwd>/sandbox-ai.toml` and `<cwd>/.state/` and warn the operator that these files are no longer used.
 
 #### Scenario: Legacy host config detected
 - **WHEN** `sandbox init` runs and `<cwd>/sandbox-ai.toml` exists
-- **THEN** init prints a warning: "Found legacy `<cwd>/sandbox-ai.toml`. Per-host config now lives at `<resolved-home>/config/sandbox-ai.toml`. Migrate manually or delete the legacy file."
+- **THEN** init prints a warning: "Found legacy `<cwd>/sandbox-ai.toml`. Per-host config is now setup-determined — run `sudo sandbox setup`. Delete the legacy file."
 
 #### Scenario: Legacy state directory detected
 - **WHEN** `sandbox init` runs and `<cwd>/.state/` exists

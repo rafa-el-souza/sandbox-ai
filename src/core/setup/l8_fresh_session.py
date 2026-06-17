@@ -11,7 +11,7 @@ verification mutates nothing, so there is nothing to undo.
 Two checks, each with the operator-drop primitive matched to its command:
 
 1. ``pipe_cmd(<operator>) → id -G`` — the operator's group set MUST include the
-   ``[host].workspace_bridge_group`` gid (the post-``usermod -aG sb-ws`` group
+   marker-sourced ``workspace_bridge_group`` gid (the post-``usermod -aG sb-ws`` group
    is visible in a fresh ``--uid`` transient unit, whose ``initgroups`` reflects
    the post-``usermod`` set even though the operator's login session predates
    the ``usermod`` — empirically validated V0/V3, the whole reason this re-probe
@@ -51,7 +51,12 @@ from typing import TYPE_CHECKING
 from core.dispatch import Op, dispatch_payload
 from core.exceptions import SandboxExecutionError
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, pipe_cmd, sudo_as_operator
+from core.host_config import (
+    DockerExecutionMode,
+    pipe_cmd,
+    resolve_daemon_owner_settings,
+    sudo_as_operator,
+)
 from core.setup.phase_runner import Identity, Phase, PhaseResult
 
 if TYPE_CHECKING:
@@ -68,7 +73,7 @@ class FreshSessionError(SandboxExecutionError):
 
 
 def _bridge_gid(host_config: HostConfig) -> int:
-    """Resolve the ``[host].workspace_bridge_group`` gid (raw ``grp`` lookup).
+    """Resolve the marker-sourced ``workspace_bridge_group`` gid (raw ``grp`` lookup).
 
     L8 only needs the gid to check membership in ``id -G`` output; the subgid-
     range validation lives in the phases that *use* the gid as a
@@ -131,7 +136,7 @@ def _check_dispatcher_reachable(
     ``sentinel=True`` made the authorized command unmatchable and silently
     failed this check for every SUDO-mode password-operator (F-018).
     """
-    sandbox_user = host_config.host.docker_unprivileged_user
+    sandbox_user = resolve_daemon_owner_settings(host_config.host)
     inner = dispatch_payload(Op.AUTH_PROBE.value, [])
     argv = [
         *sudo_as_operator(operator),

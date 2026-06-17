@@ -57,6 +57,7 @@ from core.helper_container import hardened_docker_run
 from core.host_config import (
     is_operator_rootless,
     pipe_cmd,
+    resolve_daemon_owner_settings,
     sudo_pipe_cmd,
 )
 from core.hydration import IMAGE_REGISTRY, InstanceConfig
@@ -1222,7 +1223,7 @@ def build_invocation(
     if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
     inner = dispatch_payload(op_value, wire_args)
-    user = host_config.host.docker_unprivileged_user
+    user = resolve_daemon_owner_settings(host_config.host)
     # SUDO crossings ride the privileged byte-pipe (design D2).
     crossing = sudo_pipe_cmd(user)
     return [
@@ -1278,7 +1279,7 @@ def proxy_argv(
     if is_operator_rootless(host_config):
         return build_target_argv(resolved, wire_args, host_config)
     inner = dispatch_payload(resolved.value, wire_args)
-    user = host_config.host.docker_unprivileged_user
+    user = resolve_daemon_owner_settings(host_config.host)
     crossing = sudo_pipe_cmd(user)
     return [
         *crossing,
@@ -1310,9 +1311,9 @@ def invoke(
       strings the dispatcher will receive; per-op validation happens here
       before the boundary is crossed).
     - ``host_config``: the resolved :class:`~core.host_config.HostConfig`,
-      supplying the unprivileged docker user and machinectl auth mode used to
-      build the boundary-crossing prefix, plus instance-derived state for
-      compose ops' target-argv construction.
+      supplying the unprivileged docker user used to build the
+      boundary-crossing prefix, plus instance-derived state for compose ops'
+      target-argv construction.
     - ``timeout``: keyword-only; forwarded to the underlying subprocess. ``None``
       (the default) means no timeout.
 
@@ -1700,9 +1701,9 @@ def compile_dispatcher(
     and no ``onlcr`` (see :func:`~core.host_config.pipe_cmd` for the underlying
     transport). This is the correct application of the CLAUDE.md
     byte-pipe-for-binary-frames doctrine, not a violation of the "dispatcher is
-    minimal / machinectl for ops" stance. ``pipe_cmd`` is auth-mode-independent
-    (its ``manage-units`` polkit action is the only authorization layer); the
-    per-host ``machinectl_authentication`` setting is unused on this path. The PAM-skip
+    minimal / machinectl for ops" stance. ``pipe_cmd``'s ``manage-units`` polkit
+    action is the only authorization layer on this path — there is no per-host
+    authorization layer to apply. The PAM-skip
     trade-off is acceptable here per the boundary-primitive doctrine: this is a
     fixed, audited, one-shot build path with a session-bounded lifetime.
 
@@ -1747,9 +1748,8 @@ def compile_dispatcher(
             derived inside the crossing — callers never supply or see it.
         host_config: Resolved :class:`~core.host_config.HostConfig` supplying
             the unprivileged docker user for the byte-pipe boundary crossing.
-            The ``machinectl_authentication`` field is unused on this path
-            (``pipe_cmd`` is auth-mode-independent); the parameter is retained
-            for signature symmetry with :func:`invoke`.
+            ``pipe_cmd`` applies no per-host authorization layer on this path;
+            the parameter is retained for signature symmetry with :func:`invoke`.
 
     Raises:
         SandboxExecutionError: ``go test`` failed (fixture drift / build
@@ -1761,7 +1761,7 @@ def compile_dispatcher(
     image = IMAGE_REGISTRY["golang_alpine"].pinned
     payload = _compile_payload(image, _dispatch_source_b64())
     cmd = [
-        *pipe_cmd(host_config.host.docker_unprivileged_user),
+        *pipe_cmd(resolve_daemon_owner_settings(host_config.host)),
         "/bin/bash",
         "-c",
         payload,

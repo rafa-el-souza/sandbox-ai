@@ -51,13 +51,15 @@ from core.host_config import (
     DockerExecutionMode,
     HostConfig,
     HostSettings,
-    MachinectlAuth,
     autodetect_workspace_bridge_gid_recommendation,
     parse_subgid_for_user,
     parse_subuid_for_user,
+    workspace_bridge_group_for,
 )
 from core.setup import l1_kernel, l2a_delegate
-from core.setup_state import read_mode, write_mode_root_owned
+from core.setup.l2_host_prereqs import gid_in_subgid_range
+from core.setup.subid import pick_free_subid_block
+from core.setup_state import read_entry, write_mode_root_owned
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -123,8 +125,16 @@ _MANAGED_HEADER = "# sandbox-ai managed — do not edit; rerun 'sudo sandbox set
 
 _MODULES_LOAD_DROPIN = Path("/etc/modules-load.d/sandbox-ai.conf")
 
-# The minimal subid range size, mirroring l2's host-prereq contract.
-_MIN_SUBID_RANGE = 65536
+
+def _subid_range_arg() -> str:
+    """Render the ``<start>-<end>`` usermod range for the next free block.
+
+    Derived from :func:`core.setup.subid.pick_free_subid_block` — the SINGLE
+    seam shared by the real append and the remediation preview (no second
+    hand-typed literal).
+    """
+    start, size = pick_free_subid_block()
+    return f"{start}-{start + size - 1}"
 
 
 def _nftables_modules(distro_family: str) -> tuple[str, ...]:
@@ -208,22 +218,35 @@ def _apply_subid(params: BatchParams) -> None:
     is left untouched (idempotent skip).
     """
     operator = params.operator
+    range_arg = _subid_range_arg()
     if not parse_subuid_for_user(operator):
-        _run(["usermod", "--add-subuids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", operator])
+        _run(["usermod", "--add-subuids", range_arg, operator])
     if not parse_subgid_for_user(operator):
-        _run(["usermod", "--add-subgids", f"100000-{100000 + _MIN_SUBID_RANGE - 1}", operator])
+        _run(["usermod", "--add-subgids", range_arg, operator])
 
 
 def _apply_groupadd(params: BatchParams) -> None:
     """``groupadd -g <bridge_gid> <bridge_group>`` + ``usermod -aG`` (l2's logic).
 
     Idempotent: the group is created only when absent; the operator is added to
-    it only when not already a member.
+    it only when not already a member. When the group already exists, a loud
+    guard (mirroring l2's separate-user check) refuses a group whose gid sits
+    outside the OPERATOR's /etc/subgid range — a stale marker or hand-made
+    foreign-range group must fail loud rather than be silently accepted, and the
+    raise happens before any mutation (no half-provisioning).
     """
     try:
-        grp.getgrnam(params.bridge_group)
+        existing = grp.getgrnam(params.bridge_group)
     except KeyError:
         _run(["groupadd", "-g", str(params.bridge_gid), params.bridge_group])
+    else:
+        if not gid_in_subgid_range(existing.gr_gid, parse_subgid_for_user(params.operator)):
+            raise RuntimeError(
+                f"group {params.bridge_group!r} exists at gid {existing.gr_gid} "
+                f"outside {params.operator!r}'s /etc/subgid range; setup will not "
+                f"move an operator-created group. Recreate it with a gid inside "
+                f"the subgid range and re-run setup."
+            )
     if not _operator_in_group(params.operator, params.bridge_group):
         _run(["usermod", "-aG", params.bridge_group, params.operator])
 
@@ -330,7 +353,17 @@ def _apply_marker(params: BatchParams) -> None:
     the root-owned marker write shared with separate-user setup): atomic content
     write + mode ``0644`` + ``chown root:root``.
     """
-    write_mode_root_owned(params.operator, params.mode)
+    # Record the ACTUAL group gid from /etc/group (not the fresh autodetect
+    # value in ``params.bridge_gid``): ``_apply_groupadd`` ran earlier in this
+    # batch, and on a re-provision the group may pre-exist at a divergent gid, so
+    # ``getgrnam`` is the faithful source (matching the separate-user
+    # ``_record_separate_user_mode``, which already resolves via ``getgrnam``).
+    write_mode_root_owned(
+        params.operator,
+        params.mode,
+        workspace_bridge_group=params.bridge_group,
+        workspace_bridge_gid=grp.getgrnam(params.bridge_group).gr_gid,
+    )
 
 
 # ``install_pinned`` reads no host-specific field (the reserved path is
@@ -339,7 +372,6 @@ def _apply_marker(params: BatchParams) -> None:
 _RESERVED_HOST_CONFIG = HostConfig(
     host=HostSettings(
         docker_unprivileged_user="root",
-        machinectl_authentication=MachinectlAuth.SUDO,
         docker_execution_mode=DockerExecutionMode.OPERATOR_ROOTLESS,
     )
 )
@@ -432,14 +464,14 @@ def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], B
     Inspects the host and returns the **unsatisfied** batch items plus the
     computed :class:`BatchParams`. Reuses each phase's read-only probe logic
     (l1's sysctl compare, l2's subuid/group checks, l6a's runsc sha check,
-    ``setup_state.read_mode`` for the marker, the cgroup delegation read).
+    ``setup_state.read_entry`` for the marker, the cgroup delegation read).
     """
     operator = ctx.operator
     operator_uid = pwd.getpwnam(operator).pw_uid
-    bridge_group = ctx.host_config.host.workspace_bridge_group
+    mode = ctx.host_config.host.docker_execution_mode
+    bridge_group = workspace_bridge_group_for(operator, mode)
     bridge_gid = autodetect_workspace_bridge_gid_recommendation(operator)
     family = detect_distro() or ""
-    mode = ctx.host_config.host.docker_execution_mode
 
     params = BatchParams(
         operator=operator,
@@ -465,7 +497,8 @@ def classify_host_root_batch(ctx: SetupContext) -> tuple[frozenset[BatchItem], B
         unsatisfied.add(BatchItem.LINGER)
     if not _runsc_satisfied():
         unsatisfied.add(BatchItem.RUNSC)
-    if read_mode(operator) != mode:
+    entry = read_entry(operator)
+    if entry is None or entry.mode != mode:
         unsatisfied.add(BatchItem.MARKER)
 
     return frozenset(unsatisfied), params
@@ -531,9 +564,10 @@ def render_remediation_block(items: frozenset[BatchItem], params: BatchParams) -
 
 
 def _remediation_subid(params: BatchParams) -> str:
+    range_arg = _subid_range_arg()
     return (
-        f"sudo usermod --add-subuids 100000-{100000 + _MIN_SUBID_RANGE - 1} "
-        f"--add-subgids 100000-{100000 + _MIN_SUBID_RANGE - 1} {params.operator}"
+        f"sudo usermod --add-subuids {range_arg} "
+        f"--add-subgids {range_arg} {params.operator}"
     )
 
 

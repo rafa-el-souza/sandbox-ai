@@ -53,6 +53,5 @@ class HelperCpChownAction(Action):
             self.owner_uid,
             self.owner_gid,
             self.mode,
-            ctx.auth,
             execution_mode=ctx.docker_execution_mode,
         )

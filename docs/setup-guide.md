@@ -88,9 +88,9 @@ The apply pass executes phases in this named order (the order is named, not coun
 
 | Phase | What it does |
 |---|---|
-| **L0** | Root assertion; operator resolution (`--operator` → `$SUDO_USER`+`$SUDO_UID` → `$PKEXEC_UID` → refuse); distro-tier classification; required-binary check; `MACHINECTL_PATH` uniqueness assertion on the sudoers `secure_path` basis. |
+| **L0** | Root assertion; operator resolution (`--operator` → `$SUDO_USER`+`$SUDO_UID` → refuse); distro-tier classification; required-binary check; `MACHINECTL_PATH` uniqueness assertion on the sudoers `secure_path` basis. |
 | **L1** | `/etc/sysctl.d/49-sandbox-ai.conf` (+ `sysctl -w`); verify-only ACL-FS support + cgroup-v2 hierarchy. (Resolves no OS user.) |
-| **L2** | systemd-machined enable+start; `useradd` for the sandbox user; `/etc/subuid`/`/etc/subgid` append-only-when-safe; `groupadd sb-ws` at an autodetected gid in the subuid range; `usermod -aG sb-ws <operator>`. (Does **not** install runsc.) |
+| **L2** | systemd-machined enable+start; `useradd` for the sandbox user; `/etc/subuid`/`/etc/subgid` free-block allocation (a disjoint per-operator range, with cross-user overlap detection); `groupadd` of the workspace-bridge group (`sb-ws-<operator>` in operator-rootless, the shared `sb-ws` in separate-user) at a gid in that range; `usermod -aG <bridge-group> <operator>`. (Does **not** install runsc.) |
 | **L2a** | `Delegate=yes` drop-in at `user-<sandbox-uid>.service.d/` — split out of L1 because its path is uid-scoped to the sandbox user L2 creates (`depends_on=("l2",)`, ordered before L5). |
 | **L5** | `loginctl enable-linger <sandbox-user>`; rootless dockerd install via machinectl. |
 | **L6** | Merge `runtimes["sandbox-ai-runsc"]` into `~<sandbox-user>/.config/docker/daemon.json` (preserving the operator's other runtimes); conditional `systemctl --user restart docker` + readiness poll. |
@@ -98,7 +98,7 @@ The apply pass executes phases in this named order (the order is named, not coun
 | **L6.5** | Compile the dispatcher (offline, in a pinned `golang` container — `go test ./...` for Python↔Go parity runs first, so a fixture drift fails the compile) and install it; `chattr +i`; write the root-owned `0644` `/usr/local/libexec/sandbox-ai/dispatcher.manifest.json` (host plane, alongside the binary, so every operator's `sandbox doctor` can read it). |
 | **L7** | Pre-pull the pinned helper image (`docker pull busybox:musl@<digest>`). |
 | **L3** | Install the sudoers privilege-boundary drop-in; `visudo -cf` validation; **L3a** per-op probe of every dispatcher op. |
-| **L8** | Fresh-session re-probe: verify the operator's group set now includes the `sb-ws` gid; verify machinectl is reachable through the new rule. |
+| **L8** | Fresh-session re-probe: verify the operator's group set now includes the workspace-bridge gid; verify machinectl is reachable through the new rule. |
 
 **L3 is the last base-ceremony mutation phase and the only one that touches the privilege-boundary rule.** No sudoers grant exists on disk at any point before L3, so a crash anywhere in L0..L7 leaves the host with zero sandbox-ai passwordless boundary crossing (the deliberate "no permissive bootstrap rule" property). An L3 crash is handled by L3a's rollback (the just-installed drop-in is removed). L8 is verification, not mutation.
 
@@ -124,10 +124,12 @@ On Debian-family hosts L1 writes `kernel.unprivileged_userns_clone=1`; on other 
 
 ## Multi-operator hosts
 
-Each operator runs `sudo sandbox setup` for themselves. Shared host state — the sandbox user, the `sb-ws` group, rootless dockerd, runsc, the dispatcher binary, `/etc/subuid` entries — is **convergent**: idempotent, written once, identical for everyone. Per-operator state **accumulates additively**:
+Each operator runs `sudo sandbox setup` for themselves. Identity-independent host state — runsc, the dispatcher binary, sysctl/nftables drop-ins, the reserved dir — is **convergent**: idempotent, written once, identical for everyone.
 
-- `alice` runs setup → `/etc/sudoers.d/sandbox-ai-machinectl-alice`, alice's `<sandbox_ai_home()>/`, alice in `sb-ws`.
-- `bob` runs setup later → `/etc/sudoers.d/sandbox-ai-machinectl-bob`, bob's `<sandbox_ai_home()>/`, bob in `sb-ws` — alice's drop-in and state untouched.
+In **separate-user** the modes are a single shared tenant: one sandbox user, the shared `sb-ws` group, one `/etc/subuid` range. In **operator-rootless** each operator is their own single-tenant daemon owner (their user runs the daemon), so each gets their own per-operator workspace-bridge group (`sb-ws-<operator>`) and their own disjoint `/etc/subuid`/`/etc/subgid` range — operators do not share a daemon, a subid range, or a bridge gid. Per-operator state **accumulates additively**:
+
+- `alice` runs setup → `/etc/sudoers.d/sandbox-ai-machinectl-alice`, alice's `<sandbox_ai_home()>/`, alice's marker entry, alice in her bridge group (`sb-ws-alice` op-rootless / `sb-ws` separate-user).
+- `bob` runs setup later → `/etc/sudoers.d/sandbox-ai-machinectl-bob`, bob's `<sandbox_ai_home()>/`, bob's marker entry, bob in his bridge group — alice's drop-in and state untouched.
 
 Both can independently invoke the orchestrator without password prompts. Concurrent invocations under the same operator serialize on that operator's per-user `state.lock`; invocations under different operators do not inter-serialize.
 
@@ -185,6 +187,6 @@ There is no `sandbox setup --uninstall` yet (a future change will automate this)
 7. Remove the append-only `<sandbox-user>` lines from `/etc/subuid` + `/etc/subgid` if no longer needed (shared flat-file territory — remove only the sandbox-user entries by hand).
 8. `rm /etc/fapolicyd/trust.d/sandbox-ai.trust` then `fapolicyd-cli --update` — **only if** fapolicyd integration was enabled (optional owned path).
 9. `rm /etc/aide/aide.conf.d/sandbox-ai.conf` — **only if** AIDE integration was enabled (optional owned path); the operator's next `aide --check`/`aide --update` reflects the removal.
-10. Optionally `userdel <sandbox-user>`, `groupdel sb-ws`, and drop the operator's `sb-ws` membership if the sandbox user / bridge group are no longer wanted — these are shared host state, not removed automatically since other operators may still depend on them.
+10. Optionally remove the workspace-bridge group (`groupdel sb-ws-<operator>` in operator-rootless, or the shared `groupdel sb-ws` in separate-user) and, in separate-user, `userdel <sandbox-user>` — drop the operator's bridge-group membership if no longer wanted. In separate-user the sandbox user and shared `sb-ws` are shared host state, not removed automatically since other operators may still depend on them; in operator-rootless the per-operator `sb-ws-<operator>` is yours alone.
 
 This list is faithful to and complete against the spec's "Reserved Namespace File Ownership" enumerable list (including the optional fapolicyd/AIDE drop-ins and the dispatcher manifest). Setup writes nothing outside it, so this recipe is exhaustive.

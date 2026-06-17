@@ -13,10 +13,9 @@ from pathlib import Path
 import pytest
 from core.host_config import (
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
 )
-from core.setup import host_batch, l1_kernel, l2a_delegate
+from core.setup import host_batch, l1_kernel, l2a_delegate, subid
 from core.setup.host_batch import (
     HOST_ROOT_BATCH,
     BatchItem,
@@ -27,7 +26,7 @@ from core.setup.host_batch import (
     render_remediation_block,
 )
 from core.setup.phase_runner import SetupContext
-from core.setup_state import read_mode
+from core.setup_state import MarkerEntry, read_entry, read_mode
 
 
 def _params(
@@ -53,7 +52,6 @@ def _ctx(operator: str = "alice") -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
             "sandboxuser",
-            MachinectlAuth.SUDO,
             DockerExecutionMode.OPERATOR_ROOTLESS,
         ),
         operator=operator,
@@ -102,7 +100,9 @@ def test_mid_batch_failure_never_writes_marker(monkeypatch: pytest.MonkeyPatch, 
 
     write_calls: list[tuple[str, DockerExecutionMode]] = []
 
-    def _spy_write_mode(operator: str, mode: DockerExecutionMode) -> None:
+    def _spy_write_mode(
+        operator: str, mode: DockerExecutionMode, **_facts: object
+    ) -> None:
         write_calls.append((operator, mode))
 
     # Spy the root-owned marker write that the real ``_apply_marker`` delegates to.
@@ -168,6 +168,10 @@ def test_apply_runs_only_requested_items_in_order(monkeypatch: pytest.MonkeyPatc
 def test_subid_applier_appends_operator_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_batch, "parse_subuid_for_user", lambda _u: [])
     monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [])
+    # Stub the whole-file reader to EMPTY so the free-block picker is
+    # deterministic (picks the base block) regardless of the real CI host's
+    # /etc/subuid — the per-user stubs above do not cover cross-user occupancy.
+    monkeypatch.setattr(subid, "read_all_subid_ranges", list)
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
@@ -176,6 +180,23 @@ def test_subid_applier_appends_operator_ranges(monkeypatch: pytest.MonkeyPatch) 
     assert runs == [
         ["usermod", "--add-subuids", "100000-165535", "bob"],
         ["usermod", "--add-subgids", "100000-165535", "bob"],
+    ]
+
+
+def test_subid_applier_shifts_past_occupied_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host_batch, "parse_subuid_for_user", lambda _u: [])
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [])
+    # Another user already holds the base block → the operator's append must
+    # land in the next free block, single-sourced through the picker.
+    monkeypatch.setattr(subid, "read_all_subid_ranges", lambda: [(100000, 65536)])
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    host_batch._apply_subid(_params(operator="bob"))
+
+    assert runs == [
+        ["usermod", "--add-subuids", "165536-231071", "bob"],
+        ["usermod", "--add-subgids", "165536-231071", "bob"],
     ]
 
 
@@ -190,7 +211,13 @@ def test_subid_applier_is_append_only_safe(monkeypatch: pytest.MonkeyPatch) -> N
     assert runs == []
 
 
+def _grp_entry(gid: int) -> grp.struct_group:
+    return grp.struct_group(("sb-ws-carol", "x", gid, []))
+
+
 def test_groupadd_applier_creates_group_and_adds_operator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bridge group ABSENT → groupadd at the in-range gid, then membership add."""
+
     def _no_group(_name: str) -> object:
         raise KeyError(_name)
 
@@ -199,22 +226,60 @@ def test_groupadd_applier_creates_group_and_adds_operator(monkeypatch: pytest.Mo
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
-    host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws", bridge_gid=100500))
+    host_batch._apply_groupadd(
+        _params(operator="carol", bridge_group="sb-ws-carol", bridge_gid=100500)
+    )
 
     assert runs == [
-        ["groupadd", "-g", "100500", "sb-ws"],
-        ["usermod", "-aG", "sb-ws", "carol"],
+        ["groupadd", "-g", "100500", "sb-ws-carol"],
+        ["usermod", "-aG", "sb-ws-carol", "carol"],
     ]
 
 
-def test_groupadd_applier_idempotent_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(grp, "getgrnam", lambda _n: object())
+def test_groupadd_applier_idempotent_when_present_in_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge group EXISTS at an in-range gid → no raise, no groupadd; member already."""
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(100500))
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [(100000, 65536)])
     monkeypatch.setattr(host_batch, "_operator_in_group", lambda _o, _g: True)
     runs: list[list[str]] = []
     monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
 
-    host_batch._apply_groupadd(_params())
+    host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws-carol"))
 
+    assert runs == []
+
+
+def test_groupadd_applier_adds_membership_when_present_in_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge group EXISTS at an in-range gid but operator not a member → membership add."""
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(100500))
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [(100000, 65536)])
+    monkeypatch.setattr(host_batch, "_operator_in_group", lambda _o, _g: False)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws-carol"))
+
+    assert runs == [["usermod", "-aG", "sb-ws-carol", "carol"]]
+
+
+def test_groupadd_applier_raises_when_present_out_of_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge group EXISTS at an OUT-OF-RANGE gid → RuntimeError, no mutation runs."""
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(50000))
+    monkeypatch.setattr(host_batch, "parse_subgid_for_user", lambda _u: [(100000, 65536)])
+    runs: list[list[str]] = []
+    monkeypatch.setattr(host_batch, "_run", lambda argv: runs.append(argv))
+
+    with pytest.raises(RuntimeError) as exc:
+        host_batch._apply_groupadd(_params(operator="carol", bridge_group="sb-ws-carol"))
+
+    assert "outside 'carol'" in str(exc.value)
+    assert "/etc/subgid range" in str(exc.value)
     assert runs == []
 
 
@@ -361,10 +426,17 @@ def test_marker_applier_writes_mode_and_root_owns(monkeypatch: pytest.MonkeyPatc
     chowns: list[tuple[Path, int, int]] = []
     monkeypatch.setattr(os, "chmod", lambda p, m: chmods.append((p, m)))
     monkeypatch.setattr(os, "chown", lambda p, u, g: chowns.append((p, u, g)))
+    # The marker records the ACTUAL group gid from getgrnam, NOT the fresh
+    # autodetect value in params.bridge_gid (100500). Mock a DIVERGENT gid to
+    # prove the recorded gid tracks /etc/group, faithful on a re-provision.
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: _grp_entry(200500))
 
     host_batch._apply_marker(_params(operator="dave"))
 
     assert read_mode("dave") is DockerExecutionMode.OPERATOR_ROOTLESS
+    entry = read_entry("dave")
+    assert entry is not None
+    assert entry.workspace_bridge_gid == 200500
     assert (marker, 0o644) in chmods
     assert (marker, 0, 0) in chowns
 
@@ -387,7 +459,16 @@ def _all_satisfied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_batch, "_delegation_present", lambda _u: True)
     monkeypatch.setattr(host_batch, "_linger_satisfied", lambda _o: True)
     monkeypatch.setattr(host_batch, "_runsc_satisfied", lambda: True)
-    monkeypatch.setattr(host_batch, "read_mode", lambda _o: DockerExecutionMode.OPERATOR_ROOTLESS)
+    monkeypatch.setattr(
+        host_batch,
+        "read_entry",
+        lambda op: MarkerEntry(
+            mode=DockerExecutionMode.OPERATOR_ROOTLESS,
+            workspace_bridge_group=f"sb-ws-{op}",
+            workspace_bridge_gid=100500,
+            docker_unprivileged_user=None,
+        ),
+    )
     monkeypatch.setattr(
         host_batch, "autodetect_workspace_bridge_gid_recommendation", lambda _o: 100500
     )
@@ -407,10 +488,31 @@ def test_classifier_all_satisfied_excludes_everything(monkeypatch: pytest.Monkey
     assert items == frozenset()
     assert params.operator == "alice"
     assert params.operator_uid == 1000
-    assert params.bridge_group == "sb-ws"
+    assert params.bridge_group == "sb-ws-alice"
     assert params.bridge_gid == 100500
     assert params.distro_family == "debian"
     assert params.mode is DockerExecutionMode.OPERATOR_ROOTLESS
+
+
+def test_classifier_derives_per_operator_bridge_name_at_distinct_gids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two op-rootless operators → per-operator names at distinct in-range gids (D-F)."""
+    _all_satisfied(monkeypatch)
+    gids = {"alice": 100500, "bob": 200500}
+    monkeypatch.setattr(
+        host_batch,
+        "autodetect_workspace_bridge_gid_recommendation",
+        lambda op: gids[op],
+    )
+
+    _, params_alice = classify_host_root_batch(_ctx(operator="alice"))
+    _, params_bob = classify_host_root_batch(_ctx(operator="bob"))
+
+    assert params_alice.bridge_group == "sb-ws-alice"
+    assert params_alice.bridge_gid == 100500
+    assert params_bob.bridge_group == "sb-ws-bob"
+    assert params_bob.bridge_gid == 200500
 
 
 @pytest.mark.parametrize(
@@ -423,7 +525,7 @@ def test_classifier_all_satisfied_excludes_everything(monkeypatch: pytest.Monkey
         ("_delegation_present", lambda _u: False, BatchItem.DELEGATE),
         ("_linger_satisfied", lambda _o: False, BatchItem.LINGER),
         ("_runsc_satisfied", lambda: False, BatchItem.RUNSC),
-        ("read_mode", lambda _o: None, BatchItem.MARKER),
+        ("read_entry", lambda _o: None, BatchItem.MARKER),
     ],
 )
 def test_classifier_includes_unsatisfied_item(
@@ -447,11 +549,43 @@ def test_classifier_delegation_present_excludes_delegate(monkeypatch: pytest.Mon
 
 def test_classifier_marker_mismatch_included(monkeypatch: pytest.MonkeyPatch) -> None:
     _all_satisfied(monkeypatch)
-    monkeypatch.setattr(host_batch, "read_mode", lambda _o: DockerExecutionMode.SEPARATE_USER)
+    monkeypatch.setattr(
+        host_batch,
+        "read_entry",
+        lambda op: MarkerEntry(
+            mode=DockerExecutionMode.SEPARATE_USER,
+            workspace_bridge_group=f"sb-ws-{op}",
+            workspace_bridge_gid=100500,
+            docker_unprivileged_user=None,
+        ),
+    )
 
     items, _ = classify_host_root_batch(_ctx())
 
     assert BatchItem.MARKER in items
+
+
+def test_classifier_legacy_mode_only_marker_re_provisions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A legacy mode-only entry (``read_entry`` → ``None``) → MARKER re-provisioned.
+
+    Even when the recorded mode matches, a C-004-era entry lacking the host facts
+    reads as not-yet-provisioned so ``_apply_marker`` rewrites the full entry.
+    """
+    _all_satisfied(monkeypatch)
+    monkeypatch.setattr(host_batch, "read_entry", lambda _o: None)
+
+    items, _ = classify_host_root_batch(_ctx())
+
+    assert BatchItem.MARKER in items
+
+
+def test_classifier_full_matching_entry_excludes_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full entry whose mode matches → MARKER satisfied (not re-provisioned)."""
+    _all_satisfied(monkeypatch)
+
+    items, _ = classify_host_root_batch(_ctx())
+
+    assert BatchItem.MARKER not in items
 
 
 def test_classifier_empty_distro_family(monkeypatch: pytest.MonkeyPatch) -> None:

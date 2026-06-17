@@ -16,7 +16,7 @@ Provides:
 - ``_stop_warm_check`` (autouse) — patches ``cli.main._warm_check`` to
   return False; opt-out via ``@pytest.mark.no_warm_mock``.
 - ``_resolve_host_config_default`` (autouse) — patches
-  ``cli.main.HostConfig.from_toml``; opt-out via
+  ``cli.main.HostConfig.from_marker``; opt-out via
   ``@pytest.mark.no_host_config_mock``.
 - ``runner`` — a fresh ``CliRunner`` per test.
 """
@@ -151,7 +151,7 @@ def _pass_check(name: str) -> object:
 
 @pytest.fixture(autouse=True)
 def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
-    """Tests that exercise ``HostConfig.from_toml`` directly mark themselves
+    """Tests that exercise ``HostConfig.from_marker`` directly mark themselves
     with ``@pytest.mark.no_host_config_mock`` to bypass this autouse patch.
     """
     if "no_host_config_mock" in request.keywords:
@@ -159,21 +159,20 @@ def _resolve_host_config_default(request: pytest.FixtureRequest) -> object:
         return
     from core.host_config import DockerExecutionMode, HostConfig
 
-    cfg = HostConfig.model_validate(
-        {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": "sudo"}}
+    # The runtime/init/doctor command paths resolve the host config from the
+    # per-operator setup-state marker (D-B) via ``HostConfig.from_marker``. The
+    # marker lives at a root-owned ``/usr/local/libexec`` path absent in tests, so
+    # ``from_marker`` is stubbed to a healthy separate-user marker config;
+    # op-rootless tests override it (or use ``@pytest.mark.no_host_config_mock``).
+    marker_cfg = HostConfig.model_validate(
+        {
+            "host": {
+                "docker_unprivileged_user": "sandbox",
+                "docker_execution_mode": DockerExecutionMode.SEPARATE_USER,
+            }
+        }
     )
-    # The runtime resolves the execution mode from the per-operator marker (D11)
-    # via ``_resolve_full_host_config`` → ``resolve_execution_mode``. The marker
-    # lives at a root-owned ``/usr/local/libexec`` path absent in tests, so stub
-    # the resolver to the default separate-user mode; op-rootless tests override
-    # it (or use ``@pytest.mark.no_host_config_mock``).
-    with (
-        patch("cli.main.HostConfig.from_toml", return_value=cfg),
-        patch(
-            "cli.main.resolve_execution_mode",
-            return_value=DockerExecutionMode.SEPARATE_USER,
-        ),
-    ):
+    with patch("cli.main.HostConfig.from_marker", return_value=marker_cfg):
         yield
 
 
@@ -184,9 +183,13 @@ def stub_marker_write() -> object:
     ``cli.main._record_separate_user_mode`` calls ``write_mode_root_owned``, which
     ``chown``s the root-owned ``/usr/local/libexec/sandbox-ai/setup-state.json`` —
     not writable in a unit test. Patched to a no-op Mock; yielded so the tests
-    that assert the marker was recorded can inspect ``.call_args``.
+    that assert the marker was recorded can inspect ``.call_args``. The bridge-gid
+    resolver (``grp.getgrnam`` on the not-present ``sb-ws`` group) is also stubbed.
     """
-    with patch("cli.main.write_mode_root_owned") as mock:
+    with (
+        patch("cli.main.write_mode_root_owned") as mock,
+        patch("cli.main.workspace_bridge_gid", return_value=100000),
+    ):
         yield mock
 
 

@@ -148,7 +148,7 @@ def resolve_operator(operator_flag: str | None = None) -> str:
     """Resolve the operator user via the explicit precedence; refuse on none.
 
     Precedence: ``--operator`` flag → ``$SUDO_USER`` (consistent with
-    ``$SUDO_UID``) → ``$PKEXEC_UID`` → refuse. No TTY heuristics.
+    ``$SUDO_UID``) → refuse. No TTY heuristics.
 
     Raises:
         OperatorResolutionError: No operator could be resolved, the flag names
@@ -179,15 +179,6 @@ def resolve_operator(operator_flag: str | None = None) -> str:
                 f"{entry.pw_uid} != {int(sudo_uid)}"
             )
         return sudo_user
-
-    pkexec_uid = os.environ.get("PKEXEC_UID")
-    if pkexec_uid:
-        try:
-            return pwd.getpwuid(int(pkexec_uid)).pw_name
-        except KeyError as exc:
-            raise OperatorResolutionError(
-                f"$PKEXEC_UID={pkexec_uid!r} does not resolve to an existing user"
-            ) from exc
 
     raise OperatorResolutionError(
         "cannot resolve operator user. Re-invoke as: sudo sandbox setup, "

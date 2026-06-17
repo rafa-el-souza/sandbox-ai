@@ -4,8 +4,8 @@
 Section 5.1-5.3 of the ``refactor-plan-tuples-to-actions`` change.
 
 This is the load-bearing structural gate that pins the dry-run command
-preview output to a checked-in fixture for the ``sudo``
-``machinectl_authentication`` mode. Any unintended divergence in an Action's
+preview output to a checked-in fixture for the separate-user
+``docker_execution_mode``. Any unintended divergence in an Action's
 ``.describe()`` rendering surfaces here as a byte-diff against the fixture.
 
 Determinism strategy:
@@ -163,9 +163,8 @@ def _capture_dry_run(
     user_home: Path,
     register: Callable[..., Path],
     monkeypatch: pytest.MonkeyPatch,
-    auth_mode: str,
 ) -> str:
-    from core.host_config import HostConfig
+    from core.host_config import DockerExecutionMode, HostConfig
 
     inst = "fixture-inst"
     register(
@@ -188,13 +187,20 @@ def _capture_dry_run(
 
     monkeypatch.setattr(_cli_main, "console", _Console(width=1000, force_terminal=False, color_system=None))
 
-    # Deterministic boundary stubs — pin every host-side resolver.
+    # Deterministic boundary stubs — pin every host-side resolver. The runtime
+    # dry-run reads its host config from the per-operator marker (`from_marker`);
+    # pin a separate-user marker so the crossing renders the sudo wire form.
     fixed_host = HostConfig.model_validate(
-        {"host": {"docker_unprivileged_user": "sandbox", "machinectl_authentication": auth_mode}}
+        {
+            "host": {
+                "docker_unprivileged_user": "sandbox",
+                "docker_execution_mode": DockerExecutionMode.SEPARATE_USER,
+            }
+        }
     )
 
     with (
-        patch("cli.main.HostConfig.from_toml", return_value=fixed_host),
+        patch("cli.main.HostConfig.from_marker", return_value=fixed_host),
         patch("cli.main.workspace_bridge_gid", return_value=200500),
         patch("cli.main.host_id_for_in_container", side_effect=lambda n, _u: 100000 + n),
         patch("cli.main.host_gid_for_in_container", side_effect=lambda n, _u: 200000 + n),
@@ -238,6 +244,6 @@ class TestDryRunFixtureGate:
         register: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        captured = _capture_dry_run(runner, user_home, register, monkeypatch, "sudo")
+        captured = _capture_dry_run(runner, user_home, register, monkeypatch)
         _assert_or_regen(captured, FIXTURE_SUDO)
 

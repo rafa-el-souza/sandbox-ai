@@ -4,12 +4,10 @@
 Bundles state that is uniform across a phase invocation:
 
 - ``host_user`` — the unprivileged systemd user that owns the docker
-  daemon (``[host].docker_unprivileged_user`` from ``sandbox-ai.toml``).
-- ``auth`` — the machinectl auth mode (sudo) read from the
-  same per-host config file.
+  daemon (the daemon owner, setup-determined per execution mode).
 - ``docker_execution_mode`` — the resolved
   :class:`~core.host_config.DockerExecutionMode` (separate-user / operator-rootless),
-  flat plumbing alongside ``auth``. The helper-container Actions
+  flat plumbing. The helper-container Actions
   (``HelperMkdirChownAction`` / ``HelperCpChownAction``) forward it to the
   helper primitive so that in ``operator-rootless`` mode the helper ``docker
   run`` op executes as a local subprocess with no ``machinectl`` crossing.
@@ -41,7 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from core.executor import Executor
-    from core.host_config import HostConfig, MachinectlAuth
+    from core.host_config import HostConfig
 
 
 @dataclass(frozen=True)
@@ -49,7 +47,6 @@ class ActionContext:
     """Frozen bundle of per-phase execution plumbing."""
 
     host_user: str
-    auth: MachinectlAuth
     executor: Executor
     instance_dir: Path
     host_config: HostConfig | None = None

@@ -18,7 +18,7 @@ from core.actions.compose import ComposeUpAction
 from core.actions.context import ActionContext
 from core.compose import compose_project_name
 from core.executor import Executor
-from core.host_config import DockerExecutionMode, MachinectlAuth
+from core.host_config import DockerExecutionMode
 
 if TYPE_CHECKING:
     from core.host_config import HostConfig
@@ -28,17 +28,14 @@ class _FakeHostSettings:
     docker_unprivileged_user = "claude-sandbox"
     docker_execution_mode = DockerExecutionMode.SEPARATE_USER
 
-    def __init__(self, auth: MachinectlAuth) -> None:
-        self.machinectl_authentication = auth
-
 
 class _FakeHostConfig:
-    def __init__(self, auth: MachinectlAuth = MachinectlAuth.SUDO) -> None:
-        self.host = _FakeHostSettings(auth)
+    def __init__(self) -> None:
+        self.host = _FakeHostSettings()
 
 
-def _hc(auth: MachinectlAuth = MachinectlAuth.SUDO) -> HostConfig:
-    return cast("HostConfig", _FakeHostConfig(auth))
+def _hc() -> HostConfig:
+    return cast("HostConfig", _FakeHostConfig())
 
 
 def _seed_instance(home: Path, inst: str) -> None:
@@ -61,12 +58,10 @@ def _seed_instance(home: Path, inst: str) -> None:
 
 def _ctx(
     host_config: HostConfig | None,
-    auth: MachinectlAuth = MachinectlAuth.SUDO,
     executor: Executor | None = None,
 ) -> ActionContext:
     return ActionContext(
         host_user="claude-sandbox",
-        auth=auth,
         executor=executor or Executor(),
         instance_dir=Path("/inst"),
         host_config=host_config,

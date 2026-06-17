@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, minimal_host_config
 from core.setup import l2_host_prereqs
 from core.setup.l2_host_prereqs import PHASE
 from core.setup.phase_runner import Identity, PhaseResult, SetupContext
@@ -32,7 +32,7 @@ def _ctx() -> SetupContext:
     # The operator is "alice" (the user the _World membership fixtures grant).
     return SetupContext(
         host_config=minimal_host_config(
-            "sandboxuser", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+            "sandboxuser", DockerExecutionMode.SEPARATE_USER
         ),
         operator="alice",
     )
@@ -51,6 +51,11 @@ class _World:
         self.machined = True
         self.subuid = _FULL
         self.subgid = _FULL
+        # Foreign (other-user) subid ranges for cross-user overlap detection,
+        # carried as ``(user, start, count)`` so an identical-valued foreign
+        # range is distinguishable from the sandbox user's own. Empty by
+        # default → the sandbox user owns a disjoint block.
+        self.foreign: list[tuple[str, int, int]] = []
         # Bridge gid sits inside the (100000, 65536) subgid range.
         self.bridge_gid = 101000
 
@@ -87,6 +92,19 @@ def _install(monkeypatch: pytest.MonkeyPatch, w: _World) -> None:
     monkeypatch.setattr(
         "core.setup.l2_host_prereqs.parse_subgid_for_user",
         lambda _u: list(w.subgid),
+    )
+    # The by-user whole-file reader underpins cross-user overlap detection. Seed
+    # it with the sandbox user's own ranges (under its own label) plus this
+    # world's foreign ranges so the default (no foreign user) world has no
+    # spurious overlap regardless of the real CI host's /etc/subuid. Filtering is
+    # by USER identity, so an identical-valued foreign range is NOT masked.
+    monkeypatch.setattr(
+        "core.setup.subid.read_all_subid_ranges_by_user",
+        lambda: (
+            [("sandboxuser", s, c) for s, c in w.subuid]
+            + [("sandboxuser", s, c) for s, c in w.subgid]
+            + list(w.foreign)
+        ),
     )
 
     class _P:
@@ -142,6 +160,76 @@ def test_probe_conflict_inadequate_subuid(
     result, detail = PHASE.probe(_ctx())
     assert result == PhaseResult.CONFLICT
     assert "Refusing to shrink" in detail
+
+
+def test_probe_conflict_cross_user_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    w = _World()
+    # A DIFFERENT user holds a range that overlaps the sandbox user's own
+    # (100000, 65536) block → cross-user overlap → CONFLICT (corruption).
+    w.foreign = [("alice", 120000, 1000)]
+    _install(monkeypatch, w)
+    result, detail = PHASE.probe(_ctx())
+    assert result == PhaseResult.CONFLICT
+    assert "overlaps another user" in detail
+
+
+def test_probe_conflict_cross_user_overlap_identical_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The headline F-071 case: a DIFFERENT user holds the IDENTICAL
+    # (100000, 65536) range the sandbox user owns — exactly what the pre-F-071
+    # blind ``usermod --add-subuids 100000-165535`` produced for every operator.
+    # A value-only dedup would mask this as the user's own; the by-user filter
+    # must keep it and flag the overlap.
+    w = _World()
+    w.foreign = [("alice", 100000, 65536)]
+    _install(monkeypatch, w)
+    result, detail = PHASE.probe(_ctx())
+    assert result == PhaseResult.CONFLICT
+    assert "overlaps another user" in detail
+
+
+def test_cross_user_overlap_none_when_user_has_no_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A user with no own subuid/subgid ranges can never cross-overlap → None,
+    # even if foreign users hold ranges.
+    monkeypatch.setattr(
+        "core.setup.l2_host_prereqs.parse_subuid_for_user", lambda _u: []
+    )
+    monkeypatch.setattr(
+        "core.setup.l2_host_prereqs.parse_subgid_for_user", lambda _u: []
+    )
+    monkeypatch.setattr(
+        "core.setup.subid.read_all_subid_ranges_by_user",
+        lambda: [("alice", 100000, 65536)],
+    )
+    assert l2_host_prereqs._cross_user_overlap("sandboxuser") is None
+
+
+def test_cross_user_overlap_none_when_foreign_disjoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The user owns (100000, 65536); a foreign user holds a disjoint block →
+    # the overlap loop runs but finds nothing → None.
+    monkeypatch.setattr(
+        "core.setup.l2_host_prereqs.parse_subuid_for_user",
+        lambda _u: [(100000, 65536)],
+    )
+    monkeypatch.setattr(
+        "core.setup.l2_host_prereqs.parse_subgid_for_user",
+        lambda _u: [(100000, 65536)],
+    )
+    monkeypatch.setattr(
+        "core.setup.subid.read_all_subid_ranges_by_user",
+        lambda: [
+            ("sandboxuser", 100000, 65536),
+            ("alice", 165536, 65536),
+        ],
+    )
+    assert l2_host_prereqs._cross_user_overlap("sandboxuser") is None
 
 
 def test_probe_missing_subid_absent(

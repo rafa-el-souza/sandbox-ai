@@ -16,7 +16,6 @@ from core.doctor.types import BINARY_PACKAGES, CheckResult, get_install_cmd
 from core.host_config import (
     DEFAULT_PROVISIONING_MODE,
     DockerExecutionMode,
-    MachinectlAuth,
     minimal_host_config,
     sandbox_ai_home,
 )
@@ -249,7 +248,7 @@ def _no_sandbox_running(user: str, mode: DockerExecutionMode) -> bool:
     (docker down / probe failure / unparseable output), return ``False`` so the
     caller reports the real traverse gap rather than hiding it behind a SKIP.
     """
-    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, MachinectlAuth.SUDO, mode), timeout=15)
+    outcome = dispatch.probe("compose-ls", [], minimal_host_config(user, mode), timeout=15)
     if not outcome.ok:
         return False
     try:

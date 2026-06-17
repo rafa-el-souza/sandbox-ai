@@ -111,9 +111,9 @@ The system SHALL hand over the terminal to **core** (as `agent`) using the same 
 
 **In separate-user mode** the `ProxyCommand` crossing prefix is `sudo_pipe_cmd` (the privileged byte-pipe, sudoers-authorized, headless-capable). The crossed `dispatch fwd <wire>` payload crosses via `sudo_pipe_cmd`; `machinectl_cmd` is never used for the ProxyCommand (the PTY's `onlcr` would corrupt the SSH binary stream).
 
-#### Scenario: Terminal handed to core (sudo mode)
-- **WHEN** containers are healthy, `state.lock` is released, and `machinectl_authentication` is `"sudo"`
-- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin (separate-user, SUDO mode)" scenario); the `ProxyCommand` is `sudo systemd-run -q --pipe --uid=<docker_unprivileged_user> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'`
+#### Scenario: Terminal handed to core (separate-user mode)
+- **WHEN** containers are healthy, `state.lock` is released, and the execution mode is separate-user
+- **THEN** the system invokes the same `tlog-rec → ssh → ProxyCommand → /fwd` command as `sandbox attach` (see `cli-attach`'s "Terminal handed to core via ssh-through-admin (separate-user)" scenario); the `ProxyCommand` is `sudo systemd-run -q --pipe --uid=<docker_unprivileged_user> /bin/bash -c '/usr/local/libexec/sandbox-ai/dispatch fwd <inst> --project <project_name> --ip <core_ipc_ip>'`
 
 ### Requirement: Instance Pre-Flight Checks
 The system SHALL validate instance readiness before beginning provisioning. Pre-flight includes sentinel verification, secret completeness, and doctor Chain 1 (Privilege Boundary) checks. The doctor Chain 1 pre-flight SHALL receive the `docker_execution_mode` (`DockerExecutionMode`) from host config and pass it to `build_check_registry()`. SSH keypair generation SHALL occur during `_phase_credentials()`. Per-instance file ownership matching for ro single-files (including the four IPC SSH secrets, all proxy ro files, dotfiles, and rendered service configs) SHALL occur during `_phase_helper_cp_chown_ro_files`, after ACL grants and the cache/log helper-recipe phase, via the disposable-helper-container primitive `helper_chown_files` (per the `helper-container` capability).

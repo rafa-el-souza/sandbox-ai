@@ -34,7 +34,7 @@ from cli.main import (
     app,
     resolve_effective_mode,
 )
-from core.host_config import DockerExecutionMode, MachinectlAuth, minimal_host_config
+from core.host_config import DockerExecutionMode, minimal_host_config
 from core.setup.host_batch import BatchItem, BatchParams
 from core.setup.l0_identity import OperatorResolutionError
 from core.setup.phase_runner import (
@@ -168,7 +168,7 @@ def test_setup_flag_guard_refusal_surfaces_through_command(runner: CliRunner) ->
 
 def _identity_ctx(mode: DockerExecutionMode) -> SetupContext:
     return SetupContext(
-        host_config=minimal_host_config("sandbox", MachinectlAuth.SUDO, mode),
+        host_config=minimal_host_config("sandbox", mode),
         operator="dev",
     )
 
@@ -254,7 +254,7 @@ def _bp() -> BatchParams:
 def _oprl_ctx() -> SetupContext:
     return SetupContext(
         host_config=minimal_host_config(
-            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.OPERATOR_ROOTLESS
+            "sandbox", DockerExecutionMode.OPERATOR_ROOTLESS
         ),
         operator="dev",
     )
@@ -461,7 +461,7 @@ def test_update_runsc_in_separate_user_runs_l6a_subset() -> None:
     """separate-user ``--update-runsc`` still routes to the L6a-only subset path."""
     sep_ctx = SetupContext(
         host_config=minimal_host_config(
-            "sandbox", MachinectlAuth.SUDO, DockerExecutionMode.SEPARATE_USER
+            "sandbox", DockerExecutionMode.SEPARATE_USER
         ),
         operator="dev",
     )
@@ -856,7 +856,13 @@ def test_separate_user_apply_success_records_marker(
             app, ["setup", "--docker-execution-mode", "separate-user", "--yes"]
         )
     assert result.exit_code == 0
-    stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
+    stub_marker_write.assert_called_once_with(
+        "dev",
+        DockerExecutionMode.SEPARATE_USER,
+        workspace_bridge_group="sb-ws",
+        workspace_bridge_gid=100000,
+        docker_unprivileged_user="sandbox",
+    )
 
 
 def test_separate_user_failed_apply_does_not_record_marker(
@@ -899,7 +905,13 @@ def test_separate_user_nothing_to_apply_records_marker(
         )
     assert result.exit_code == 0
     apply_mock.assert_not_called()
-    stub_marker_write.assert_called_once_with("dev", DockerExecutionMode.SEPARATE_USER)
+    stub_marker_write.assert_called_once_with(
+        "dev",
+        DockerExecutionMode.SEPARATE_USER,
+        workspace_bridge_group="sb-ws",
+        workspace_bridge_gid=100000,
+        docker_unprivileged_user="sandbox",
+    )
 
 
 def test_yes_passes_assume_yes_to_distro_gate(runner: CliRunner) -> None:
@@ -1139,12 +1151,12 @@ def test_sigint_handler_callback_raises_setup_aborted(
 @pytest.mark.no_host_config_mock
 def test_setup_is_toml_free(runner: CliRunner) -> None:
     """D8 regression: setup builds host_config from flags + defaults and NEVER
-    reads the operator toml (`HostConfig.from_toml`).
+    reads a per-user toml.
 
-    The pre-fix tree called `HostConfig.from_toml()` on the setup path (resolving
-    to root's `/root/.sandbox-ai`); patching it to fail-on-call demonstrates the
-    read is gone. The config still comes from the documented default
-    (`docker_unprivileged_user="sandbox"`) and the resolved operator.
+    The host toml loader has been retired entirely (`from_toml` deleted); this
+    asserts the surviving behavior — the config comes from the documented default
+    (`docker_unprivileged_user="sandbox"`) and the resolved operator, not any
+    per-user file.
     """
     phases = [_phase("l0")]
     plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
@@ -1156,15 +1168,11 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
         captured.append(ctx)
         return plan
 
-    def _explode() -> object:
-        raise AssertionError("setup must not read the operator toml (D8)")
-
     with (
         patch("cli.main.os.geteuid", return_value=0),
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.emit_distro_gate"),
         patch("cli.main.selected_extras", return_value=[]),
-        patch("cli.main.HostConfig.from_toml", side_effect=_explode),
         patch("cli.main.cli_flow.build_phase_list", return_value=phases),
         patch("cli.main.run_plan_pass", side_effect=_capture),
         patch("cli.main._stdin_is_tty", return_value=True),
@@ -1178,43 +1186,6 @@ def test_setup_is_toml_free(runner: CliRunner) -> None:
     # (the same value `sandbox init` later seeds); operator from the resolver.
     assert ctx.host_config.host.docker_unprivileged_user == "sandbox"
     assert ctx.operator == "dev"
-
-
-# ── auth-mode resolution (sudo-only) ─────────────────────────────────────────
-
-
-@pytest.mark.no_host_config_mock
-def test_setup_resolves_sudo_auth_unconditionally(runner: CliRunner) -> None:
-    """Setup always provisions SUDO auth (the only supported mode)."""
-    from core.host_config import MachinectlAuth
-
-    phases = [_phase("l0")]
-    plan = [_plan("l0", PhaseResult.ALREADY_CORRECT)]
-    captured: list[SetupContext] = []
-
-    def _capture(_phs: object, ctx: SetupContext) -> list[PhasePlanOutcome]:
-        captured.append(ctx)
-        return plan
-
-    with (
-        patch("cli.main.os.geteuid", return_value=0),
-        patch("cli.main.resolve_operator", return_value="dev"),
-        patch("cli.main.emit_distro_gate"),
-        patch("cli.main.selected_extras", return_value=[]),
-        patch("cli.main.cli_flow.build_phase_list", return_value=phases),
-        patch("cli.main.run_plan_pass", side_effect=_capture),
-        patch("cli.main._stdin_is_tty", return_value=True),
-    ):
-        result = runner.invoke(
-            app,
-            [
-                "setup",
-                "--docker-execution-mode",
-                "separate-user",
-            ],
-        )
-    assert result.exit_code == 0
-    assert captured[0].host_config.host.machinectl_authentication == MachinectlAuth.SUDO
 
 
 # ── sticky-opt-in extras inclusion is wired into the phase list ──────────────
@@ -1329,12 +1300,22 @@ def test_invalid_mode_flag_refused(runner: CliRunner) -> None:
     plan_mock.assert_not_called()
 
 
+def test_workspace_bridge_group_flag_removed(runner: CliRunner) -> None:
+    """--workspace-bridge-group is no longer a setup option (name is setup-derived)."""
+    with patch("cli.main.run_plan_pass") as plan_mock:
+        result = runner.invoke(
+            app, ["setup", "--workspace-bridge-group", "custom"]
+        )
+    assert result.exit_code != 0
+    assert "No such option" in result.output
+    plan_mock.assert_not_called()
+
+
 def _build_and_guard(
     operator_flag: str | None = None,
     *,
     mode_flag: str | None = None,
     docker_unprivileged_user: str = "sandbox",
-    workspace_bridge_group: str = "sb-ws",
 ) -> SetupContext:
     """Mirror ``setup()``'s build→flag-guard sequence (finding 8.7 reorder).
 
@@ -1346,7 +1327,6 @@ def _build_and_guard(
         operator_flag,
         mode_flag=mode_flag,
         docker_unprivileged_user=docker_unprivileged_user,
-        workspace_bridge_group=workspace_bridge_group,
     )
     _guard_setup_flags(
         ctx.host_config,
@@ -1358,7 +1338,7 @@ def _build_and_guard(
 
 
 def test_flags_threaded_into_host_config() -> None:
-    """--docker-unprivileged-user and --workspace-bridge-group thread into host_config."""
+    """--docker-unprivileged-user threads into host_config (bridge group is setup-derived)."""
     with (
         patch("cli.main.resolve_operator", return_value="dev"),
         patch("cli.main.read_mode", return_value=None),
@@ -1367,10 +1347,10 @@ def test_flags_threaded_into_host_config() -> None:
             None,
             mode_flag="separate-user",
             docker_unprivileged_user="customsvc",
-            workspace_bridge_group="custom-ws",
         )
     assert ctx.host_config.host.docker_unprivileged_user == "customsvc"
-    assert ctx.host_config.host.workspace_bridge_group == "custom-ws"
+    # Bridge group name is helper-derived, not a flag: separate-user → shared "sb-ws".
+    assert ctx.host_config.host.workspace_bridge_group == "sb-ws"
     assert (
         ctx.host_config.host.docker_execution_mode is DockerExecutionMode.SEPARATE_USER
     )
@@ -1425,6 +1405,57 @@ def test_guard_refuses_operator_other_than_invoker_in_operator_rootless() -> Non
             mode_flag="operator-rootless",
         )
     assert "does not match the invoking user" in str(exc.value)
+
+
+def test_guard_refuses_sudo_user_invoker_mismatch_in_operator_rootless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sudo -u other` footgun: op-rootless $SUDO_USER ≠ invoking user is refused."""
+    monkeypatch.setenv("SUDO_USER", "someone-else")
+    with (
+        patch("cli.main.resolve_operator", return_value="someone-else"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+        pytest.raises(_SetupFlagRefused) as exc,
+    ):
+        _build_and_guard(
+            None,
+            mode_flag="operator-rootless",
+        )
+    assert "resolved the operator from $SUDO_USER='someone-else'" in str(exc.value)
+
+
+def test_guard_allows_matching_operator_flag_in_operator_rootless() -> None:
+    """op-rootless --operator == invoker passes both cross-checks (skips the
+    $SUDO_USER footgun branch, which is operator_flag-None-only)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="dev"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+    ):
+        ctx = _build_and_guard(
+            "dev",
+            mode_flag="operator-rootless",
+        )
+    assert ctx.operator == "dev"
+
+
+def test_guard_allows_operator_other_than_invoker_in_separate_user() -> None:
+    """separate-user --operator <other> is the admin path; the op-rootless-only
+    cross-check must NOT fire (admin provisions for another)."""
+    with (
+        patch("cli.main.resolve_operator", return_value="someone-else"),
+        patch("cli.main.read_mode", return_value=None),
+        patch("cli.main.getpass.getuser", return_value="dev"),
+        patch("core.host_config.getpass.getuser", return_value="dev"),
+    ):
+        ctx = _build_and_guard(
+            "someone-else",
+            mode_flag="separate-user",
+        )
+    assert ctx.operator == "someone-else"
 
 
 def test_guard_refuses_root_daemon_owner_separate_user() -> None:

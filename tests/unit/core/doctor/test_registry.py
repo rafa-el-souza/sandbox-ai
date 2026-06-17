@@ -39,7 +39,7 @@ class TestCheckRunner:
         from core.doctor import build_check_registry
 
         checks = build_check_registry()
-        assert len(checks) == 42
+        assert len(checks) == 43
         ids = [c.id for c in checks]
         assert "host_cpu_capacity" in ids
         assert "instance_memory_overcommit" in ids
@@ -323,7 +323,20 @@ class TestSudoRegistry:
         checks = build_check_registry()
         ids = [c.id for c in checks]
         assert "sudo" in ids
-        assert len(checks) == 42
+        assert len(checks) == 43
+
+    def test_obsolete_host_toml_in_per_user_tree_category(self) -> None:
+        from core.doctor import build_check_registry
+
+        checks = {c.id: c for c in build_check_registry()}
+        assert "obsolete_host_toml" in checks
+        obsolete = checks["obsolete_host_toml"]
+        assert obsolete.category == "Per-User Tree"
+        # Mode-invariant: runs on unprovisioned hosts (both modes apply).
+        assert obsolete.depends_on == []
+        from core.host_config import DockerExecutionMode
+
+        assert set(obsolete.applies_in) == set(DockerExecutionMode)
 
     def test_machinectl_reachable_dependency_includes_sudo(self) -> None:
         from core.doctor import build_check_registry
@@ -624,8 +637,8 @@ class TestRunCheckSubsetThreadsMode:
         )
         by_name = {r.name: r for r in results}
         # The crossing-only checks are mode-skipped, not run / not PASS.
-        assert by_name["machinectl reachable"].status == "skip"
-        assert by_name["machinectl reachable"].detail == "skipped (operator-rootless)"
+        assert by_name["boundary reachable"].status == "skip"
+        assert by_name["boundary reachable"].detail == "skipped (operator-rootless)"
         assert by_name["unprivileged user"].status == "skip"
         assert by_name["systemd-machined"].status == "skip"
 
@@ -643,7 +656,7 @@ class TestRunCheckSubsetThreadsMode:
         # The crossing-only checks carry the operator-rootless mode-skip detail.
         assert by_name["unprivileged user"].status == "skip"
         assert by_name["unprivileged user"].detail == "skipped (operator-rootless)"
-        assert by_name["machinectl reachable"].status == "skip"
+        assert by_name["boundary reachable"].status == "skip"
 
 
 class TestL1PrerequisitesSurfaceInOperatorRootless:

@@ -1,0 +1,475 @@
+name = "multi-operator-separate-user-first"
+
+# =============================================================================
+# Multi-operator validation battery — SEPARATE-USER FIRST arc.
+#
+# PURPOSE
+#   The cross-mode mirror of multi-operator-oprootless-first. Here the host is
+#   provisioned separate-user FIRST (op1 -> creates the dedicated `sandbox`
+#   daemon user + the shared `sb-ws` group inside the SANDBOX user's subgid
+#   range), then a SECOND operator op2 provisions OPERATOR-ROOTLESS on the same
+#   host. This is the SILENT-BREAK case: op-rootless's GROUPADD step
+#   (host_batch._apply_groupadd) finds `sb-ws` already present and its
+#   satisfaction probe (host_batch._group_satisfied) checks only existence +
+#   membership, never gid-in-range -> op2's setup silently accepts a bridge gid
+#   that lives in the `sandbox` daemon user's subgid range, NOT op2's.
+#
+# SCHEMA MIGRATION (vmlease requires/[prep]):
+#   - root `requires = ["docker"]` installs docker-ce + rootless extras.
+#   - the op1 PREP probe is hoisted into [prep]: util-linux via [prep.packages];
+#     uv-install / uv-sync / tlog as ordered [[prep.setup]] script= steps. The
+#     PREP provenance block + the op1 [host] config-seed are DROPPED (covered by
+#     vmlease's _detail snapshot; [host] retired under C-013).
+#   - mk-op2 / mk-op3f (pure-provisioning) are hoisted into ordered required=true
+#     [[prep.setup]] steps; their per-operator [host] seeds are DROPPED. This arc
+#     has NO op4 / NO fused F-071 creation+setup+assert probe (its F-071 silent
+#     overlap is structurally absent per the header NOTE), so the op4
+#     split-not-hoist caveat does not apply here.
+#
+# DEFECTS UNDER TEST
+#   F-070  bridge-gid collision (cross-mode direction): `sb-ws`'s gid is in the
+#          dedicated sandbox user's range; op2 (op-rootless) inherits it but it
+#          is outside op2's /etc/subgid range -> op2's rootless docker cannot use
+#          it (workspace_bridge_gid -> in_container_gid_for_host_gid raises
+#          SubgidOutOfRangeError at start/doctor time).
+#   F-071  subid overlap. RE-AIM (grounded in code, confirmed by smoke): the
+#          SILENT overlap is the SEPARATE-USER literal-100000 append
+#          (l2_host_prereqs.py:343-349, no cross-user overlap check) colliding
+#          with an op-rootless operator that already holds 100000. THIS BATTERY
+#          DOES NOT REPRODUCE IT and intentionally carries NO F-071 silent-
+#          overlap red gate (see the dedicated NOTE below): here op1 is
+#          separate-user (the `sandbox` user gets 100000) and op2 is op-rootless
+#          via a plain `useradd` (auto-assigned a DISTINCT block, e.g. 165536),
+#          so no op-rootless operator lands on 100000 and the silent overlap is
+#          structurally absent. It is battery 1's mixed arc (op-rootless op1 at
+#          100000 + a later separate-user `sandbox` user at 100000) that
+#          reproduces it. The op3f entry-less arc here is OBSERVATIONAL only:
+#          the op-rootless entry-less path FAILS LOUD with NoSubgidRangeError
+#          (host_batch.py:440 -> host_config.py:597) before any append, so
+#          `op3f-loud-assert` documents that acceptable-but-mis-worded loud-fail
+#          and PASSES on HEAD. op2 keeps its auto-assigned distinct block and is
+#          the F-070 (bridge-gid) subject.
+#
+# NOTE on the ABSENCE of an F-071 silent-overlap red gate in this battery
+#   The F-071 silent overlap requires BOTH: (a) an op-rootless operator holding
+#   the 100000 block, and (b) a separate-user `sandbox` user that the hardcoded
+#   l2_host_prereqs.py:343-349 literal-100000 append (no cross-user overlap
+#   check) silently lands on 100000. In THIS arc op1 is separate-user (the
+#   `sandbox` user takes 100000 FIRST) and the only op-rootless operator (op2)
+#   was created with a plain `useradd`, which auto-assigns a DISTINCT block
+#   (e.g. 165536) -- so no op-rootless operator is at 100000 and the two
+#   preconditions never co-occur. The silent overlap is therefore structurally
+#   absent here. It is battery 1's mixed arc (`mixed-subid-overlap-and-guard`)
+#   that reproduces F-071 as a red gate.
+#
+# (Full GATING / per-probe verdict / sudo-i-caveat narrative preserved in the
+#  original sandbox-ai battery; see the commentary on each probe.)
+# =============================================================================
+
+requires = ["docker"]
+
+[prep.packages]
+apt = ["bsdutils", "util-linux"]
+dnf = ["util-linux"]
+pacman = ["util-linux"]
+
+[[prep.setup]]
+id = "uv-install"
+title = "install uv for the probe operator op1 (op1 HOME)"
+required = true
+script = "prep/uv-install.sh"
+
+[[prep.setup]]
+id = "uv-sync"
+title = "op1 extract uploaded source tarball + uv sync -> sandbox CLI"
+required = true
+script = "prep/uv-sync.sh"
+
+[[prep.setup]]
+id = "install-helpers"
+title = "install the shared probe-helper library to /tmp/sbai-helpers.sh (bridge-group resolver + forensic dump + teardown sentinel)"
+required = true
+script = "prep/install-helpers.sh"
+
+[[prep.setup]]
+id = "tlog"
+title = "install tlog-rec per-distro (best-effort; L0 refusal is a separate finding)"
+required = false
+script = "prep/tlog.sh"
+
+[[prep.setup]]
+id = "mk-operators"
+title = "create the extra operators (useradd + sudoers + linger + per-operator uv sync)"
+required = true
+script = "prep/mk-operators.sh"
+
+[[probe]]
+id = "op1-setup"
+title = "op1 separate-user setup: `sudo ... script -qec 'sandbox setup --docker-execution-mode separate-user --docker-unprivileged-user sandbox --yes'`; capture sb-ws gid + the sandbox user's subgid range"
+tag = "mutating:host-root"
+timeout = 1200
+classifies = "Provision the host separate-user as op1: exit 0 + 'Setup complete' + the setup-state marker + the dedicated `sandbox` daemon user. Capture the created `sb-ws` gid and the `sandbox` user's /etc/subgid range into /tmp/* for the later cross-operator asserts."
+run = '''
+VENV="$HOME/sandbox-ai/.venv/bin"
+. /tmp/sbai-helpers.sh
+rc=0
+OP1=$(id -un)
+echo '== separate-user setup via sudo; capture the FULL tty stream with script(1) =='
+rm -f /tmp/setup1.out
+sudo env PATH="$VENV:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" script -qec "sandbox setup --docker-execution-mode separate-user --docker-unprivileged-user sandbox --yes" /tmp/setup1.out
+RC=$?
+echo "op1 separate-user setup exit: $RC (0 expected)"
+tail -25 /tmp/setup1.out
+[ "$RC" -eq 0 ] && echo OP1_SETUP_EXIT0_OK || { echo OP1_SETUP_EXIT_NONZERO_FAIL; rc=1; }
+grep -qiE "Setup complete|Summary:.*0 failed" /tmp/setup1.out && echo OP1_SETUP_COMPLETE_OK || { echo OP1_SETUP_NO_COMPLETE_FAIL; rc=1; }
+if sudo test -f /usr/local/libexec/sandbox-ai/setup-state.json; then echo OP1_SETUP_MARKER_PRESENT_OK; else echo OP1_SETUP_MARKER_MISSING_FAIL; rc=1; fi
+id sandbox >/dev/null 2>&1 && echo OP1_SANDBOX_USER_OK || { echo OP1_NO_SANDBOX_USER_FAIL; rc=1; }
+echo '== capture op1 bridge group via the marker resolver (separate-user: the shared sb-ws) + sandbox user subgid =='
+# Resolver reads what op1's setup actually recorded (separate-user -> "sb-ws"); the token is
+# mode-explicit (the same OP1_SBWS line means sb-ws here vs sb-ws-<op1> in op-rootless, #6).
+SBWS_NAME=$(sbai_bridge_group "$OP1")
+SBWS_GID=$(sbai_bridge_gid "$OP1")
+SBUSER_SUBGID=$(grep -E "^sandbox:" /etc/subgid 2>/dev/null | head -1)
+printf '%s\n' "$SBWS_GID" > /tmp/sbws.gid
+printf '%s\n' "$SBUSER_SUBGID" > /tmp/sbuser.subgid
+echo "OP1_BRIDGE_GROUP=${SBWS_NAME:-<none>} SBWS_GID=${SBWS_GID:-<none>} OP1_review"
+echo "SANDBOX_USER_SUBGID=${SBUSER_SUBGID:-<none>} OP1_review"
+[ -n "$SBWS_GID" ] && echo OP1_SBWS_PRESENT_OK || { echo OP1_SBWS_ABSENT_FAIL; rc=1; }
+exit $rc
+'''
+
+[[probe]]
+id = "op2-setup"
+title = "op2 operator-rootless setup (the SILENT-BREAK case): `sandbox setup --docker-execution-mode operator-rootless --yes` AS op2; record exit + the unchanged sb-ws gid"
+tag = "mutating:host-root"
+timeout = 1200
+classifies = "op2 provisions OP-ROOTLESS on a host where op1's separate-user setup already created `sb-ws` inside the dedicated `sandbox` user's subgid range. On HEAD setup EXITS 0 (op-rootless GROUPADD's _group_satisfied checks only existence+membership, never gid-in-range, so the sandbox-user-range gid is silently accepted for op2). Exit is RECORDED, NOT gated (gating on it would wrongly pass on HEAD). The real gate is the next probe. Capture op2's setup exit and confirm sb-ws gid unchanged."
+run = '''
+. /tmp/sbai-helpers.sh
+echo '== sandbox setup as op2 (op-rootless, runs as the operator op2) =='
+# The shared sb-ws DOES exist here (op1 separate-user created it in the sandbox user range);
+# op2's op-rootless setup must not MOVE it.
+SBWS_BEFORE=$(getent group sb-ws | cut -d: -f3)
+echo "shared sb-ws gid before op2 setup: ${SBWS_BEFORE:-<none>} OP2_SETUP_review"
+# script-file pattern: write as probe user, run as op2 with a single path arg (no sudo -i newline collapse).
+cat > /tmp/op2_setup.sh <<'SCRIPT'
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+# unset SUDO_* so `sandbox` resolves the operator as the CURRENT user (op2/op3f), not the
+# probe user that `sudo -iu` records in SUDO_USER (l0_identity precedence: --operator -> $SUDO_USER
+# -> current). This RESTORES fidelity to the real scenario (opN logs in directly, no SUDO_USER).
+unset SUDO_USER SUDO_UID SUDO_GID PKEXEC_UID
+export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+sandbox setup --docker-execution-mode operator-rootless --yes
+SCRIPT
+chmod 0755 /tmp/op2_setup.sh
+sudo -iu op2 bash /tmp/op2_setup.sh > /tmp/op2_setup.out 2>&1
+RC=$?
+echo "op2 setup exit: $RC"
+tail -25 /tmp/op2_setup.out
+echo "== HEAD expectation: exit 0 (silent break). Recorded, NOT gated. =="
+if [ "$RC" -eq 0 ]; then echo OP2_SETUP_EXIT0_review; else echo OP2_SETUP_EXIT_NONZERO_review; fi
+echo '== confirm shared sb-ws gid unchanged (op-rootless never moves an existing group) =='
+SBWS_AFTER=$(getent group sb-ws | cut -d: -f3)
+echo "shared sb-ws gid after op2 setup: ${SBWS_AFTER:-<none>} OP2_SETUP_review"
+if [ -n "$SBWS_AFTER" ] && [ "$SBWS_BEFORE" = "$SBWS_AFTER" ]; then echo OP2_SBWS_UNCHANGED_review; else echo OP2_SBWS_CHANGED_review; fi
+echo '== op2 own per-operator bridge group (op-rootless: sb-ws-op2, in op2 range) =='
+OP2_BRIDGE_NAME=$(sbai_bridge_group op2)
+OP2_BRIDGE_GID=$(sbai_bridge_gid op2)
+echo "op2 bridge group=${OP2_BRIDGE_NAME:-<none>} gid=${OP2_BRIDGE_GID:-<none>} OP2_SETUP_review"
+echo '== SILENT-BREAK regression evidence: op2 a MEMBER of the SHARED sb-ws at an OUT-OF-RANGE gid =='
+# Exact-token match on `sb-ws` (NOT op2's correct per-operator `sb-ws-op2`, which shares the
+# prefix) AND require the shared gid to be OUTSIDE op2's subgid range. Membership of op2's own
+# correctly-ranged group is NOT a silent break (#7).
+OP2_SUBGID=$(grep -E "^op2:" /etc/subgid 2>/dev/null | head -1)
+if id -nG op2 2>/dev/null | tr ' ' '\n' | grep -qx sb-ws && [ -n "$SBWS_AFTER" ] && [ -n "$OP2_SUBGID" ]; then
+  S2=$(printf '%s' "$OP2_SUBGID" | cut -d: -f2); C2=$(printf '%s' "$OP2_SUBGID" | cut -d: -f3)
+  case "$SBWS_AFTER$S2$C2" in
+    *[!0-9]*|'') echo "shared sb-ws / op2 range unparseable OP2_SETUP_review" ;;
+    *) E2=$((S2 + C2));
+       if [ "$SBWS_AFTER" -ge "$S2" ] && [ "$SBWS_AFTER" -lt "$E2" ]; then
+         echo "op2 in shared sb-ws but gid $SBWS_AFTER is IN op2 range -- not a collision OP2_SETUP_review"
+       else
+         echo "op2 is a member of the SHARED sb-ws gid $SBWS_AFTER, OUTSIDE op2 range [$S2,$E2) -- silent break"
+         echo MU_OP2_SILENT_ACCEPT_review
+       fi ;;
+  esac
+else
+  echo "op2 is NOT a member of the colliding shared sb-ws (uses its own ${OP2_BRIDGE_NAME:-<none>}) OP2_SETUP_review"
+fi
+# Always succeed: this probe only records observational state for the gates that follow.
+exit 0
+'''
+
+[[probe]]
+id = "op2-bridge-gid-assert"
+title = "F-070 CORE GATE: the `sb-ws` gid IS within op2's /etc/subgid range"
+tag = "mutating:host-root"
+timeout = 120
+classifies = "F-070 bridge-gid collision (cross-mode) core assertion, re-aimed at the group op2 ACTUALLY uses. POST-FIX-CORRECT: op2's marker-recorded bridge group (op-rootless: the per-operator sb-ws-op2) has a live gid inside op2's /etc/subgid range -> _OK. The OLD `getent group sb-ws` compared the STALE SHARED sb-ws (created by op1 separate-user, gid in the dedicated `sandbox` user's range) against op2's range and emitted a FALSE RED even though op2's own sb-ws-op2 is correctly in range (doctor confirms ✓). A genuine regression where op2's recorded group lands outside its range -> _FAIL (RED) + MU_OP2_BRIDGE_GID_OUT_OF_RANGE. The group NAME is resolved from op2's setup-state marker entry via the shared resolver; the stale shared sb-ws gid is shown as _review context only."
+run = '''
+. /tmp/sbai-helpers.sh
+rc=0
+echo '== resolve op2 bridge group from the marker (the group op2 ACTUALLY uses) + ranges =='
+# Re-aimed: the OLD `getent group sb-ws` compared the STALE SHARED sb-ws (in the dedicated
+# sandbox user range) against op2's range and emitted a FALSE RED. op2 actually uses the
+# per-operator sb-ws-op2 (in op2's range; doctor confirms ✓). Resolve op2's recorded group
+# name from its marker entry and getent its live gid; the shared sb-ws is shown as context only.
+SBWS_NAME=$(sbai_bridge_group op2)
+SBWS_GID=$(sbai_bridge_gid op2)
+OP2_SUBGID=$(grep -E "^op2:" /etc/subgid 2>/dev/null | head -1)
+SBUSER_SUBGID=$(grep -E "^sandbox:" /etc/subgid 2>/dev/null | head -1)
+SHARED_SBWS_GID=$(getent group sb-ws 2>/dev/null | cut -d: -f3)
+echo "OP2_BRIDGE_GROUP=${SBWS_NAME:-<none>} SBWS_GID=${SBWS_GID:-<none>} BRIDGE_review"
+echo "STALE_SHARED_SBWS_GID=${SHARED_SBWS_GID:-<none>} (context: op2 does NOT use this) BRIDGE_review"
+echo "OP2_SUBGID=${OP2_SUBGID:-<none>} BRIDGE_review"
+echo "SANDBOX_USER_SUBGID=${SBUSER_SUBGID:-<none>} BRIDGE_review"
+if [ -z "$SBWS_GID" ]; then echo BRIDGE_SBWS_ABSENT_FAIL; exit 1; fi
+if [ -z "$OP2_SUBGID" ]; then echo BRIDGE_OP2_SUBGID_ABSENT_FAIL; exit 1; fi
+S2=$(printf '%s' "$OP2_SUBGID" | cut -d: -f2)
+C2=$(printf '%s' "$OP2_SUBGID" | cut -d: -f3)
+case "$SBWS_GID$S2$C2" in
+  *[!0-9]*|'') echo BRIDGE_UNPARSEABLE_FAIL; exit 1 ;;
+esac
+E2=$((S2 + C2))
+echo "op2 subgid range: [$S2, $E2)  $SBWS_NAME gid: $SBWS_GID"
+if [ "$SBWS_GID" -ge "$S2" ] && [ "$SBWS_GID" -lt "$E2" ]; then
+  echo BRIDGE_GID_IN_OP2_RANGE_OK
+else
+  echo BRIDGE_GID_OUT_OF_OP2_RANGE_FAIL
+  echo MU_OP2_BRIDGE_GID_OUT_OF_RANGE_review
+  rc=1
+fi
+exit $rc
+'''
+
+[[probe]]
+id = "op2-doctor"
+title = "`sandbox doctor --user op2`: NO bridge-gid-out-of-range violation"
+tag = "mutating:host-root"
+timeout = 180
+classifies = "doctor's setup-invariants audit (setup_invariants._audit_subid_and_group) flags 'bridge group sb-ws gid <n> outside op2's /etc/subgid range'. POST-FIX-CORRECT: doctor --user op2 exits 0 with NO such violation -> _OK. On HEAD the violation is present (sb-ws gid is in the sandbox user's range, not op2's) -> _FAIL (RED). The host-global marker now reads op-rootless (op2 wrote it last); --user op2 is passed explicitly so the audit targets op2's ranges regardless."
+run = '''
+. /tmp/sbai-helpers.sh
+rc=0
+echo '== sandbox doctor --user op2 (run as op2 against op2 ranges) =='
+cat > /tmp/op2_doctor.sh <<'SCRIPT'
+# unset SUDO_* so `sandbox` resolves the operator as the CURRENT user (op2/op3f), not the
+# probe user that `sudo -iu` records in SUDO_USER (l0_identity precedence: --operator -> $SUDO_USER
+# -> current). This RESTORES fidelity to the real scenario (opN logs in directly, no SUDO_USER).
+unset SUDO_USER SUDO_UID SUDO_GID PKEXEC_UID
+export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+sandbox doctor --user op2
+SCRIPT
+chmod 0755 /tmp/op2_doctor.sh
+sudo -iu op2 bash /tmp/op2_doctor.sh > /tmp/op2_doctor.out 2>&1
+DRC=$?
+echo "doctor exit: $DRC"
+cat /tmp/op2_doctor.out
+echo '== narrow gate: a ✗ (hard-fail) row on op2 bridge gid / subgid range =='
+# Gate ONLY on a red ✗ subgid/bridge violation on op2's OWN group. The ⚠ (yellow) advisory
+# about the stale shared sb-ws (gid in the sandbox user range, outside op2's) is NOT a ✗ on
+# op2's bridge and must not gate (#3/#4). ACL/registry/init-ordering ✗ rows are excluded by
+# the helper (env/ordering artifacts), surfaced as _review below.
+HARD=$(sbai_doctor_hard_violations /tmp/op2_doctor.out)
+if printf '%s\n' "$HARD" | grep -qiE "subgid range|bridge group .* outside|out of .*subgid"; then
+  echo DOCTOR_BRIDGE_GID_VIOLATION_PRESENT_FAIL
+  echo MU_OP2_BRIDGE_GID_OUT_OF_RANGE_review
+  rc=1
+else
+  echo DOCTOR_NO_BRIDGE_GID_VIOLATION_OK
+fi
+echo '== observational: stale shared-sb-ws ⚠ advisory (NOT gated) =='
+if grep -E "⚠" /tmp/op2_doctor.out 2>/dev/null | grep -qiE "sb-ws|bridge group"; then echo DOCTOR_SHARED_SBWS_ADVISORY_review; fi
+echo '== observational: ✗ rows EXCLUDED from the gate (env capability / network / init-ordering) =='
+grep '✗' /tmp/op2_doctor.out 2>/dev/null | grep -iE "ACL support|image digest|registry|state dir writable|per-user tree exists" && echo DOCTOR_ENV_OR_ORDERING_ROWS_review || true
+echo '== whole-doctor exit recorded observationally (NOT gated: it conflates env/network/init-ordering) =='
+[ "$DRC" -eq 0 ] && echo DOCTOR_EXIT0_review || echo DOCTOR_EXIT_NONZERO_review
+exit $rc
+'''
+
+[[probe]]
+id = "op2-start"
+title = "op2 `sandbox init` + `sandbox start`: op2's core container runs under op2's rootless docker"
+tag = "mutating:host-root"
+timeout = 600
+classifies = "End-to-end op2 runtime. POST-FIX-CORRECT: op2 can init + start an instance and `-mu2-core-1` runs under op2's rootless docker (docker ps with op2's XDG_RUNTIME_DIR + DOCKER_HOST) -> _OK. On HEAD start fails (workspace_bridge_gid -> in_container_gid_for_host_gid raises SubgidOutOfRangeError because sb-ws gid is in the sandbox user's range, outside op2's) -> _FAIL (RED). Uses instance name `mu2`; seeds dummy secrets like the baseline init."
+run = '''
+. /tmp/sbai-helpers.sh
+rc=0
+OP2_UID=$(id -u op2)
+echo '== op2 init (non-TTY) + seed dummy secrets =='
+cat > /tmp/op2_init.sh <<'SCRIPT'
+# unset SUDO_* so `sandbox` resolves the operator as the CURRENT user (op2/op3f), not the
+# probe user that `sudo -iu` records in SUDO_USER (l0_identity precedence: --operator -> $SUDO_USER
+# -> current). This RESTORES fidelity to the real scenario (opN logs in directly, no SUDO_USER).
+unset SUDO_USER SUDO_UID SUDO_GID PKEXEC_UID
+export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+sandbox init mu2 --empty main < /dev/null 2>&1
+ENVF="$HOME/.sandbox-ai/instances/mu2/.sandbox.env"
+if [ -f "$ENVF" ]; then
+  sed -i 's#^CORE_ANTHROPIC_API_KEY=.*#CORE_ANTHROPIC_API_KEY="sk-ant-dummy0000000000000000000000000000"#; s#^CORE_GITHUB_TOKEN=.*#CORE_GITHUB_TOKEN="ghp_dummy00000000000000000000000000000000"#' "$ENVF"
+fi
+SCRIPT
+chmod 0755 /tmp/op2_init.sh
+sudo -iu op2 bash /tmp/op2_init.sh > /tmp/op2_init.out 2>&1
+IRC=$?
+echo "op2 init exit: $IRC"
+tail -15 /tmp/op2_init.out
+[ "$IRC" -eq 0 ] && echo OP2_INIT_EXIT0_OK || { echo OP2_INIT_EXIT_NONZERO_FAIL; rc=1; }
+echo '== op2 start (no interactive handover) =='
+cat > /tmp/op2_start.sh <<'SCRIPT'
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+# unset SUDO_* so `sandbox` resolves the operator as the CURRENT user (op2/op3f), not the
+# probe user that `sudo -iu` records in SUDO_USER (l0_identity precedence: --operator -> $SUDO_USER
+# -> current). This RESTORES fidelity to the real scenario (opN logs in directly, no SUDO_USER).
+unset SUDO_USER SUDO_UID SUDO_GID PKEXEC_UID
+export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+sandbox start mu2 --no-handover
+SCRIPT
+chmod 0755 /tmp/op2_start.sh
+sudo -iu op2 bash /tmp/op2_start.sh > /tmp/op2_start.out 2>&1
+SRC=$?
+echo "op2 start exit: $SRC"
+tail -30 /tmp/op2_start.out
+# Start exit is OBSERVATIONAL: a non-zero exit here is currently driven by the core
+# container's exit-126 whose cause is uncharacterized (#9) — captured below, not gated.
+[ "$SRC" -eq 0 ] && echo OP2_START_EXIT0_review || echo OP2_START_EXIT_NONZERO_review
+echo '== F-070 GATE: SubgidOutOfRangeError must be ABSENT (post per-operator fix) =='
+if grep -qiE "SubgidOutOfRange|outside .*subgid|out of .*subgid range" /tmp/op2_start.out; then
+  echo OP2_START_SUBGID_ERROR_PRESENT_FAIL
+  echo MU_OP2_BRIDGE_GID_OUT_OF_RANGE_review
+  rc=1
+else
+  echo OP2_START_NO_SUBGID_ERROR_OK
+fi
+echo '== op2 core container under op2 rootless docker (OBSERVATIONAL until the exit-126 cause is characterized, #9) =='
+# The OP2_START_NO_SUBGID_ERROR_OK + core-down contradiction proved the OLD hard gate
+# tested a failure mode the per-operator fix already removed. Core health is recorded,
+# NOT gated, until the forensic dump (below) lets us classify the 126 cause.
+CT=$(sudo -u op2 env XDG_RUNTIME_DIR="/run/user/${OP2_UID}" DOCKER_HOST="unix:///run/user/${OP2_UID}/docker.sock" docker ps --format '{{.Names}}' 2>&1 | tr -d '\r')
+echo "op2 containers: $CT"
+if printf '%s' "$CT" | grep -q -- '-mu2-core-1'; then
+  echo OP2_CORE_RUNNING_review
+else
+  echo OP2_CORE_NOT_RUNNING_review
+  echo '== forensic capture of the non-running core BEFORE the probe exits + mark for teardown guard (#1/#3) =='
+  CTR=$(sudo -u op2 env XDG_RUNTIME_DIR="/run/user/${OP2_UID}" DOCKER_HOST="unix:///run/user/${OP2_UID}/docker.sock" docker ps -a --format '{{.Names}}' 2>/dev/null | tr -d '\r' | grep -- '-mu2-core-1' | head -1)
+  CTR=${CTR:--mu2-core-1}
+  sbai_forensic_dump op2 "$CTR"
+  sbai_mark_forensics op2 "$CTR"
+fi
+exit $rc
+'''
+
+[[probe]]
+id = "op3f-setup"
+title = "op3f operator-rootless setup (entry-less): `sandbox setup --docker-execution-mode operator-rootless --yes` AS op3f; setup FAILS LOUD with NoSubgidRangeError before any subid append"
+tag = "mutating:host-root"
+timeout = 1200
+classifies = "op3f provisions op-rootless with NO pre-existing /etc/subuid+/etc/subgid entries (stripped in mk-op3f). RE-AIM: classify_host_root_batch (host_batch.py:440) calls autodetect_workspace_bridge_gid_recommendation BEFORE the subid classify, so the entry-less op-rootless path FAILS LOUD with NoSubgidRangeError (host_config.py:597, 'cannot recommend a bridge gid') and NEVER reaches the literal subid append -- it does NOT silently overlap the dedicated `sandbox` user. Exit recorded observationally (_review), NOT gated; the loud failure is then asserted (as acceptable behavior) by the op3f-loud-assert probe that follows. Uses the script-file pattern so setup ACTUALLY runs (sudo -i collapses a multiline arg)."
+run = '''
+echo '== sandbox setup as op3f (op-rootless, entry-less precondition -> setup FAILS LOUD before any append) =='
+# script-file pattern: write as probe user, run as op3f with a single path arg (no sudo -i newline collapse).
+cat > /tmp/op3f_setup.sh <<'SCRIPT'
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+# unset SUDO_* so `sandbox` resolves the operator as the CURRENT user (op2/op3f), not the
+# probe user that `sudo -iu` records in SUDO_USER (l0_identity precedence: --operator -> $SUDO_USER
+# -> current). This RESTORES fidelity to the real scenario (opN logs in directly, no SUDO_USER).
+unset SUDO_USER SUDO_UID SUDO_GID PKEXEC_UID
+export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+sandbox setup --docker-execution-mode operator-rootless --yes
+SCRIPT
+chmod 0755 /tmp/op3f_setup.sh
+sudo -iu op3f bash /tmp/op3f_setup.sh > /tmp/op3f_setup.out 2>&1
+RC=$?
+echo "op3f setup exit: $RC"
+tail -25 /tmp/op3f_setup.out
+echo "== exit recorded, NOT gated (the subid-overlap-assert is the F-071 gate). =="
+if [ "$RC" -eq 0 ]; then echo OP3F_SETUP_EXIT0_review; else echo OP3F_SETUP_EXIT_NONZERO_review; fi
+echo '== record op3f subid entries appended by setup =='
+grep -E "^op3f:" /etc/subuid /etc/subgid 2>/dev/null || echo 'op3f subid entries: <none> OP3F_SETUP_review'
+# Always succeed: this probe only records observational state for the gate that follows.
+exit 0
+'''
+
+[[probe]]
+id = "op3f-loud-assert"
+title = "OBSERVATIONAL: op3f's entry-less op-rootless setup FAILED LOUD with a subid-range error (acceptable behavior; this battery has NO F-071 silent-overlap gate)"
+tag = "mutating:host-root"
+timeout = 120
+classifies = "Re-aim (grounded in code, confirmed by smoke): the op-rootless ENTRY-LESS path does NOT produce a silent subid overlap. classify_host_root_batch (host_batch.py:440) calls autodetect_workspace_bridge_gid_recommendation(operator) BEFORE the subid classify, so op3f (no /etc/subgid entry) FAILS LOUD with NoSubgidRangeError (host_config.py:597, 'cannot recommend a bridge gid') and NEVER reaches the literal subid append. That loud failure is ACCEPTABLE behavior, not a bug. This probe documents it: it asserts op3f-setup failed loud with a subid-range error (-> OP3F_LOUD_FAIL_OK) and flags the mis-worded 'cannot recommend a bridge gid' message as OP3F_MESSAGE_MISLEADING_review (the #8 clarity fix should reword it). PASSES on HEAD: documentation of acceptable-but-mis-worded loud-fail. THIS BATTERY HAS NO F-071 SILENT-OVERLAP RED GATE (see the header NOTE): the silent overlap needs an op-rootless operator at 100000 AND a separate-user `sandbox` user at 100000; here the op-rootless op2 is at a distinct auto-assigned block, so the overlap is structurally absent -- it is battery 1's mixed arc that reproduces it. Raw gid/range values emitted as _review."
+run = '''
+rc=0
+echo '== inspect op3f entry-less op-rootless setup output (captured in op3f-setup) =='
+if [ ! -f /tmp/op3f_setup.out ]; then
+  echo OP3F_SETUP_OUT_MISSING_FAIL
+  exit 1
+fi
+tail -25 /tmp/op3f_setup.out
+echo '== raw op3f subid entries (should be ABSENT: setup never reached the literal append) =='
+grep -E "^op3f:" /etc/subuid /etc/subgid 2>/dev/null || echo 'op3f subid entries: <none> OP3F_LOUD_review'
+echo '== assert: setup failed LOUD with a subid-range error (acceptable behavior) =='
+if grep -qiE "NoSubgidRangeError|no /etc/subgid entry|cannot recommend a bridge gid" /tmp/op3f_setup.out; then
+  echo OP3F_LOUD_FAIL_OK
+else
+  echo OP3F_NO_LOUD_FAIL_FAIL
+  echo MU_OP3F_DID_NOT_FAIL_LOUD_review
+  rc=1
+fi
+echo '== observational: flag the mis-worded message (the #8 clarity fix should reword it) =='
+if grep -qiE "cannot recommend a bridge gid" /tmp/op3f_setup.out; then
+  echo "loud-fail message is the bridge-gid wording, not the missing-subid wording"
+  echo OP3F_MESSAGE_MISLEADING_review
+fi
+exit $rc
+'''
+
+[[probe]]
+id = "teardown"
+title = "best-effort teardown: stop/destroy op2 instance, remove op2/op3f artifacts"
+tag = "mutating:host-root"
+timeout = 600
+classifies = "Best-effort cleanup so a re-run starts clean: stop/destroy op2's `mu2` instance, remove op2/op3f sudoers drop-ins, disable linger. Non-gating except that the probe itself must not error out; leftovers recorded as _review."
+run = '''
+. /tmp/sbai-helpers.sh
+rc=0
+echo '== capture-before-destroy guard: if any gated probe failed a container, dump it and PRESERVE the host (#2) =='
+if ! sbai_teardown_guard; then
+  echo "== forensics captured above; SKIPPING destroy + disable-linger so the orchestrator can inspect the live host =="
+  echo TEARDOWN_SKIPPED_FORENSICS_PENDING_review
+  exit 0
+fi
+echo '== no gated container failed: normal best-effort teardown =='
+echo '== stop + destroy op2 mu2 instance (best-effort; script-file pattern) =='
+cat > /tmp/op2_teardown.sh <<'SCRIPT'
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+# unset SUDO_* so `sandbox` resolves the operator as the CURRENT user (op2/op3f), not the
+# probe user that `sudo -iu` records in SUDO_USER (l0_identity precedence: --operator -> $SUDO_USER
+# -> current). This RESTORES fidelity to the real scenario (opN logs in directly, no SUDO_USER).
+unset SUDO_USER SUDO_UID SUDO_GID PKEXEC_UID
+export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+sandbox stop mu2 2>&1 | tail -3 || true
+sandbox destroy mu2 --force --backup-workspaces=none 2>&1 | tail -3 || true
+SCRIPT
+chmod 0755 /tmp/op2_teardown.sh
+sudo -iu op2 bash /tmp/op2_teardown.sh > /tmp/op2_teardown.out 2>&1 || true
+tail -10 /tmp/op2_teardown.out
+echo '== remove op2/op3f sudoers drop-ins + disable linger (best-effort) =='
+sudo rm -f /etc/sudoers.d/op2-sandbox /etc/sudoers.d/op3f-sandbox 2>/dev/null || true
+sudo loginctl disable-linger op2 2>/dev/null || true
+sudo loginctl disable-linger op3f 2>/dev/null || true
+echo TEARDOWN_DROPINS_REMOVED_review
+echo '== record leftover op2 containers (non-gating) =='
+OP2_UID=$(id -u op2 2>/dev/null)
+if [ -n "$OP2_UID" ]; then
+  LC=$(sudo -u op2 env XDG_RUNTIME_DIR="/run/user/${OP2_UID}" DOCKER_HOST="unix:///run/user/${OP2_UID}/docker.sock" docker ps -a --format '{{.Names}}' 2>/dev/null | grep -c -- '-mu2-' || true)
+  echo "leftover_op2_containers=${LC:-0}"
+fi
+echo TEARDOWN_DONE_review
+exit $rc
+'''

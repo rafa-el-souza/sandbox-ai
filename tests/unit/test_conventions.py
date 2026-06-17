@@ -766,19 +766,19 @@ _DOCKER_USER_READ_ALLOWLIST: dict[str, frozenset[str]] = {
             "_build_attach_argv",  # separate-user ProxyCommand pipe_cmd crossing only
             "init",                # seeds + auth-probes the separate-user dedicated user
             "doctor",              # separate-user boundary validation (mode-awareness → C-005)
+            # separate-user marker's docker_unprivileged_user (D-A) — not owner-resolution
+            "_record_separate_user_mode",
         }
     ),
     "src/core/hydration.py": frozenset(),  # owner via resolve_daemon_owner_settings only
-    # The sudoers-rule body audit re-renders the SUDO rule that enumerates the
-    # dedicated ``sandbox_user``; the whole ``setup_invariants`` check is
-    # ``applies_in=separate-user`` (registry), so this read is correctly
-    # mode-guarded and is NOT an owner-resolution read.
     # ``_audit_rule_body`` re-renders the SUDO rule that enumerates the dedicated
     # ``sandbox_user``; ``_audit_daemon_user_no_admin`` reads the dedicated daemon
     # user to verify it is in NO admin group. Both are separate-user-only sub-audits
     # of the both-mode ``setup_invariants`` check (the caller runs them only on the
     # separate-user branch, after the operator-rootless early-return) — sanctioned
-    # reads of the dedicated user, NOT operator-rootless owner-resolution reads.
+    # LITERAL reads of the dedicated user, NOT operator-rootless owner-resolution
+    # reads (the carrier config can default to op-rootless under direct unit-test
+    # construction, where the resolver would wrongly return ``getpass.getuser()``).
     "src/core/doctor/checks/setup_invariants.py": frozenset(
         {"_audit_rule_body", "_audit_daemon_user_no_admin"}
     ),

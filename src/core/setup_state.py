@@ -4,9 +4,15 @@
 Setup persists the provisioned execution mode in a root-owned host-plane marker
 ``/usr/local/libexec/sandbox-ai/setup-state.json`` (root:root ``0644``,
 world-readable; same trust tier as the dispatcher manifest, NOT under
-``sandbox_ai_home()``). The marker is keyed per operator::
+``sandbox_ai_home()``). The marker is keyed per operator, and each entry carries
+the setup-determined host facts (mode-conditional per D-A)::
 
-    {"operators": {"<name>": {"mode": "<mode>"}}}
+    {"operators": {"<name>": {
+        "mode": "<mode>",
+        "workspace_bridge_group": "<group>",
+        "workspace_bridge_gid": <int>,
+        "docker_unprivileged_user": "<user>"  # separate-user entries only
+    }}}
 
 because operator-rootless runs a per-operator daemon while separate-user shares
 one ``sandbox`` daemon — a host can legitimately carry ``alice=operator-rootless``
@@ -16,7 +22,7 @@ This module is the **single source** of the marker path and the only place that
 parses/serializes the marker file. It is deliberately dependency-light: it imports
 ``RESERVED_DIR`` from :mod:`core.binary_install` (to single-source the directory)
 and :class:`DockerExecutionMode` from :mod:`core.host_config` (a one-way
-dependency — ``core.host_config`` may read this module in a later milestone
+dependency — ``HostConfig.from_marker`` reads this module (function-locally)
 without an import cycle, which is why the marker reader lives at
 ``core.setup_state`` rather than under ``core.setup`` — ``core.setup.*`` imports
 ``core.host_config``).
@@ -27,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,16 +69,77 @@ def read_mode(operator: str) -> DockerExecutionMode | None:
     return DockerExecutionMode(entry["mode"])
 
 
-def write_mode(operator: str, mode: DockerExecutionMode) -> None:
-    """Record ``mode`` for ``operator`` in the marker, preserving other entries.
+@dataclass(frozen=True)
+class MarkerEntry:
+    """The full per-operator marker record (design D-A).
+
+    Carries the setup-determined host facts: the provisioned execution mode, the
+    workspace bridge group name + its gid (mode-scoped per D-F), and — for
+    separate-user entries only — the unprivileged daemon user
+    (``docker_unprivileged_user is None`` for operator-rootless, whose daemon
+    owner is intrinsic via ``getpass.getuser()``).
+    """
+
+    mode: DockerExecutionMode
+    workspace_bridge_group: str
+    workspace_bridge_gid: int
+    docker_unprivileged_user: str | None
+
+
+def read_entry(operator: str) -> MarkerEntry | None:
+    """Return the full :class:`MarkerEntry` for ``operator``, or ``None``.
+
+    Returns ``None`` when the marker file is absent, has no entry for
+    ``operator``, OR the entry is a **legacy mode-only** record (a C-004-era
+    marker missing ``workspace_bridge_group`` / ``workspace_bridge_gid``) — such
+    a host is treated as not-yet-provisioned so setup rewrites the full entry.
+    """
+    try:
+        raw = MARKER_PATH.read_text()
+    except FileNotFoundError:
+        return None
+    data = json.loads(raw)
+    operators = data.get("operators", {})
+    entry = operators.get(operator)
+    if entry is None:
+        return None
+    if "workspace_bridge_group" not in entry or "workspace_bridge_gid" not in entry:
+        return None
+    return MarkerEntry(
+        mode=DockerExecutionMode(entry["mode"]),
+        workspace_bridge_group=entry["workspace_bridge_group"],
+        workspace_bridge_gid=entry["workspace_bridge_gid"],
+        docker_unprivileged_user=entry.get("docker_unprivileged_user"),
+    )
+
+
+def write_mode(
+    operator: str,
+    mode: DockerExecutionMode,
+    *,
+    workspace_bridge_group: str,
+    workspace_bridge_gid: int,
+    docker_unprivileged_user: str | None = None,
+) -> None:
+    """Record the full marker entry for ``operator``, preserving other entries.
 
     Read-merge-write: existing entries for *other* operators are preserved; the
-    entry for ``operator`` is set (or overwritten) to ``mode``. The write is
-    atomic (temp file in the marker's directory + ``os.replace``) and the file
-    lands mode ``0o644``. Ownership is NOT set here (root ownership is the host
-    batch's concern — this writer is called under whatever identity the caller
-    holds).
+    entry for ``operator`` is set (or overwritten) to the mode + the
+    setup-determined host facts. ``docker_unprivileged_user`` is included in the
+    entry **iff** it is not ``None`` (separate-user entries carry it; op-rootless
+    omits it). The write is atomic (temp file in the marker's directory +
+    ``os.replace``) and the file lands mode ``0o644``. Ownership is NOT set here
+    (root ownership is the host batch's concern — this writer is called under
+    whatever identity the caller holds).
     """
+    entry: dict[str, JsonValue] = {
+        "mode": mode.value,
+        "workspace_bridge_group": workspace_bridge_group,
+        "workspace_bridge_gid": workspace_bridge_gid,
+    }
+    if docker_unprivileged_user is not None:
+        entry["docker_unprivileged_user"] = docker_unprivileged_user
+
     data: dict[str, JsonValue]
     try:
         raw = MARKER_PATH.read_text()
@@ -91,7 +159,7 @@ def write_mode(operator: str, mode: DockerExecutionMode) -> None:
             f"[FATAL] Sandbox Execution Fault: {MARKER_PATH} has a non-object "
             f"'operators' field; refusing to overwrite a malformed mode marker."
         )
-    operators: dict[str, JsonValue] = {**raw_operators, operator: {"mode": mode.value}}
+    operators: dict[str, JsonValue] = {**raw_operators, operator: entry}
     merged: dict[str, JsonValue] = {**data, "operators": operators}
 
     MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +176,14 @@ def write_mode(operator: str, mode: DockerExecutionMode) -> None:
         raise
 
 
-def write_mode_root_owned(operator: str, mode: DockerExecutionMode) -> None:
+def write_mode_root_owned(
+    operator: str,
+    mode: DockerExecutionMode,
+    *,
+    workspace_bridge_group: str,
+    workspace_bridge_gid: int,
+    docker_unprivileged_user: str | None = None,
+) -> None:
     """Write the marker for ``operator`` and force root:root ``0644`` ownership.
 
     The single source for the *root-owned* marker write both setup paths need:
@@ -118,7 +193,13 @@ def write_mode_root_owned(operator: str, mode: DockerExecutionMode) -> None:
     ``chown``s the marker to root (the marker is a root-owned reserved-namespace
     artifact, D6). The caller MUST hold root.
     """
-    write_mode(operator, mode)
+    write_mode(
+        operator,
+        mode,
+        workspace_bridge_group=workspace_bridge_group,
+        workspace_bridge_gid=workspace_bridge_gid,
+        docker_unprivileged_user=docker_unprivileged_user,
+    )
     os.chmod(MARKER_PATH, 0o644)
     os.chown(MARKER_PATH, 0, 0)
 
