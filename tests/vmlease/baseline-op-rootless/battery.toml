@@ -1,102 +1,35 @@
 name = "baseline-op-rootless"
 
-[[probe]]
-id = "PREP"
-title = "install uv + source (uv sync) + tlog-rec per-distro + ensure script/pkttyagent + pre-seed sandbox-ai.toml (operator-rootless)"
-tag = "mutating:operator-space"
-timeout = 1800
-classifies = "PRE-REQ: the `sandbox` CLI via `uv sync` from the uploaded source tarball, tlog-rec per-distro (L0 hard prereq + attach session recorder), script(1)/pkttyagent present, and a per-operator operator-rootless sandbox-ai.toml ([host].docker_unprivileged_user = the operator, machinectl_authentication = sudo)."
-run = '''
-echo '== install uv =='
-curl -LsSf https://astral.sh/uv/install.sh | sh
-. "$HOME/.local/bin/env" 2>/dev/null || . "$HOME/.cargo/env" 2>/dev/null || true
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-uv --version || { echo PREP_UV_FAIL; exit 1; }
-echo '== uploaded source tarball present? =='
-TARBALL=$(ls "$HOME"/sandbox-ai-src*.tar.gz 2>/dev/null | head -1)
-[ -n "$TARBALL" ] || { echo PREP_TARBALL_MISSING; exit 1; }
-echo '== extract + uv sync =='
-rm -rf "$HOME/sandbox-ai"
-mkdir -p "$HOME/sandbox-ai"
-tar -xzf "$TARBALL" -C "$HOME/sandbox-ai"
-uv sync --directory "$HOME/sandbox-ai" 2>&1 | tail -6
-"$HOME/sandbox-ai/.venv/bin/sandbox" --help >/dev/null 2>&1 && echo PREP_SANDBOX_INSTALLED_OK || { echo PREP_SANDBOX_INSTALL_FAIL; exit 1; }
-echo '== install tlog-rec per-distro (best-effort; failure -> L0 refuses, which is a separate finding) =='
-. /etc/os-release
-if command -v tlog-rec >/dev/null 2>&1; then
-  echo 'tlog-rec already present'
-else
-  (
-    case "${ID:-}" in
-      ubuntu)
-        sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tlog
-        ;;
-      debian)
-        maj=$(echo "${VERSION_ID:-0}" | cut -d. -f1)
-        if [ "${maj:-0}" -le 12 ] 2>/dev/null; then
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tlog
-        else
-          echo "debian ${VERSION_ID}: source-building tlog"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential autoconf automake libtool m4 pkg-config git libjson-c-dev libsystemd-dev libcurl4-openssl-dev libutempter-dev
-          T=$(mktemp -d)
-          git clone --depth=1 https://github.com/Scribery/tlog "$T/tlog"
-          cd "$T/tlog" && autoreconf -i -f && ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var && make -j"$(nproc)" && sudo make install && sudo ldconfig
-        fi
-        ;;
-      fedora)
-        sudo dnf -y install tlog
-        ;;
-      arch|manjaro)
-        if command -v paru >/dev/null 2>&1; then
-          paru -S --noconfirm tlog
-        elif command -v yay >/dev/null 2>&1; then
-          yay -S --noconfirm tlog
-        else
-          sudo pacman -Sy --needed --noconfirm base-devel git
-          T=$(mktemp -d)
-          git clone --depth=1 https://aur.archlinux.org/yay.git "$T/yay"
-          cd "$T/yay" && makepkg -si --noconfirm && yay -S --noconfirm tlog
-        fi
-        ;;
-    esac
-  ) || echo 'tlog install step returned non-zero'
-fi
-command -v tlog-rec >/dev/null 2>&1 && echo PREP_TLOG_OK || echo PREP_TLOG_MISSING_review
-echo '== ensure script(1) + pkttyagent present (PTY drive + polkit agent) =='
-command -v script >/dev/null 2>&1 && echo PREP_SCRIPT_OK || {
-  echo 'installing util-linux/script'
-  (
-    case "${ID:-}" in
-      ubuntu|debian)
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bsdutils util-linux
-        ;;
-      fedora)
-        sudo dnf -y install util-linux
-        ;;
-      arch|manjaro)
-        sudo pacman -Sy --needed --noconfirm util-linux
-        ;;
-    esac
-  ) >/dev/null 2>&1
-  command -v script >/dev/null 2>&1 && echo PREP_SCRIPT_OK || echo PREP_SCRIPT_MISSING_review
-}
-command -v pkttyagent >/dev/null 2>&1 && echo PREP_PKTTYAGENT_OK || echo PREP_PKTTYAGENT_MISSING_review
-echo '== pre-seed per-operator sandbox-ai.toml: operator-rootless daemon owner = the operator =='
-OP=$(id -un)
-mkdir -p "$HOME/.sandbox-ai/config"
-printf '[host]\ndocker_unprivileged_user = "%s"\nmachinectl_authentication = "sudo"\n' "$OP" > "$HOME/.sandbox-ai/config/sandbox-ai.toml"
-echo "seeded toml for operator: $OP"
-cat "$HOME/.sandbox-ai/config/sandbox-ai.toml"
-echo '== provenance =='
-"$HOME/sandbox-ai/.venv/bin/sandbox" --version 2>/dev/null || echo 'sandbox --version: n/a'
-uname -r
-systemctl --version | head -1
-. /etc/os-release
-echo "DISTRO=${ID:-?} VERSION_ID=${VERSION_ID:-?}"
-echo PREP_PROVENANCE_review
-echo PREP_TOML_SEEDED_OK
-'''
+requires = ["docker"]
+
+[prep.packages]
+apt = ["bsdutils", "util-linux"]
+dnf = ["util-linux"]
+pacman = ["util-linux"]
+
+[[prep.setup]]
+id = "uv-install"
+title = "install uv (operator HOME)"
+required = true
+script = "prep/uv-install.sh"
+
+[[prep.setup]]
+id = "uv-sync"
+title = "extract uploaded source tarball + uv sync -> sandbox CLI"
+required = true
+script = "prep/uv-sync.sh"
+
+[[prep.setup]]
+id = "install-helpers"
+title = "install the shared probe-helper library to /tmp/sbai-helpers.sh (bridge-group resolver + forensic dump + teardown sentinel)"
+required = true
+script = "prep/install-helpers.sh"
+
+[[prep.setup]]
+id = "tlog"
+title = "install tlog-rec per-distro (best-effort; L0 refusal is a separate finding)"
+required = false
+script = "prep/tlog.sh"
 
 [[probe]]
 id = "setup"
@@ -157,14 +90,19 @@ tag = "mutating:host-root"
 classifies = "`sandbox doctor --user <operator>` -> exit 0 (every readiness check green) on the operator-rootless host."
 run = '''
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+. /tmp/sbai-helpers.sh
 rc=0
 OP=$(id -un)
 echo "operator: $OP"
 sandbox doctor --user "$OP" > /tmp/doctor.out 2>&1
 DRC=$?
-echo "doctor exit: $DRC (0 expected)"
+echo "doctor exit: $DRC"
 cat /tmp/doctor.out
-[ "$DRC" -eq 0 ] && echo DOCTOR_EXIT0_OK || { echo DOCTOR_EXIT_NONZERO_FAIL; rc=1; }
+echo '== gate on real ✗ readiness rows only; whole-doctor exit + env/network rows are observational (#3) =='
+HARD=$(sbai_doctor_hard_violations /tmp/doctor.out)
+if [ -n "$HARD" ]; then echo "hard violations:"; printf '%s\n' "$HARD"; echo DOCTOR_HARD_VIOLATION_FAIL; rc=1; else echo DOCTOR_NO_HARD_VIOLATION_OK; fi
+[ "$DRC" -eq 0 ] && echo DOCTOR_EXIT0_review || echo DOCTOR_EXIT_NONZERO_review
+grep '✗' /tmp/doctor.out 2>/dev/null | grep -iE "ACL support|image digest|registry" && echo DOCTOR_ENV_OR_NETWORK_ROWS_review || true
 grep -qE '(✓|✗|⚠).*machinectl' /tmp/doctor.out && echo DOCTOR_ROW_MACHINECTL_PRESENT_review || echo DOCTOR_ROW_MACHINECTL_ABSENT_review
 grep -qiE 'Privilege Boundary' /tmp/doctor.out && echo DOCTOR_PRIV_BOUNDARY_SECTION_review || true
 exit $rc
@@ -263,6 +201,7 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
+. /tmp/sbai-helpers.sh
 rc=0
 echo '== start (no interactive handover) =='
 sandbox start smoke --no-handover > /tmp/start.out 2>&1
@@ -274,7 +213,15 @@ echo '== crossing-error guard =='
 if grep -qiE "Interactive authentication required|Exit sentinel not found|systemd error|failed to create task" /tmp/start.out; then echo START_CROSSING_ERROR_PRESENT_FAIL; rc=1; else echo START_NO_CROSSING_ERROR_OK; fi
 echo '== assert the CORE container is running (op-rootless: docker ps as the operator with rootless DOCKER_HOST) =='
 docker ps --format '{{.Names}} {{.Status}}' | grep -i smoke
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q -- '-smoke-core-1'; then echo START_CORE_RUNNING_OK; else echo START_CORE_RUNNING_FAIL; rc=1; docker ps -a --format '{{.Names}} {{.Status}}' | grep -i smoke; fi
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q -- '-smoke-core-1'; then
+  echo START_CORE_RUNNING_OK
+else
+  echo START_CORE_RUNNING_FAIL; rc=1
+  echo '== forensic capture of the non-running core BEFORE later teardown probes (#1) =='
+  CTR=$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -- '-smoke-core-1' | head -1)
+  CTR=${CTR:--smoke-core-1}
+  sbai_forensic_dump "$(id -un)" "$CTR"
+fi
 docker ps --filter "name=-smoke-core-1" --format '{{.Status}}' | grep -qiE 'healthy|Up' && echo START_CORE_HEALTHY_review || echo START_CORE_HEALTH_UNKNOWN_review
 exit $rc
 '''
@@ -310,22 +257,30 @@ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 export PATH="$HOME/sandbox-ai/.venv/bin:$PATH"
 rc=0
-command -v script >/dev/null 2>&1 && echo ATTACH_SCRIPT_TOOL_OK || { echo ATTACH_SCRIPT_TOOL_MISSING_FAIL; rc=1; }
+echo '== PTY precondition: script(1) availability (skip-with-reason, not a hard FAIL, if absent) (#5) =='
+# A missing PTY tool is an ENV gap, not a product regression. Emit a _review skip token and
+# skip the PTY drive rather than letting an absent script(1) read as a substantive attach FAIL.
+if command -v script >/dev/null 2>&1; then HAVE_PTY=1; echo ATTACH_SCRIPT_TOOL_OK; else HAVE_PTY=0; echo ATTACH_SCRIPT_TOOL_MISSING_review; echo ATTACH_PTY_UNAVAILABLE_review; fi
 echo '== confirm core running before attach =='
 docker ps --format '{{.Names}}' | grep -q -- '-smoke-core-1' && echo ATTACH_PRECOND_CORE_RUNNING_OK || { echo ATTACH_PRECOND_CORE_NOT_RUNNING_FAIL; rc=1; }
-echo '== drive sandbox attach in a PTY via script(1); timed so bash -l is ready =='
-rm -f /tmp/attach.ts
-SBX="$HOME/sandbox-ai/.venv/bin/sandbox"
-{ sleep 6; printf 'echo RWHOAMI=$(whoami); echo RPWD=$(pwd)\n'; sleep 3; printf 'exit\n'; sleep 1; } | timeout 90 script -qec "$SBX attach smoke main" /tmp/attach.ts > /dev/null 2>&1
-ARC=$?
-echo "attach exit: $ARC"
-echo '--- attach typescript (tail) ---'
-tail -25 /tmp/attach.ts 2>/dev/null
-echo '== PRIMARY: warm handover reached the agent shell in /workspaces/main =='
-if grep -aq ':/workspaces/main' /tmp/attach.ts; then echo ATTACH_REACHED_WORKSPACE_OK; else echo ATTACH_REACHED_WORKSPACE_FAIL; rc=1; fi
-echo '== SECONDARY (best-effort interactive drive) =='
-grep -aq 'RWHOAMI=agent' /tmp/attach.ts && echo ATTACH_USER_AGENT_review || echo ATTACH_USER_review
-grep -aq 'RPWD=/workspaces/main' /tmp/attach.ts && echo ATTACH_CMD_PWD_review || echo ATTACH_CMD_PWD_review
+if [ "$HAVE_PTY" -eq 1 ]; then
+  echo '== drive sandbox attach in a PTY via script(1); timed so bash -l is ready =='
+  rm -f /tmp/attach.ts
+  SBX="$HOME/sandbox-ai/.venv/bin/sandbox"
+  { sleep 6; printf 'echo RWHOAMI=$(whoami); echo RPWD=$(pwd)\n'; sleep 3; printf 'exit\n'; sleep 1; } | timeout 90 script -qec "$SBX attach smoke main" /tmp/attach.ts > /dev/null 2>&1
+  ARC=$?
+  echo "attach exit: $ARC"
+  echo '--- attach typescript (tail) ---'
+  tail -25 /tmp/attach.ts 2>/dev/null
+  echo '== PRIMARY: warm handover reached the agent shell in /workspaces/main =='
+  if grep -aq ':/workspaces/main' /tmp/attach.ts; then echo ATTACH_REACHED_WORKSPACE_OK; else echo ATTACH_REACHED_WORKSPACE_FAIL; rc=1; fi
+  echo '== SECONDARY (best-effort interactive drive) =='
+  grep -aq 'RWHOAMI=agent' /tmp/attach.ts && echo ATTACH_USER_AGENT_review || echo ATTACH_USER_review
+  grep -aq 'RPWD=/workspaces/main' /tmp/attach.ts && echo ATTACH_CMD_PWD_review || echo ATTACH_CMD_PWD_review
+else
+  echo '== PTY unavailable: attach drive SKIPPED (precondition unmet, not a regression) =='
+  echo ATTACH_REACHED_WORKSPACE_SKIPPED_review
+fi
 exit $rc
 '''
 
