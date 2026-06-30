@@ -1055,7 +1055,7 @@ def _build_test_context(instance_dir: str) -> dict[str, object]:
         **ips,
         "proxy_password": "testpass",
         "proxy_url_core": "http://proxyuser:testpass@proxy:3128",
-        "dnsdist_console_key": "dGVzdC1kbnNkaXN0LWNvbnNvbGUta2V5LTAwMDAwMDA=",
+        "dnsdist_console_key": "test-dnsdist-console-key",
         "core_base_image": "cgr.dev/chainguard/wolfi-base:latest",
         "core_distro_family": "wolfi",
         "host_uid": "1000",
@@ -1898,7 +1898,7 @@ class TestDnsdistGvisorOprootlessFixes:
     def test_dnsdist_conf_renders_setkey(self, tmp_path: Path) -> None:
         rendered = _render_dnsdist_conf(tmp_path)
         # the test context's console key, interpolated into setKey(...)
-        assert 'setKey("dGVzdC1kbnNkaXN0LWNvbnNvbGUta2V5LTAwMDAwMDA=")' in rendered
+        assert 'setKey("test-dnsdist-console-key")' in rendered
         assert 'controlSocket("127.0.0.1:5199")' in rendered
 
     def test_dnsdist_service_opts_out_of_oci_seccomp(self, tmp_path: Path) -> None:
