@@ -11,9 +11,11 @@ sandbox-ai.toml
 .deprecated/
 temp/
 
-# Maintainer-internal internal-tooling state — backlog, ongoing explorations,
-# validation records, findings, transcripts (not shipped to the public repo)
+# Maintainer-internal spec-workflow state — backlog, ongoing explorations,
+# validation records, findings, transcripts (only openspec/specs/ is published)
 openspec/explorations/
+openspec/changes/
+openspec/schemas/
 
 # Tooling
 .antigravityignore
