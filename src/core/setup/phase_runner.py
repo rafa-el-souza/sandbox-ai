@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase-runner contract for setup's probe-act-reverify ceremony.
 
 ``sandbox setup`` runs a phased host-provisioning ceremony (L0..L8 plus the

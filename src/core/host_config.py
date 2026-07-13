@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Project-wide configuration: the per-host config schema, loader, and machinectl command builder.
 
 Defines the per-host configuration that holds host-level settings (docker

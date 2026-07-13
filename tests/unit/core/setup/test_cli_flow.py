@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for :mod:`core.setup.cli_flow` — the pure plan/apply UX logic.
 
 Every gating-matrix branch, the spec-exact ``Summary:`` line formats, the

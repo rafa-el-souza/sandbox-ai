@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """L3a — per-op probe: the F-004 silent-footgun defense for the L3 rule.
 
 ``l3a_per_op_probe`` matches the phase-discovery regex, so it MUST export a

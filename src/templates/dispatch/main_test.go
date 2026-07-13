@@ -1,4 +1,4 @@
-// Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 // Table-driven parity + confinement tests for the dispatcher.
 //
 // These run via `go test ./...` inside the pinned golang:1.23-alpine image as

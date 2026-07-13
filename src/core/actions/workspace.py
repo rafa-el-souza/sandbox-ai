@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Workspace shared-group Action — one per chgrp/chmod/setfacl step.
 
 Replaces the ``(operation_summary, target)`` tuples emitted by

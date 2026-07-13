@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """End-to-end coverage for the acl-ownership-recipes change.
 
 These tests invoke the CLI via ``uv run sandbox …`` against a real host with

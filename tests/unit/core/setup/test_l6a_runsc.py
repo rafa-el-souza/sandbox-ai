@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the L6a runsc-install phase (shape #3).
 
 Covers: probe branches (MISSING absent, ALREADY_CORRECT match, DRIFT

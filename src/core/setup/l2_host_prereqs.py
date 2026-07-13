@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """L2 — host-side prerequisites: machined, sandbox user, subuid/subgid, sb-ws.
 
 Third phase of ``sandbox setup`` (spec "Phase Execution Order" step 3). L2

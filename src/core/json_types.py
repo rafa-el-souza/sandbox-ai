@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Structural type for ``json.load``/``json.loads`` results.
 
 ``json``'s stdlib stubs type their decode entrypoints as ``Any``, which erases

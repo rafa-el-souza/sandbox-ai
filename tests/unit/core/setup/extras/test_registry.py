@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for :mod:`core.setup.extras.registry` — registry + sticky-opt-in.
 
 These tests isolate the registry shape, the lazy loader, and the sticky-opt-in

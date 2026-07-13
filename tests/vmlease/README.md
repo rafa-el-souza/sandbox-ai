@@ -1,6 +1,6 @@
 # Real-host validation batteries (vmlease)
 
-These are **[vmlease](https://github.com/zerotrust-ai/vmlease) probe batteries** that validate sandbox-ai
+These are **[vmlease](https://github.com/rafa-el-souza/vmlease) probe batteries** that validate sandbox-ai
 end-to-end on **fresh, real cloud hosts** (ubuntu / debian-13 / fedora / arch) — the "ratified ≠ validated"
 gate that unit/integration tests can't cover (the privilege boundary, rootless docker, gVisor, the full
 `sandbox` command surface, and host-level shared-namespace allocation across *multiple* operators).

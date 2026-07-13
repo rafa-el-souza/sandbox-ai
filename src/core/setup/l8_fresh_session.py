@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """L8 — fresh-session re-probe: post-ceremony verification (no mutation).
 
 L8 is the last phase of the base ceremony and is **verification, not

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core.doctor.checks.daemon_owner_sudo (C-005 3.1 / design D4).
 
 Operator-rootless-only WARN when the daemon-owning operator is a sudoer. The

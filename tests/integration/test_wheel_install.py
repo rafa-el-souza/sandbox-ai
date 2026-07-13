@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Subprocess-level test: build the wheel, install it into an isolated env,
 and verify the packaged ``templates`` module ships and is importable.
 """

@@ -29,8 +29,8 @@ dependencies = [
 sandbox = "cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/zerotrust-ai/sandbox-ai"
-Repository = "https://github.com/zerotrust-ai/sandbox-ai"
+Homepage = "https://github.com/rafa-el-souza/sandbox-ai"
+Repository = "https://github.com/rafa-el-souza/sandbox-ai"
 
 [dependency-groups]
 dev = [

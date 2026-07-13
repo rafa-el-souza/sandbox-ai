@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Operator-side journald audit shim for ``operator-rootless`` mode.
 
 In ``separate-user`` mode every runtime op crosses into the dedicated

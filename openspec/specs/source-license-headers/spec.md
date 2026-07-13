@@ -10,7 +10,7 @@ Every tracked first-party source file SHALL carry an SPDX license-identifier hea
 few lines of the file, of the form (comment prefix per file type):
 
 ```
-<comment> Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+<comment> Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 ```
 
 where `<comment>` is the file type's comment token (`#` for Python / shell / Dockerfile / `#`-comment
@@ -57,6 +57,6 @@ drift-prevention contract — a newly added source file without the header fails
 - **THEN** the meta-test treats the file as compliant
 
 #### Scenario: Jinja2 template header is a stripped comment
-- **WHEN** a covered `src/templates/**` Jinja2 template carries the SPDX header as a Jinja comment `{# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later #}`
+- **WHEN** a covered `src/templates/**` Jinja2 template carries the SPDX header as a Jinja comment `{# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later #}`
 - **THEN** the meta-test treats the template as compliant, and the rendered config/compose output produced from that template does NOT contain the header line (the Jinja engine strips `{# … #}` comments at render time)
 

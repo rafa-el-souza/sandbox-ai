@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Integration smoke: the offline compile recipe is byte-reproducible.
 
 Marked ``@pytest.mark.integration`` — NOT collected by the default

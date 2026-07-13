@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for project-wide test conventions — enforces fixture/marker/suppression rules.
 
 Three structural guarantees, all AST-based:
@@ -1081,7 +1081,7 @@ def test_spdx_deliberate_violation_is_detected(tmp_path: Path) -> None:
     headerless.write_text("import os\n\n\ndef f() -> None:\n    return None\n")
     headerful = tmp_path / "rogue_with_header.py"
     headerful.write_text(
-        f"# Copyright (c) 2026 zerotrust-ai. {_SPDX_TOKEN}\nimport os\n"
+        f"# Copyright (c) 2026 Rafa Souza. {_SPDX_TOKEN}\nimport os\n"
     )
 
     offenders = _spdx_violations(iter([headerless, headerful]), {})

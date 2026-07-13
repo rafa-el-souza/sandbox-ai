@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """L3 — privilege-boundary rule: sudoers drop-in install + probe.
 
 L3 is the **last mutation phase of the base ceremony** and the only phase that

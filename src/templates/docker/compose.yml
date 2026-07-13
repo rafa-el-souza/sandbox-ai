@@ -1,4 +1,4 @@
-{# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later #}
+{# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later #}
 # ─── Shared Security Baseline ─────────────────────────────────────────────────
 # YAML anchor merge (<<:) replaces list values — only scalar properties here.
 # List-valued properties (cap_add, sysctls, tmpfs) remain per-service (D4).

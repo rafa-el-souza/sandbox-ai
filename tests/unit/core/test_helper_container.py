@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for core/helper_container.py — disposable helper-container primitives.
 
 Mocking policy: post-``runtime-dispatcher`` (C-001) the helper primitives are

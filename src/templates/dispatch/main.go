@@ -1,4 +1,4 @@
-// Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 // Command dispatch is the sandbox-ai runtime dispatcher.
 //
 // It is the *executor* half of OpenSpec change runtime-dispatcher (C-001): a

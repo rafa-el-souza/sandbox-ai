@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """L6a — runsc install (shape #3: install-if-absent, drift-no-overwrite).
 
 runsc is its **own** phase, distinct from L2's host prerequisites (R1): it has

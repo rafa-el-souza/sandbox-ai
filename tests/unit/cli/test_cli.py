@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """CLI lifecycle unit tests — start, stop, attach, destroy.
 
 All subprocess interactions are mocked at the core.executor.Executor.run boundary.

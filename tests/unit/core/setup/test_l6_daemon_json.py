@@ -1,4 +1,4 @@
-# Copyright (c) 2026 zerotrust-ai. SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Rafa Souza. SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests for the L6 daemon.json reserved-key phase.
 
 Covers: probe branches (MISSING file-absent, MISSING key-absent, DRIFT
