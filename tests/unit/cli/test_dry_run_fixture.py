@@ -178,6 +178,10 @@ def _capture_dry_run(
     _create_tooling_plane(user_home)
 
     monkeypatch.setenv("USER", "dev")
+    # $USER alone is NOT enough: compose_project_name resolves the user via
+    # pwd.getpwuid(os.getuid()), which ignores the environment. Pin that seam
+    # too, or the fixture diverges on any account other than 'dev' (CI: 'runner').
+    monkeypatch.setattr("core.compose._resolve_dev_username", lambda: "dev")
     # Replace Rich's module-level console with a fixed-width, non-terminal
     # console so the captured output is independent of the host's COLUMNS,
     # PTY state, and ANSI capability at test time. Width 500 is comfortably

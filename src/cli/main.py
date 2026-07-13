@@ -3726,6 +3726,10 @@ def destroy(
                     shutil.rmtree(ws.path)
                 except FileNotFoundError:
                     pass
+                except OSError as e:
+                    # Fault-isolated like D10: an unremovable tree (EACCES, …)
+                    # must not abort the rest of the teardown.
+                    console.print(f"⚠ workspace tree not removed ({ws.path}): {e}", style="yellow")
 
             # D9: rmdir workspaces/<inst>/ if empty.
             inst_workspaces_dir = sandbox_ai_home() / "workspaces" / inst
@@ -3841,11 +3845,15 @@ def _workspace_state_label(ws_path: str, host_settings: HostSettings) -> str:
     `● ok`    — path exists, setgid + group ownership matches the bridge gid.
     `⚠ drift` — path exists but bridge-group state is missing or wrong.
     `✗ missing` — path does not exist on disk.
+    `✗ inaccessible` — the path cannot be stat'ed from this account.
     """
     try:
         st = os.stat(ws_path)
     except FileNotFoundError:
         return "[red]✗ missing[/red]"
+    except OSError:
+        # EACCES/ELOOP/…: status must degrade to a label, never crash.
+        return "[red]✗ inaccessible[/red]"
     try:
         expected_gid = workspace_bridge_gid(host_settings)
     except WorkspaceBridgeGroupMissingError:

@@ -5221,7 +5221,14 @@ class TestACLPlanAsymmetry:
         """
         from cli.main import RW_FILE_RECIPES, _helper_cp_chown_plan
 
-        plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
+        # Pin the subuid/subgid forward resolvers: they read the REAL
+        # /etc/subuid, which has a claude-sandbox range only on a provisioned
+        # host (not in CI). The plan's shape, not the mapping, is under test.
+        with (
+            patch("cli.main.host_id_for_in_container", side_effect=lambda n, _u: 100000 + n),
+            patch("cli.main.host_gid_for_in_container", side_effect=lambda n, _u: 200000 + n),
+        ):
+            plan = _helper_cp_chown_plan("/inst", "claude-sandbox")
         # Find the RW entry for config/core/.claude.json in the plan.
         rw_entries = [
             (str(action.parent), action.files, action.mode)
@@ -6650,6 +6657,34 @@ class TestCluster3TeardownSymmetry:
             result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
         assert result.exit_code == 0, result.output
         assert mock_teardown.call_args.kwargs["volumes"] is True
+
+    def test_destroy_warns_and_continues_on_unremovable_workspace(self, runner: CliRunner) -> None:
+        """D8 is fault-isolated: an unremovable workspace tree (EACCES) degrades
+        to a warning instead of aborting the rest of the teardown."""
+        import shutil as _shutil
+
+        inst = "myproject"
+        _register_instance(inst)
+        _write_ipam(inst, 0)
+        from cli.main import app
+
+        real_rmtree = _shutil.rmtree
+
+        def _rmtree_eacces(path: typing.Any) -> None:
+            if str(path) == "/home/user/myproject":
+                raise PermissionError(13, "Permission denied", str(path))
+            real_rmtree(path)
+
+        with (
+            patch("cli.main._compose_down"),
+            patch("cli.main._acquire_state_lock", return_value=99),
+            patch("cli.main._release_lock"),
+            patch("cli.main._phase_stop_teardown", return_value=[]),
+            patch("cli.main.shutil.rmtree", side_effect=_rmtree_eacces),
+        ):
+            result = runner.invoke(app, ["destroy", inst, "--force", "--backup-workspaces=none"])
+        assert result.exit_code == 0, result.output
+        assert "not removed" in result.output
 
     def test_container_status_does_not_re_grant_env_acl(self, tmp_path: Path) -> None:
         """`_container_status` MUST NOT defensively re-grant the .sandbox.env

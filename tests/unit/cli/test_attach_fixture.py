@@ -81,6 +81,10 @@ def _capture_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     # session-log mkdir(parents=True, exist_ok=True) call to succeed
     # without requiring a real /tmp/sandbox-test on disk.
     monkeypatch.setenv("SANDBOX_AI_HOME", str(_STABLE_HOME))
+    # Pin the compose project-name user component (getpwuid-based, ignores
+    # $USER): the fixture argv was recorded as 'dev' and must not depend on
+    # the invoking account (CI runs as 'runner').
+    monkeypatch.setattr("core.compose._resolve_dev_username", lambda: "dev")
     # `_build_attach_argv` calls `session_log_dir.mkdir(parents=True,
     # exist_ok=True)`; redirect that to a tmp shadow via a Path subclass
     # would be heavy. Simpler: stub Path.mkdir on the session_log_dir

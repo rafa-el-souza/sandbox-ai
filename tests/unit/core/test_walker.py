@@ -116,7 +116,11 @@ class TestSymlinkInChain:
 class TestBoundaryRejection:
     @pytest.mark.parametrize("boundary", ["/etc", "/usr", "/var", "/tmp", "/home"])
     def test_target_in_boundary_rejected(self, boundary: str) -> None:
-        with pytest.raises(BoundaryPathError):
+        # On ostree hosts some boundaries are symlinks (/home -> /var/home) and
+        # are rejected one gate EARLIER, by the symlink-chain check — still a
+        # rejection, just a different error.
+        expected = SymlinkInChainError if os.path.islink(boundary) else BoundaryPathError
+        with pytest.raises(expected):
             walk_ancestors(boundary)
 
     def test_user_home_rejected(self) -> None:
