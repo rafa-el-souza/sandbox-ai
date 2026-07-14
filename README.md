@@ -1,5 +1,7 @@
 # sandbox-ai
 
+[![CI](https://github.com/rafa-el-souza/sandbox-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/rafa-el-souza/sandbox-ai/actions/workflows/ci.yml)
+
 **Zero-trust sandboxing for AI coding agents.**
 
 You hand a coding agent a task and walk away. While you're gone it runs with
