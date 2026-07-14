@@ -7380,6 +7380,15 @@ class TestWorkspaceStateLabel:
         label = _workspace_state_label(str(tmp_path / "does-not-exist"), host)
         assert "missing" in label
 
+    def test_unstatable_path_returns_inaccessible(self, tmp_path: Path) -> None:
+        from cli.main import _workspace_state_label
+        from core.host_config import HostSettings
+
+        host = HostSettings(docker_unprivileged_user="sandbox")
+        with patch("cli.main.os.stat", side_effect=PermissionError(13, "Permission denied")):
+            label = _workspace_state_label(str(tmp_path / "ws"), host)
+        assert "inaccessible" in label
+
     def test_correct_setgid_and_group_returns_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from cli.main import _workspace_state_label
         from core.host_config import HostSettings

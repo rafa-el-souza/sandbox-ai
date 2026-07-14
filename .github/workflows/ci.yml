@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # Rich force-enables color when it detects GITHUB_ACTIONS; the suite's
+      # output assertions are written against the plain rendering.
+      NO_COLOR: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
