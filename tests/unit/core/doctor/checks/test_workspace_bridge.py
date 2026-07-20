@@ -11,6 +11,28 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fixed_operator(monkeypatch: Any) -> None:
+    """Resolve the invoking operator deterministically, independent of the runner env.
+
+    ``_load_host_settings_or_skip`` calls ``getpass.getuser()`` to name the
+    operator whose setup-state marker to read. ``getpass.getuser`` consults
+    ``LOGNAME``/``USER``/``LNAME``/``USERNAME`` and only falls back to
+    ``pwd.getpwuid(os.getuid())`` when none are set. Several tests here replace
+    ``pwd.getpwuid`` with a fake record for the check's own user lookup; on a
+    runner without those env vars (e.g. the gate container) ``getpass.getuser``
+    would reach that fake and raise, leaking the mock through an env-dependent
+    path. Pin the module's ``getpass.getuser`` so operator resolution never
+    depends on the runner's environment.
+    """
+    monkeypatch.setattr(
+        "core.doctor.checks.workspace_bridge.getpass.getuser",
+        lambda: "operator",
+    )
+
 
 def _stub_marker(
     monkeypatch: Any,
