@@ -50,9 +50,10 @@ The codebase is documented by concern under [`docs/`](docs/):
 
 Before opening a PR, make sure your change:
 
-- **Passes the full gate** — `make lint typecheck test coverage` green. Coverage
-  is enforced at 100% on `core/` and `cli/`; add tests that assert *behavior*,
-  not tests that merely satisfy the metric.
+- **Passes the full gate** — `make check` green (see
+  [docs/testing.md](docs/testing.md) for what the gate runs). Coverage is
+  enforced at 100% on `core/` and `cli/`; add tests that assert *behavior*, not
+  tests that merely satisfy the metric.
 - **Preserves the privilege boundary.** Any code that shells out must go through
   the sanctioned execution path (see [docs/privilege-boundary.md](docs/privilege-boundary.md));
   any orchestrator→sandbox operation must cross the boundary via the dispatcher.
