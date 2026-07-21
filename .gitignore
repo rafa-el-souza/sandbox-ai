@@ -18,7 +18,8 @@ openspec/changes/
 openspec/schemas/
 
 # Tooling
-# Containerized-gate HOME (uv caches/toolchains inside no-mistakes runs)
+# Containerized-gate HOME (uv and pyright caches inside no-mistakes runs;
+# see .no-mistakes.yaml for why HOME is redirected here)
 .nm-home/
 # no-mistakes tooling output (validation evidence, run artifacts) — never tracked
 .no-mistakes/
