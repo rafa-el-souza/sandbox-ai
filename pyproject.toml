@@ -35,7 +35,7 @@ Repository = "https://github.com/rafa-el-souza/sandbox-ai"
 [dependency-groups]
 dev = [
     "mypy>=1.20.1",
-    "pyright>=1.1.408",
+    "pyright[nodejs]>=1.1.408",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
