@@ -12,9 +12,9 @@
 #
 # The image name is the single source of the gate's Python version: it ships
 # exactly one interpreter and `uv sync` selects it. Keep it in step with
-# requires-python in pyproject.toml - if the image drifts below that floor, uv
-# silently downloads a matching interpreter again and the gate pays for it on
-# every run instead of failing loudly.
+# requires-python in pyproject.toml - UV_PYTHON_DOWNLOADS=never pins uv to that
+# interpreter, so if the image ever drifts below the floor the gate fails loudly
+# instead of silently downloading a matching toolchain on every run.
 #
 # The bootstrap USED to live here (`command -v uv || pip install ... uv`) and
 # had to go: an unattended agent cannot run it. The `>` redirect trips the
@@ -27,10 +27,12 @@ commands:
   lint: >-
     hardened-run --profile fetch --image uv-python-3.14 -d "$PWD" -- bash -c
     'set -e; export HOME="$PWD/.nm-home"
-    USER="${USER:-nm-gate}" LOGNAME="${LOGNAME:-nm-gate}";
+    USER="${USER:-nm-gate}" LOGNAME="${LOGNAME:-nm-gate}"
+    UV_PYTHON_DOWNLOADS=never;
     make lint'
   test: >-
     hardened-run --profile fetch --image uv-python-3.14 -d "$PWD" -- bash -c
     'set -e; export HOME="$PWD/.nm-home"
-    USER="${USER:-nm-gate}" LOGNAME="${LOGNAME:-nm-gate}";
+    USER="${USER:-nm-gate}" LOGNAME="${LOGNAME:-nm-gate}"
+    UV_PYTHON_DOWNLOADS=never;
     make typecheck pyright coverage'
