@@ -20,6 +20,8 @@ openspec/schemas/
 # Tooling
 # Containerized-gate HOME (uv caches/toolchains inside no-mistakes runs)
 .nm-home/
+# no-mistakes tooling output (validation evidence, run artifacts) — never tracked
+.no-mistakes/
 .antigravityignore
 .agent/
 .venv/
