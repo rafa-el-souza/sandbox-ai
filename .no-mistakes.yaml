@@ -27,13 +27,13 @@
 
 commands:
   lint: >-
-    hardened-run --profile fetch --image uv-python-3.14 -d "$PWD" -- bash -c
+    hardened-run --profile fetch --domain dev --image uv-python-3.14 -d "$PWD" -- bash -c
     'set -e; export HOME="$PWD/.nm-home"
     USER="${USER:-nm-gate}" LOGNAME="${LOGNAME:-nm-gate}"
     UV_PYTHON_DOWNLOADS=never;
     make lint'
   test: >-
-    hardened-run --profile fetch --image uv-python-3.14 -d "$PWD" -- bash -c
+    hardened-run --profile fetch --domain dev --image uv-python-3.14 -d "$PWD" -- bash -c
     'set -e; export HOME="$PWD/.nm-home"
     USER="${USER:-nm-gate}" LOGNAME="${LOGNAME:-nm-gate}"
     UV_PYTHON_DOWNLOADS=never;
