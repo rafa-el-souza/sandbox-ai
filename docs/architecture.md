@@ -22,7 +22,7 @@ make check                      # the full gate: lint → typecheck → pyright 
 
 `pytest.testpaths = ["tests/unit"]` — integration tests under `tests/integration/` are not collected by default and must be invoked explicitly.
 
-The CLI entrypoint is `sandbox = "cli.main:app"` (typer). Run as `uv run sandbox <cmd>`.
+The CLI entrypoint is `sandbox = "cli.main:app"` (typer). See [testing.md](testing.md) for how to invoke it from a development checkout.
 
 ## Overview
 

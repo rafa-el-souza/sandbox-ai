@@ -18,7 +18,7 @@ make check                      # the full gate: lint → typecheck → pyright 
 
 `pytest.testpaths = ["tests/unit"]` — integration tests under `tests/integration/` are not collected by default and must be invoked explicitly.
 
-The CLI entrypoint is `sandbox = "cli.main:app"` (typer). Run as `uv run sandbox <cmd>`, never as a bare `sandbox` on the host.
+The CLI entrypoint is `sandbox = "cli.main:app"` (typer). From a development checkout, always run it as `uv run sandbox <cmd>`, never as a bare `sandbox`: the bare name resolves to whatever wheel the operator installed on PATH (see [setup-guide.md](setup-guide.md)), not to this tree, so it would exercise the wrong code against the wrong interpreter.
 
 ## Conventions
 
